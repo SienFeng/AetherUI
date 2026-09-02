@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"a-ui/database"
+	"a-ui/database/model"
 )
 
 func TestParseSubscriptionSurgeFormat(t *testing.T) {
@@ -198,5 +201,184 @@ func TestFetchSubscriptionRejectsOversizedBody(t *testing.T) {
 
 	if _, err := fetchSubscription(srv.URL); err == nil {
 		t.Error("expected error for oversized body, got nil")
+	}
+}
+
+func TestRefreshWritesSubscribedDomainsOnSuccess(t *testing.T) {
+	setupDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\nIP-CIDR,1.1.1.1/32\n"))
+	}))
+	defer srv.Close()
+
+	group := &model.DomainGroup{Remark: "国内", Domains: "[]", SubscribeUrl: srv.URL}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	got, err := s.Get(group.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	domains, err := DecodeSubscribedDomains(got.SubscribedDomains)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedDomains: %v", err)
+	}
+	if len(domains) != 2 || domains[0] != "domain:qq.com" {
+		t.Errorf("domains = %v", domains)
+	}
+	if got.LastUpdatedAt == 0 {
+		t.Error("LastUpdatedAt should be set")
+	}
+	if got.LastError != "" {
+		t.Errorf("LastError = %q, want empty", got.LastError)
+	}
+	if got.LastSkipped != 1 {
+		t.Errorf("LastSkipped = %d, want 1", got.LastSkipped)
+	}
+}
+
+// 失败时清空订阅域名会让合并结果为空、规则被 buildRule 跳过、
+// 流量静默退回直连。这是本功能最危险的失败模式，必须锁死。
+func TestRefreshKeepsOldDataOnFailure(t *testing.T) {
+	setupDB(t)
+
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"404", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }},
+		{"解析为空", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("<!DOCTYPE html><html>404: Not Found</html>"))
+		}},
+		{"空响应", func(w http.ResponseWriter, r *http.Request) {}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+
+			const oldData = `["domain:old.com"]`
+			group := &model.DomainGroup{
+				Remark: tc.name, Domains: "[]", SubscribeUrl: srv.URL,
+				SubscribedDomains: oldData, LastUpdatedAt: 1234567890,
+			}
+			if err := database.GetDB().Save(group).Error; err != nil {
+				t.Fatalf("save group: %v", err)
+			}
+
+			s := &DomainGroupService{}
+			if err := s.Refresh(group.Id); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+
+			got, err := s.Get(group.Id)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.SubscribedDomains != oldData {
+				t.Errorf("SubscribedDomains = %q, want %q (旧数据必须保留)",
+					got.SubscribedDomains, oldData)
+			}
+			if got.LastUpdatedAt != 1234567890 {
+				t.Errorf("LastUpdatedAt = %d, 失败不应改动成功时间", got.LastUpdatedAt)
+			}
+			if got.LastError == "" {
+				t.Error("LastError 必须写入，否则管理员看不到订阅已经坏了")
+			}
+		})
+	}
+}
+
+func TestRefreshRejectsGroupWithoutUrl(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{Remark: "无订阅", Domains: `["domain:a.com"]`}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	if err := (&DomainGroupService{}).Refresh(group.Id); err == nil {
+		t.Error("expected error for group without subscribe url")
+	}
+}
+
+// 从「国内域名合集」改成「广告拦截列表」之后，旧域名继续按新规则的动作生效
+// 是一次用错误的数据分流，比规则暂时不生效更危险。
+func TestUpdateClearsSubscribedDataWhenUrlChanges(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
+		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111, LastSkipped: 5,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	err := s.Update(&model.DomainGroup{
+		Id: group.Id, Remark: "组", Domains: "[]",
+		SubscribeUrl: "http://b.example.com/list",
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, _ := s.Get(group.Id)
+	if got.SubscribedDomains != "" {
+		t.Errorf("SubscribedDomains = %q, want empty", got.SubscribedDomains)
+	}
+	if got.LastUpdatedAt != 0 {
+		t.Errorf("LastUpdatedAt = %d, want 0 (触发立即重新拉取)", got.LastUpdatedAt)
+	}
+	if got.LastSkipped != 0 {
+		t.Errorf("LastSkipped = %d, want 0", got.LastSkipped)
+	}
+}
+
+func TestUpdateKeepsSubscribedDataWhenUrlUnchanged(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
+		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	err := s.Update(&model.DomainGroup{
+		Id: group.Id, Remark: "改了备注", Domains: `["domain:manual.com"]`,
+		SubscribeUrl: "http://a.example.com/list",
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, _ := s.Get(group.Id)
+	if got.SubscribedDomains != `["domain:old.com"]` {
+		t.Errorf("SubscribedDomains = %q, 地址没变不该清空", got.SubscribedDomains)
+	}
+	if got.LastUpdatedAt != 111 {
+		t.Errorf("LastUpdatedAt = %d, want 111", got.LastUpdatedAt)
+	}
+	if got.Remark != "改了备注" || got.Domains != `["domain:manual.com"]` {
+		t.Errorf("备注与手工域名应当被更新: %+v", got)
+	}
+}
+
+func TestDecodeSubscribedDomainsToleratesEmpty(t *testing.T) {
+	for _, raw := range []string{"", "   "} {
+		got, err := DecodeSubscribedDomains(raw)
+		if err != nil {
+			t.Errorf("%q: unexpected error %v", raw, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("%q: got %v, want empty", raw, got)
+		}
 	}
 }

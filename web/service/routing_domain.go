@@ -3,9 +3,12 @@ package service
 import (
 	"encoding/json"
 	"strings"
+	"sync"
+	"time"
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/util/common"
 )
 
@@ -59,6 +62,16 @@ func DecodeDomains(encoded string) ([]string, error) {
 	return list, nil
 }
 
+// DecodeSubscribedDomains 容忍空字符串——没订阅过的组这个字段本来就是空的，
+// 直接交给 DecodeDomains 会得到一个 json 语法错误，进而被 buildRule 当成
+// 「数据损坏」丢弃整条规则。
+func DecodeSubscribedDomains(encoded string) ([]string, error) {
+	if strings.TrimSpace(encoded) == "" {
+		return nil, nil
+	}
+	return DecodeDomains(encoded)
+}
+
 type DomainGroupService struct {
 }
 
@@ -94,8 +107,86 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 	}
 	old.Remark = group.Remark
 	old.Domains = group.Domains
-	db := database.GetDB()
-	return db.Save(old).Error
+
+	// 订阅地址变了：旧订阅内容来自另一个来源，继续拿它分流是「用错误的数据
+	// 生效」，比规则暂时不生效更危险。清空并把 LastUpdatedAt 置 0，
+	// SubscriptionJob 的「从未成功过」分支会在下一个检查窗口拉取新地址。
+	if old.SubscribeUrl != group.SubscribeUrl {
+		old.SubscribeUrl = group.SubscribeUrl
+		old.SubscribedDomains = ""
+		old.LastUpdatedAt = 0
+		old.LastError = ""
+		old.LastSkipped = 0
+	}
+
+	return database.GetDB().Save(old).Error
+}
+
+// subscriptionMu 串行化所有订阅更新。定时任务与管理员点「立即更新」可能同时
+// 发生。更新是分钟级的低频操作，不值得做更细的按组加锁。
+var subscriptionMu sync.Mutex
+
+// Refresh 立即更新一个域名组的订阅内容。
+func (s *DomainGroupService) Refresh(id int) error {
+	subscriptionMu.Lock()
+	defer subscriptionMu.Unlock()
+
+	group, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	return s.refreshLocked(group)
+}
+
+// refreshLocked 假定调用方已持有 subscriptionMu。
+func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
+	if group.SubscribeUrl == "" {
+		return common.NewError("该域名组没有配置订阅地址, id:", group.Id)
+	}
+
+	raw, err := fetchSubscription(group.SubscribeUrl)
+	if err != nil {
+		return s.recordFailure(group, err)
+	}
+	domains, skipped, err := ParseSubscription(raw)
+	if err != nil {
+		return s.recordFailure(group, err)
+	}
+	// 落库前过真实 xray 校验。ValidateDomains 自身是 fail open 的：
+	// 二进制缺失、超时等一律放行，只有 xray 明确判定非法才拦。
+	if err := ValidateDomains(domains); err != nil {
+		return s.recordFailure(group, err)
+	}
+	encoded, err := EncodeDomains(domains)
+	if err != nil {
+		return s.recordFailure(group, err)
+	}
+
+	// 用 map 而不是 struct：GORM 的 struct 更新会跳过零值，
+	// LastError 与 LastSkipped 清不掉。
+	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Updates(map[string]any{
+			"subscribed_domains": encoded,
+			"last_updated_at":    time.Now().UnixMilli(),
+			"last_error":         "",
+			"last_skipped":       skipped,
+		}).Error
+}
+
+// recordFailure 只写失败原因，绝不动 SubscribedDomains 与 LastUpdatedAt。
+//
+// 清空订阅域名会让合并结果为空 → buildRule 跳过整条规则 → 本该走指定节点或被
+// 封禁的流量静默退回直连。上游改格式、URL 失效返回 404 页面、CDN 返回空响应
+// 都会走到这里，而它们都不该导致分流失效。宁可用旧数据。
+func (s *DomainGroupService) recordFailure(group *model.DomainGroup, cause error) error {
+	err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Update("last_error", cause.Error()).Error
+	if err != nil {
+		logger.Warning("record subscription failure err:", err)
+	}
+	logger.Warning("refresh subscription failed, id:", group.Id,
+		"remark:", group.Remark, "err:", cause)
+	return cause
 }
 
 func (s *DomainGroupService) Del(id int) error {
