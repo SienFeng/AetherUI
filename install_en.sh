@@ -135,10 +135,10 @@ install_x-ui() {
     else
         last_version=$1
         url="https://github.com/SienFeng/x-ui/releases/download/${last_version}/x-ui-linux-${arch}-english.tar.gz"
-        echo -e "begin to install x-ui v$1 ..."
+        echo -e "begin to install x-ui $1 ..."
         wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}-english.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}dowanload x-ui v$1 failed,please check the verison exists${plain}"
+            echo -e "${red}dowanload x-ui $1 failed,please check the verison exists${plain}"
             exit 1
         fi
     fi
@@ -159,7 +159,7 @@ install_x-ui() {
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
-    echo -e "${green}x-ui v${last_version}${plain} install finished,it is working now..."
+    echo -e "${green}x-ui ${last_version}${plain} install finished,it is working now..."
     echo -e ""
     echo -e "x-ui control menu usages: "
     echo -e "----------------------------------------------"
