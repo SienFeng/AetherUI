@@ -9,6 +9,7 @@ type XUIController struct {
 
 	inboundController *InboundController
 	settingController *SettingController
+	routingController *RoutingController
 }
 
 func NewXUIController(g *gin.RouterGroup) *XUIController {
@@ -23,10 +24,12 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 
 	g.GET("/", a.index)
 	g.GET("/inbounds", a.inbounds)
+	g.GET("/routing", a.routing)
 	g.GET("/setting", a.setting)
 
 	a.inboundController = NewInboundController(g)
 	a.settingController = NewSettingController(g)
+	a.routingController = NewRoutingController(g)
 }
 
 func (a *XUIController) index(c *gin.Context) {
@@ -39,4 +42,8 @@ func (a *XUIController) inbounds(c *gin.Context) {
 
 func (a *XUIController) setting(c *gin.Context) {
 	html(c, "setting.html", "设置", nil)
+}
+
+func (a *XUIController) routing(c *gin.Context) {
+	html(c, "routing.html", "分流管理", nil)
 }
