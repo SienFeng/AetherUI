@@ -31,9 +31,24 @@ func IsReservedTag(tag string) bool {
 type DomainGroup struct {
 	Id     int    `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
 	Remark string `json:"remark" form:"remark"`
-	// Domains 是 JSON 字符串数组，元素为 xray 原生域名语法：
+	// Domains 是管理员手工录入的域名，JSON 字符串数组，元素为 xray 原生域名语法：
 	// domain:openai.com / full:chat.openai.com / geosite:openai / regexp:.*\.oaistatic\.com
 	Domains string `json:"domains" form:"domains"`
+
+	// SubscribeUrl 为空表示这个组不订阅，行为与本功能上线前完全一致。
+	SubscribeUrl string `json:"subscribeUrl" form:"subscribeUrl"`
+	// SubscribedDomains 是上一次成功拉取并解析出的域名，JSON 字符串数组。
+	// 与 Domains 物理隔离：订阅更新绝不覆盖管理员手工补的条目，
+	// 两个字段各自只有一个写入方，永不交叉。
+	SubscribedDomains string `json:"subscribedDomains" form:"subscribedDomains"`
+	// LastUpdatedAt 是上一次「成功」更新的时刻，Unix 毫秒。0 表示从未成功过，
+	// 调度会据此立即拉取一次，见 SubscriptionJob。
+	LastUpdatedAt int64 `json:"lastUpdatedAt" form:"lastUpdatedAt"`
+	// LastError 是上一次尝试的失败原因，成功时清空。必须显示在界面上——
+	// 只进日志的话，管理员看到的是一个域名数量停在两周前却毫无提示的组。
+	LastError string `json:"lastError" form:"lastError"`
+	// LastSkipped 是上一次成功解析时跳过的非域名规则条数（IP-CIDR 等）。
+	LastSkipped int `json:"lastSkipped" form:"lastSkipped"`
 }
 
 // OutboundNode 是一个落地代理服务器。

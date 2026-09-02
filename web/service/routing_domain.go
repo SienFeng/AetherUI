@@ -106,3 +106,23 @@ func (s *DomainGroupService) Del(id int) error {
 	db := database.GetDB()
 	return db.Delete(model.DomainGroup{}, id).Error
 }
+
+// MergeDomains 把手工域名与订阅域名合并去重。
+//
+// 顺序是确定的：手工在前、订阅在后，各自保持原顺序，重复项保留首次出现。
+// 这一点不能含糊——注入器的第四条不变量要求生成逐字节确定，顺序一旦不稳定，
+// Config.Equals 恒为 false，每 10 秒的重启 cron 会不停重启 xray。
+func MergeDomains(manual, subscribed []string) []string {
+	merged := make([]string, 0, len(manual)+len(subscribed))
+	seen := make(map[string]bool, len(manual)+len(subscribed))
+	for _, list := range [][]string{manual, subscribed} {
+		for _, d := range list {
+			if d == "" || seen[d] {
+				continue
+			}
+			seen[d] = true
+			merged = append(merged, d)
+		}
+	}
+	return merged
+}

@@ -95,3 +95,53 @@ func TestDomainGroupCRUD(t *testing.T) {
 		t.Errorf("after Del, GetAll = %v, want empty", all)
 	}
 }
+
+func TestMergeDomainsKeepsManualFirstAndDeduplicates(t *testing.T) {
+	manual := []string{"domain:my-nas.local", "domain:qq.com"}
+	subscribed := []string{"domain:qq.com", "domain:163.com"}
+	got := MergeDomains(manual, subscribed)
+	want := []string{"domain:my-nas.local", "domain:qq.com", "domain:163.com"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// 合并结果必须逐字节确定，否则 Config.Equals 恒为 false，
+// 每 10 秒的重启 cron 会不停重启 xray。
+func TestMergeDomainsIsDeterministic(t *testing.T) {
+	manual := []string{"domain:b.com", "domain:a.com"}
+	subscribed := []string{"domain:c.com", "domain:a.com", "domain:d.com"}
+	first := MergeDomains(manual, subscribed)
+	for i := 0; i < 50; i++ {
+		again := MergeDomains(manual, subscribed)
+		for j := range first {
+			if first[j] != again[j] {
+				t.Fatalf("run %d differs at %d: %q vs %q", i, j, first[j], again[j])
+			}
+		}
+	}
+}
+
+func TestMergeDomainsHandlesEmptyInputs(t *testing.T) {
+	if got := MergeDomains(nil, nil); len(got) != 0 {
+		t.Errorf("both empty: got %v, want empty", got)
+	}
+	if got := MergeDomains([]string{"domain:a.com"}, nil); len(got) != 1 {
+		t.Errorf("subscribed empty: got %v", got)
+	}
+	if got := MergeDomains(nil, []string{"domain:a.com"}); len(got) != 1 {
+		t.Errorf("manual empty: got %v", got)
+	}
+}
+
+func TestMergeDomainsDropsEmptyStrings(t *testing.T) {
+	got := MergeDomains([]string{"", "domain:a.com"}, []string{"", ""})
+	if len(got) != 1 || got[0] != "domain:a.com" {
+		t.Errorf("got = %v, want [domain:a.com]", got)
+	}
+}
