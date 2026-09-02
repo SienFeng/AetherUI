@@ -103,22 +103,16 @@ please input a legal number[0-16]:
 
 # Telegram
 
+Communities of the upstream author, unaffiliated with this fork:  
 [Channel](https://t.me/CoderfanBaby)  
 [Group](https://t.me/franzkafayu)
 
 # Credits
+- [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)
 - [vaxilu/x-ui](https://github.com/vaxilu/x-ui)
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
 - [telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api)  
 
-# Sponsor  
-
-if you want to purchase some virtual servers,you can purchase by my aff link:   
-- [BandwagonHost](https://bandwagonhost.com/aff.php?aff=65703)     
-- [Cloudcone](https://app.cloudcone.com/?ref=7536)  
-- [SpartanHost](https://billing.spartanhost.net/aff.php?aff=1875)  
-
-
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/FranzKafkaYu/x-ui.svg)](https://starchart.cc/FranzKafkaYu/x-ui)
+[![Stargazers over time](https://starchart.cc/SienFeng/x-ui.svg)](https://starchart.cc/SienFeng/x-ui)

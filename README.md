@@ -12,7 +12,6 @@
 &#x26A1;`xtls-rprx-vision`与`reality`快速入手请看[这里](https://github.com/FranzKafkaYu/x-ui/wiki/%E8%8A%82%E7%82%B9%E9%85%8D%E7%BD%AE)  
 欢迎大家使用并反馈意见或提交Pr,帮助项目更好的改善  
 如果您觉得本项目对您有所帮助,不妨给个star:star2:支持我  
-或者你恰巧有购买服务器的需求,可以通过文末的赞助部分支持我~ 
 
 # 文档目录  
 - [功能介绍](#功能介绍)  
@@ -196,29 +195,17 @@ xray 状态: 运行
 - 2022.04.06：优化安装/更新流程，增加证书签发功能，添加Telegram bot机器人推送功能
 # Telegram
 
+以下为上游项目作者的社区，本仓库与其无关，仅供参考：  
 [订阅频道](https://t.me/CoderfanBaby)  
 [讨论群组](https://t.me/franzkafayu)
 
 # 致谢
 
+- [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)
 - [vaxilu/x-ui](https://github.com/vaxilu/x-ui)
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
 - [telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api)  
 
-# 广告赞助  
-
-如果你觉得本项目对你有用,而且你也恰巧有这方面的需求,你也可以选择通过我的购买链接赞助我  
-- [搬瓦工GIA高端线路](https://bandwagonhost.com/aff.php?aff=65703),仅推荐购买GIA套餐      
-- [Cloudcone性价比主机提供商](https://app.cloudcone.com/?ref=7536)  
-- [Spartan三网4837性价比主机](https://billing.spartanhost.net/aff.php?aff=1875)
-
-  
-如果你希望购买一些现成的代理服务,可选择下述代理服务
-- [搬瓦工关联机场](https://justmysocks.net/members/aff.php?aff=18177)  
-- [高端奶昔机场](https://nxboom.com/signupbyemail.aspx?MemberCode=2fd79885e45549049c66698f1eea154620230921234746)
-
-VPS推送可关注电报[频道](https://t.me/VpsReStockAlert)  
-
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/FranzKafkaYu/x-ui.svg)](https://starchart.cc/FranzKafkaYu/x-ui)
+[![Stargazers over time](https://starchart.cc/SienFeng/x-ui.svg)](https://starchart.cc/SienFeng/x-ui)
