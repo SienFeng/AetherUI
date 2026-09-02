@@ -127,6 +127,9 @@ func ParseLink(link string) (*ParseResult, error) {
 		return parseHysteria2(link)
 	case strings.HasPrefix(link, "wireguard://"), strings.HasPrefix(link, "wg://"):
 		return parseWireguard(link)
+	case strings.HasPrefix(link, "socks://"), strings.HasPrefix(link, "socks5://"),
+		strings.HasPrefix(link, "socks4://"), strings.HasPrefix(link, "socks4a://"):
+		return parseSocks(link)
 	default:
 		return nil, fmt.Errorf("unsupported link scheme")
 	}
