@@ -1,6 +1,11 @@
 package service
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestParseSubscriptionSurgeFormat(t *testing.T) {
 	raw := `# ChinaMax
@@ -135,5 +140,63 @@ func TestParseSubscriptionLowercasesKeyword(t *testing.T) {
 	// 未归一的关键词在 xray 里可能永不命中。
 	if len(domains) != 1 || domains[0] != "baidu" {
 		t.Errorf("got = %v, want [baidu]", domains)
+	}
+}
+
+func TestValidateSubscribeURLAcceptsHttpAndHttps(t *testing.T) {
+	for _, u := range []string{"http://example.com/a.list", "https://example.com/a.list"} {
+		if err := ValidateSubscribeURL(u); err != nil {
+			t.Errorf("%s: unexpected error %v", u, err)
+		}
+	}
+}
+
+func TestValidateSubscribeURLRejectsOtherSchemes(t *testing.T) {
+	for _, u := range []string{"ftp://example.com/a", "file:///etc/passwd", "example.com/a", ""} {
+		if err := ValidateSubscribeURL(u); err == nil {
+			t.Errorf("%s: expected error, got nil", u)
+		}
+	}
+}
+
+func TestFetchSubscriptionReadsBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\n"))
+	}))
+	defer srv.Close()
+
+	body, err := fetchSubscription(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(body, "qq.com") {
+		t.Errorf("body = %q", body)
+	}
+}
+
+func TestFetchSubscriptionRejectsNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	if _, err := fetchSubscription(srv.URL); err == nil {
+		t.Error("expected error for 404, got nil")
+	}
+}
+
+// 不设上限的话一个大文件就能把面板打爆，而 cron 没有 panic 恢复，
+// OOM 会杀掉整个面板进程。
+func TestFetchSubscriptionRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := strings.Repeat("a", 1<<20)
+		for i := 0; i < 11; i++ {
+			w.Write([]byte(chunk))
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := fetchSubscription(srv.URL); err == nil {
+		t.Error("expected error for oversized body, got nil")
 	}
 }

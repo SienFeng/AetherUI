@@ -1,7 +1,11 @@
 package service
 
 import (
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"a-ui/util/common"
 )
@@ -139,4 +143,57 @@ func isValidKeyword(s string) bool {
 		return false
 	}
 	return !strings.ContainsAny(s, " \t/\\:?#@<>\"'()[]{}|,")
+}
+
+const (
+	subscriptionTimeout  = 30 * time.Second
+	subscriptionMaxBytes = 10 << 20 // 10 MB，约 30 万条域名
+)
+
+// ValidateSubscribeURL 在保存表单时就拦住非法地址，不必等到拉取时才报错。
+//
+// 只限制 scheme。不拦内网地址：本面板是单管理员系统，管理员本就有 shell 级
+// 权限，拦截 SSRF 换不来实际的安全收益，却会挡住「订阅局域网里自建的列表」
+// 这种合理用法。
+func ValidateSubscribeURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return common.NewError("订阅地址无法解析:", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return common.NewError("订阅地址必须以 http:// 或 https:// 开头:", raw)
+	}
+	if u.Host == "" {
+		return common.NewError("订阅地址缺少主机名:", raw)
+	}
+	return nil
+}
+
+// fetchSubscription 拉取订阅内容。超时与体积上限都是硬限制。
+func fetchSubscription(rawURL string) (string, error) {
+	if err := ValidateSubscribeURL(rawURL); err != nil {
+		return "", err
+	}
+
+	client := &http.Client{Timeout: subscriptionTimeout}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return "", common.NewError("拉取订阅失败:", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", common.NewError("订阅地址返回状态码:", resp.StatusCode)
+	}
+
+	// 多读 1 字节用于判断是否超限：LimitReader 本身只会静默截断，
+	// 截断后的内容解析出来是残缺的域名列表，比直接失败更危险。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, subscriptionMaxBytes+1))
+	if err != nil {
+		return "", common.NewError("读取订阅内容失败:", err)
+	}
+	if len(body) > subscriptionMaxBytes {
+		return "", common.NewError("订阅内容超过 10MB 上限")
+	}
+	return string(body), nil
 }
