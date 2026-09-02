@@ -1,0 +1,294 @@
+{{template "head" .}}
+<body>
+<a-layout id="app" v-cloak>
+    {{template "commonSider" .}}
+    <a-layout id="content-layout">
+        <a-layout-content>
+            <a-spin :spinning="spinning" :delay="500" tip="加载中">
+                <a-tabs default-active-key="1">
+
+                    <a-tab-pane key="1" tab="域名组">
+                        <a-button type="primary" @click="openGroup()">添加域名组</a-button>
+                        <a-table :columns="groupColumns" :data-source="groups"
+                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
+                            <template slot="domains" slot-scope="text, group">
+                                <a-tag v-for="d in group.domains" :key="d">[[ d ]]</a-tag>
+                            </template>
+                            <template slot="action" slot-scope="text, group">
+                                <a-icon type="edit" @click="openGroup(group)"></a-icon>
+                                <a-divider type="vertical"></a-divider>
+                                <a-icon type="delete" style="color: #ff4d4f;"
+                                        @click="delGroup(group)"></a-icon>
+                            </template>
+                        </a-table>
+                    </a-tab-pane>
+
+                    <a-tab-pane key="2" tab="出站节点">
+                        <a-button type="primary" @click="openNode()">添加出站节点</a-button>
+                        <a-table :columns="nodeColumns" :data-source="nodes"
+                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
+                            <template slot="enable" slot-scope="text, node">
+                                <a-switch :checked="node.enable"
+                                          @change="toggleNode(node)"></a-switch>
+                            </template>
+                            <template slot="action" slot-scope="text, node">
+                                <a-icon type="delete" style="color: #ff4d4f;"
+                                        @click="delNode(node)"></a-icon>
+                            </template>
+                        </a-table>
+                    </a-tab-pane>
+
+                    <a-tab-pane key="3" tab="分流规则">
+                        <a-button type="primary" @click="openRule()">添加分流规则</a-button>
+                        <a-table :columns="ruleColumns" :data-source="rules"
+                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
+                            <template slot="inbound" slot-scope="text, rule">
+                                [[ inboundName(rule.inboundId) ]]
+                            </template>
+                            <template slot="group" slot-scope="text, rule">
+                                [[ groupName(rule.domainGroupId) ]]
+                            </template>
+                            <template slot="target" slot-scope="text, rule">
+                                <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
+                                <a-tag v-else color="blue">[[ nodeName(rule.outboundId) ]]</a-tag>
+                            </template>
+                            <template slot="action" slot-scope="text, rule">
+                                <a-icon type="edit" @click="openRule(rule)"></a-icon>
+                                <a-divider type="vertical"></a-divider>
+                                <a-icon type="delete" style="color: #ff4d4f;"
+                                        @click="delRule(rule)"></a-icon>
+                            </template>
+                        </a-table>
+                    </a-tab-pane>
+
+                </a-tabs>
+            </a-spin>
+        </a-layout-content>
+    </a-layout>
+</a-layout>
+
+<a-modal v-model="groupModal.visible" title="域名组"
+         @ok="saveGroup" ok-text="保存" cancel-text="取消">
+    <a-form layout="vertical">
+        <a-form-item label="备注">
+            <a-input v-model="groupModal.remark"></a-input>
+        </a-form-item>
+        <a-form-item label="域名（一行一条）">
+            <a-input type="textarea" :rows="8" v-model="groupModal.domains"
+                     placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com"></a-input>
+        </a-form-item>
+    </a-form>
+</a-modal>
+
+<a-modal v-model="nodeModal.visible" title="出站节点"
+         @ok="saveNode" ok-text="保存" cancel-text="取消">
+    <a-form layout="vertical">
+        <a-form-item label="备注">
+            <a-input v-model="nodeModal.remark"></a-input>
+        </a-form-item>
+        <a-form-item label="分享链接">
+            <a-input type="textarea" :rows="4" v-model="nodeModal.link"
+                     placeholder="vmess:// vless:// trojan:// ss:// socks:// hysteria2://"></a-input>
+        </a-form-item>
+        <a-form-item label="或直接粘贴 outbound JSON（高级）">
+            <a-input type="textarea" :rows="6" v-model="nodeModal.config"></a-input>
+        </a-form-item>
+    </a-form>
+</a-modal>
+
+<a-modal v-model="ruleModal.visible" title="分流规则"
+         @ok="saveRule" ok-text="保存" cancel-text="取消">
+    <a-form layout="vertical">
+        <a-form-item label="备注">
+            <a-input v-model="ruleModal.rule.remark"></a-input>
+        </a-form-item>
+        <a-form-item label="用户（入站）">
+            <a-select v-model="ruleModal.rule.inboundId" style="width: 100%;">
+                <a-select-option :value="0">所有用户</a-select-option>
+                <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id">
+                    [[ i.remark || i.tag ]]
+                </a-select-option>
+            </a-select>
+        </a-form-item>
+        <a-form-item label="域名组">
+            <a-select v-model="ruleModal.rule.domainGroupId" style="width: 100%;">
+                <a-select-option v-for="g in groups" :key="g.id" :value="g.id">
+                    [[ g.remark ]]
+                </a-select-option>
+            </a-select>
+        </a-form-item>
+        <a-form-item label="动作">
+            <a-radio-group v-model="ruleModal.rule.action">
+                <a-radio value="proxy">走节点</a-radio>
+                <a-radio value="block">阻断（黑洞）</a-radio>
+            </a-radio-group>
+        </a-form-item>
+        <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
+            <a-select v-model="ruleModal.rule.outboundId" style="width: 100%;">
+                <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
+                    [[ n.remark ]] ([[ n.protocol ]])
+                </a-select-option>
+            </a-select>
+        </a-form-item>
+        <a-form-item label="优先级（数字越小越先匹配）">
+            <a-input-number v-model="ruleModal.rule.priority" :min="0"></a-input-number>
+        </a-form-item>
+    </a-form>
+</a-modal>
+
+{{template "js" .}}
+<script src="{{ .base_path }}assets/js/model/routing.js?{{ .cur_ver }}"></script>
+<script>
+    const app = new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#app',
+        data: {
+            spinning: false,
+            groups: [],
+            nodes: [],
+            rules: [],
+            inbounds: [],
+            groupColumns: [
+                { title: '备注', dataIndex: 'remark', width: 160 },
+                { title: '域名', scopedSlots: { customRender: 'domains' } },
+                { title: '操作', width: 100, scopedSlots: { customRender: 'action' } },
+            ],
+            nodeColumns: [
+                { title: '备注', dataIndex: 'remark', width: 160 },
+                { title: 'tag', dataIndex: 'tag', width: 160 },
+                { title: '协议', dataIndex: 'protocol', width: 100 },
+                { title: '启用', width: 80, scopedSlots: { customRender: 'enable' } },
+                { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
+            ],
+            ruleColumns: [
+                { title: '备注', dataIndex: 'remark', width: 140 },
+                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140 },
+                { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140 },
+                { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
+                { title: '优先级', dataIndex: 'priority', width: 80 },
+                { title: '操作', width: 100, scopedSlots: { customRender: 'action' } },
+            ],
+            groupModal: { visible: false, id: 0, remark: '', domains: '' },
+            nodeModal: { visible: false, remark: '', link: '', config: '' },
+            ruleModal: { visible: false, rule: new RoutingRule() },
+        },
+        methods: {
+            async post(url, data) {
+                this.spinning = true;
+                try {
+                    const resp = await axios.post(url, data);
+                    const msg = resp.data;
+                    if (msg.success) {
+                        if (msg.msg) this.$message.success(msg.msg);
+                    } else {
+                        this.$message.error(msg.msg);
+                    }
+                    return msg;
+                } finally {
+                    this.spinning = false;
+                }
+            },
+            async loadAll() {
+                const [g, n, r, i] = await Promise.all([
+                    axios.post('xui/routing/domain-group/list'),
+                    axios.post('xui/routing/outbound/list'),
+                    axios.post('xui/routing/rule/list'),
+                    axios.post('xui/inbound/list'),
+                ]);
+                this.groups = (g.data.obj || []).map(DomainGroup.fromJson);
+                this.nodes = (n.data.obj || []).map(OutboundNode.fromJson);
+                this.rules = (r.data.obj || []).map(RoutingRule.fromJson);
+                this.inbounds = i.data.obj || [];
+            },
+            groupName(id) {
+                const g = this.groups.find(x => x.id === id);
+                return g ? g.remark : '(已删除)';
+            },
+            nodeName(id) {
+                const n = this.nodes.find(x => x.id === id);
+                return n ? n.remark : '(已删除)';
+            },
+            inboundName(id) {
+                if (!id) return '所有用户';
+                const i = this.inbounds.find(x => x.id === id);
+                return i ? (i.remark || i.tag) : '(已删除)';
+            },
+            openGroup(group) {
+                this.groupModal.id = group ? group.id : 0;
+                this.groupModal.remark = group ? group.remark : '';
+                this.groupModal.domains = group ? group.text : '';
+                this.groupModal.visible = true;
+            },
+            async saveGroup() {
+                const data = { remark: this.groupModal.remark, domains: this.groupModal.domains };
+                const url = this.groupModal.id
+                    ? 'xui/routing/domain-group/update/' + this.groupModal.id
+                    : 'xui/routing/domain-group/add';
+                const msg = await this.post(url, data);
+                if (msg.success) {
+                    this.groupModal.visible = false;
+                    await this.loadAll();
+                }
+            },
+            async delGroup(group) {
+                const msg = await this.post('xui/routing/domain-group/del/' + group.id);
+                if (msg.success) await this.loadAll();
+            },
+            openNode() {
+                this.nodeModal.remark = '';
+                this.nodeModal.link = '';
+                this.nodeModal.config = '';
+                this.nodeModal.visible = true;
+            },
+            async saveNode() {
+                const msg = await this.post('xui/routing/outbound/add', {
+                    remark: this.nodeModal.remark,
+                    link: this.nodeModal.link.trim(),
+                    config: this.nodeModal.config.trim(),
+                });
+                if (msg.success) {
+                    this.nodeModal.visible = false;
+                    await this.loadAll();
+                }
+            },
+            async toggleNode(node) {
+                const msg = await this.post('xui/routing/outbound/update/' + node.id, {
+                    remark: node.remark, enable: !node.enable, config: '',
+                });
+                if (msg.success) await this.loadAll();
+            },
+            async delNode(node) {
+                const msg = await this.post('xui/routing/outbound/del/' + node.id);
+                if (msg.success) await this.loadAll();
+            },
+            openRule(rule) {
+                this.ruleModal.rule = rule
+                    ? RoutingRule.fromJson(JSON.parse(JSON.stringify(rule)))
+                    : new RoutingRule();
+                this.ruleModal.visible = true;
+            },
+            async saveRule() {
+                const r = this.ruleModal.rule;
+                const url = r.id ? 'xui/routing/rule/update/' + r.id : 'xui/routing/rule/add';
+                const msg = await this.post(url, r);
+                if (msg.success) {
+                    this.ruleModal.visible = false;
+                    await this.loadAll();
+                }
+            },
+            async delRule(rule) {
+                const msg = await this.post('xui/routing/rule/del/' + rule.id);
+                if (msg.success) await this.loadAll();
+            },
+        },
+        async mounted() {
+            this.spinning = true;
+            try {
+                await this.loadAll();
+            } finally {
+                this.spinning = false;
+            }
+        },
+    });
+</script>
+</body>
