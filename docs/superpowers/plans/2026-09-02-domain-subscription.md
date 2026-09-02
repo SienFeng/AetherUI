@@ -1638,10 +1638,16 @@ git commit -m "feat(routing): 订阅定时更新任务，每 10 分钟自检是�
 
 ```go
 type domainGroupForm struct {
-	Id           int    `json:"id" form:"id"`
-	Remark       string `json:"remark" form:"remark"`
-	Domains      string `json:"domains" form:"domains"`
-	SubscribeUrl string `json:"subscribeUrl" form:"subscribeUrl"`
+	Id      int    `json:"id" form:"id"`
+	Remark  string `json:"remark" form:"remark"`
+	Domains string `json:"domains" form:"domains"`
+	// SubscribeUrl 用指针，为的是区分「表单没提供这个字段」（nil）与
+	// 「用户主动清空了订阅地址」（指向空串）。两者后果天差地别：前者是前端
+	// 疏漏，此时必须沿用库里的原值；后者是取消订阅，此时清空订阅数据才对。
+	// 用 string 绑定的话两种情况都是空串，一次「只改备注」的提交就会被
+	// DomainGroupService.Update 判成「订阅地址变了」而清掉已拉取的域名——
+	// 域名组变空、规则被 buildRule 跳过、流量静默走直连。
+	SubscribeUrl *string `json:"subscribeUrl" form:"subscribeUrl"`
 }
 
 // 列表页只需要摘要。域名组挂上订阅后可能有几万条域名，
@@ -1811,14 +1817,18 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 	}
 	// 保存时只校验格式，不去拉取——一个慢地址会把这个 HTTP 请求挂满 30 秒。
 	// 内容由管理员点「立即更新」或定时任务拉取。
-	if form.SubscribeUrl != "" {
-		if err := service.ValidateSubscribeURL(form.SubscribeUrl); err != nil {
+	subscribeUrl := ""
+	if form.SubscribeUrl != nil {
+		subscribeUrl = *form.SubscribeUrl
+	}
+	if subscribeUrl != "" {
+		if err := service.ValidateSubscribeURL(subscribeUrl); err != nil {
 			jsonMsg(c, "添加域名组", err)
 			return
 		}
 	}
 	group := &model.DomainGroup{
-		Remark: form.Remark, Domains: encoded, SubscribeUrl: form.SubscribeUrl,
+		Remark: form.Remark, Domains: encoded, SubscribeUrl: subscribeUrl,
 	}
 	err = a.domainGroupService.Add(group)
 	jsonMsg(c, "添加域名组", err)
@@ -1828,11 +1838,30 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 }
 ```
 
-`updateDomainGroup` 同样插入这段校验，并把传给 `Update` 的结构体改为：
+`updateDomainGroup` 的订阅地址处理**与新增不同**，必须先读库里的原值兜底：
 
 ```go
+	// form.SubscribeUrl 为 nil 表示这次提交根本没带订阅地址字段，此时必须
+	// 沿用库里的原值。否则 Update 会看到「原值 -> 空串」，判定为订阅地址被
+	// 改动而清空 SubscribedDomains——一次「只改备注」的提交就让这个域名组
+	// 变空，引用它的分流规则被 buildRule 跳过，流量静默走直连。
+	old, err := a.domainGroupService.Get(id)
+	if err != nil {
+		jsonMsg(c, "修改域名组", err)
+		return
+	}
+	subscribeUrl := old.SubscribeUrl
+	if form.SubscribeUrl != nil {
+		subscribeUrl = *form.SubscribeUrl
+	}
+	if subscribeUrl != "" {
+		if err := service.ValidateSubscribeURL(subscribeUrl); err != nil {
+			jsonMsg(c, "修改域名组", err)
+			return
+		}
+	}
 	err = a.domainGroupService.Update(&model.DomainGroup{
-		Id: id, Remark: form.Remark, Domains: encoded, SubscribeUrl: form.SubscribeUrl,
+		Id: id, Remark: form.Remark, Domains: encoded, SubscribeUrl: subscribeUrl,
 	})
 ```
 
@@ -2141,6 +2170,10 @@ XUI_DEBUG=true go run main.go
 4. 打开编辑弹窗 → 订阅内容区显示条数与前 200 条预览
 5. 把订阅地址改成一个 404 地址 → 保存 → 点「立即更新」→ 显示「拉取失败」，且**域名条数保持不变**（旧数据保留）
 6. 统计条的「订阅异常」变成 1
+7. **回归验证（专防事故）**：打开一个订阅正常的组，只改备注、不碰订阅地址，保存 →
+   域名条数与「上次更新时间」必须保持不变。若域名清空了，说明表单没有回传原订阅地址，
+   `Update` 把它误判成「用户清空了订阅」——这个组会立刻变空，引用它的分流规则被
+   `buildRule` 跳过，流量静默走直连
 
 - [ ] **Step 10: 提交**
 
