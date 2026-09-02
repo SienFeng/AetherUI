@@ -127,6 +127,7 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 - **规则存 `InboundId` 外键，不存 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。
 - **`InboundId = 0` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。
 - **出站 `Tag` 一经分配即不可变**，且不能由自增 Id 拼出（unique 约束要求 INSERT 前就确定，那时 Id 尚未分配）。用 `link.SuggestTag("a-ui", remark, idx)` 生成，重名由调用方追加序号——注意 `SuggestTag` 只在 remark 为空时才用 `idx`，remark 非空时对任何 idx 都返回同一个值。
+- **`a-ui-block` 是保留 tag，任何用户可控的 tag 分配都必须排除它。** 数据库唯一约束管不到它——注入器发出的 tag 不在 `outbound_nodes` 表里。备注写「block」（含 `Block`/`BLOCK`/`block!`/` block ` 等，`SlugRemark` 会把它们归一到同一个 slug）就会生成 `a-ui-block`，与注入器的黑洞出站撞名，xray 报 `existing tag found: a-ui-block` 并拒绝启动。**将来若增加第二个保留 tag，必须同时更新分配端与生成端的排除逻辑**（建议做成 `IsReservedTag()` 之类的单一判定，避免两处各自维护）。
 
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
@@ -167,6 +168,8 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 
 策略是 **fail open**：只有 xray 明确判定配置非法才拒绝；二进制缺失、老版本不认 `run -test` 参数、执行超时，一律放行并记日志。校验是辅助手段，不能因它自身故障就把用户锁在门外。
 
+**当前实现是「用最小配置包住单个 outbound / 域名列表」，只能发现该对象自身的错误，发现不了任何组合层面的冲突**（重复 tag、指向不存在出站的 `proxySettings.tag` 等）。设计文档 §5.4.2 要求的是校验**完整生成配置**——实测 `xray run -test` 含加载 10MB geosite 仅约 18ms，成本不构成理由。改动此处时应优先补上完整配置校验。
+
 ### `util/link` 包
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
@@ -190,3 +193,6 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 - **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题——需要自己 `ParseFS` 一遍让错误暴露出来。
 - **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
+- **面板报告的 xray 状态可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 和 `bin/config.json` 跑一次 `xray run -test` 为准，不要相信面板首页**。
+- **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。
+- **cron 任务没有 panic 恢复。** `Server.Start()` 里 `cron.New(...)` 未配 `cron.WithChain(cron.Recover(...))`，`robfig/cron/v3` 自身也不 recover。定时任务（含每 10 秒的 xray 重启消费任务）里的任何 panic 都会**杀掉整个面板进程**。在这些路径上写代码要格外注意 nil map、越界等运行时 panic。
