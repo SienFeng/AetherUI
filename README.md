@@ -1,6 +1,9 @@
 # X-UI
 简体中文|[ENGLISH](./README_EN.md)  
 
+> 本项目基于 [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)（GPL-3.0）二次开发。  
+> 上游仓库已于 2024-11 归档并停止维护，本仓库在其最后一个开源版本基础上继续修改与发布。  
+
 > 声明：该项目仅供个人学习、交流，请遵守当地法律法规,勿用于非法用途;请勿用于生产环境  
 > 声明：该项目已闭源，介意者请勿使用；如您需要开源代码，请附上您的Github Profile邮箱联系  
 
@@ -39,15 +42,15 @@
 &#x26A1;从原版升级也可使用该命令，数据不会丢失&#x26A1;
 
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/FranzKafkaYu/x-ui/master/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
 ```    
 For English Users,please use the following command to install English supported version:  
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/FranzKafkaYu/x-ui/master/install_en.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install_en.sh)
 ```
 如需安装指定的版本,可以在上述命令中指定版本号,如指定版本为`0.3.4.4`,安装命令如下：    
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/FranzKafkaYu/x-ui/master/install.sh) 0.3.4.4   
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh) 0.3.4.4   
 ```
 
 # 效果预览  

@@ -1,6 +1,10 @@
 # X-UI
 
 [简体中文](./README.md)| ENGLISH  
+
+> This project is derived from [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui) (GPL-3.0).
+> The upstream repository was archived in Nov 2024; this fork continues from its last open-source version.
+
 X-UI is a webUI panel based on Xray-core which supports multi protocols and multi users  
 This project is a fork of [vaxilu&#39;s project](https://github.com/vaxilu/x-ui),and it is a experiental project which used by myself for learning golang   
 If you need more language options ,please open a issue and let me know that
@@ -47,11 +51,11 @@ for more detailed usages,plz see [WIKI](https://github.com/FranzKafkaYu/x-ui/wik
 Make sure your system `bash` and `curl` and `network` are ready,here we go
 
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/FranzKafkaYu/x-ui/master/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
 ```  
 For English Users,please use the following command to install English supported version:  
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/FranzKafkaYu/x-ui/master/install_en.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install_en.sh)
 ``` 
 
 ## Shortcut  

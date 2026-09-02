@@ -1,0 +1,111 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（仅试构建，不会创建 release）'
+        required: true
+        default: '0.0.0-test'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确定版本号
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            V="${GITHUB_REF_NAME}"
+          else
+            V="${{ inputs.version }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "构建版本: $V"
+
+      # 版本号由 config/config.go 通过 //go:embed 读取，必须在编译前写入
+      - name: 写入版本号
+        run: |
+          printf '%s' "${{ steps.ver.outputs.version }}" > config/version
+          echo "config/version = $(cat config/version)"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+
+      # 项目依赖 mattn/go-sqlite3，必须开 CGO，交叉编译需要目标架构的 gcc
+      - name: 安装 arm64 交叉工具链
+        if: matrix.arch == 'arm64'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: 编译
+        run: |
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            export CC=aarch64-linux-gnu-gcc
+          fi
+          CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.arch }} \
+            go build -trimpath -ldflags "-s -w" -o x-ui main.go
+          file x-ui
+
+      - name: 打包
+        run: |
+          ARCH=${{ matrix.arch }}
+          mkdir -p dist/x-ui/bin
+          cp x-ui x-ui.service dist/x-ui/
+          cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat dist/x-ui/bin/
+          chmod +x dist/x-ui/x-ui dist/x-ui/bin/xray-linux-${ARCH}
+
+          # 中文包
+          cp x-ui.sh dist/x-ui/
+          tar -C dist -czf x-ui-linux-${ARCH}.tar.gz x-ui
+          rm dist/x-ui/x-ui.sh
+
+          # 英文包：二进制完全相同，仅 SSH 管理脚本语言不同
+          # （面板 Web 界面按浏览器 Accept-Language 自动切换，与打包无关）
+          cp x-ui_en.sh dist/x-ui/
+          tar -C dist -czf x-ui-linux-${ARCH}-english.tar.gz x-ui
+
+          echo "--- 产物 ---"
+          ls -lh ./*.tar.gz
+          echo "--- 中文包内容 ---"
+          tar -tzvf x-ui-linux-${ARCH}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-ui-${{ matrix.arch }}
+          path: ./*.tar.gz
+          retention-days: 7
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: x-ui-*
+          merge-multiple: true
+
+      - name: 创建 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lh ./*.tar.gz
+          gh release create "$GITHUB_REF_NAME" ./*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
