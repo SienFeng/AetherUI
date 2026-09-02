@@ -152,6 +152,10 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 }
 
 func (s *OutboundNodeService) Del(id int) error {
+	ruleService := RoutingRuleService{}
+	if err := ruleService.CheckOutboundRefs(id); err != nil {
+		return err
+	}
 	db := database.GetDB()
 	return db.Delete(model.OutboundNode{}, id).Error
 }

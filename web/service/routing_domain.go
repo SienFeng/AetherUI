@@ -99,6 +99,10 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 }
 
 func (s *DomainGroupService) Del(id int) error {
+	ruleService := RoutingRuleService{}
+	if err := ruleService.CheckDomainGroupRefs(id); err != nil {
+		return err
+	}
 	db := database.GetDB()
 	return db.Delete(model.DomainGroup{}, id).Error
 }
