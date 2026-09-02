@@ -17,7 +17,8 @@
 - **生成的出站 tag 一律加 `a-ui-` 前缀**，禁止与手工模板的 tag 冲突。黑洞出站 tag 固定为 `a-ui-block`。
 - **配置生成必须确定性**：相同的库内容两次生成必须得到逐字节相同的 JSON。规则一律按 `Priority, Id` 升序排列。违反此约束会导致 `Config.Equals` 恒为 false，xray 被 10 秒 cron 反复重启。
 - **绝不输出条件残缺的规则**：域名列表为空、出站不存在或已禁用、入站不存在时，整条规则跳过。原因见 spec §2——xray 对 `domain: []` 不报错，会把规则退化成「劫持该入站全部流量」。
-- **本仓库当前不是 git 仓库**。若要执行计划中的 commit 步骤，需先征得用户同意并 `git init`；否则把每个 commit 步骤当作「跑一次 `go build ./... && go vet ./...` 的检查点」。**不得擅自 `git init`。**
+- **git**：仓库已初始化并关联 `origin`（github.com/SienFeng/AetherUI），当前工作分支是 `feature/domain-routing`，基线是 `origin/main` 的 `c4c29b0`。各任务的 commit 步骤照常执行。**不得 push、不得动 `main` 分支、不得改写已有历史。**
+- **本机已装好 `bin/xray-darwin-arm64`（Xray 26.7.28）**，凡是需要真实 xray 的步骤都能直接跑。注意仓库内 `bin/geo*.dat` 已随之更新为新版——旧版不含 OPENAI 类别，`geosite:openai` 会报错，**不要把这两个文件还原成更早的版本**。
 - 项目原本零测试。本计划新增的测试是正式回归测试，需保留。
 - 现有代码的中文风格保持一致：controller 层用 `jsonMsg(c, "添加", err)` 这类中文动词拼接消息。
 
