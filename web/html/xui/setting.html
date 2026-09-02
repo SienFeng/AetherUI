@@ -74,6 +74,9 @@
                         <a-tab-pane key="4" tab="其他设置">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
+                                <setting-list-item type="text" title="订阅更新时间"
+                                                   desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，改动立即生效无需重启"
+                                                   v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                     </a-tabs>
