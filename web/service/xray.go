@@ -15,8 +15,9 @@ var isNeedXrayRestart atomic.Bool
 var result string
 
 type XrayService struct {
-	inboundService InboundService
-	settingService SettingService
+	inboundService  InboundService
+	settingService  SettingService
+	routingInjector RoutingInjector
 }
 
 func (s *XrayService) IsXrayRunning() bool {
@@ -74,6 +75,11 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		inboundConfig := inbound.GenXrayInboundConfig()
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
+
+	if err := s.routingInjector.Inject(xrayConfig); err != nil {
+		return nil, err
+	}
+
 	return xrayConfig, nil
 }
 
