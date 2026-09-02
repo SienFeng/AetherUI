@@ -371,6 +371,49 @@ func TestUpdateKeepsSubscribedDataWhenUrlUnchanged(t *testing.T) {
 	}
 }
 
+// Update 不得写回它 Get 时捕获的订阅字段：那中间可能有一次成功的 Refresh，
+// 整行写入会把它静默回滚。这里用「Get 之后、Save 之前第三方改了库」来模拟。
+func TestUpdateDoesNotClobberConcurrentRefresh(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
+		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	stale := &model.DomainGroup{
+		Id: group.Id, Remark: "改了备注", Domains: `["domain:manual.com"]`,
+		SubscribeUrl: "http://a.example.com/list",
+	}
+
+	// 模拟并发 Refresh：在 Update 之前直接改库，代表一次刚刚成功的刷新
+	if err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Updates(map[string]any{
+			"subscribed_domains": `["domain:fresh.com"]`,
+			"last_updated_at":    999,
+		}).Error; err != nil {
+		t.Fatalf("simulate refresh: %v", err)
+	}
+
+	if err := s.Update(stale); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, _ := s.Get(group.Id)
+	if got.SubscribedDomains != `["domain:fresh.com"]` {
+		t.Errorf("SubscribedDomains = %q, 刷新结果被 Update 回滚了", got.SubscribedDomains)
+	}
+	if got.LastUpdatedAt != 999 {
+		t.Errorf("LastUpdatedAt = %d, want 999", got.LastUpdatedAt)
+	}
+	if got.Remark != "改了备注" {
+		t.Errorf("Remark = %q, 备注应当被更新", got.Remark)
+	}
+}
+
 func TestDecodeSubscribedDomainsToleratesEmpty(t *testing.T) {
 	for _, raw := range []string{"", "   "} {
 		got, err := DecodeSubscribedDomains(raw)

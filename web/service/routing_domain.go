@@ -105,21 +105,29 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 	if err != nil {
 		return err
 	}
-	old.Remark = group.Remark
-	old.Domains = group.Domains
+
+	// 只写实际要改的列，不用 Save 写整行。整行写入会把 Get 那一刻捕获的
+	// SubscribedDomains/LastUpdatedAt 一并写回，而这中间可能有一次成功的
+	// Refresh 已经更新了它们——那次刷新会被静默回滚，无错误无日志。
+	// 注意：将来给 DomainGroup 加字段时，要更新的字段必须同时加进这个 map。
+	fields := map[string]any{
+		"remark":  group.Remark,
+		"domains": group.Domains,
+	}
 
 	// 订阅地址变了：旧订阅内容来自另一个来源，继续拿它分流是「用错误的数据
 	// 生效」，比规则暂时不生效更危险。清空并把 LastUpdatedAt 置 0，
 	// SubscriptionJob 的「从未成功过」分支会在下一个检查窗口拉取新地址。
 	if old.SubscribeUrl != group.SubscribeUrl {
-		old.SubscribeUrl = group.SubscribeUrl
-		old.SubscribedDomains = ""
-		old.LastUpdatedAt = 0
-		old.LastError = ""
-		old.LastSkipped = 0
+		fields["subscribe_url"] = group.SubscribeUrl
+		fields["subscribed_domains"] = ""
+		fields["last_updated_at"] = 0
+		fields["last_error"] = ""
+		fields["last_skipped"] = 0
 	}
 
-	return database.GetDB().Save(old).Error
+	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Updates(fields).Error
 }
 
 // subscriptionMu 串行化所有订阅更新。定时任务与管理员点「立即更新」可能同时
