@@ -7,3 +7,5 @@ a-ui-*.tar.gz
 /a-ui
 /release.sh
 .sync*
+# superpowers SDD 工作区（ledger、审查包等临时产物）
+.superpowers/
