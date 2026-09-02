@@ -79,7 +79,7 @@ install_base() {
     fi
 }
 
-#This function will be called when user installed x-ui out of sercurity
+#This function will be called when user installed a-ui out of sercurity
 config_after_install() {
     echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
     read -p "确认是否继续,如选择n则跳过本次端口与账户密码设定[y/n]": config_confirm
@@ -91,100 +91,100 @@ config_after_install() {
         read -p "请设置面板访问端口:" config_port
         echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
         echo -e "${yellow}确认设定,设定中${plain}"
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
+        /usr/local/a-ui/a-ui setting -username ${config_account} -password ${config_password}
         echo -e "${yellow}账户密码设定完成${plain}"
-        /usr/local/x-ui/x-ui setting -port ${config_port}
+        /usr/local/a-ui/a-ui setting -port ${config_port}
         echo -e "${yellow}面板端口设定完成${plain}"
     else
         echo -e "${red}已取消设定...${plain}"
-        if [[ ! -f "/etc/x-ui/x-ui.db" ]]; then
+        if [[ ! -f "/etc/a-ui/a-ui.db" ]]; then
             local usernameTemp=$(head -c 6 /dev/urandom | base64)
             local passwordTemp=$(head -c 6 /dev/urandom | base64)
             local portTemp=$(echo $RANDOM)
-            /usr/local/x-ui/x-ui setting -username ${usernameTemp} -password ${passwordTemp}
-            /usr/local/x-ui/x-ui setting -port ${portTemp}
+            /usr/local/a-ui/a-ui setting -username ${usernameTemp} -password ${passwordTemp}
+            /usr/local/a-ui/a-ui setting -port ${portTemp}
             echo -e "检测到您属于全新安装,出于安全考虑已自动为您生成随机用户与端口:"
             echo -e "###############################################"
             echo -e "${green}面板登录用户名:${usernameTemp}${plain}"
             echo -e "${green}面板登录用户密码:${passwordTemp}${plain}"
             echo -e "${red}面板登录端口:${portTemp}${plain}"
             echo -e "###############################################"
-            echo -e "${red}如您遗忘了面板登录相关信息,可在安装完成后输入x-ui,输入选项7查看面板登录信息${plain}"
+            echo -e "${red}如您遗忘了面板登录相关信息,可在安装完成后输入a-ui,输入选项7查看面板登录信息${plain}"
         else
-            echo -e "${red}当前属于版本升级,保留之前设置项,登录方式保持不变,可输入x-ui后键入数字7查看面板登录信息${plain}"
+            echo -e "${red}当前属于版本升级,保留之前设置项,登录方式保持不变,可输入a-ui后键入数字7查看面板登录信息${plain}"
         fi
     fi
 }
 
-install_x-ui() {
-    systemctl stop x-ui
+install_a-ui() {
+    systemctl stop a-ui
     cd /usr/local/
 
     if [ $# == 0 ]; then
-        last_version=$(curl -Lsk "https://api.github.com/repos/SienFeng/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -Lsk "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 x-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 x-ui 版本安装${plain}"
+            echo -e "${red}检测 a-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 a-ui 版本安装${plain}"
             exit 1
         fi
-        echo -e "检测到 x-ui 最新版本：${last_version}，开始安装"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/SienFeng/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
+        echo -e "检测到 a-ui 最新版本：${last_version}，开始安装"
+        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}.tar.gz
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 x-ui 失败，请确保你的服务器能够下载 Github 的文件${plain}"
+            echo -e "${red}下载 a-ui 失败，请确保你的服务器能够下载 Github 的文件${plain}"
             exit 1
         fi
     else
         last_version=$1
-        url="https://github.com/SienFeng/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
-        echo -e "开始安装 x-ui $1"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz ${url}
+        url="https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}.tar.gz"
+        echo -e "开始安装 a-ui $1"
+        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 x-ui $1 失败，请确保此版本存在${plain}"
+            echo -e "${red}下载 a-ui $1 失败，请确保此版本存在${plain}"
             exit 1
         fi
     fi
 
-    if [[ -e /usr/local/x-ui/ ]]; then
-        rm /usr/local/x-ui/ -rf
+    if [[ -e /usr/local/a-ui/ ]]; then
+        rm /usr/local/a-ui/ -rf
     fi
 
-    tar zxvf x-ui-linux-${arch}.tar.gz
-    rm x-ui-linux-${arch}.tar.gz -f
-    cd x-ui
-    chmod +x x-ui bin/xray-linux-${arch}
-    cp -f x-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/SienFeng/x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
-    chmod +x /usr/bin/x-ui
+    tar zxvf a-ui-linux-${arch}.tar.gz
+    rm a-ui-linux-${arch}.tar.gz -f
+    cd a-ui
+    chmod +x a-ui bin/xray-linux-${arch}
+    cp -f a-ui.service /etc/systemd/system/
+    wget --no-check-certificate -O /usr/bin/a-ui https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui.sh
+    chmod +x /usr/local/a-ui/a-ui.sh
+    chmod +x /usr/bin/a-ui
     config_after_install
     #echo -e "如果是全新安装，默认网页端口为 ${green}54321${plain}，用户名和密码默认都是 ${green}admin${plain}"
     #echo -e "请自行确保此端口没有被其他程序占用，${yellow}并且确保 54321 端口已放行${plain}"
-    #    echo -e "若想将 54321 修改为其它端口，输入 x-ui 命令进行修改，同样也要确保你修改的端口也是放行的"
+    #    echo -e "若想将 54321 修改为其它端口，输入 a-ui 命令进行修改，同样也要确保你修改的端口也是放行的"
     #echo -e ""
     #echo -e "如果是更新面板，则按你之前的方式访问面板"
     #echo -e ""
     systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl start x-ui
-    echo -e "${green}x-ui ${last_version}${plain} 安装完成，面板已启动，"
+    systemctl enable a-ui
+    systemctl start a-ui
+    echo -e "${green}a-ui ${last_version}${plain} 安装完成，面板已启动，"
     echo -e ""
-    echo -e "x-ui 管理脚本使用方法: "
+    echo -e "a-ui 管理脚本使用方法: "
     echo -e "----------------------------------------------"
-    echo -e "x-ui              - 显示管理菜单 (功能更多)"
-    echo -e "x-ui start        - 启动 x-ui 面板"
-    echo -e "x-ui stop         - 停止 x-ui 面板"
-    echo -e "x-ui restart      - 重启 x-ui 面板"
-    echo -e "x-ui status       - 查看 x-ui 状态"
-    echo -e "x-ui enable       - 设置 x-ui 开机自启"
-    echo -e "x-ui disable      - 取消 x-ui 开机自启"
-    echo -e "x-ui log          - 查看 x-ui 日志"
-    echo -e "x-ui v2-ui        - 迁移本机器的 v2-ui 账号数据至 x-ui"
-    echo -e "x-ui update       - 更新 x-ui 面板"
-    echo -e "x-ui install      - 安装 x-ui 面板"
-    echo -e "x-ui uninstall    - 卸载 x-ui 面板"
-    echo -e "x-ui geo          - 更新 geo  数据"
+    echo -e "a-ui              - 显示管理菜单 (功能更多)"
+    echo -e "a-ui start        - 启动 a-ui 面板"
+    echo -e "a-ui stop         - 停止 a-ui 面板"
+    echo -e "a-ui restart      - 重启 a-ui 面板"
+    echo -e "a-ui status       - 查看 a-ui 状态"
+    echo -e "a-ui enable       - 设置 a-ui 开机自启"
+    echo -e "a-ui disable      - 取消 a-ui 开机自启"
+    echo -e "a-ui log          - 查看 a-ui 日志"
+    echo -e "a-ui v2-ui        - 迁移本机器的 v2-ui 账号数据至 a-ui"
+    echo -e "a-ui update       - 更新 a-ui 面板"
+    echo -e "a-ui install      - 安装 a-ui 面板"
+    echo -e "a-ui uninstall    - 卸载 a-ui 面板"
+    echo -e "a-ui geo          - 更新 geo  数据"
     echo -e "----------------------------------------------"
 }
 
 echo -e "${green}开始安装${plain}"
 install_base
-install_x-ui $1
+install_a-ui $1

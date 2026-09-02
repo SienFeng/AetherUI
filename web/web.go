@@ -20,13 +20,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"x-ui/config"
-	"x-ui/logger"
-	"x-ui/util/common"
-	"x-ui/web/controller"
-	"x-ui/web/job"
-	"x-ui/web/network"
-	"x-ui/web/service"
+	"a-ui/config"
+	"a-ui/logger"
+	"a-ui/util/common"
+	"a-ui/web/controller"
+	"a-ui/web/job"
+	"a-ui/web/network"
+	"a-ui/web/service"
 )
 
 //go:embed assets/*

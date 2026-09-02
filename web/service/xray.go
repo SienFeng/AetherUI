@@ -5,8 +5,8 @@ import (
 	"errors"
 	"go.uber.org/atomic"
 	"sync"
-	"x-ui/logger"
-	"x-ui/xray"
+	"a-ui/logger"
+	"a-ui/xray"
 )
 
 var p *xray.Process

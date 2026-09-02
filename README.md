@@ -1,4 +1,4 @@
-# X-UI
+# AetherUI
 简体中文|[ENGLISH](./README_EN.md)  
 
 > 本项目基于 [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)（GPL-3.0）二次开发。  
@@ -39,40 +39,40 @@
 &#x26A1;从原版升级也可使用该命令，数据不会丢失&#x26A1;
 
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh)
 ```    
 For English Users,please use the following command to install English supported version:  
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install_en.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh)
 ```
 如需安装指定的版本,可以在上述命令中指定版本号,如指定版本为`0.3.4.4`,安装命令如下：    
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh) 0.3.4.4   
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh) v1.0.1   
 ```
 
 # 快捷方式
-安装成功后，通过键入`x-ui`进入控制选项菜单，目前菜单内容：
+安装成功后，通过键入`a-ui`进入控制选项菜单，目前菜单内容：
 ```
-  x-ui 面板管理脚本
+  AetherUI 面板管理脚本
   0. 退出脚本
 ————————————————
-  1. 安装 x-ui
-  2. 更新 x-ui
-  3. 卸载 x-ui
+  1. 安装 a-ui
+  2. 更新 a-ui
+  3. 卸载 a-ui
 ————————————————
   4. 重置用户名密码
   5. 重置面板设置
   6. 设置面板端口
   7. 查看当前面板设置
 ————————————————
-  8. 启动 x-ui
-  9. 停止 x-ui
-  10. 重启 x-ui
-  11. 查看 x-ui 状态
-  12. 查看 x-ui 日志
+  8. 启动 a-ui
+  9. 停止 a-ui
+  10. 重启 a-ui
+  11. 查看 a-ui 状态
+  12. 查看 a-ui 日志
 ————————————————
-  13. 设置 x-ui 开机自启
-  14. 取消 x-ui 开机自启
+  13. 设置 a-ui 开机自启
+  14. 取消 a-ui 开机自启
 ————————————————
   15. 一键安装 bbr (最新内核)
   16. 一键申请SSL证书(acme申请)

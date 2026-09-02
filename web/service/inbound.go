@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"gorm.io/gorm"
 	"time"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/util/common"
-	"x-ui/xray"
+	"a-ui/database"
+	"a-ui/database/model"
+	"a-ui/util/common"
+	"a-ui/xray"
 )
 
 type InboundService struct {

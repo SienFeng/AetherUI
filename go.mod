@@ -1,4 +1,4 @@
-module x-ui
+module a-ui
 
 go 1.16
 

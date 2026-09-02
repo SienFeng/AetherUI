@@ -28,12 +28,12 @@ body:
   - type: textarea
     id: version
     attributes:
-      label: Version of x-ui
+      label: Version of AetherUI
       value: |-
         <details>
 
         ```console
-        $ x-ui version
+        $ a-ui version
         # Paste output here
         ```
 
@@ -44,7 +44,7 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: x-ui log or xray log
+      label: AetherUI log or xray log
       value: |-
         <details>
 

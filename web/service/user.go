@@ -3,9 +3,9 @@ package service
 import (
 	"errors"
 	"gorm.io/gorm"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/logger"
+	"a-ui/database"
+	"a-ui/database/model"
+	"a-ui/logger"
 )
 
 type UserService struct {

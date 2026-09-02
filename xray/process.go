@@ -17,7 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"x-ui/util/common"
+	"a-ui/util/common"
 )
 
 var trafficRegex = regexp.MustCompile("(inbound|outbound)>>>([^>]+)>>>traffic>>>(downlink|uplink)")

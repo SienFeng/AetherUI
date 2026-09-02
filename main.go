@@ -9,13 +9,13 @@ import (
 	"os/signal"
 	"syscall"
 	_ "unsafe"
-	"x-ui/config"
-	"x-ui/database"
-	"x-ui/logger"
-	"x-ui/v2ui"
-	"x-ui/web"
-	"x-ui/web/global"
-	"x-ui/web/service"
+	"a-ui/config"
+	"a-ui/database"
+	"a-ui/logger"
+	"a-ui/v2ui"
+	"a-ui/web"
+	"a-ui/web/global"
+	"a-ui/web/service"
 )
 
 func runWebServer() {

@@ -1,12 +1,12 @@
 [Unit]
-Description=x-ui Service
+Description=AetherUI Service
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/usr/local/x-ui/
-ExecStart=/usr/local/x-ui/x-ui
+WorkingDirectory=/usr/local/a-ui/
+ExecStart=/usr/local/a-ui/a-ui
 
 [Install]
 WantedBy=multi-user.target

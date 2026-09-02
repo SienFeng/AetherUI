@@ -1,11 +1,11 @@
-# X-UI
+# AetherUI
 
 [简体中文](./README.md)| ENGLISH  
 
 > This project is derived from [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui) (GPL-3.0).
 > The upstream repository was archived in Nov 2024; this fork continues from its last open-source version.
 
-X-UI is a webUI panel based on Xray-core which supports multi protocols and multi users  
+AetherUI is a webUI panel based on Xray-core which supports multi protocols and multi users  
 This project is a fork of [vaxilu&#39;s project](https://github.com/vaxilu/x-ui),and it is a experiental project which used by myself for learning golang   
 If you need more language options ,please open a issue and let me know that
 
@@ -51,42 +51,42 @@ for more detailed usages,plz see [WIKI](https://github.com/FranzKafkaYu/x-ui/wik
 Make sure your system `bash` and `curl` and `network` are ready,here we go
 
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh)
 ```  
 For English Users,please use the following command to install English supported version:  
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install_en.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh)
 ``` 
 
 ## Shortcut  
-After Installation，you can input `x-ui`to enter control menu，current menu details：
+After Installation，you can input `a-ui`to enter control menu，current menu details：
 ```
  
-  x-ui control menu
+  AetherUI control menu
   0. exit
 ————————————————
-  1. install   x-ui
-  2. update    x-ui
-  3. uninstall x-ui
+  1. install   a-ui
+  2. update    a-ui
+  3. uninstall a-ui
 ————————————————
   4. reset username
   5. reset panel
   6. reset panel port
   7. check panel info
 ————————————————
-  8. start x-ui
-  9. stop  x-ui
-  10. restart x-ui
-  11. check x-ui status
-  12. check x-ui logs
+  8. start a-ui
+  9. stop  a-ui
+  10. restart a-ui
+  11. check a-ui status
+  12. check a-ui logs
 ————————————————
-  13. enable  x-ui on sysyem startup
-  14. disabel x-ui on sysyem startup
+  13. enable  a-ui on sysyem startup
+  14. disabel a-ui on sysyem startup
 ————————————————
   15. enable bbr 
   16. issuse certs
  
-x-ui status: running
+a-ui status: running
 enable on system startup: yes
 xray status: running
 

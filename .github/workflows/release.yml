@@ -55,35 +55,35 @@ jobs:
             export CC=aarch64-linux-gnu-gcc
           fi
           CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.arch }} \
-            go build -trimpath -ldflags "-s -w" -o x-ui main.go
-          file x-ui
+            go build -trimpath -ldflags "-s -w" -o a-ui main.go
+          file a-ui
 
       - name: 打包
         run: |
           ARCH=${{ matrix.arch }}
-          mkdir -p dist/x-ui/bin
-          cp x-ui x-ui.service dist/x-ui/
-          cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat dist/x-ui/bin/
-          chmod +x dist/x-ui/x-ui dist/x-ui/bin/xray-linux-${ARCH}
+          mkdir -p dist/a-ui/bin
+          cp a-ui a-ui.service dist/a-ui/
+          cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat dist/a-ui/bin/
+          chmod +x dist/a-ui/a-ui dist/a-ui/bin/xray-linux-${ARCH}
 
           # 中文包
-          cp x-ui.sh dist/x-ui/
-          tar -C dist -czf x-ui-linux-${ARCH}.tar.gz x-ui
-          rm dist/x-ui/x-ui.sh
+          cp a-ui.sh dist/a-ui/
+          tar -C dist -czf a-ui-linux-${ARCH}.tar.gz a-ui
+          rm dist/a-ui/a-ui.sh
 
           # 英文包：二进制完全相同，仅 SSH 管理脚本语言不同
           # （面板 Web 界面按浏览器 Accept-Language 自动切换，与打包无关）
-          cp x-ui_en.sh dist/x-ui/
-          tar -C dist -czf x-ui-linux-${ARCH}-english.tar.gz x-ui
+          cp a-ui_en.sh dist/a-ui/
+          tar -C dist -czf a-ui-linux-${ARCH}-english.tar.gz a-ui
 
           echo "--- 产物 ---"
           ls -lh ./*.tar.gz
           echo "--- 中文包内容 ---"
-          tar -tzvf x-ui-linux-${ARCH}.tar.gz
+          tar -tzvf a-ui-linux-${ARCH}.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
-          name: x-ui-${{ matrix.arch }}
+          name: a-ui-${{ matrix.arch }}
           path: ./*.tar.gz
           retention-days: 7
 
@@ -97,7 +97,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: x-ui-*
+          pattern: a-ui-*
           merge-multiple: true
 
       - name: 创建 release

@@ -2,11 +2,11 @@ package v2ui
 
 import (
 	"fmt"
-	"x-ui/config"
-	"x-ui/database"
-	"x-ui/database/model"
-	"x-ui/util/common"
-	"x-ui/web/service"
+	"a-ui/config"
+	"a-ui/database"
+	"a-ui/database/model"
+	"a-ui/util/common"
+	"a-ui/web/service"
 )
 
 func MigrateFromV2UI(dbPath string) error {
@@ -16,7 +16,7 @@ func MigrateFromV2UI(dbPath string) error {
 	}
 	err = database.InitDB(config.GetDBPath())
 	if err != nil {
-		return common.NewError("init x-ui database failed:", err)
+		return common.NewError("init a-ui database failed:", err)
 	}
 
 	v2Inbounds, err := getV2Inbounds()
@@ -31,7 +31,7 @@ func MigrateFromV2UI(dbPath string) error {
 	userService := service.UserService{}
 	user, err := userService.GetFirstUser()
 	if err != nil {
-		return common.NewError("get x-ui user failed:", err)
+		return common.NewError("get a-ui user failed:", err)
 	}
 
 	inbounds := make([]*model.Inbound, 0)
@@ -42,7 +42,7 @@ func MigrateFromV2UI(dbPath string) error {
 	inboundService := service.InboundService{}
 	err = inboundService.AddInbounds(inbounds)
 	if err != nil {
-		return common.NewError("add x-ui inbounds failed:", err)
+		return common.NewError("add a-ui inbounds failed:", err)
 	}
 
 	fmt.Println("migrate v2-ui inbounds success:", len(inbounds))

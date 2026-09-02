@@ -43,7 +43,7 @@ fi
 echo "架构: ${arch}"
 
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
-    echo "x-ui dosen't support 32bit(x86) system,please use 64 bit operating system(x86_64) instead,if there is something wrong,plz let me know"
+    echo "a-ui dosen't support 32bit(x86) system,please use 64 bit operating system(x86_64) instead,if there is something wrong,plz let me know"
     exit -1
 fi
 
@@ -79,7 +79,7 @@ install_base() {
     fi
 }
 
-#This function will be called when user installed x-ui out of sercurity
+#This function will be called when user installed a-ui out of sercurity
 config_after_install() {
     echo -e "${yellow}Install/update finished need to modify panel settings out of security${plain}"
     read -p "are you continue,if you type n will skip this at this time[y/n]": config_confirm
@@ -91,93 +91,93 @@ config_after_install() {
         read -p "please set up the panel port:" config_port
         echo -e "${yellow}your panel port is:${config_port}${plain}"
         echo -e "${yellow}initializing,wait some time here...${plain}"
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
+        /usr/local/a-ui/a-ui setting -username ${config_account} -password ${config_password}
         echo -e "${yellow}account name and password set down!${plain}"
-        /usr/local/x-ui/x-ui setting -port ${config_port}
+        /usr/local/a-ui/a-ui setting -port ${config_port}
         echo -e "${yellow}panel port set down!${plain}"
     else
         echo -e "${red}cancel...${plain}"
-        if [[ ! -f "/etc/x-ui/x-ui.db" ]]; then
+        if [[ ! -f "/etc/a-ui/a-ui.db" ]]; then
             local usernameTemp=$(head -c 6 /dev/urandom | base64)
             local passwordTemp=$(head -c 6 /dev/urandom | base64)
             local portTemp=$(echo $RANDOM)
-            /usr/local/x-ui/x-ui setting -username ${usernameTemp} -password ${passwordTemp}
-            /usr/local/x-ui/x-ui setting -port ${portTemp}
+            /usr/local/a-ui/a-ui setting -username ${usernameTemp} -password ${passwordTemp}
+            /usr/local/a-ui/a-ui setting -port ${portTemp}
             echo -e "this is a fresh installation,will generate random login info for security concerns:"
             echo -e "###############################################"
             echo -e "${green}user name:${usernameTemp}${plain}"
             echo -e "${green}user password:${passwordTemp}${plain}"
             echo -e "${red}web port:${portTemp}${plain}"
             echo -e "###############################################"
-            echo -e "${red}if you forgot your login info,you can type x-ui and then type 7 to check after installation${plain}"
+            echo -e "${red}if you forgot your login info,you can type a-ui and then type 7 to check after installation${plain}"
         else
-            echo -e "${red} this is your upgrade,will keep old settings,if you forgot your login info,you can type x-ui and then type 7 to check${plain}"
+            echo -e "${red} this is your upgrade,will keep old settings,if you forgot your login info,you can type a-ui and then type 7 to check${plain}"
         fi
     fi
 }
 
-install_x-ui() {
-    systemctl stop x-ui
+install_a-ui() {
+    systemctl stop a-ui
     cd /usr/local/
 
     if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/SienFeng/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -Ls "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}refresh x-ui version failed,it may due to Github API restriction,please try it later${plain}"
+            echo -e "${red}refresh a-ui version failed,it may due to Github API restriction,please try it later${plain}"
             exit 1
         fi
-        echo -e "get x-ui latest version succeed:${last_version},begin to install..."
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}-english.tar.gz https://github.com/SienFeng/x-ui/releases/download/${last_version}/x-ui-linux-${arch}-english.tar.gz
+        echo -e "get a-ui latest version succeed:${last_version},begin to install..."
+        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}-english.tar.gz
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}dowanload x-ui failed,please be sure that your server can access Github{plain}"
+            echo -e "${red}dowanload a-ui failed,please be sure that your server can access Github{plain}"
             exit 1
         fi
     else
         last_version=$1
-        url="https://github.com/SienFeng/x-ui/releases/download/${last_version}/x-ui-linux-${arch}-english.tar.gz"
-        echo -e "begin to install x-ui $1 ..."
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}-english.tar.gz ${url}
+        url="https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}-english.tar.gz"
+        echo -e "begin to install a-ui $1 ..."
+        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}dowanload x-ui $1 failed,please check the verison exists${plain}"
+            echo -e "${red}dowanload a-ui $1 failed,please check the verison exists${plain}"
             exit 1
         fi
     fi
 
-    if [[ -e /usr/local/x-ui/ ]]; then
-        rm /usr/local/x-ui/ -rf
+    if [[ -e /usr/local/a-ui/ ]]; then
+        rm /usr/local/a-ui/ -rf
     fi
 
-    tar zxvf x-ui-linux-${arch}-english.tar.gz
-    rm x-ui-linux-${arch}-english.tar.gz -f
-    cd x-ui
-    chmod +x x-ui bin/xray-linux-${arch}
-    cp -f x-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/SienFeng/x-ui/main/x-ui_en.sh
-    chmod +x /usr/local/x-ui/x-ui_en.sh
-    chmod +x /usr/bin/x-ui
+    tar zxvf a-ui-linux-${arch}-english.tar.gz
+    rm a-ui-linux-${arch}-english.tar.gz -f
+    cd a-ui
+    chmod +x a-ui bin/xray-linux-${arch}
+    cp -f a-ui.service /etc/systemd/system/
+    wget --no-check-certificate -O /usr/bin/a-ui https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui_en.sh
+    chmod +x /usr/local/a-ui/a-ui_en.sh
+    chmod +x /usr/bin/a-ui
     config_after_install
     systemctl daemon-reload
-    systemctl enable x-ui
-    systemctl start x-ui
-    echo -e "${green}x-ui ${last_version}${plain} install finished,it is working now..."
+    systemctl enable a-ui
+    systemctl start a-ui
+    echo -e "${green}a-ui ${last_version}${plain} install finished,it is working now..."
     echo -e ""
-    echo -e "x-ui control menu usages: "
+    echo -e "a-ui control menu usages: "
     echo -e "----------------------------------------------"
-    echo -e "x-ui              - Enter     control menu"
-    echo -e "x-ui start        - Start     x-ui "
-    echo -e "x-ui stop         - Stop      x-ui "
-    echo -e "x-ui restart      - Restart   x-ui "
-    echo -e "x-ui status       - Show      x-ui status"
-    echo -e "x-ui enable       - Enable    x-ui on system startup"
-    echo -e "x-ui disable      - Disable   x-ui on system startup"
-    echo -e "x-ui log          - Check     x-ui logs"
-    echo -e "x-ui update       - Update    x-ui "
-    echo -e "x-ui install      - Install   x-ui "
-    echo -e "x-ui uninstall    - Uninstall x-ui "
-    echo -e "x-ui geo          - Update    geo  data"
+    echo -e "a-ui              - Enter     control menu"
+    echo -e "a-ui start        - Start     a-ui "
+    echo -e "a-ui stop         - Stop      a-ui "
+    echo -e "a-ui restart      - Restart   a-ui "
+    echo -e "a-ui status       - Show      a-ui status"
+    echo -e "a-ui enable       - Enable    a-ui on system startup"
+    echo -e "a-ui disable      - Disable   a-ui on system startup"
+    echo -e "a-ui log          - Check     a-ui logs"
+    echo -e "a-ui update       - Update    a-ui "
+    echo -e "a-ui install      - Install   a-ui "
+    echo -e "a-ui uninstall    - Uninstall a-ui "
+    echo -e "a-ui geo          - Update    geo  data"
     echo -e "----------------------------------------------"
 }
 
 echo -e "${green}excuting...${plain}"
 install_base
-install_x-ui $1
+install_a-ui $1

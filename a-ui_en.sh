@@ -9,9 +9,9 @@ plain='\033[0m'
 declare -r DEFAULT_LOG_FILE_DELETE_TRIGGER=35
 
 # consts for geo update
-PATH_FOR_GEO_IP='/usr/local/x-ui/bin/geoip.dat'
-PATH_FOR_CONFIG='/usr/local/x-ui/bin/config.json'
-PATH_FOR_GEO_SITE='/usr/local/x-ui/bin/geosite.dat'
+PATH_FOR_GEO_IP='/usr/local/a-ui/bin/geoip.dat'
+PATH_FOR_CONFIG='/usr/local/a-ui/bin/config.json'
+PATH_FOR_GEO_SITE='/usr/local/a-ui/bin/geosite.dat'
 URL_FOR_GEO_IP='https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat'
 URL_FOR_GEO_SITE='https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat'
 
@@ -28,7 +28,7 @@ function LOGI() {
     echo -e "${green}[INF] $* ${plain}"
 }
 # check root
-[[ $EUID -ne 0 ]] && LOGE "错误:  必须使用root用户运行此脚本!\n" && exit 1
+[[ $EUID -ne 0 ]] && LOGE "${red}fatal error:please run this script with root privilege${plain}\n" && exit 1
 
 # check os
 if [[ -f /etc/redhat-release ]]; then
@@ -46,7 +46,7 @@ elif cat /proc/version | grep -Eqi "ubuntu"; then
 elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
     release="centos"
 else
-    LOGE "未检测到系统版本，请联系脚本作者！\n" && exit 1
+    LOGE "check system os failed,please contact with author!\n" && exit 1
 fi
 
 os_version=""
@@ -61,21 +61,21 @@ fi
 
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
-        LOGE "请使用 CentOS 7 或更高版本的系统！\n" && exit 1
+        LOGE "${red}please use CentOS 7 or higher version${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"ubuntu" ]]; then
     if [[ ${os_version} -lt 16 ]]; then
-        LOGE "请使用 Ubuntu 16 或更高版本的系统！\n" && exit 1
+        LOGE "${red}please use Ubuntu 16 or higher version${plain}\n" && exit 1
     fi
 elif [[ x"${release}" == x"debian" ]]; then
     if [[ ${os_version} -lt 8 ]]; then
-        LOGE "请使用 Debian 8 或更高版本的系统！\n" && exit 1
+        LOGE "${red}please use Debian 8 or higher version${plain}\n" && exit 1
     fi
 fi
 
 confirm() {
     if [[ $# > 1 ]]; then
-        echo && read -p "$1 [默认$2]: " temp
+        echo && read -p "$1 [default:$2]: " temp
         if [[ x"${temp}" == x"" ]]; then
             temp=$2
         fi
@@ -90,7 +90,7 @@ confirm() {
 }
 
 confirm_restart() {
-    confirm "是否重启面板，重启面板也会重启 xray" "y"
+    confirm "confirm to restart a-ui,xray service will be restart" "y"
     if [[ $? == 0 ]]; then
         restart
     else
@@ -99,12 +99,12 @@ confirm_restart() {
 }
 
 before_show_menu() {
-    echo && echo -n -e "${yellow}按回车返回主菜单: ${plain}" && read temp
+    echo && echo -n -e "${yellow}enter to return to the control menu: ${plain}" && read temp
     show_menu
 }
 
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
+    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh)
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -115,39 +115,39 @@ install() {
 }
 
 update() {
-    confirm "本功能会强制重装当前最新版，数据不会丢失，是否继续?" "n"
+    confirm "will upgrade to the latest,continue?" "n"
     if [[ $? != 0 ]]; then
-        LOGE "已取消"
+        LOGE "cancelled..."
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
         return 0
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh)
+    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh)
     if [[ $? == 0 ]]; then
-        LOGI "更新完成，已自动重启面板 "
+        LOGI "upgrade finished,restart completed"
         exit 0
     fi
 }
 
 uninstall() {
-    confirm "确定要卸载面板吗,xray 也会卸载?" "n"
+    confirm "sure you want to uninstall a-ui?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
-    systemctl stop x-ui
-    systemctl disable x-ui
-    rm /etc/systemd/system/x-ui.service -f
+    systemctl stop a-ui
+    systemctl disable a-ui
+    rm /etc/systemd/system/a-ui.service -f
     systemctl daemon-reload
     systemctl reset-failed
-    rm /etc/x-ui/ -rf
-    rm /usr/local/x-ui/ -rf
+    rm /etc/a-ui/ -rf
+    rm /usr/local/a-ui/ -rf
 
     echo ""
-    echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/x-ui -f${plain} 进行删除"
+    echo -e "uninstall a-ui succeed,you can delete this script by ${green}rm /usr/bin/a-ui -f${plain}"
     echo ""
 
     if [[ $# == 0 ]]; then
@@ -156,33 +156,33 @@ uninstall() {
 }
 
 reset_user() {
-    confirm "确定要将用户名和密码重置为 admin 吗" "n"
+    confirm "are you sure you want to reset the username and password to ${green}admin${plain} ?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
-    /usr/local/x-ui/x-ui setting -username admin -password admin
-    echo -e "用户名和密码已重置为 ${green}admin${plain}，现在请重启面板"
+    /usr/local/a-ui/a-ui setting -username admin -password admin
+    echo -e "your username and password are reset to ${green}admin${plain},restart a-ui to take effect"
     confirm_restart
 }
 
 reset_config() {
-    confirm "确定要重置所有面板设置吗，账号数据不会丢失，用户名和密码不会改变" "n"
+    confirm "are you sure you want to reset all settings,user data will not be lost" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
-    /usr/local/x-ui/x-ui setting -reset
-    echo -e "所有面板设置已重置为默认值，现在请重启面板，并使用默认的 ${green}54321${plain} 端口访问面板"
+    /usr/local/a-ui/a-ui setting -reset
+    echo -e "all settings are reset to default,please restart a-ui,and use default port ${green}54321${plain} to access panel"
     confirm_restart
 }
 
 check_config() {
-    info=$(/usr/local/x-ui/x-ui setting -show true)
+    info=$(/usr/local/a-ui/a-ui setting -show true)
     if [[ $? != 0 ]]; then
         LOGE "get current settings error,please check logs"
         show_menu
@@ -191,13 +191,13 @@ check_config() {
 }
 
 set_port() {
-    echo && echo -n -e "输入端口号[1-65535]: " && read port
+    echo && echo -n -e "please set a port[1-65535]: " && read port
     if [[ -z "${port}" ]]; then
-        LOGD "已取消"
+        LOGD "cancelled..."
         before_show_menu
     else
-        /usr/local/x-ui/x-ui setting -port ${port}
-        echo -e "设置端口完毕，现在请重启面板，并使用新设置的端口 ${green}${port}${plain} 访问面板"
+        /usr/local/a-ui/a-ui setting -port ${port}
+        echo -e "set port done,please restart a-ui,and use this new port ${green}${port}${plain} to access panel"
         confirm_restart
     fi
 }
@@ -206,15 +206,15 @@ start() {
     check_status
     if [[ $? == 0 ]]; then
         echo ""
-        LOGI "面板已运行，无需再次启动，如需重启请选择重启"
+        LOGI "a-ui is running,no need to start agin"
     else
-        systemctl start x-ui
+        systemctl start a-ui
         sleep 2
         check_status
         if [[ $? == 0 ]]; then
-            LOGI "x-ui 启动成功"
+            LOGI "start a-ui  succeed"
         else
-            LOGE "面板启动失败，可能是因为启动时间超过了两秒，请稍后查看日志信息"
+            LOGE "start a-ui failed,please check logs"
         fi
     fi
 
@@ -227,15 +227,15 @@ stop() {
     check_status
     if [[ $? == 1 ]]; then
         echo ""
-        LOGI "面板已停止，无需再次停止"
+        LOGI "a-ui is stopped,no need to stop again"
     else
-        systemctl stop x-ui
+        systemctl stop a-ui
         sleep 2
         check_status
         if [[ $? == 1 ]]; then
-            LOGI "x-ui 与 xray 停止成功"
+            LOGI "stop a-ui succeed"
         else
-            LOGE "面板停止失败，可能是因为停止时间超过了两秒，请稍后查看日志信息"
+            LOGE "stop a-ui failed,please check logs"
         fi
     fi
 
@@ -245,13 +245,13 @@ stop() {
 }
 
 restart() {
-    systemctl restart x-ui
+    systemctl restart a-ui
     sleep 2
     check_status
     if [[ $? == 0 ]]; then
-        LOGI "x-ui 与 xray 重启成功"
+        LOGI "restart a-ui succeed"
     else
-        LOGE "面板重启失败，可能是因为启动时间超过了两秒，请稍后查看日志信息"
+        LOGE "stop a-ui failed,please check logs"
     fi
     if [[ $# == 0 ]]; then
         before_show_menu
@@ -259,18 +259,18 @@ restart() {
 }
 
 status() {
-    systemctl status x-ui -l
+    systemctl status a-ui -l
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 enable() {
-    systemctl enable x-ui
+    systemctl enable a-ui
     if [[ $? == 0 ]]; then
-        LOGI "x-ui 设置开机自启成功"
+        LOGI "enable a-ui on system startup succeed"
     else
-        LOGE "x-ui 设置开机自启失败"
+        LOGE "enable a-ui on system startup failed"
     fi
 
     if [[ $# == 0 ]]; then
@@ -279,11 +279,11 @@ enable() {
 }
 
 disable() {
-    systemctl disable x-ui
+    systemctl disable a-ui
     if [[ $? == 0 ]]; then
-        LOGI "x-ui 取消开机自启成功"
+        LOGI "disable a-ui on system startup succeed"
     else
-        LOGE "x-ui 取消开机自启失败"
+        LOGE "disable a-ui on system startup failed"
     fi
 
     if [[ $# == 0 ]]; then
@@ -292,14 +292,14 @@ disable() {
 }
 
 show_log() {
-    journalctl -u x-ui.service -e --no-pager -f
+    journalctl -u a-ui.service -e --no-pager -f
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
 }
 
 migrate_v2_ui() {
-    /usr/local/x-ui/x-ui v2-ui
+    /usr/local/a-ui/a-ui v2-ui
 
     before_show_menu
 }
@@ -312,23 +312,23 @@ install_bbr() {
 }
 
 update_shell() {
-    wget -O /usr/bin/x-ui -N --no-check-certificate https://github.com/SienFeng/x-ui/raw/main/x-ui.sh
+    wget -O /usr/bin/a-ui -N --no-check-certificate https://github.com/SienFeng/AetherUI/raw/main/a-ui_en.sh
     if [[ $? != 0 ]]; then
         echo ""
-        LOGE "下载脚本失败，请检查本机能否连接 Github"
+        LOGE "update shell script failed,please check whether your server can access github"
         before_show_menu
     else
-        chmod +x /usr/bin/x-ui
-        LOGI "升级脚本成功，请重新运行脚本" && exit 0
+        chmod +x /usr/bin/a-ui
+        LOGI "update shell script succeed" && exit 0
     fi
 }
 
 # 0: running, 1: not running, 2: not installed
 check_status() {
-    if [[ ! -f /etc/systemd/system/x-ui.service ]]; then
+    if [[ ! -f /etc/systemd/system/a-ui.service ]]; then
         return 2
     fi
-    temp=$(systemctl status x-ui | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
+    temp=$(systemctl status a-ui | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
     if [[ x"${temp}" == x"running" ]]; then
         return 0
     else
@@ -337,7 +337,7 @@ check_status() {
 }
 
 check_enabled() {
-    temp=$(systemctl is-enabled x-ui)
+    temp=$(systemctl is-enabled a-ui)
     if [[ x"${temp}" == x"enabled" ]]; then
         return 0
     else
@@ -349,7 +349,7 @@ check_uninstall() {
     check_status
     if [[ $? != 2 ]]; then
         echo ""
-        LOGE "面板已安装，请不要重复安装"
+        LOGE "a-ui is installed already"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -363,7 +363,7 @@ check_install() {
     check_status
     if [[ $? == 2 ]]; then
         echo ""
-        LOGE "请先安装面板"
+        LOGE "please install a-ui first"
         if [[ $# == 0 ]]; then
             before_show_menu
         fi
@@ -377,15 +377,15 @@ show_status() {
     check_status
     case $? in
     0)
-        echo -e "面板状态: ${green}已运行${plain}"
+        echo -e "a-ui status: ${green}running${plain}"
         show_enable_status
         ;;
     1)
-        echo -e "面板状态: ${yellow}未运行${plain}"
+        echo -e "a-ui status: ${yellow}stopped${plain}"
         show_enable_status
         ;;
     2)
-        echo -e "面板状态: ${red}未安装${plain}"
+        echo -e "a-ui status: ${red}not installed${plain}"
         ;;
     esac
     show_xray_status
@@ -394,9 +394,9 @@ show_status() {
 show_enable_status() {
     check_enabled
     if [[ $? == 0 ]]; then
-        echo -e "是否开机自启: ${green}是${plain}"
+        echo -e "enable on system startup: ${green}yes${plain}"
     else
-        echo -e "是否开机自启: ${red}否${plain}"
+        echo -e "enable on system startup: ${red}no${plain}"
     fi
 }
 
@@ -412,9 +412,9 @@ check_xray_status() {
 show_xray_status() {
     check_xray_status
     if [[ $? == 0 ]]; then
-        echo -e "xray 状态: ${green}运行${plain}"
+        echo -e "xray status: ${green}running${plain}"
     else
-        echo -e "xray 状态: ${red}未运行${plain}"
+        echo -e "xray status: ${red}stopped${plain}"
     fi
 }
 
@@ -424,34 +424,35 @@ show_xray_status() {
 ssl_cert_issue() {
     local method=""
     echo -E ""
-    LOGD "******使用说明******"
-    LOGI "该脚本提供两种方式实现证书签发,证书安装路径均为/root/cert"
-    LOGI "方式1:acme standalone mode,需要保持端口开放"
-    LOGI "方式2:acme DNS API mode,需要提供Cloudflare Global API Key"
-    LOGI "如域名属于免费域名,则推荐使用方式1进行申请"
-    LOGI "如域名非免费域名且使用Cloudflare进行解析使用方式2进行申请"
-    read -p "请选择你想使用的方式,输入数字1或者2后回车": method
-    LOGI "你所使用的方式为${method}"
+    LOGD "********Usage********"
+    LOGI "this shell script will use acme to help issue certs."
+    LOGI "here we provide two methods for issuing certs:"
+    LOGI "method 1:acme standalone mode,need to keep port:80 open"
+    LOGI "method 2:acme DNS API mode,need provide Cloudflare Global API Key"
+    LOGI "recommend method 2 first,if it fails,you can try method 1."
+    LOGI "certs will be installed in /root/cert directory"
+    read -p "please choose which method do you want,type 1 or 2": method
+    LOGI "you choosed method:${method}"
 
     if [ "${method}" == "1" ]; then
         ssl_cert_issue_standalone
     elif [ "${method}" == "2" ]; then
         ssl_cert_issue_by_cloudflare
     else
-        LOGE "输入无效,请检查你的输入,脚本将退出..."
+        LOGE "invalid input,please check it..."
         exit 1
     fi
 }
 
 install_acme() {
     cd ~
-    LOGI "开始安装acme脚本..."
+    LOGI "install acme..."
     curl https://get.acme.sh | sh
     if [ $? -ne 0 ]; then
-        LOGE "acme安装失败"
+        LOGE "install acme failed"
         return 1
     else
-        LOGI "acme安装成功"
+        LOGI "install acme succeed"
     fi
     return 0
 }
@@ -460,9 +461,10 @@ install_acme() {
 ssl_cert_issue_standalone() {
     #check for acme.sh first
     if ! command -v ~/.acme.sh/acme.sh &>/dev/null; then
+        echo "acme.sh could not be found. we will install it"
         install_acme
         if [ $? -ne 0 ]; then
-            LOGE "安装 acme 失败，请检查日志"
+            LOGE "install acme failed, please check logs"
             exit 1
         fi
     fi
@@ -473,10 +475,10 @@ ssl_cert_issue_standalone() {
         apt install socat -y
     fi
     if [ $? -ne 0 ]; then
-        LOGE "无法安装socat,请检查错误日志"
+        LOGE "install socat failed, please check logs"
         exit 1
     else
-        LOGI "socat安装成功..."
+        LOGI "install socat succeed..."
     fi
     #creat a directory for install cert
     certPath=/root/cert
@@ -485,35 +487,35 @@ ssl_cert_issue_standalone() {
     fi
     #get the domain here,and we need verify it
     local domain=""
-    read -p "请输入你的域名:" domain
-    LOGD "你输入的域名为:${domain},正在进行域名合法性校验..."
+    read -p "please input your domain:" domain
+    LOGD "your domain is:${domain},check it..."
     #here we need to judge whether there exists cert already
     local currentCert=$(~/.acme.sh/acme.sh --list | grep ${domain} | wc -l)
     if [ ${currentCert} -ne 0 ]; then
         local certInfo=$(~/.acme.sh/acme.sh --list)
-        LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
+        LOGE "system already have certs here,can not issue again,current certs details:"
         LOGI "$certInfo"
         exit 1
     else
-        LOGI "域名合法性校验通过..."
+        LOGI "your domain is ready for issuing cert now..."
     fi
     #get needed port here
     local WebPort=80
-    read -p "请输入你所希望使用的端口,如回车将使用默认80端口:" WebPort
+    read -p "please choose which port do you use,default will be 80 port:" WebPort
     if [[ ${WebPort} -gt 65535 || ${WebPort} -lt 1 ]]; then
-        LOGE "你所选择的端口${WebPort}为无效值,将使用默认80端口进行申请"
+        LOGE "your input ${WebPort} is invalid,will use default port"
     fi
-    LOGI "将会使用${WebPort}进行证书申请,请确保端口处于开放状态..."
+    LOGI "will use port:${WebPort} to issue certs,please make sure this port is open..."
     #NOTE:This should be handled by user
     #open the port and kill the occupied progress
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
     ~/.acme.sh/acme.sh --issue -d ${domain} --standalone --httpport ${WebPort}
     if [ $? -ne 0 ]; then
-        LOGE "证书申请失败,原因请参见报错信息"
+        LOGE "issue certs failed,please check logs"
         rm -rf ~/.acme.sh/${domain}
         exit 1
     else
-        LOGI "证书申请成功,开始安装证书..."
+        LOGE "issue certs succeed,installing certs..."
     fi
     #install cert
     ~/.acme.sh/acme.sh --installcert -d ${domain} --ca-file /root/cert/ca.cer \
@@ -521,20 +523,20 @@ ssl_cert_issue_standalone() {
         --fullchain-file /root/cert/fullchain.cer
 
     if [ $? -ne 0 ]; then
-        LOGE "证书安装失败,脚本退出"
+        LOGE "install certs failed,exit"
         rm -rf ~/.acme.sh/${domain}
         exit 1
     else
-        LOGI "证书安装成功,开启自动更新..."
+        LOGI "install certs succeed,enable auto renew..."
     fi
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     if [ $? -ne 0 ]; then
-        LOGE "自动更新设置失败,脚本退出"
+        LOGE "auto renew failed,certs details:"
         ls -lah cert
         chmod 755 $certPath
         exit 1
     else
-        LOGI "证书已安装且已开启自动更新,具体信息如下"
+        LOGI "auto renew succeed,certs details:"
         ls -lah cert
         chmod 755 $certPath
     fi
@@ -544,17 +546,15 @@ ssl_cert_issue_standalone() {
 #method for DNS API mode
 ssl_cert_issue_by_cloudflare() {
     echo -E ""
-    LOGD "******使用说明******"
-    LOGI "该脚本将使用Acme脚本申请证书,使用时需保证:"
-    LOGI "1.知晓Cloudflare 注册邮箱"
-    LOGI "2.知晓Cloudflare Global API Key"
-    LOGI "3.域名已通过Cloudflare进行解析到当前服务器"
-    LOGI "4.该脚本申请证书默认安装路径为/root/cert目录"
-    confirm "我已确认以上内容[y/n]" "y"
+    LOGD "******Preconditions******"
+    LOGI "1.need Cloudflare account associated email"
+    LOGI "2.need Cloudflare Global API Key"
+    LOGI "3.your domain use Cloudflare as resolver"
+    confirm "I have confirmed all these info above[y/n]" "y"
     if [ $? -eq 0 ]; then
         install_acme
         if [ $? -ne 0 ]; then
-            LOGE "无法安装acme,请检查错误日志"
+            LOGE "install acme failed,please check logs"
             exit 1
         fi
         CF_Domain=""
@@ -564,58 +564,58 @@ ssl_cert_issue_by_cloudflare() {
         if [ ! -d "$certPath" ]; then
             mkdir $certPath
         fi
-        LOGD "请设置域名:"
+        LOGD "please input your domain:"
         read -p "Input your domain here:" CF_Domain
-        LOGD "你的域名设置为:${CF_Domain},正在进行域名合法性校验..."
+        LOGD "your domain is:${CF_Domain},check it..."
         #here we need to judge whether there exists cert already
         local currentCert=$(~/.acme.sh/acme.sh --list | grep ${CF_Domain} | wc -l)
         if [ ${currentCert} -ne 0 ]; then
             local certInfo=$(~/.acme.sh/acme.sh --list)
-            LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
+            LOGE "system already have certs here,can not issue again,current certs details:"
             LOGI "$certInfo"
             exit 1
         else
-            LOGI "域名合法性校验通过..."
+            LOGI "your domain is ready for issuing cert now..."
         fi
-        LOGD "请设置API密钥:"
+        LOGD "please inout your cloudflare global API key:"
         read -p "Input your key here:" CF_GlobalKey
-        LOGD "你的API密钥为:${CF_GlobalKey}"
-        LOGD "请设置注册邮箱:"
+        LOGD "your cloudflare global API key is:${CF_GlobalKey}"
+        LOGD "please input your cloudflare account email:"
         read -p "Input your email here:" CF_AccountEmail
-        LOGD "你的注册邮箱为:${CF_AccountEmail}"
+        LOGD "your cloudflare account email:${CF_AccountEmail}"
         ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
         if [ $? -ne 0 ]; then
-            LOGE "修改默认CA为Lets'Encrypt失败,脚本退出"
+            LOGE "change the default CA to Lets'Encrypt failed,exit"
             exit 1
         fi
         export CF_Key="${CF_GlobalKey}"
         export CF_Email=${CF_AccountEmail}
         ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${CF_Domain} -d *.${CF_Domain} --log
         if [ $? -ne 0 ]; then
-            LOGE "证书签发失败,脚本退出"
+            LOGE "issue cert failed,exit"
             rm -rf ~/.acme.sh/${CF_Domain}
             exit 1
         else
-            LOGI "证书签发成功,安装中..."
+            LOGI "issue cert succeed,installing..."
         fi
         ~/.acme.sh/acme.sh --installcert -d ${CF_Domain} -d *.${CF_Domain} --ca-file /root/cert/ca.cer \
             --cert-file /root/cert/${CF_Domain}.cer --key-file /root/cert/${CF_Domain}.key \
             --fullchain-file /root/cert/fullchain.cer
         if [ $? -ne 0 ]; then
-            LOGE "证书安装失败,脚本退出"
+            LOGE "install cert failed,exit"
             rm -rf ~/.acme.sh/${CF_Domain}
             exit 1
         else
-            LOGI "证书安装成功,开启自动更新..."
+            LOGI "install cert succeed,enable auto renew..."
         fi
         ~/.acme.sh/acme.sh --upgrade --auto-upgrade
         if [ $? -ne 0 ]; then
-            LOGE "自动更新设置失败,脚本退出"
+            LOGE "enable auto renew failed,exit"
             ls -lah cert
             chmod 755 $certPath
             exit 1
         else
-            LOGI "证书已安装且已开启自动更新,具体信息如下"
+            LOGI "enable auto renew succeed,cert details:"
             ls -lah cert
             chmod 755 $certPath
         fi
@@ -624,18 +624,18 @@ ssl_cert_issue_by_cloudflare() {
     fi
 }
 
-#add for cron jobs,including sync geo data,check logs and restart x-ui
+#add for cron jobs,including sync geo data,check logs and restart a-ui
 cron_jobs() {
     clear
     echo -e "
-  ${green}定时任务管理${plain}
-  ${green}0.${plain}  返回主菜单
-  ${green}1.${plain}  开启定时更新geo
-  ${green}2.${plain}  关闭定时更新geo
-  ${green}3.${plain}  开启定时删除xray日志
-  ${green}4.${plain}  关闭定时删除xray日志
+  ${green}a-ui cron jobs${plain}
+  ${green}0.${plain}  return main menu
+  ${green}1.${plain}  enable automatically update geo data
+  ${green}2.${plain}  disable automatically update geo data 
+  ${green}3.${plain}  enable automatically clear xray log
+  ${green}4.${plain}  disable automatically clear xray log
   "
-    echo && read -p "请输入选择 [0-4]: " num
+    echo && read -p "plz input your choice [0-4]: " num
     case "${num}" in
     0)
         show_menu
@@ -653,7 +653,7 @@ cron_jobs() {
         disable_auto_clear_log
         ;;
     *)
-        LOGE "请输入正确的数字 [0-4]"
+        LOGE "plz input a valid choice [0-4]"
         ;;
     esac
 }
@@ -680,150 +680,148 @@ update_geo() {
         echo "update geosite.dat succeed"
         rm -f ${PATH_FOR_GEO_SITE}.bak
     fi
-    #restart x-ui
-    systemctl restart x-ui
+    #restart a-ui
+    systemctl restart a-ui
 }
 
 enable_auto_update_geo() {
-    LOGI "正在开启自动更新geo数据..."
+    LOGI "enable automatically update geo data..."
     crontab -l >/tmp/crontabTask.tmp
-    echo "00 4 */2 * * x-ui geo > /dev/null" >>/tmp/crontabTask.tmp
+    echo "00 4 */2 * * a-ui geo > /dev/null" >>/tmp/crontabTask.tmp
     crontab /tmp/crontabTask.tmp
     rm /tmp/crontabTask.tmp
-    LOGI "开启自动更新geo数据成功"
+    LOGI "enable automatically update geo data succeed"
 }
 
 disable_auto_update_geo() {
-    crontab -l | grep -v "x-ui geo" | crontab -
+    crontab -l | grep -v "a-ui geo" | crontab -
     if [[ $? -ne 0 ]]; then
-        LOGI "取消x-ui 自动更新geo数据失败"
+        LOGI "cancel a-ui automatically update geo data failed"
     else
-        LOGI "取消x-ui 自动更新geo数据成功"
+        LOGI "cancel a-ui automatically update geo data succeed"
     fi
 }
 
 #clear xray log,need enable log in config template
 #here we need input an absolute path for log
 clear_log() {
-    LOGI "清除xray日志中..."
+    LOGI "clear xray logs..."
     local filePath=''
     if [[ $# -gt 0 ]]; then
         filePath=$1
     else
-        LOGE "未输入有效文件路径,脚本退出"
+        LOGE "invalid file path,will exit"
         exit 1
     fi
-    LOGI "日志路径为:${filePath}"
+    LOGI "log file:${filePath}"
     if [[ ! -f ${filePath} ]]; then
-        LOGE "清除xray日志文件失败,${filePath}不存在,请确认"
+        LOGE "clear xray log failed,${filePath} didn't exist,plz check it"
         exit 1
     fi
     fileSize=$(ls -la ${filePath} --block-size=M | awk '{print $5}' | awk -F 'M' '{print$1}')
     if [[ ${fileSize} -gt ${DEFAULT_LOG_FILE_DELETE_TRIGGER} ]]; then
         rm $1
         if [[ $? -ne 0 ]]; then
-            LOGE "清除xray日志文件:${filePath}失败"
+            LOGE "clear xray log :${filePath} failed"
         else
-            LOGI "清除xray日志文件:${filePath}成功"
-            systemctl restart x-ui
+            LOGI "clear xray log :${filePath} succeed"
+            systemctl restart a-ui
         fi
     else
-        LOGI "当前日志大小为${fileSize}M,小于${DEFAULT_LOG_FILE_DELETE_TRIGGER}M,将不会清除"
+        LOGI "current size of xray log is:${fileSize}M,smaller that ${DEFAULT_LOG_FILE_DELETE_TRIGGER}M,won't clear"
     fi
 }
 
 #enable auto delete log，need file path as
 enable_auto_clear_log() {
-    LOGI "设置定时清除xray日志..."
+    LOGI "enable automatically clear xray logs..."
     local accessfilePath=''
     local errorfilePath=''
     accessfilePath=$(cat ${PATH_FOR_CONFIG} | jq .log.access | tr -d '"')
     errorfilePath=$(cat ${PATH_FOR_CONFIG} | jq .log.error | tr -d '"')
     if [[ ! -n ${accessfilePath} && ! -n ${errorfilePath} ]]; then
-        LOGI "配置文件中的日志文件路径无效,脚本退出"
+        LOGI "current configuration didn't set valid logs,will exited"
         exit 1
     fi
     if [[ -f ${accessfilePath} ]]; then
         crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * x-ui clear ${accessfilePath} > /dev/null" >>/tmp/crontabTask.tmp
+        echo "30 4 */2 * * a-ui clear ${accessfilePath} > /dev/null" >>/tmp/crontabTask.tmp
         crontab /tmp/crontabTask.tmp
         rm /tmp/crontabTask.tmp
-        LOGI "设置定时清除xray日志:${accessfilePath}成功"
+        LOGI "enable automatically clear xray log:${accessfilePath} succeed"
     else
-        LOGE "accesslog不存在,将不会为其设置定时清除"
+        LOGE "accesslog didn't existed,won't automatically clear it"
     fi
 
     if [[ -f ${errorfilePath} ]]; then
         crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * x-ui clear ${errorfilePath} > /dev/null" >>/tmp/crontabTask.tmp
+        echo "30 4 */2 * * a-ui clear ${errorfilePath} > /dev/null" >>/tmp/crontabTask.tmp
         crontab /tmp/crontabTask.tmp
         rm /tmp/crontabTask.tmp
-        LOGI "设置定时清除xray日志:${errorfilePath}成功"
+        LOGI "enable automatically clear xray log:${errorfilePath} succeed"
     else
-        LOGE "errorlog不存在,将不会为其设置定时清除"
+        LOGE "errorlog didn't existed,won't automatically clear it"
     fi
 }
 
 #disable auto dlete log
 disable_auto_clear_log() {
-    crontab -l | grep -v "x-ui clear" | crontab -
+    crontab -l | grep -v "a-ui clear" | crontab -
     if [[ $? -ne 0 ]]; then
-        LOGI "取消 定时清除xray日志失败"
+        LOGI "cancel  automatically clear xray logs failed"
     else
-        LOGI "取消 定时清除xray日志成功"
+        LOGI "cancel  automatically clear xray logs succeed"
     fi
 }
 
 show_usage() {
-    echo "x-ui 管理脚本使用方法: "
+    echo "a-ui control menu usages: "
     echo "------------------------------------------"
-    echo "x-ui              - 显示管理菜单 (功能更多)"
-    echo "x-ui start        - 启动 x-ui 面板"
-    echo "x-ui stop         - 停止 x-ui 面板"
-    echo "x-ui restart      - 重启 x-ui 面板"
-    echo "x-ui status       - 查看 x-ui 状态"
-    echo "x-ui enable       - 设置 x-ui 开机自启"
-    echo "x-ui disable      - 取消 x-ui 开机自启"
-    echo "x-ui log          - 查看 x-ui 日志"
-    echo "x-ui v2-ui        - 迁移本机器的 v2-ui 账号数据至 x-ui"
-    echo "x-ui update       - 更新 x-ui 面板"
-    echo "x-ui install      - 安装 x-ui 面板"
-    echo "x-ui uninstall    - 卸载 x-ui 面板"
-    echo "x-ui clear        - 清除 x-ui 日志"
-    echo "x-ui geo          - 更新 x-ui geo数据"
-    echo "x-ui cron         - 配置 x-ui 定时任务"
+    echo -e "a-ui              - Enter control menu"
+    echo -e "a-ui start        - Start a-ui "
+    echo -e "a-ui stop         - Stop  a-ui "
+    echo -e "a-ui restart      - Restart a-ui "
+    echo -e "a-ui status       - Show a-ui status"
+    echo -e "a-ui enable       - Enable a-ui on system startup"
+    echo -e "a-ui disable      - Disable a-ui on system startup"
+    echo -e "a-ui log          - Check a-ui logs"
+    echo -e "a-ui update       - Update a-ui "
+    echo -e "a-ui install      - Install a-ui "
+    echo -e "a-ui uninstall    - Uninstall a-ui "
+    echo "a-ui geo             - Update a-ui geo "
+    echo "a-ui cron            - Cron a-ui jobs"
     echo "------------------------------------------"
 }
 
 show_menu() {
     echo -e "
-  ${green}x-ui 面板管理脚本${plain}
-  ${green}0.${plain} 退出脚本
+  ${green}AetherUI control menu${plain}
+  ${green}0.${plain} exit
 ————————————————
-  ${green}1.${plain} 安装 x-ui
-  ${green}2.${plain} 更新 x-ui
-  ${green}3.${plain} 卸载 x-ui
+  ${green}1.${plain} install   a-ui
+  ${green}2.${plain} update    a-ui
+  ${green}3.${plain} uninstall a-ui
 ————————————————
-  ${green}4.${plain} 重置用户名密码
-  ${green}5.${plain} 重置面板设置
-  ${green}6.${plain} 设置面板端口
-  ${green}7.${plain} 查看当前面板信息
+  ${green}4.${plain} reset username
+  ${green}5.${plain} reset panel
+  ${green}6.${plain} reset panel port
+  ${green}7.${plain} check panel info
 ————————————————
-  ${green}8.${plain} 启动 x-ui
-  ${green}9.${plain} 停止 x-ui
-  ${green}10.${plain} 重启 x-ui
-  ${green}11.${plain} 查看 x-ui 状态
-  ${green}12.${plain} 查看 x-ui 日志
+  ${green}8.${plain} start a-ui
+  ${green}9.${plain} stop  a-ui
+  ${green}10.${plain} restart a-ui
+  ${green}11.${plain} check a-ui status
+  ${green}12.${plain} check a-ui logs
 ————————————————
-  ${green}13.${plain} 设置 x-ui 开机自启
-  ${green}14.${plain} 取消 x-ui 开机自启
+  ${green}13.${plain} enable  a-ui on system startup
+  ${green}14.${plain} disable a-ui on system startup
 ————————————————
-  ${green}15.${plain} 一键安装 bbr (最新内核)
-  ${green}16.${plain} 一键申请SSL证书(acme申请)
-  ${green}17.${plain} 配置x-ui定时任务
+  ${green}15.${plain} enable bbr 
+  ${green}16.${plain} issuse certs
+  ${green}17.${plain} a-ui cron jobs
  "
     show_status
-    echo && read -p "请输入选择 [0-17],查看面板登录信息请输入数字7:" num
+    echo && read -p "please input a legal number[0-16],input 7 for checking login info:" num
 
     case "${num}" in
     0)
@@ -881,7 +879,7 @@ show_menu() {
         check_install && cron_jobs
         ;;
     *)
-        LOGE "请输入正确的数字 [0-17],查看面板登录信息请输入数字7"
+        LOGE "please input a legal number[0-17],input 7 for checking login info"
         ;;
     esac
 }
