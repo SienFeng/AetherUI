@@ -294,6 +294,9 @@ func (s *Server) startTask() {
 
 	// 每 30 秒检查一次 inbound 流量超出和到期的情况
 	s.cron.AddJob("@every 30s", job.NewCheckInboundJob())
+
+	// 每 10 分钟检查一次域名组订阅是否到了更新时间
+	s.cron.AddJob("@every 10m", job.NewSubscriptionJob())
 }
 
 func (s *Server) Start() (err error) {

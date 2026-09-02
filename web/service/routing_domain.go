@@ -206,6 +206,50 @@ func (s *DomainGroupService) Del(id int) error {
 	return db.Delete(model.DomainGroup{}, id).Error
 }
 
+// RefreshDue 更新所有到点的订阅域名组，返回成功更新的个数。
+//
+// 单个组失败不影响其余组：失败原因已由 recordFailure 落库，返回 error 会让
+// 一个坏掉的订阅地址把整批更新都挡住。只有取配置这种全局性失败才返回 error。
+func (s *DomainGroupService) RefreshDue() (int, error) {
+	settingService := SettingService{}
+	raw, err := settingService.GetSubscriptionUpdateTime()
+	if err != nil {
+		return 0, err
+	}
+	at, err := time.Parse("15:04", raw)
+	if err != nil {
+		return 0, common.NewError("订阅更新时间格式不正确:", raw, "err:", err)
+	}
+	loc, err := settingService.GetTimeLocation()
+	if err != nil {
+		return 0, err
+	}
+
+	groups, err := s.GetAll()
+	if err != nil {
+		return 0, err
+	}
+
+	subscriptionMu.Lock()
+	defer subscriptionMu.Unlock()
+
+	now := time.Now().In(loc)
+	updated := 0
+	for _, group := range groups {
+		if group.SubscribeUrl == "" {
+			continue
+		}
+		if !ShouldUpdateNow(now, group.LastUpdatedAt, at.Hour(), at.Minute()) {
+			continue
+		}
+		if err := s.refreshLocked(group); err != nil {
+			continue // 失败原因已落库并记日志
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 // MergeDomains 把手工域名与订阅域名合并去重。
 //
 // 顺序是确定的：手工在前、订阅在后，各自保持原顺序，重复项保留首次出现。

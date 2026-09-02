@@ -197,3 +197,23 @@ func fetchSubscription(rawURL string) (string, error) {
 	}
 	return string(body), nil
 }
+
+// ShouldUpdateNow 判断某个域名组现在是否该更新。
+//
+// 这里刻意不按配置时间去建 cron entry，而是固定间隔跑、每次自己判断。
+// 换来两个收益：改更新时间立即生效，不必走 SIGHUP 重启面板（cron entry 是在
+// Server.Start 里注册的）；面板重启若恰好跨过时间点，也会在下一个检查窗口补上。
+//
+// lastUpdatedAt == 0 表示从未成功过，此时立即更新、不等时间点——新建的订阅组
+// 否则会一直空到第二天凌晨，而空域名组会让引用它的规则被 buildRule 跳过。
+func ShouldUpdateNow(now time.Time, lastUpdatedAt int64, hour, minute int) bool {
+	if lastUpdatedAt == 0 {
+		return true
+	}
+	target := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	if now.Before(target) {
+		return false
+	}
+	// 上次成功早于今天的时间点，说明今天这一轮还没跑过
+	return time.UnixMilli(lastUpdatedAt).In(now.Location()).Before(target)
+}

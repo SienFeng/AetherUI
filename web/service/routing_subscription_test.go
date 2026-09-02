@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"a-ui/database"
 	"a-ui/database/model"
@@ -457,5 +458,105 @@ func TestAllSettingRejectsBadUpdateTime(t *testing.T) {
 		if err := base(good).CheckValid(); err != nil {
 			t.Errorf("%q: unexpected error %v", good, err)
 		}
+	}
+}
+
+func TestShouldUpdateNow(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	today := func(h, m int) time.Time {
+		return time.Date(2026, 9, 2, h, m, 0, 0, loc)
+	}
+	ms := func(tm time.Time) int64 { return tm.UnixMilli() }
+
+	cases := []struct {
+		name          string
+		now           time.Time
+		lastUpdatedAt int64
+		want          bool
+	}{
+		{"从未成功过，未到时间点也要更新", today(1, 0), 0, true},
+		{"已过时间点且今天没更新过", today(5, 0), ms(today(4, 0).AddDate(0, 0, -1)), true},
+		{"已过时间点但今天更新过", today(5, 0), ms(today(4, 30)), false},
+		{"未到时间点", today(3, 0), ms(today(0, 0).AddDate(0, 0, -1)), false},
+		{"恰好到点", today(4, 0), ms(today(0, 0).AddDate(0, 0, -1)), true},
+		{"今天更晚时候手动更新过", today(23, 0), ms(today(10, 0)), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ShouldUpdateNow(tc.now, tc.lastUpdatedAt, 4, 0)
+			if got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRefreshDueOnlyTouchesGroupsWithUrl(t *testing.T) {
+	setupDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\n"))
+	}))
+	defer srv.Close()
+
+	withURL := &model.DomainGroup{Remark: "订阅组", Domains: "[]", SubscribeUrl: srv.URL}
+	plain := &model.DomainGroup{Remark: "手工组", Domains: `["domain:a.com"]`}
+	for _, g := range []*model.DomainGroup{withURL, plain} {
+		if err := database.GetDB().Save(g).Error; err != nil {
+			t.Fatalf("save group: %v", err)
+		}
+	}
+
+	s := &DomainGroupService{}
+	count, err := s.RefreshDue()
+	if err != nil {
+		t.Fatalf("RefreshDue: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+
+	got, _ := s.Get(withURL.Id)
+	if got.SubscribedDomains == "" {
+		t.Error("订阅组应当被更新")
+	}
+	gotPlain, _ := s.Get(plain.Id)
+	if gotPlain.SubscribedDomains != "" || gotPlain.LastUpdatedAt != 0 {
+		t.Error("没有订阅地址的组不应被碰")
+	}
+}
+
+// 一个组拉取失败不能拖垮其余组。
+func TestRefreshDueContinuesAfterFailure(t *testing.T) {
+	setupDB(t)
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\n"))
+	}))
+	defer good.Close()
+
+	g1 := &model.DomainGroup{Remark: "坏", Domains: "[]", SubscribeUrl: bad.URL}
+	g2 := &model.DomainGroup{Remark: "好", Domains: "[]", SubscribeUrl: good.URL}
+	for _, g := range []*model.DomainGroup{g1, g2} {
+		if err := database.GetDB().Save(g).Error; err != nil {
+			t.Fatalf("save group: %v", err)
+		}
+	}
+
+	s := &DomainGroupService{}
+	count, err := s.RefreshDue()
+	if err != nil {
+		t.Fatalf("RefreshDue 不应因单个组失败而整体报错: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1 (只有好的那个算成功)", count)
+	}
+	if got, _ := s.Get(g2.Id); got.SubscribedDomains == "" {
+		t.Error("好的组应当被更新")
+	}
+	if got, _ := s.Get(g1.Id); got.LastError == "" {
+		t.Error("坏的组应当记录失败原因")
 	}
 }
