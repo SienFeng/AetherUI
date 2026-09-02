@@ -8,6 +8,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/web/entity"
 )
 
 func TestParseSubscriptionSurgeFormat(t *testing.T) {
@@ -422,6 +423,39 @@ func TestDecodeSubscribedDomainsToleratesEmpty(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Errorf("%q: got %v, want empty", raw, got)
+		}
+	}
+}
+
+func TestSubscriptionUpdateTimeDefault(t *testing.T) {
+	setupDB(t)
+	got, err := (&SettingService{}).GetSubscriptionUpdateTime()
+	if err != nil {
+		t.Fatalf("GetSubscriptionUpdateTime: %v", err)
+	}
+	if got != "04:00" {
+		t.Errorf("got = %q, want 04:00", got)
+	}
+}
+
+func TestAllSettingRejectsBadUpdateTime(t *testing.T) {
+	base := func(v string) *entity.AllSetting {
+		return &entity.AllSetting{
+			WebPort: 54321, WebBasePath: "/", TimeLocation: "Asia/Shanghai",
+			// CheckValid 会先 json.Unmarshal 这个字段，空字符串会让它在
+			// 到达时间格式校验之前就报错，测出来的就不是我们要测的东西了。
+			XrayTemplateConfig:     "{}",
+			SubscriptionUpdateTime: v,
+		}
+	}
+	for _, bad := range []string{"25:00", "4:00pm", "0400", "", "04:60", "abc"} {
+		if err := base(bad).CheckValid(); err == nil {
+			t.Errorf("%q: expected error, got nil", bad)
+		}
+	}
+	for _, good := range []string{"04:00", "00:00", "23:59"} {
+		if err := base(good).CheckValid(); err != nil {
+			t.Errorf("%q: unexpected error %v", good, err)
 		}
 	}
 }

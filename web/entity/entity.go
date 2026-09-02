@@ -36,6 +36,8 @@ type AllSetting struct {
 	XrayTemplateConfig string `json:"xrayTemplateConfig" form:"xrayTemplateConfig"`
 
 	TimeLocation string `json:"timeLocation" form:"timeLocation"`
+
+	SubscriptionUpdateTime string `json:"subscriptionUpdateTime" form:"subscriptionUpdateTime"`
 }
 
 func (s *AllSetting) CheckValid() error {
@@ -73,6 +75,12 @@ func (s *AllSetting) CheckValid() error {
 	_, err = time.LoadLocation(s.TimeLocation)
 	if err != nil {
 		return common.NewError("time location not exist:", s.TimeLocation)
+	}
+
+	// 用 time.Parse 而不是手写正则：标准库负责格式与范围，
+	// 25:00 / 04:60 这类越界值它会直接拒绝。
+	if _, err := time.Parse("15:04", s.SubscriptionUpdateTime); err != nil {
+		return common.NewError("订阅更新时间格式不正确，应为 HH:MM:", s.SubscriptionUpdateTime)
 	}
 
 	return nil

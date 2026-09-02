@@ -29,6 +29,7 @@ var defaultValueMap = map[string]string{
 	"secret":             random.Seq(32),
 	"webBasePath":        "/",
 	"timeLocation":       "Asia/Shanghai",
+	"subscriptionUpdateTime": "04:00",
 }
 
 type SettingService struct {
@@ -229,6 +230,11 @@ func (s *SettingService) GetTimeLocation() (*time.Location, error) {
 		return time.LoadLocation(defaultLocation)
 	}
 	return location, nil
+}
+
+// GetSubscriptionUpdateTime 返回域名组订阅的每日更新时刻，格式 HH:MM。
+func (s *SettingService) GetSubscriptionUpdateTime() (string, error) {
+	return s.getString("subscriptionUpdateTime")
 }
 
 func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
