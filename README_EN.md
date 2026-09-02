@@ -101,18 +101,8 @@ please input a legal number[0-16]:
 - Ubuntu 16+
 - Debian 8+
 
-# Telegram
-
-Communities of the upstream author, unaffiliated with this fork:  
-[Channel](https://t.me/CoderfanBaby)  
-[Group](https://t.me/franzkafayu)
-
 # Credits
 - [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)
 - [vaxilu/x-ui](https://github.com/vaxilu/x-ui)
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
 - [telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api)  
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/SienFeng/x-ui.svg)](https://starchart.cc/SienFeng/x-ui)

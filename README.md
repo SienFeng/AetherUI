@@ -5,7 +5,6 @@
 > 上游仓库已于 2024-11 归档并停止维护，本仓库在其最后一个开源版本基础上继续修改与发布。  
 
 > 声明：该项目仅供个人学习、交流，请遵守当地法律法规,勿用于非法用途;请勿用于生产环境  
-> 声明：该项目已闭源，介意者请勿使用；如您需要开源代码，请附上您的Github Profile邮箱联系  
 
 支持单端口多用户、多协议的 xray 面板，究极缝合怪    
 通过免费的Telegram bot方便快捷地进行监控、管理你的代理服务  
@@ -16,7 +15,6 @@
 # 文档目录  
 - [功能介绍](#功能介绍)  
 - [一键安装](#一键安装)  
-- [效果预览](#效果预览)  
 - [快捷方式](#快捷方式)  
 - [变更记录](#变更记录)
 
@@ -51,84 +49,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install_en.
 ```
 bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/x-ui/main/install.sh) 0.3.4.4   
 ```
-
-# 效果预览  
-`面板使用`:  
-<details>
-<summary><b>点击查看效果预览</b></summary>  
-  
-![image](https://user-images.githubusercontent.com/38254177/180629631-f76a05c8-ecf0-4685-bbc7-a7058747d213.png)  
-![image](https://user-images.githubusercontent.com/38254177/180629662-b7a325fc-1ebb-47c9-992c-1e7c758a326b.png)
-
-
- </details>  
- 
-`Bot使用`:  
-<details>
-<summary><b>点击查看效果预览</b></summary>  
-  
-![image](https://user-images.githubusercontent.com/38254177/178551055-893936b7-b75f-4ee8-a773-eee7c6f43f51.png)  
- 
-</details>  
-
-`流量提醒`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/180039760-dc987a30-e21c-49a3-8e03-19666566a822.png)
-
-</details>  
-
-`SSH提醒`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/180040129-2ec1a7c0-abd3-41dc-aab0-8cd22415c943.png)
-
-</details>  
-
-`限额提醒`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/180040521-af6e9ef8-d7e5-44e8-834e-25b3b8e3e1b5.png)
-
-</details>  
-
-`到期提醒`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/180041690-90ca4b1f-3a2d-470b-bc0c-eca9261a739a.png)
-
-</details>  
-
-`登录提醒`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/180040913-b8bf2fe1-6fc1-43ab-a683-ae23db1866b2.png)  
-![image](https://user-images.githubusercontent.com/38254177/180041179-a5f4cd52-a1ba-4aa9-abb2-b94e36722385.png)
-
-</details>  
-
-`用户速览`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/230761101-20431dd7-5bce-489e-9139-0ceb9ab9a2dc.png)
-
-</details>  
-
-`用户查询`:  
-<details>
-<summary><b>点击查看效果预览</b></summary> 
-  
-![image](https://user-images.githubusercontent.com/38254177/230761252-c283c02d-82a4-46ce-a180-dfab4048180d.png)
-
-</details>  
-
-
 
 # 快捷方式
 安装成功后，通过键入`x-ui`进入控制选项菜单，目前菜单内容：
@@ -193,19 +113,9 @@ xray 状态: 运行
 - 2022.04.16：增加面板设置Telegram bot功能
 - 2022.04.12：优化Telegram Bot通知提醒
 - 2022.04.06：优化安装/更新流程，增加证书签发功能，添加Telegram bot机器人推送功能
-# Telegram
-
-以下为上游项目作者的社区，本仓库与其无关，仅供参考：  
-[订阅频道](https://t.me/CoderfanBaby)  
-[讨论群组](https://t.me/franzkafayu)
-
 # 致谢
 
 - [FranzKafkaYu/x-ui](https://github.com/FranzKafkaYu/x-ui)
 - [vaxilu/x-ui](https://github.com/vaxilu/x-ui)
 - [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
 - [telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api)  
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/SienFeng/x-ui.svg)](https://starchart.cc/SienFeng/x-ui)
