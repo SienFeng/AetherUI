@@ -1,3 +1,5 @@
+<!DOCTYPE html>
+<html lang="en">
 {{template "head" .}}
 <body>
 <a-layout id="app" v-cloak>
@@ -173,17 +175,12 @@
             ruleModal: { visible: false, rule: new RoutingRule() },
         },
         methods: {
+            // 复用既有的 HttpUtil.post：它内部有 try/catch，请求级失败（网络中断、
+            // 非 2xx）也会经 _handleMsg 弹出错误提示；这里只额外负责 spinning 状态。
             async post(url, data) {
                 this.spinning = true;
                 try {
-                    const resp = await axios.post(url, data);
-                    const msg = resp.data;
-                    if (msg.success) {
-                        if (msg.msg) this.$message.success(msg.msg);
-                    } else {
-                        this.$message.error(msg.msg);
-                    }
-                    return msg;
+                    return await HttpUtil.post(url, data);
                 } finally {
                     this.spinning = false;
                 }
@@ -292,3 +289,4 @@
     });
 </script>
 </body>
+</html>
