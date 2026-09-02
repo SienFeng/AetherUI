@@ -125,3 +125,15 @@ func TestParseSubscriptionRejectsGarbageEntries(t *testing.T) {
 		t.Errorf("skipped = %d, want 2", skipped)
 	}
 }
+
+func TestParseSubscriptionLowercasesKeyword(t *testing.T) {
+	domains, _, err := ParseSubscription("DOMAIN-KEYWORD,BaiDu\nDOMAIN-KEYWORD,baidu\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 大小写变体必须归一后去重：域名匹配大小写不敏感，
+	// 未归一的关键词在 xray 里可能永不命中。
+	if len(domains) != 1 || domains[0] != "baidu" {
+		t.Errorf("got = %v, want [baidu]", domains)
+	}
+}

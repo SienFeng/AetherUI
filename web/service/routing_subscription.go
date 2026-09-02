@@ -12,14 +12,9 @@ import (
 //
 // 已知的非域名规则类型一律跳过并计数。不尝试翻译成 xray 的其他条件——
 // 域名组这个概念只承载域名，把 IP 规则塞进来需要动整个数据模型。
-var skippedRuleTypes = map[string]bool{
-	"IP-CIDR": true, "IP-CIDR6": true, "IP-ASN": true, "GEOIP": true,
-	"SRC-IP-CIDR": true, "SRC-PORT": true, "DST-PORT": true,
-	"PROCESS-NAME": true, "PROCESS-PATH": true, "USER-AGENT": true,
-	"URL-REGEX": true, "RULE-SET": true, "SUB-DOMAIN": true,
-	"DOMAIN-WILDCARD": true, "AND": true, "OR": true, "NOT": true,
-	"PROTOCOL": true, "NETWORK": true, "IN-PORT": true,
-}
+// 实际遇到的规则类型：IP-CIDR、IP-CIDR6、IP-ASN、GEOIP、SRC-IP-CIDR、SRC-PORT、
+// DST-PORT、PROCESS-NAME、PROCESS-PATH、USER-AGENT、URL-REGEX、RULE-SET、SUB-DOMAIN、
+// DOMAIN-WILDCARD、AND、OR、NOT、PROTOCOL、NETWORK、IN-PORT。
 
 // ParseSubscription 把订阅文件文本解析成 xray 域名语法。
 // 返回（域名列表, 跳过的非域名条数, 错误）。
@@ -87,15 +82,13 @@ func convertSubscriptionLine(item string) (string, bool) {
 			// xray 的裸域名就是子串匹配，与 DOMAIN-KEYWORD 语义一致。
 			// 会误伤（ads 命中 downloads.example.com），但那是这个规则类型
 			// 在 Shadowrocket/Clash 里的固有行为，不是本实现引入的偏差。
+			// 必须归一大小写：域名匹配大小写不敏感，未归一可能在 xray 里永不命中。
 			if !isValidKeyword(value) {
 				return "", false
 			}
-			return value, true
+			return strings.ToLower(value), true
 		default:
-			if skippedRuleTypes[ruleType] {
-				return "", false
-			}
-			// 不认识的类型一律跳过，绝不猜测
+			// 已知的非域名规则类型一律跳过，不认识的类型也一律跳过，绝不猜测
 			return "", false
 		}
 	}
