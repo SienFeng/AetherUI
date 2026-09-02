@@ -1,6 +1,6 @@
 # 当前工作状态
 
-最后更新：2026-09-02（Task 12 与最终审查完成后）
+最后更新：2026-09-02（最终审查发现的 7 条 finding 修复完成后）
 分支：`feature/domain-routing`（基于 `origin/main` 的 `c4c29b0`）
 
 ## 任务目标
@@ -58,58 +58,97 @@
 
 **验证中的关键确认**：block 规则的 `priority` 设为 99（最大）、proxy 设为 0，block 仍排在前面——证明顺序来自 block/proxy 分组机制而非 priority 排序，符合设计。
 
-## 尚未解决：最终审查发现 1 个 Critical + 6 个 Important
+## 最终审查的 7 条 finding：已全部修复
 
-整支最终审查（`a4ed9e3..1d3c7ca`）已完成。**功能主链路可用，但有一个特定输入触发的严重缺陷。**
+一轮修复处理全部 findings，工作区尚未提交。修复过程中变异测试又暴露出**一个审查未发现的真实缺陷**（见下方 C1-b）。
 
-### C1（Critical，已由控制方独立复现）：保留 tag 冲突导致全员断网
+| 编号 | 修复内容 | 落点 |
+|---|---|---|
+| C1 | 保留 tag 判定收敛为 `model.IsReservedTag()`，三个消费点共用 | `database/model/routing.go`、`allocTag`、`buildOutbounds`、`removeOutboundByTag` |
+| I1 | 校验改为**完整生成配置**（`validateWithFullConfig`），新增 `ValidateOutboundReplacing` 供编辑路径 | `web/service/routing_validate.go` |
+| I2 | 新增 `CheckInboundRefs`，三条引用边守卫对称 | `routing_rule.go`、`InboundService.DelInbound` |
+| I3 | 两处 nil map 守卫（`"null"` 可通过 Unmarshal 却留下 nil map） | `OutboundNodeService.Update`、`buildOutbounds` |
+| I4 | `buildRule` 第三个返回值回报跳过原因，`buildRules` 记 `logger.Warning` | `routing_inject.go` |
+| I5 | 出站节点行补编辑图标，弹窗区分新增/编辑，tag 只读回显 | `web/html/xui/routing.html` |
+| I6 | 三处删除均加 `this.$confirm`，沿用 `inbounds.html` 的既有写法 | 同上 |
 
-管理员把出站节点备注命名为「block」（或 `Block`/`BLOCK`/`block!`/` block `，`SlugRemark` 会归一到同一 slug），`allocTag` 会生成 `a-ui-block`——与注入器的黑洞出站撞名。`allocTag` 只查 `outbound_nodes` 表，而注入器发出的 tag 不在表里，所以放行。
+### C1-b（修复过程中新发现，已修）：校验早于 tag 分配，完整配置校验看不见真正的 tag
 
-实测复现结果：
+`persist` 原本**先 `ValidateOutbound(ob)`、后 `allocTag`**，校验时 `ob["tag"]` 还是解析器给的旧值。这意味着 I1 的完整配置校验在**新增路径上根本看不到真正会写进配置的 tag**——组合冲突全部漏检，I1「修好 C1 隐形根因」的说法只成立一半。
+
+发现方式：撤掉 C1 两处排除做变异测试时，日志里出现 `config was already invalid before this change, allowing the save: ... existing tag found: a-ui-block`，顺藤摸到调用顺序。
+
+已把顺序改为「先 `allocTag` 定下 tag → 写入 `ob["tag"]` → 再校验」。`allocTag` 只读不写，前置无副作用。
+
+对应回归测试 `TestAddRejectsTagCollidingWithATemplateOutbound` 复刻的是另一个真实场景：用户在 xray 模板里手写了 tag 为 `a-ui-hk` 的出站（`a-ui-` 前缀只是约定，模板用户可编辑，拦不住），此时新建备注为 `hk` 的节点，`allocTag` 查表发现没人占用就会分配 `a-ui-hk`，与模板撞名导致 xray 拒绝启动。修复前该测试失败，修复后通过。
+
+### 两道防线已验证互相独立
+
+变异测试确认（每项都实跑过）：
+
+| 变异 | 结果 |
+|---|---|
+| 撤掉 `allocTag` 的保留 tag 排除 | 完整配置校验独立拦下：`xray 校验未通过: ... existing tag found: a-ui-block`，保存被拒 |
+| 撤掉 `buildOutbounds` 的保留 tag 排除 | `TestInjectSkipsOutboundNodeCarryingReservedTag` 失败（出现 2 个 `a-ui-block`） |
+| 撤掉 `removeOutboundByTag` 的保留 tag 排除 | `TestValidateOutboundReplacingNeverRemovesTheInjectedBlackhole` 失败 |
+| 去掉「基线本来就不合法则放行」 | `TestValidateOutboundAllowsWhenBaselineTemplateIsAlreadyInvalid` 失败 |
+| `CheckInboundRefs` 把全局规则也算作引用 | `TestDelInboundAllowedWhenOnlyGlobalRuleExists` 失败 |
+
+两道防线现在的分工：`allocTag` 排除给出好的 UX（备注写 block 会拿到 `a-ui-block-2` 而非报错），完整配置校验是安全网。
+
+### fail open 的三条边界（不可收紧成拒绝）
+
+1. xray 自身故障——二进制缺失、老版本不认 `run -test`、执行超时
+2. 取不到完整配置（模板损坏、库不可用）——退回最小配置校验，不是放弃校验
+3. **改动之前配置就已经不合法**——那不是本次改动的错，拒绝会把管理员锁在门外，连修复用的操作都做不了
+
+### 已更新的文档
+
+`CLAUDE.md` 中三处描述因本次修复而失效，已同步改写：保留 tag 段（改为描述 `IsReservedTag` 的三个消费点）、两道防线段（第一道防线现在是三条边而非两条）、输入侧校验段（最小配置 → 完整配置，并补上 fail open 的三条边界）。同时消除了改写后产生的两处自相矛盾。
+
+### 新发现但未处理（不阻塞，留作跟进）
+
+**出站节点的「启用」开关不过校验。** `toggleNode` 发送 `config: ''`，`Update` 因此跳过校验分支。若节点 A 处于禁用状态、用户随后在模板里手写了与 A 同 tag 的出站，再启用 A 就会撞名，而新增路径已能拦住同样的冲突——两条路径不对称。触发需要用户在模板里违反 `a-ui-` 命名空间约定，可能性低，故按「发现的额外问题可以报告，但不自行处理」记录在此。
+
+## 用户反馈修复（分流页按钮失灵 + 切页动画）
+
+用户在真实面板上发现分流页所有「添加 / 编辑」按钮点了没反应，并指出侧栏切页动画生硬。
+
+### 按钮失灵：根因是 Vue 指令写在根元素之外
+
+三个 `<a-modal>` 整块落在 `<a-layout id="app">` 之后。Vue 2 只编译 `el` 指向的子树，所以它们从未被编译：点按钮把 `groupModal.visible` 置为 true，但没有任何东西绑定这个数据，界面毫无反应，控制台也不报错。
+
+排查手段：浏览器扩展未连接，改用本机 Chrome 无头模式 + 项目自带的 Vue/antd 资源 + 桩接口搭隔离环境（端口 87xx，未触碰用户运行中的 54321）。实测证据：
 
 ```
-生成的 outbounds tags: [None,'blocked','a-ui-b-节点','a-ui-c-节点','a-ui-东京-vless','a-ui-block','a-ui-block']
-a-ui-block 出现次数  : 2
-xray -test          : Failed to start: existing tag found: a-ui-block
-xray 子进程          : 已死（全员断网）
-面板报告的状态        : state=running, errorMsg=''   <- 面板完全不知道
+raw_uncompiled_a-modal=3     三个 a-modal 原样躺在 DOM 里，从未被编译
+compiled_ant-modal_nodes=0   点击后依然是 0
+after_click_visible_flag=true 数据确实变了，只是没人渲染
 ```
 
-**面板状态显示错误这一点是控制方实测发现、审查报告未提及的**，它让「不会自愈」升级为「不会自愈且看不见」。根因：`Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后返回 nil，启动失败不回传。
+修复：把三个弹窗移进 `#app`，并加注释说明为什么不能挪出去。
 
-不会自愈：`CheckXrayRunningJob` 每 30 秒重试，每次都撞同一个冲突。因 `Tag` 设计上不可变，唯一补救是禁用或删除该节点。删除后 20 秒内自动恢复（已验证）。
+**删除图标其实是好的。** 同一套环境实测 `A_icon_click_fired_request=true`，请求确实发出。用户看到「没反应」是因为那几个域名组 / 出站节点正被分流规则引用，被第一道引用守卫拒绝了，只弹了一条错误提示（实测提示能正常显示：「该域名组仍被 1 条分流规则引用，请先删除这些规则」）。这是设计内行为，未改动。
 
-### I1（Important）：校验只包住单个对象，看不见组合冲突
+### 新增回归守卫 `web/html_test.go`
 
-设计 §5.4.2 要求校验**完整生成配置**，但计划的 Task 10 实现成「最小配置包住单个 outbound / 域名列表」。这正是 C1 隐形的原因——孤立校验在原理上发现不了重复 tag。审查实测 `xray run -test`（含加载 10MB geosite）仅约 **18ms**，成本理由不成立。
+两个测试，都守 `go build` 查不出的东西：
 
-### I2（Important）：SQLite id 复用导致规则静默错绑
+- `TestAllTemplatesParse`——`getHtmlTemplate` 把 `ParseFS` 错误 `// ignore` 掉了，这个测试不忽略。
+- `TestVueDirectivesLiveInsideAVueRoot`——解析每个顶层页面的渲染结果，断言带 `v-*` / `@*` / `:*` 的元素都落在某个 `new Vue({el:'#...'})` 的根元素内。修复前只有 `routing.html` 失败（22 处），另外 4 个页面通过，说明检查不过宽。
 
-GORM 的 sqlite 驱动对自增主键生成 rowid 别名而非 `AUTOINCREMENT`，id 会被复用（审查已实测）。删除用户 A 的入站后新建用户 C 的入站可能拿到同一 id，「A 的 ChatGPT 走 B 节点」这条孤儿规则会**静默重绑到 C 身上**，规则列表还会渲染得很合理。生成期跳过防线拦不住——引用不再悬空，只是指错了人。建议补 `CheckInboundRefs` 使三条引用边对称。
+代价：`golang.org/x/net` 从 indirect 提为 direct（同版本，go.sum 已有，无新增下载）。用它做 HTML 解析而非手写字符串匹配，是因为这条不变量要对所有页面成立。
 
-### I3（Important）：`config: "null"` 触发 nil map panic
+### 切页动画
 
-`json.Unmarshal([]byte("null"), &map)` 不报错但留下 nil map，下一行赋值 panic。走 API 是 500（gin 有 Recovery），**走 cron 会杀掉整个面板进程**（cron 未配 Recover）。两处：`OutboundNodeService.Update`、`RoutingInjector.buildOutbounds`。
+菜单点击是 `location.href = key` 整页跳转，不是前端路由。所以「生硬」由两段构成：跳转间隙的白闪，加上 `[v-cloak]{display:none}` 解除后整个界面瞬间出现。改 `web/assets/css/custom.css`：
 
-### I4（Important）：六处 rule-skip 全部静默
+- `html, body` 底色设为布局灰，消除白闪。**没有**去画侧栏那条深色区域——侧栏宽度随折叠状态变化，画死了折叠后会露出对不齐的深色带。
+- `#app` 淡入 0.22s，`#content-layout` 再多 6px 位移、延迟 0.04s，读起来是浮现而非弹出。
+- 菜单项补背景色与选中条的过渡（antd 只给了 color）。
+- `prefers-reduced-motion: reduce` 下全部关闭，已实测（`--force-prefers-reduced-motion` 下 `animation=none`）。
 
-设计 §5.3 接受第二道防线的理由是「宁可规则不生效，用户能察觉」，但 `buildRule` 的六个 `return nil` 无一记日志。禁用一个出站节点，引用它的规则会从生成配置里消失，而规则表照常渲染。用户实际察觉不到。
-
-### I5 / I6（Important，纯 UI）
-
-- I5：出站节点的「编辑」在界面上不可达（只有删除图标），设计 §7 明确要求「列表 + 增删改」。
-- I6：三个删除动作均无确认框，与 `inbounds.html` 的既有做法不一致；规则删除不可恢复且无引用保护。
-
-### 审查对工作方法的批评（已接受）
-
-C1、I1、I5、I6 **全部源自计划里逐字提供的成品代码**，实现者严格照做。根因是计划内联了写好的代码，而不是陈述代码必须满足的约束（如「生成的 tag 不得与注入器发出的任何 tag 冲突」）。**后续写任务简报应改为约束优先，而非代码优先**——代码优先的简报让这类问题一直隐形到组合阶段。
-
-### 延后 Minor 的分诊结论
-
-审查对 21 条延后项逐条给了判断，其中三条被判定为**「不是问题」**：`ParseResult.Identity` 在本项目从未被读取；`SlugRemark` 小写化是 slug 的正常行为；`runXrayTest` 的 `json.Marshal` 失败分支不可达。其余多为「可以延后」。完整分诊表见审查报告（会话内产出，未落盘）。
-
-另有一条被推翻的怀疑记录在此以免重复排查：**`parseVless` 输出扁平 `settings`（无 `vnext` 包裹）不是缺陷**。控制方实测两种结构运行时行为一致（xray 正确读出 address/port 并发起连接），仅结构风格与 `parseVmess`/`parseTrojan` 不一致。
+**这次改了 `web/assets/css/`**，浏览器对它是 `max-age=31536000` 强缓存、缓存键为 `config/version`（当前 `0.3.2`，未变），所以必须硬刷新（Cmd+Shift+R）才能看到效果。
 
 ## 当前测试状态
 
@@ -118,23 +157,45 @@ C1、I1、I5、I6 **全部源自计划里逐字提供的成品代码**，实现�
 ```
 util/link     33 个测试
 database       2 个测试
-web/service   37 个测试
-合计          72 个
+web            2 个测试（模板解析 / Vue 根元素不变量）
+web/service   51 个测试
+合计          88 个（0 失败，0 跳过）
 ```
 
 本项目在此分支之前零测试。上述均为本次新增的正式回归测试，不得删除。
 
-**已知测试覆盖缺口**：没有任何测试把**完整生成配置**交给真实 xray（这正是 C1 得以通过全部审查的原因）。`newTestInbound` 的 `Settings: "{}"` 真实 xray 会拒绝，需先修好它，才能加这个端到端测试。
+**此前的覆盖缺口已补上**：`web/service/routing_e2e_test.go` 把 `GetXrayConfig()` 的产物 `json.Marshal` 后交给真实 xray 判定，三个场景——完整目标形态（2 入站 / 2 域名组 / 2 出站 / 全局 block + 按用户 proxy）、脏数据下仍产出合法配置、以及直接复刻事故路径的「备注写 block」。二进制缺失时 `requireXrayBinary` 会 skip。
+
+该文件里的 `newE2EInbound` 给出真实 xray 接受的入站配置（VLESS 必须有 `decryption:"none"`，实测 `Settings: "{}"` 会被拒）。`routing_inject_test.go` 里原有的 `newTestInbound` 保持不变——它只用于不接触真实 xray 的注入器单元测试。
+
+`assertRealXrayAccepts` **刻意不做 fail open**：`runXrayTest` 的 fail open 是给生产路径用的，测试里拿不到判定必须失败，否则这条覆盖会静默失效。
 
 ## 下一步
 
-按流程应派**一轮**修复（一次性处理全部 findings，而非每条一个 fixer），然后做**一次** scoped 复审。建议优先级：
+1. **对本轮修复做一次 scoped 复审**（按流程：一轮修复 → 一次复审）。复审范围是尚未提交的工作区改动，重点看 I1 改成完整配置校验后的行为边界，以及 C1-b 那个调用顺序问题是否还有同类。
+2. 复审通过后提交。本轮改动尚未 commit。
+3. 可选跟进：上面「新发现但未处理」的启用开关不过校验。
 
-1. **必须修**：C1（保留 tag 排除，分配端 + 生成端都要）、I3（nil map）、I1（改用完整配置校验——它是 C1 隐形的根因）
-2. **应该修**：I2（`CheckInboundRefs`）、I4（skip 记日志）
-3. **可跟进**：I5、I6（纯 UI，不影响正确性）
+### 本轮修复的验证证据
 
-审查还建议加一个端到端测试：`GetXrayConfig()` → `json.Marshal` → `xray run -test`，二进制缺失时 skip。这能把 I1 从「设计偏离」变成「有覆盖的不变量」，并防止 C1 这类组合失败再次发生。
+全部在本机实跑，非推断：
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 构建 | `go build ./...` | exit 0 |
+| 发布构建 | `CGO_ENABLED=1 go build -trimpath -ldflags "-s -w" -o ... main.go` | exit 0（gopsutil 的 cgo deprecation warning 为既有） |
+| 静态检查 | `go vet ./...` | exit 0 |
+| 格式 | `gofmt -l <本次改动的 .go>` | 无输出 |
+| 测试 | `go test ./... -count=1` | 86 PASS / 0 FAIL / 0 SKIP |
+| 模板可解析 | 自写 `ParseFS` 遍历（`web.go` 的 `getHtmlTemplate` 吞错误，`go build` 查不出） | 62 个具名模板全部解析通过 |
+| 页面渲染 | 离线 `ExecuteTemplate("routing.html")` | 零个未渲染的 `{{`，I5/I6 的 7 处改动全部命中 |
+| JS 语法 | `node --check` | 内联 script 与 `model/routing.js` 均通过 |
+
+未做的验证及原因：
+
+- **浏览器交互未验证**——扩展未连接，按用户指示不动运行中的面板，改用上面的模板渲染 + JS 语法检查做 HTTP/模板层等价验证。编辑弹窗的实际交互（点开编辑图标能否正确回填、保存后列表是否刷新）**未经真人点击确认**。
+- **未重启面板、未清理库里 Task 12 的验证数据**——按用户指示保持现状。
+- 本次没有改 `web/assets/js|css`，因此不涉及 `cur_ver` 强缓存问题。
 
 ## 继续工作时必须注意
 
@@ -145,16 +206,35 @@ web/service   37 个测试
 - 排查「面板说正常但用不了」时，**不要相信面板首页的 xray 状态**，以 `pgrep` + `xray run -test -c bin/config.json` 为准（原因见 CLAUDE.md）。
 - 改完 `web/html/**` 后 `go build` 查不出模板语法错误，需自行 `ParseFS` 验证。
 - 改完 `web/assets/js/**` 后浏览器要硬刷新（Cmd+Shift+R）。
-- 浏览器扩展当前未连接，界面交互只能用 HTTP 层等价验证。
+- 浏览器扩展当前未连接，界面交互只能用 HTTP / 模板层等价验证。验证模板改动的两个手法（自写 `ParseFS` 遍历、离线 `ExecuteTemplate` 后查未渲染的 `{{`）见「本轮修复的验证证据」。
+- **`gofmt -l $VAR` 在 zsh 下不会分词**（zsh 默认不对未加引号的参数展开做 word splitting），会把整串当成一个文件名。要么写 `${=VAR}`，要么直接列出文件。
+- `web/service/inbound.go`、`panel.go`、`server.go`、`setting.go`、`user.go`、`xray.go` **在本分支之前就未通过 `gofmt`**（import 分组问题）。不要顺手格式化，那属于无关改动。
 - 本次流程的完整 ledger（含每条裁决与代价评估）在 `.superpowers/sdd/2026-09-02-domain-routing/progress.md`，该目录已被 `.gitignore` 排除。
 
 ## Git / 工作区状态
 
 ```
 分支      feature/domain-routing
-HEAD      7d65307（文档提交；最后一个功能提交是 1d3c7ca）
+HEAD      5a2c395（文档提交；最后一个功能提交是 1d3c7ca）
 基线      c4c29b0 (= origin/main，未被改动)
-提交数    23（4 前置 + 18 功能 + 1 文档）
-工作区    干净
+提交数    24（4 前置 + 18 功能 + 2 文档）
+工作区    有未提交改动 —— 本轮 7 条 finding 的修复，尚未 commit
 远程      origin = github.com/SienFeng/AetherUI（从未 push）
 ```
+
+本轮改动涉及的文件（`git status`）：
+
+```
+M  CLAUDE.md                             三处失效描述同步改写
+M  database/model/routing.go             + IsReservedTag
+M  web/html/xui/routing.html             I5 编辑入口 + I6 三处确认框
+M  web/service/inbound.go                DelInbound 接上 CheckInboundRefs
+M  web/service/routing_inject.go         C1 生成端排除、I3 nil map、I4 跳过原因
+M  web/service/routing_outbound.go       C1 分配端排除、I3 nil map、C1-b 校验顺序
+M  web/service/routing_rule.go           + CheckInboundRefs
+M  web/service/routing_validate.go       I1 完整配置校验
+M  web/service/routing_*_test.go         新增回归测试
+?? web/service/routing_e2e_test.go       新增：完整生成配置交真实 xray
+```
+
+共 14 个新增测试。本次没有改 `web/assets/**`，无需处理 `cur_ver` 强缓存。

@@ -113,6 +113,32 @@ func (s *RoutingRuleService) CheckDomainGroupRefs(groupId int) error {
 	return nil
 }
 
+// CheckInboundRefs 在删除入站前调用。
+//
+// SQLite 的自增主键 id 会被复用：GORM 的 sqlite 驱动对 primaryKey;autoIncrement
+// 生成的是 rowid 别名而非 AUTOINCREMENT，删掉最大 id 的行后，新插入的行会拿到
+// 同一个 id。删掉用户甲的入站再新建用户丙的入站，「甲的 ChatGPT 走 B 节点」这条
+// 孤儿规则会静默重绑到丙身上，而规则列表还会渲染得很合理。
+//
+// 生成期跳过那道防线拦不住这种情况——引用不再悬空，只是指错了人。
+//
+// InboundId = 0 是全局规则，不指向任何具体入站，不参与本检查。
+func (s *RoutingRuleService) CheckInboundRefs(inboundId int) error {
+	if inboundId <= 0 {
+		return nil
+	}
+	db := database.GetDB()
+	var count int64
+	err := db.Model(model.RoutingRule{}).Where("inbound_id = ?", inboundId).Count(&count).Error
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return common.NewError("该入站仍被", count, "条分流规则引用，请先删除这些规则")
+	}
+	return nil
+}
+
 // CheckOutboundRefs 在删除出站节点前调用。出站消失后规则会静默回落到
 // 默认出站（直连），封禁与分流都会失效且无任何报错。
 func (s *RoutingRuleService) CheckOutboundRefs(outboundId int) error {

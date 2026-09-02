@@ -2,6 +2,76 @@
     height: 100%;
 }
 
+/* 页面切换的观感
+ *
+ * 侧栏菜单点击走的是 location.href = key，即整页跳转，不是前端路由。所以每次
+ * 换页浏览器都会：先刷一帧默认白底 → 等 Vue 挂载、[v-cloak] 解除 → 整个界面
+ * 瞬间出现。两段都很突兀，合起来就是「生硬」。下面分别处理。
+ *
+ * 注意这里改的是 assets 下的文件，浏览器对它是 max-age=31536000 的强缓存，
+ * 缓存键为 config/version。版本号没变时需要硬刷新才能看到效果。 */
+
+/* 第一段：把跳转间隙的底色提前画成布局底色，白闪就没有了。
+ * 不去画侧栏那条深色区域——侧栏宽度会随折叠状态变化，画死了反而会在折叠后
+ * 露出一条对不齐的深色带。灰底已经比白底柔和得多。 */
+html, body {
+    background-color: #f0f2f5;
+}
+
+/* 第二段：挂载后整体淡入，内容区再多一点点位移，让它读起来是「浮现」
+ * 而不是「弹出」。时长压在 0.3s 以内，避免每次换页都觉得在等动画。 */
+#app {
+    animation: aui-shell-in 0.22s ease-out both;
+}
+
+#content-layout {
+    animation: aui-content-in 0.32s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+    animation-delay: 0.04s;
+}
+
+@keyframes aui-shell-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+@keyframes aui-content-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* 菜单项本身：antd 只给了 color 的过渡，背景色是瞬间切换的，鼠标划过时
+ * 会一格一格地跳。补上背景与缩进的过渡，悬停和选中都跟手一些。 */
+#sider .ant-menu-item,
+#sider .ant-menu-submenu-title,
+#sider-drawer .ant-menu-item,
+#sider-drawer .ant-menu-submenu-title {
+    transition: background-color 0.2s ease, color 0.2s ease, padding-left 0.2s ease;
+}
+
+/* 选中项左侧的高亮条同样是瞬间出现的，给它一个生长过程 */
+#sider .ant-menu-item::after,
+#sider-drawer .ant-menu-item::after {
+    transition: transform 0.2s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.2s ease;
+}
+
+/* 系统设置里开了「减少动态效果」就不要动。这类偏好通常是前庭功能需求，
+ * 不是审美选择。 */
+@media (prefers-reduced-motion: reduce) {
+    #app,
+    #content-layout {
+        animation: none;
+    }
+
+    #sider .ant-menu-item,
+    #sider .ant-menu-submenu-title,
+    #sider-drawer .ant-menu-item,
+    #sider-drawer .ant-menu-submenu-title,
+    #sider .ant-menu-item::after,
+    #sider-drawer .ant-menu-item::after {
+        transition: none;
+    }
+}
+
 .ant-space {
     width: 100%;
 }

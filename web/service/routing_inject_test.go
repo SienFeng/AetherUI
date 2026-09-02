@@ -328,3 +328,96 @@ func TestInjectSkipsRuleWhenOutboundConfigCorrupt(t *testing.T) {
 		}
 	}
 }
+
+// 历史脏数据：C1 修复之前分配到 a-ui-block 的节点仍可能躺在库里。生成端必须
+// 同样排除保留 tag，否则输出两个 a-ui-block，xray 报 "existing tag found"
+// 并拒绝启动 —— 而面板首页不会显示任何异常。
+func TestInjectSkipsOutboundNodeCarryingReservedTag(t *testing.T) {
+	setupDB(t)
+	// 绕过 service 直接写库，模拟修复前留下的脏数据
+	node := &model.OutboundNode{
+		Tag: model.BlockOutboundTag, Remark: "block", Protocol: "socks", Enable: true,
+		Config: `{"tag":"` + model.BlockOutboundTag + `","protocol":"socks",` +
+			`"settings":{"servers":[{"address":"1.2.3.4","port":1080}]}}`,
+	}
+	if err := database.GetDB().Save(node).Error; err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	count := 0
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if ob["tag"] != model.BlockOutboundTag {
+			continue
+		}
+		count++
+		if ob["protocol"] != "blackhole" {
+			t.Errorf("%s must be the injector's blackhole, got protocol %v",
+				model.BlockOutboundTag, ob["protocol"])
+		}
+	}
+	if count != 1 {
+		t.Errorf("%s appears %d times in the generated outbounds, want exactly 1",
+			model.BlockOutboundTag, count)
+	}
+}
+
+// Config 为 "null" 时 json.Unmarshal 不报错却留下 nil map，紧接着的赋值 panic。
+// 这条路径由每 10 秒的重启 cron 走到，而 cron 没有 panic 恢复 —— 整个面板进程会死。
+func TestInjectSkipsOutboundNodeWithNullConfig(t *testing.T) {
+	setupDB(t)
+	node := &model.OutboundNode{
+		Tag: "a-ui-null-node", Remark: "null", Protocol: "socks", Enable: true, Config: "null",
+	}
+	if err := database.GetDB().Save(node).Error; err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if ob["tag"] == "a-ui-null-node" {
+			t.Errorf("a node whose config is null must be skipped, got %v", ob)
+		}
+	}
+}
+
+// 设计 §5.3 接受「生成期跳过」这道防线的理由是「宁可规则不生效，用户能察觉」。
+// 但跳过如果不说明原因，用户其实察觉不到：规则表照常渲染，配置里却没有这条规则。
+// buildRule 必须回报跳过原因，由 buildRules 记进日志。
+func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
+	setupDB(t)
+	inj := &RoutingInjector{}
+
+	group := newTestGroup(t, "ChatGPT")
+	emptyGroup := &model.DomainGroup{Remark: "空组", Domains: "[]"}
+	if err := database.GetDB().Save(emptyGroup).Error; err != nil {
+		t.Fatalf("save empty group: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		rule *model.RoutingRule
+	}{
+		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock}},
+		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, Action: model.ActionBlock}},
+		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, InboundId: 999, Action: model.ActionBlock}},
+		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionProxy, OutboundId: 999}},
+		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, Action: "definitely-not-an-action"}},
+	}
+	for _, tc := range cases {
+		generated, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{})
+		if generated != nil {
+			t.Errorf("%s: expected the rule to be skipped, got %v", tc.name, generated)
+		}
+		if skip == nil {
+			t.Errorf("%s: the rule was skipped without reporting a reason", tc.name)
+		}
+	}
+}

@@ -12,6 +12,21 @@ const (
 	BlockOutboundTag  = "a-ui-block"
 )
 
+// IsReservedTag 判定一个 tag 是否由注入器自己发出，因而不能分配给出站节点。
+//
+// 保留 tag 不在 outbound_nodes 表里，数据库的唯一约束管不到它们：备注写成
+// 「block」（含 Block/BLOCK/block!/" block "，SlugRemark 会把它们归一到同一个
+// slug）会让 SuggestTag 生成 a-ui-block，与注入器始终注入的黑洞出站撞名，
+// xray 报 "existing tag found" 并拒绝启动——全员断网，而面板首页仍显示 running。
+//
+// 三个消费点都只认这一个判定，将来新增保留 tag 只需改这里：
+// 分配端 OutboundNodeService.allocTag（不分配出去）、
+// 生成端 RoutingInjector.buildOutbounds（修复前的脏数据不写进配置）、
+// 校验端 removeOutboundByTag（校验时绝不把注入器的黑洞出站当成旧版本摘掉）。
+func IsReservedTag(tag string) bool {
+	return tag == BlockOutboundTag
+}
+
 // DomainGroup 是一批可复用的域名集合。
 type DomainGroup struct {
 	Id     int    `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`

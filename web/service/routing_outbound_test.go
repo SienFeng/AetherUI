@@ -189,3 +189,62 @@ func TestUpdateRejectsInvalidOutboundConfig(t *testing.T) {
 		t.Fatalf("Update rejected a valid config: %v", err)
 	}
 }
+
+// 备注写成「block」会让 SuggestTag 生成 a-ui-block —— 与注入器始终注入的
+// 黑洞出站撞名。xray 报 "existing tag found" 并拒绝启动，全员断网，而面板
+// 首页仍显示 running（Process.Start 把 cmd.Run 丢进 goroutine，启动失败不回传）。
+// 数据库的唯一约束管不到这个冲突：注入器发出的 tag 根本不在 outbound_nodes 表里，
+// 所以必须由分配端自己排除。
+func TestAddFromLinkNeverMintsReservedTag(t *testing.T) {
+	setupDB(t)
+	s := OutboundNodeService{}
+	// SlugRemark 会把下面这些备注归一到同一个 slug "block"
+	for _, remark := range []string{"block", "Block", "BLOCK", "block!", " block "} {
+		node, err := s.AddFromLink("socks5://1.2.3.4:1080", remark)
+		if err != nil {
+			t.Fatalf("AddFromLink(%q): %v", remark, err)
+		}
+		if node.Tag == model.BlockOutboundTag {
+			t.Errorf("remark %q produced the reserved tag %q", remark, node.Tag)
+		}
+	}
+}
+
+// json.Unmarshal([]byte("null"), &m) 不报错，但会留下一个 nil map，
+// 紧接着的 m["tag"] = ... 直接 panic。走 API 是 500（gin 有 Recovery），
+// 走每 10 秒的重启 cron 则会杀掉整个面板进程（cron 未配 Recover）。
+func TestUpdateRejectsNullConfigWithoutPanicking(t *testing.T) {
+	setupDB(t)
+	s := OutboundNodeService{}
+	node, err := s.AddFromLink("socks5://1.2.3.4:1080", "hk")
+	if err != nil {
+		t.Fatalf("AddFromLink: %v", err)
+	}
+	if err := s.Update(&model.OutboundNode{
+		Id: node.Id, Remark: "hk", Enable: true, Config: "null",
+	}); err == nil {
+		t.Error(`expected a "null" outbound config to be rejected`)
+	}
+}
+
+// tag 必须在校验之前就定下来。persist 若先校验、后分配 tag，完整配置校验
+// 看到的是解析器给的旧 tag，看不见真正会写进配置的那一个，组合冲突就检不出来。
+//
+// 真实场景：用户在 xray 模板里手写了一个 tag 为 a-ui-hk 的出站——`a-ui-` 前缀
+// 只是命名空间约定，而模板是用户可自由编辑的，拦不住这种写法。此时新建备注为
+// 「hk」的节点，allocTag 查 outbound_nodes 表发现没人占用，就会分配 a-ui-hk，
+// 与模板里那个撞名，xray 报 "existing tag found" 并拒绝启动，全员断网。
+func TestAddRejectsTagCollidingWithATemplateOutbound(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	tmpl := `{"outbounds":[` +
+		`{"protocol":"freedom","settings":{}},` +
+		`{"tag":"a-ui-hk","protocol":"freedom","settings":{}}` +
+		`]}`
+	if err := (&SettingService{}).setString("xrayTemplateConfig", tmpl); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+	if _, err := (&OutboundNodeService{}).AddFromLink("socks5://1.2.3.4:1080", "hk"); err == nil {
+		t.Error("a tag colliding with an outbound already in the template must be rejected")
+	}
+}

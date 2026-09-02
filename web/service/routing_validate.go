@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/common"
 	"a-ui/xray"
@@ -95,20 +96,120 @@ func lastMeaningfulLine(s string) string {
 	return firstLine(s)
 }
 
-// ValidateOutbound 用一份最小配置把待验证的 outbound 包起来送去校验。
-// 在落库之前调用，因此不需要事务回滚。
-func ValidateOutbound(ob map[string]any) error {
-	return runXrayTest(map[string]any{
+// generatedConfigJSON 返回「不做本次改动的话，xray 会拿到的那份配置」，
+// 即模板 + 全部启用入站 + 注入的出站与分流规则。
+func generatedConfigJSON() ([]byte, error) {
+	cfg, err := (&XrayService{}).GetXrayConfig()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(cfg)
+}
+
+func decodeConfig(data []byte) (map[string]any, error) {
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// validateWithFullConfig 校验「应用本次改动之后」的完整配置。
+//
+// 设计 §5.4.2 要求校验的就是完整配置：只包住单个对象的最小配置在原理上发现
+// 不了组合层面的冲突——与注入器发出的 tag 撞名、proxySettings.tag 指向不存在
+// 的出站，这些只有放进完整配置才暴露。C1（备注写 block 导致全员断网）正是
+// 因为孤立校验看不见它，才一路通过了全部审查。
+//
+// 沿用 runXrayTest 的 fail open 原则，另加两条边界：
+//   - 取不到完整配置（模板损坏、库不可用）时退回最小配置校验，至少还能抓出
+//     对象自身的错误，而不是干脆放弃校验。
+//   - 改动之前配置就已经不合法时放行：问题不是本次改动引入的。否则一个早已
+//     存在的模板错误会把管理员锁在门外，连修复用的操作都做不了。
+func validateWithFullConfig(apply func(cfg map[string]any), minimal map[string]any) error {
+	data, err := generatedConfigJSON()
+	if err != nil {
+		logger.Warning("fall back to minimal config validation, cannot build full config:", err)
+		return runXrayTest(minimal)
+	}
+	prospective, err := decodeConfig(data)
+	if err != nil {
+		logger.Warning("fall back to minimal config validation, cannot decode full config:", err)
+		return runXrayTest(minimal)
+	}
+
+	apply(prospective)
+	testErr := runXrayTest(prospective)
+	if testErr == nil {
+		return nil
+	}
+
+	baseline, err := decodeConfig(data)
+	if err == nil && runXrayTest(baseline) != nil {
+		logger.Warning("config was already invalid before this change, allowing the save:", testErr)
+		return nil
+	}
+	return testErr
+}
+
+// appendOutbound 把候选出站追加到配置末尾。追加而非插入是为了不改变默认出站
+// （xray 取 outbounds 的第一个），与注入器的第一条不变量一致。
+func appendOutbound(cfg map[string]any, ob map[string]any) {
+	outbounds, _ := cfg["outbounds"].([]any)
+	cfg["outbounds"] = append(outbounds, ob)
+}
+
+// removeOutboundByTag 摘掉完整配置里同 tag 的那份旧出站。编辑一个已存在的节点
+// 时必须先摘掉，否则它会和候选对象自己撞名，造成误拒。
+func removeOutboundByTag(cfg map[string]any, tag string) {
+	// 保留 tag 对应的是注入器自己发出的黑洞出站，不是节点表里的东西，绝不能摘。
+	// 摘掉它，一个 tag 为 a-ui-block 的历史脏数据节点就会「校验通过」，
+	// 而它在生成端本来就是被跳过的。
+	if tag == "" || model.IsReservedTag(tag) {
+		return
+	}
+	outbounds, _ := cfg["outbounds"].([]any)
+	for i, item := range outbounds {
+		ob, ok := item.(map[string]any)
+		if !ok || ob["tag"] != tag {
+			continue
+		}
+		cfg["outbounds"] = append(outbounds[:i:i], outbounds[i+1:]...)
+		return
+	}
+}
+
+func minimalOutboundConfig(ob map[string]any) map[string]any {
+	return map[string]any{
 		"outbounds": []any{
 			map[string]any{"protocol": "freedom", "settings": map[string]any{}},
 			ob,
 		},
-	})
+	}
+}
+
+// ValidateOutbound 校验一个新增的出站节点。在落库之前调用，因此不需要事务回滚。
+func ValidateOutbound(ob map[string]any) error {
+	return ValidateOutboundReplacing(ob, "")
+}
+
+// ValidateOutboundReplacing 校验一个编辑后的出站节点。replacedTag 是它在库里
+// 已有的 tag（tag 不可变），校验时要把完整配置里那份旧的先摘掉。
+func ValidateOutboundReplacing(ob map[string]any, replacedTag string) error {
+	return validateWithFullConfig(func(cfg map[string]any) {
+		removeOutboundByTag(cfg, replacedTag)
+		appendOutbound(cfg, ob)
+	}, minimalOutboundConfig(ob))
 }
 
 // ValidateDomains 校验域名列表，能抓出不存在的 geosite 类别与非法正则。
+// 候选域名挂在一条追加到末尾的规则上，出站指向注入器始终会注入的黑洞，
+// 因此这条探针规则不会引入悬空引用。
 func ValidateDomains(domains []string) error {
-	return runXrayTest(map[string]any{
+	probe := map[string]any{
+		"type": "field", "domain": domains, "outboundTag": model.BlockOutboundTag,
+	}
+	minimal := map[string]any{
 		"outbounds": []any{
 			map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}},
 		},
@@ -117,5 +218,14 @@ func ValidateDomains(domains []string) error {
 				map[string]any{"type": "field", "domain": domains, "outboundTag": "direct"},
 			},
 		},
-	})
+	}
+	return validateWithFullConfig(func(cfg map[string]any) {
+		routing, _ := cfg["routing"].(map[string]any)
+		if routing == nil {
+			routing = map[string]any{}
+			cfg["routing"] = routing
+		}
+		rules, _ := routing["rules"].([]any)
+		routing["rules"] = append(rules, probe)
+	}, minimal)
 }

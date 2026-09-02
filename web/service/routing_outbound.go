@@ -61,6 +61,10 @@ func (s *OutboundNodeService) allocTag(remark string) (string, error) {
 		if idx > 1 {
 			candidate = fmt.Sprintf("%s-%d", base, idx)
 		}
+		// 保留 tag 是注入器自己发出的，不在本表里，下面的唯一性查询看不见它们。
+		if model.IsReservedTag(candidate) {
+			continue
+		}
 		var count int64
 		if err := db.Model(model.OutboundNode{}).Where("tag = ?", candidate).Count(&count).Error; err != nil {
 			return "", err
@@ -74,14 +78,17 @@ func (s *OutboundNodeService) allocTag(remark string) (string, error) {
 
 // persist 把解析好的 outbound 写库，并把 tag 强制改写成本表分配的值。
 func (s *OutboundNodeService) persist(ob map[string]any, protocol, remark string) (*model.OutboundNode, error) {
-	if err := ValidateOutbound(ob); err != nil {
-		return nil, err
-	}
+	// 顺序要紧：必须先把 tag 定下来再校验。tag 正是组合冲突的核心，带着解析器
+	// 给的旧 tag 去校验，完整配置校验就看不见真正会写进配置的那一个——
+	// 与模板里手写出站撞名这类问题会整个漏掉。allocTag 只读不写，放前面无副作用。
 	tag, err := s.allocTag(remark)
 	if err != nil {
 		return nil, err
 	}
 	ob["tag"] = tag
+	if err := ValidateOutbound(ob); err != nil {
+		return nil, err
+	}
 	encoded, err := json.Marshal(ob)
 	if err != nil {
 		return nil, err
@@ -138,10 +145,16 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 		if err := json.Unmarshal([]byte(node.Config), &ob); err != nil {
 			return common.NewError("outbound JSON 格式错误:", err)
 		}
+		// "null" 能通过 Unmarshal，却留下一个 nil map，下面那行赋值直接 panic。
+		if ob == nil {
+			return common.NewError("outbound JSON 不能为 null")
+		}
 		ob["tag"] = old.Tag
 		// 编辑路径与新增路径一样要过真实 xray 校验：否则用户可以先建一个
 		// 合法节点、再把它编辑成坏配置，同样会让整份配置作废、全员断网。
-		if err := ValidateOutbound(ob); err != nil {
+		// 走 Replacing 版本，把完整配置里那份旧的同 tag 出站先摘掉，
+		// 否则候选对象会和它自己撞名而被误拒。
+		if err := ValidateOutboundReplacing(ob, old.Tag); err != nil {
 			return err
 		}
 		encoded, err := json.Marshal(ob)

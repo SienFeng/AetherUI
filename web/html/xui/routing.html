@@ -1,152 +1,266 @@
 <!DOCTYPE html>
 <html lang="en">
 {{template "head" .}}
+<style>
+    /* 与 inbounds.html 一致：不加这条内容区会紧贴侧栏和顶栏 */
+    @media (min-width: 769px) {
+        .ant-layout-content {
+            margin: 24px 16px;
+        }
+    }
+
+    .ant-col-sm-24 {
+        margin-top: 10px;
+    }
+
+    /* tab 栏浮在灰底上，与下方卡片留出呼吸 */
+    #routing-tabs .ant-tabs-bar {
+        margin-bottom: 16px;
+    }
+</style>
 <body>
 <a-layout id="app" v-cloak>
     {{template "commonSider" .}}
     <a-layout id="content-layout">
         <a-layout-content>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
-                <a-tabs default-active-key="1">
-
-                    <a-tab-pane key="1" tab="域名组">
-                        <a-button type="primary" @click="openGroup()">添加域名组</a-button>
-                        <a-table :columns="groupColumns" :data-source="groups"
-                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
-                            <template slot="domains" slot-scope="text, group">
-                                <a-tag v-for="d in group.domains" :key="d">[[ d ]]</a-tag>
-                            </template>
-                            <template slot="action" slot-scope="text, group">
-                                <a-icon type="edit" @click="openGroup(group)"></a-icon>
-                                <a-divider type="vertical"></a-divider>
-                                <a-icon type="delete" style="color: #ff4d4f;"
-                                        @click="delGroup(group)"></a-icon>
-                            </template>
-                        </a-table>
-                    </a-tab-pane>
-
-                    <a-tab-pane key="2" tab="出站节点">
-                        <a-button type="primary" @click="openNode()">添加出站节点</a-button>
-                        <a-table :columns="nodeColumns" :data-source="nodes"
-                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
-                            <template slot="enable" slot-scope="text, node">
-                                <a-switch :checked="node.enable"
-                                          @change="toggleNode(node)"></a-switch>
-                            </template>
-                            <template slot="action" slot-scope="text, node">
-                                <a-icon type="delete" style="color: #ff4d4f;"
-                                        @click="delNode(node)"></a-icon>
-                            </template>
-                        </a-table>
-                    </a-tab-pane>
-
-                    <a-tab-pane key="3" tab="分流规则">
-                        <a-button type="primary" @click="openRule()">添加分流规则</a-button>
-                        <a-table :columns="ruleColumns" :data-source="rules"
-                                 :row-key="r => r.id" :pagination="false" style="margin-top: 16px;">
-                            <template slot="inbound" slot-scope="text, rule">
-                                [[ inboundName(rule.inboundId) ]]
-                            </template>
-                            <template slot="group" slot-scope="text, rule">
-                                [[ groupName(rule.domainGroupId) ]]
-                            </template>
-                            <template slot="target" slot-scope="text, rule">
-                                <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
-                                <a-tag v-else color="blue">[[ nodeName(rule.outboundId) ]]</a-tag>
-                            </template>
-                            <template slot="warn" slot-scope="text, rule">
-                                <a-tooltip v-if="sniffingOff(rule)"
-                                           title="该入站未开启 sniffing（http/tls），xray 在路由阶段拿不到域名，这条域名规则不会命中">
-                                    <a-icon type="warning" style="color: #faad14;"></a-icon>
+                <transition name="list" appear>
+                    <a-card hoverable style="margin-bottom: 20px;">
+                        <a-row>
+                            <a-col :xs="24" :sm="24" :lg="6">
+                                域名组：
+                                <a-tag color="green">[[ groups.length ]]</a-tag>
+                            </a-col>
+                            <a-col :xs="24" :sm="24" :lg="6">
+                                出站节点：
+                                <a-tag color="green">启用 [[ enabledNodeCount ]] / 共 [[ nodes.length ]]</a-tag>
+                            </a-col>
+                            <a-col :xs="24" :sm="24" :lg="6">
+                                分流规则：
+                                <a-tag color="green">[[ rules.length ]]</a-tag>
+                            </a-col>
+                            <a-col :xs="24" :sm="24" :lg="6">
+                                未生效规则：
+                                <a-tag v-if="brokenRules.length === 0" color="green">0</a-tag>
+                                <a-tooltip v-else :title="brokenSummary" placement="bottomLeft">
+                                    <a-tag color="red">[[ brokenRules.length ]]</a-tag>
                                 </a-tooltip>
-                            </template>
-                            <template slot="action" slot-scope="text, rule">
-                                <a-icon type="edit" @click="openRule(rule)"></a-icon>
-                                <a-divider type="vertical"></a-divider>
-                                <a-icon type="delete" style="color: #ff4d4f;"
-                                        @click="delRule(rule)"></a-icon>
-                            </template>
-                        </a-table>
-                    </a-tab-pane>
+                            </a-col>
+                        </a-row>
+                    </a-card>
+                </transition>
 
-                </a-tabs>
+                <transition name="list" appear>
+                    <a-tabs id="routing-tabs" default-active-key="1">
+
+                        <a-tab-pane key="1" tab="域名组">
+                            <a-card hoverable>
+                                <div slot="title">
+                                    <a-button type="primary" icon="plus" @click="openGroup()">添加域名组</a-button>
+                                </div>
+                                <a-table :columns="groupColumns" :data-source="groups"
+                                         :row-key="r => r.id" :loading="spinning" :pagination="false"
+                                         style="margin-top: 20px">
+                                    <template slot="domains" slot-scope="text, group">
+                                        <a-tag v-for="d in group.domains" :key="d">[[ d ]]</a-tag>
+                                    </template>
+                                    <template slot="action" slot-scope="text, group">
+                                        <a-dropdown :trigger="['click']">
+                                            <a @click="e => e.preventDefault()">操作</a>
+                                            <a-menu slot="overlay" @click="a => clickGroupAction(a, group)">
+                                                <a-menu-item key="edit">
+                                                    <a-icon type="edit"></a-icon>编辑
+                                                </a-menu-item>
+                                                <a-menu-item key="delete">
+                                                    <span style="color: #FF4D4F">
+                                                        <a-icon type="delete"></a-icon>删除
+                                                    </span>
+                                                </a-menu-item>
+                                            </a-menu>
+                                        </a-dropdown>
+                                    </template>
+                                </a-table>
+                            </a-card>
+                        </a-tab-pane>
+
+                        <a-tab-pane key="2" tab="出站节点">
+                            <a-card hoverable>
+                                <div slot="title">
+                                    <a-button type="primary" icon="plus" @click="openNode()">添加出站节点</a-button>
+                                </div>
+                                <a-table :columns="nodeColumns" :data-source="nodes"
+                                         :row-key="r => r.id" :loading="spinning" :pagination="false"
+                                         style="margin-top: 20px">
+                                    <template slot="tag" slot-scope="text, node">
+                                        <a-tag>[[ node.tag ]]</a-tag>
+                                    </template>
+                                    <template slot="protocol" slot-scope="text, node">
+                                        <a-tag color="blue">[[ node.protocol ]]</a-tag>
+                                    </template>
+                                    <template slot="enable" slot-scope="text, node">
+                                        <a-switch :checked="node.enable"
+                                                  @change="toggleNode(node)"></a-switch>
+                                    </template>
+                                    <template slot="action" slot-scope="text, node">
+                                        <a-dropdown :trigger="['click']">
+                                            <a @click="e => e.preventDefault()">操作</a>
+                                            <a-menu slot="overlay" @click="a => clickNodeAction(a, node)">
+                                                <a-menu-item key="edit">
+                                                    <a-icon type="edit"></a-icon>编辑
+                                                </a-menu-item>
+                                                <a-menu-item key="copyTag">
+                                                    <a-icon type="copy"></a-icon>复制 tag
+                                                </a-menu-item>
+                                                <a-menu-item key="delete">
+                                                    <span style="color: #FF4D4F">
+                                                        <a-icon type="delete"></a-icon>删除
+                                                    </span>
+                                                </a-menu-item>
+                                            </a-menu>
+                                        </a-dropdown>
+                                    </template>
+                                </a-table>
+                            </a-card>
+                        </a-tab-pane>
+
+                        <a-tab-pane key="3" tab="分流规则">
+                            <a-card hoverable>
+                                <div slot="title">
+                                    <a-button type="primary" icon="plus" @click="openRule()">添加分流规则</a-button>
+                                </div>
+                                <a-table :columns="ruleColumns" :data-source="rules"
+                                         :row-key="r => r.id" :loading="spinning" :pagination="false"
+                                         style="margin-top: 20px">
+                                    <template slot="inbound" slot-scope="text, rule">
+                                        <a-tag v-if="!rule.inboundId">所有用户</a-tag>
+                                        <a-tag v-else :color="inboundMissing(rule.inboundId) ? 'red' : ''">
+                                            [[ inboundName(rule.inboundId) ]]
+                                        </a-tag>
+                                    </template>
+                                    <template slot="group" slot-scope="text, rule">
+                                        <a-tag :color="groupMissing(rule.domainGroupId) ? 'red' : ''">
+                                            [[ groupName(rule.domainGroupId) ]]
+                                        </a-tag>
+                                    </template>
+                                    <template slot="target" slot-scope="text, rule">
+                                        <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
+                                        <a-tag v-else :color="nodeMissing(rule.outboundId) ? 'red' : 'blue'">
+                                            [[ nodeName(rule.outboundId) ]]
+                                        </a-tag>
+                                    </template>
+                                    <template slot="warn" slot-scope="text, rule">
+                                        <a-tooltip v-if="ruleIssue(rule)" :title="ruleIssue(rule)">
+                                            <a-icon type="warning" style="color: #faad14;"></a-icon>
+                                        </a-tooltip>
+                                        <a-icon v-else type="check-circle" style="color: #52c41a;"></a-icon>
+                                    </template>
+                                    <template slot="action" slot-scope="text, rule">
+                                        <a-dropdown :trigger="['click']">
+                                            <a @click="e => e.preventDefault()">操作</a>
+                                            <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
+                                                <a-menu-item key="edit">
+                                                    <a-icon type="edit"></a-icon>编辑
+                                                </a-menu-item>
+                                                <a-menu-item key="delete">
+                                                    <span style="color: #FF4D4F">
+                                                        <a-icon type="delete"></a-icon>删除
+                                                    </span>
+                                                </a-menu-item>
+                                            </a-menu>
+                                        </a-dropdown>
+                                    </template>
+                                </a-table>
+                            </a-card>
+                        </a-tab-pane>
+
+                    </a-tabs>
+                </transition>
             </a-spin>
         </a-layout-content>
     </a-layout>
+
+    <!-- 弹窗必须留在 #app 内：Vue 2 只编译 el 指向的那棵子树，
+         写在外面的 <a-modal> 不会被编译，点「添加 / 编辑」只会改数据、
+         界面毫无反应，且没有任何报错。
+         若要挪到外面，得照 inbound_modal.html 的做法给它自己的根元素和 new Vue。 -->
+    <a-modal v-model="groupModal.visible" title="域名组"
+             @ok="saveGroup" ok-text="保存" cancel-text="取消">
+        <a-form layout="vertical">
+            <a-form-item label="备注">
+                <a-input v-model="groupModal.remark"></a-input>
+            </a-form-item>
+            <a-form-item label="域名（一行一条）">
+                <a-input type="textarea" :rows="8" v-model="groupModal.domains"
+                         placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com"></a-input>
+            </a-form-item>
+        </a-form>
+    </a-modal>
+
+    <a-modal v-model="nodeModal.visible" :title="nodeModal.id ? '编辑出站节点' : '添加出站节点'"
+             @ok="saveNode" ok-text="保存" cancel-text="取消">
+        <a-form layout="vertical">
+            <!-- tag 一经分配即不可变：改 tag 会让所有引用它的规则悬空，
+                 而 xray 对悬空 outboundTag 不报错，流量会静默回落到直连。 -->
+            <a-form-item label="tag（不可修改）" v-if="nodeModal.id">
+                <a-input :value="nodeModal.tag" disabled></a-input>
+            </a-form-item>
+            <a-form-item label="备注">
+                <a-input v-model="nodeModal.remark"></a-input>
+            </a-form-item>
+            <a-form-item label="分享链接">
+                <a-input type="textarea" :rows="4" v-model="nodeModal.link"
+                         placeholder="vmess:// vless:// trojan:// ss:// socks:// hysteria2://"></a-input>
+            </a-form-item>
+            <a-form-item>
+                <a-button @click="parseLink" :disabled="!nodeModal.link.trim()">解析预览</a-button>
+            </a-form-item>
+            <a-form-item label="或直接粘贴 outbound JSON（高级）">
+                <a-input type="textarea" :rows="6" v-model="nodeModal.config"
+                         placeholder="保存时若上方链接框非空，将按链接重新解析，此处的手工修改会被忽略；如需保留修改，请先清空链接框"></a-input>
+            </a-form-item>
+        </a-form>
+    </a-modal>
+
+    <a-modal v-model="ruleModal.visible" title="分流规则"
+             @ok="saveRule" ok-text="保存" cancel-text="取消">
+        <a-form layout="vertical">
+            <a-form-item label="备注">
+                <a-input v-model="ruleModal.rule.remark"></a-input>
+            </a-form-item>
+            <a-form-item label="用户（入站）">
+                <a-select v-model="ruleModal.rule.inboundId" style="width: 100%;">
+                    <a-select-option :value="0">所有用户</a-select-option>
+                    <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id">
+                        [[ i.remark || i.tag ]]
+                    </a-select-option>
+                </a-select>
+            </a-form-item>
+            <a-form-item label="域名组">
+                <a-select v-model="ruleModal.rule.domainGroupId" style="width: 100%;">
+                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id">
+                        [[ g.remark ]]
+                    </a-select-option>
+                </a-select>
+            </a-form-item>
+            <a-form-item label="动作">
+                <a-radio-group v-model="ruleModal.rule.action">
+                    <a-radio value="proxy">走节点</a-radio>
+                    <a-radio value="block">阻断（黑洞）</a-radio>
+                </a-radio-group>
+            </a-form-item>
+            <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
+                <a-select v-model="ruleModal.rule.outboundId" style="width: 100%;">
+                    <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
+                        [[ n.remark ]] ([[ n.protocol ]])
+                    </a-select-option>
+                </a-select>
+            </a-form-item>
+            <a-form-item label="优先级（数字越小越先匹配）">
+                <a-input-number v-model="ruleModal.rule.priority" :min="0"></a-input-number>
+            </a-form-item>
+        </a-form>
+    </a-modal>
 </a-layout>
-
-<a-modal v-model="groupModal.visible" title="域名组"
-         @ok="saveGroup" ok-text="保存" cancel-text="取消">
-    <a-form layout="vertical">
-        <a-form-item label="备注">
-            <a-input v-model="groupModal.remark"></a-input>
-        </a-form-item>
-        <a-form-item label="域名（一行一条）">
-            <a-input type="textarea" :rows="8" v-model="groupModal.domains"
-                     placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com"></a-input>
-        </a-form-item>
-    </a-form>
-</a-modal>
-
-<a-modal v-model="nodeModal.visible" title="出站节点"
-         @ok="saveNode" ok-text="保存" cancel-text="取消">
-    <a-form layout="vertical">
-        <a-form-item label="备注">
-            <a-input v-model="nodeModal.remark"></a-input>
-        </a-form-item>
-        <a-form-item label="分享链接">
-            <a-input type="textarea" :rows="4" v-model="nodeModal.link"
-                     placeholder="vmess:// vless:// trojan:// ss:// socks:// hysteria2://"></a-input>
-        </a-form-item>
-        <a-form-item>
-            <a-button @click="parseLink" :disabled="!nodeModal.link.trim()">解析预览</a-button>
-        </a-form-item>
-        <a-form-item label="或直接粘贴 outbound JSON（高级）">
-            <a-input type="textarea" :rows="6" v-model="nodeModal.config"
-                     placeholder="保存时若上方链接框非空，将按链接重新解析，此处的手工修改会被忽略；如需保留修改，请先清空链接框"></a-input>
-        </a-form-item>
-    </a-form>
-</a-modal>
-
-<a-modal v-model="ruleModal.visible" title="分流规则"
-         @ok="saveRule" ok-text="保存" cancel-text="取消">
-    <a-form layout="vertical">
-        <a-form-item label="备注">
-            <a-input v-model="ruleModal.rule.remark"></a-input>
-        </a-form-item>
-        <a-form-item label="用户（入站）">
-            <a-select v-model="ruleModal.rule.inboundId" style="width: 100%;">
-                <a-select-option :value="0">所有用户</a-select-option>
-                <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id">
-                    [[ i.remark || i.tag ]]
-                </a-select-option>
-            </a-select>
-        </a-form-item>
-        <a-form-item label="域名组">
-            <a-select v-model="ruleModal.rule.domainGroupId" style="width: 100%;">
-                <a-select-option v-for="g in groups" :key="g.id" :value="g.id">
-                    [[ g.remark ]]
-                </a-select-option>
-            </a-select>
-        </a-form-item>
-        <a-form-item label="动作">
-            <a-radio-group v-model="ruleModal.rule.action">
-                <a-radio value="proxy">走节点</a-radio>
-                <a-radio value="block">阻断（黑洞）</a-radio>
-            </a-radio-group>
-        </a-form-item>
-        <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
-            <a-select v-model="ruleModal.rule.outboundId" style="width: 100%;">
-                <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
-                    [[ n.remark ]] ([[ n.protocol ]])
-                </a-select-option>
-            </a-select>
-        </a-form-item>
-        <a-form-item label="优先级（数字越小越先匹配）">
-            <a-input-number v-model="ruleModal.rule.priority" :min="0"></a-input-number>
-        </a-form-item>
-    </a-form>
-</a-modal>
 
 {{template "js" .}}
 <script src="{{ .base_path }}assets/js/model/routing.js?{{ .cur_ver }}"></script>
@@ -167,8 +281,8 @@
             ],
             nodeColumns: [
                 { title: '备注', dataIndex: 'remark', width: 160 },
-                { title: 'tag', dataIndex: 'tag', width: 160 },
-                { title: '协议', dataIndex: 'protocol', width: 100 },
+                { title: 'tag', width: 200, scopedSlots: { customRender: 'tag' } },
+                { title: '协议', width: 100, scopedSlots: { customRender: 'protocol' } },
                 { title: '启用', width: 80, scopedSlots: { customRender: 'enable' } },
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
@@ -177,13 +291,27 @@
                 { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140 },
                 { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140 },
                 { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
-                { title: '', width: 40, scopedSlots: { customRender: 'warn' } },
+                { title: '状态', width: 60, scopedSlots: { customRender: 'warn' } },
                 { title: '优先级', dataIndex: 'priority', width: 80 },
-                { title: '操作', width: 100, scopedSlots: { customRender: 'action' } },
+                { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
             groupModal: { visible: false, id: 0, remark: '', domains: '' },
-            nodeModal: { visible: false, remark: '', link: '', config: '' },
+            nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule() },
+        },
+        computed: {
+            enabledNodeCount() {
+                return this.nodes.filter(n => n.enable).length;
+            },
+            // 「未生效」只统计已启用的规则——禁用的规则是有意关掉的，不算异常。
+            brokenRules() {
+                return this.rules.filter(r => this.ruleIssue(r) !== '');
+            },
+            brokenSummary() {
+                return this.brokenRules
+                    .map(r => (r.remark || ('#' + r.id)) + '：' + this.ruleIssue(r))
+                    .join('\n');
+            },
         },
         methods: {
             // 复用既有的 HttpUtil.post：它内部有 try/catch，请求级失败（网络中断、
@@ -238,22 +366,42 @@
                     await this.loadAll();
                 }
             },
-            async delGroup(group) {
-                const msg = await this.post('xui/routing/domain-group/del/' + group.id);
-                if (msg.success) await this.loadAll();
+            delGroup(group) {
+                this.$confirm({
+                    title: '删除域名组',
+                    content: '确定要删除域名组「' + (group.remark || group.id) + '」吗?',
+                    okText: '删除',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        const msg = await this.post('xui/routing/domain-group/del/' + group.id);
+                        if (msg.success) await this.loadAll();
+                    },
+                });
             },
-            openNode() {
-                this.nodeModal.remark = '';
+            openNode(node) {
+                this.nodeModal.id = node ? node.id : 0;
+                this.nodeModal.tag = node ? node.tag : '';
+                this.nodeModal.enable = node ? node.enable : true;
+                this.nodeModal.remark = node ? node.remark : '';
+                // 链接框在编辑时留空：它是「重新解析覆盖」的入口，不是当前值的回显。
                 this.nodeModal.link = '';
-                this.nodeModal.config = '';
+                this.nodeModal.config = node ? node.config : '';
                 this.nodeModal.visible = true;
             },
             async saveNode() {
-                const msg = await this.post('xui/routing/outbound/add', {
-                    remark: this.nodeModal.remark,
-                    link: this.nodeModal.link.trim(),
-                    config: this.nodeModal.config.trim(),
-                });
+                const n = this.nodeModal;
+                let msg;
+                if (n.id) {
+                    // 编辑走 update：后端只认 remark / enable / config，tag 由它自己保持不变。
+                    // 想按链接重新解析，先点「解析预览」把结果填进 config 框。
+                    msg = await this.post('xui/routing/outbound/update/' + n.id, {
+                        remark: n.remark, enable: n.enable, config: n.config.trim(),
+                    });
+                } else {
+                    msg = await this.post('xui/routing/outbound/add', {
+                        remark: n.remark, link: n.link.trim(), config: n.config.trim(),
+                    });
+                }
                 if (msg.success) {
                     this.nodeModal.visible = false;
                     await this.loadAll();
@@ -265,9 +413,17 @@
                 });
                 if (msg.success) await this.loadAll();
             },
-            async delNode(node) {
-                const msg = await this.post('xui/routing/outbound/del/' + node.id);
-                if (msg.success) await this.loadAll();
+            delNode(node) {
+                this.$confirm({
+                    title: '删除出站节点',
+                    content: '确定要删除出站节点「' + (node.remark || node.tag) + '」吗?',
+                    okText: '删除',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        const msg = await this.post('xui/routing/outbound/del/' + node.id);
+                        if (msg.success) await this.loadAll();
+                    },
+                });
             },
             openRule(rule) {
                 this.ruleModal.rule = rule
@@ -284,9 +440,19 @@
                     await this.loadAll();
                 }
             },
-            async delRule(rule) {
-                const msg = await this.post('xui/routing/rule/del/' + rule.id);
-                if (msg.success) await this.loadAll();
+            delRule(rule) {
+                // 规则没有引用守卫兜底（没有别的东西引用规则），删掉即不可恢复，
+                // 而删掉一条 block 规则意味着那批域名当场恢复直连，所以必须确认。
+                this.$confirm({
+                    title: '删除分流规则',
+                    content: '确定要删除规则「' + (rule.remark || rule.id) + '」吗? 删除后该规则立即失效，不可恢复。',
+                    okText: '删除',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        const msg = await this.post('xui/routing/rule/del/' + rule.id);
+                        if (msg.success) await this.loadAll();
+                    },
+                });
             },
             async parseLink() {
                 const msg = await this.post('xui/routing/outbound/parse', {
@@ -297,6 +463,90 @@
                     this.$message.success('解析成功，可在下方核对后保存');
                 }
             },
+            groupMissing(id) {
+                return !this.groups.find(x => x.id === id);
+            },
+            nodeMissing(id) {
+                return !this.nodes.find(x => x.id === id);
+            },
+            inboundMissing(id) {
+                return !!id && !this.inbounds.find(x => x.id === id);
+            },
+
+            // ruleIssue 返回空串表示这条规则会正常生效，否则返回失效原因。
+            //
+            // 前四种与后端 RoutingInjector.buildRule 的跳过条件一一对应：条件残缺的
+            // 规则整条不输出，配置里根本没有它，而规则表照常渲染——用户察觉不到。
+            // 第五种（sniffing）规则会生成，但 xray 在路由阶段拿不到域名，永不命中。
+            // 两类都是静默失效，所以必须在界面上说出来。
+            ruleIssue(rule) {
+                if (!rule.enable) return '';
+                const group = this.groups.find(x => x.id === rule.domainGroupId);
+                if (!group) return '域名组已删除，这条规则不会写进配置';
+                if (!group.domains.length) return '域名组为空，这条规则不会写进配置';
+                if (rule.inboundId) {
+                    const inbound = this.inbounds.find(x => x.id === rule.inboundId);
+                    if (!inbound) return '入站已删除，这条规则不会写进配置';
+                    if (!inbound.enable) return '入站已禁用，这条规则不会写进配置';
+                }
+                if (rule.action === 'proxy') {
+                    const node = this.nodes.find(x => x.id === rule.outboundId);
+                    if (!node) return '出站节点已删除，这条规则不会写进配置';
+                    if (!node.enable) return '出站节点已禁用，这条规则不会写进配置';
+                }
+                if (this.sniffingOff(rule)) {
+                    return '该入站未开启 sniffing（http/tls），xray 在路由阶段拿不到域名，这条规则永远不会命中';
+                }
+                return '';
+            },
+
+            clickGroupAction(a, group) {
+                if (a.key === 'edit') this.openGroup(group);
+                else if (a.key === 'delete') this.delGroup(group);
+            },
+            clickNodeAction(a, node) {
+                if (a.key === 'edit') this.openNode(node);
+                else if (a.key === 'copyTag') this.copyTag(node);
+                else if (a.key === 'delete') this.delNode(node);
+            },
+            clickRuleAction(a, rule) {
+                if (a.key === 'edit') this.openRule(rule);
+                else if (a.key === 'delete') this.delRule(rule);
+            },
+
+            // 出站 tag 不可变，且是分流规则引用它的唯一标识，值得能一键复制。
+            //
+            // 两条路径都保留：navigator.clipboard 只在安全上下文可用（localhost
+            // 算安全，裸 IP 的 HTTP 部署不算），ClipboardJS 用的是 execCommand，
+            // 在非安全上下文也能work。两者都要求点击是受信任的用户手势。
+            async copyTag(node) {
+                if (await this.writeClipboard(node.tag)) {
+                    this.$message.success('已复制 ' + node.tag);
+                } else {
+                    this.$message.error('复制失败，请手动选中 tag 复制');
+                }
+            },
+            async writeClipboard(text) {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    } catch (e) {
+                        // 非安全上下文或权限被拒，落到下面的兜底
+                    }
+                }
+                // ClipboardJS 需要一个触发元素，这里临时造一个用完即拆
+                const trigger = document.createElement('button');
+                document.body.appendChild(trigger);
+                let ok = false;
+                const clipboard = new ClipboardJS(trigger, { text: () => text });
+                clipboard.on('success', () => { ok = true; });
+                trigger.click();
+                clipboard.destroy();
+                trigger.remove();
+                return ok;
+            },
+
             // 域名分流依赖 sniffing 拿到 SNI/Host。入站关掉 sniffing 或
             // destOverride 不含 http/tls 时，域名规则永远不会命中。
             sniffingOff(rule) {

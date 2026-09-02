@@ -196,3 +196,46 @@ func TestDelOutboundNodeRejectsWhenReferenced(t *testing.T) {
 		t.Errorf("Del failed even after the referencing rule was removed: %v", err)
 	}
 }
+
+// SQLite 的自增主键 id 会被复用（GORM 的 sqlite 驱动生成的是 rowid 别名而非
+// AUTOINCREMENT）。删掉用户甲的入站后，新建用户丙的入站可能拿到同一个 id，
+// 「甲的 ChatGPT 走 B 节点」这条孤儿规则会静默重绑到丙身上，规则列表还会渲染得
+// 很合理。生成期跳过那道防线拦不住 —— 引用不再悬空，只是指错了人。
+// 三条引用边必须对称：域名组、出站已有守卫，入站也要有。
+func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	g := newTestGroup(t, "ChatGPT")
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "甲的 ChatGPT", InboundId: in.Id, DomainGroupId: g.Id,
+		Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add rule: %v", err)
+	}
+
+	if err := (&InboundService{}).DelInbound(in.Id); err == nil {
+		t.Fatal("DelInbound removed an inbound that a routing rule still references")
+	}
+
+	// 被拒之后入站必须还在，否则守卫只是「报错但照删」
+	if _, err := (&InboundService{}).GetInbound(in.Id); err != nil {
+		t.Errorf("inbound was deleted despite the rejection: %v", err)
+	}
+}
+
+// InboundId = 0 是全局规则，不指向任何具体入站，不该阻塞任何入站的删除。
+func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10002)
+	g := newTestGroup(t, "违规域名")
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "全员封禁", InboundId: 0, DomainGroupId: g.Id,
+		Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add rule: %v", err)
+	}
+
+	if err := (&InboundService{}).DelInbound(in.Id); err != nil {
+		t.Fatalf("a global rule must not block deleting an unrelated inbound: %v", err)
+	}
+}

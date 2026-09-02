@@ -127,7 +127,7 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 - **规则存 `InboundId` 外键，不存 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。
 - **`InboundId = 0` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。
 - **出站 `Tag` 一经分配即不可变**，且不能由自增 Id 拼出（unique 约束要求 INSERT 前就确定，那时 Id 尚未分配）。用 `link.SuggestTag("a-ui", remark, idx)` 生成，重名由调用方追加序号——注意 `SuggestTag` 只在 remark 为空时才用 `idx`，remark 非空时对任何 idx 都返回同一个值。
-- **`a-ui-block` 是保留 tag，任何用户可控的 tag 分配都必须排除它。** 数据库唯一约束管不到它——注入器发出的 tag 不在 `outbound_nodes` 表里。备注写「block」（含 `Block`/`BLOCK`/`block!`/` block ` 等，`SlugRemark` 会把它们归一到同一个 slug）就会生成 `a-ui-block`，与注入器的黑洞出站撞名，xray 报 `existing tag found: a-ui-block` 并拒绝启动。**将来若增加第二个保留 tag，必须同时更新分配端与生成端的排除逻辑**（建议做成 `IsReservedTag()` 之类的单一判定，避免两处各自维护）。
+- **`a-ui-block` 是保留 tag，任何用户可控的 tag 分配都必须排除它。** 数据库唯一约束管不到它——注入器发出的 tag 不在 `outbound_nodes` 表里。备注写「block」（含 `Block`/`BLOCK`/`block!`/` block ` 等，`SlugRemark` 会把它们归一到同一个 slug）就会生成 `a-ui-block`，与注入器的黑洞出站撞名，xray 报 `existing tag found: a-ui-block` 并拒绝启动。判定收敛在 `model.IsReservedTag()` 一处，分配端（`allocTag`）、生成端（`buildOutbounds`）与校验端（`removeOutboundByTag`）都只认它，**新增保留 tag 只改这一个函数**。生成端也要排除，是因为修复前分配出去的脏数据仍可能躺在库里。
 
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
@@ -142,10 +142,8 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 
 因此有**两道防线**，改动本子系统时都不能削弱：
 
-1. **删除时拒绝**——`DomainGroupService.Del` / `OutboundNodeService.Del` 先调 `RoutingRuleService.CheckDomainGroupRefs` / `CheckOutboundRefs`。
-2. **生成期跳过**——`buildRule` 返回 `nil` 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、入站不存在，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**
-
-入站没有引用守卫（管理员可以正常删掉被规则引用的入站），全靠第二道防线兜住。
+1. **删除时拒绝**——三条引用边都有守卫：`DomainGroupService.Del` / `OutboundNodeService.Del` / `InboundService.DelInbound` 分别调 `RoutingRuleService` 的 `CheckDomainGroupRefs` / `CheckOutboundRefs` / `CheckInboundRefs`。入站这条边**不能只靠第二道防线**：SQLite 会复用被删除的自增 id（见「已知偏差」），孤儿规则会绑到新入站上，那时引用不再悬空，跳过防线拦不住，规则列表还会渲染得很合理。`CheckInboundRefs` 不把 `InboundId = 0` 的全局规则算作引用。
+2. **生成期跳过**——`buildRule` 第三个返回值非 nil 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、入站不存在，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**跳过必须带原因并由 `buildRules` 记进 `logger.Warning`——否则这道防线对用户是隐形的：规则表照常渲染，配置里却没有它。
 
 ### 配置注入的四条不变量（`web/service/routing_inject.go`）
 
@@ -164,11 +162,15 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 
 ### 输入侧校验（`web/service/routing_validate.go`）
 
-出站配置与域名列表在**落库之前**用一份最小配置交给真实 xray 校验，因此不需要事务回滚。两个入口都接了：`OutboundNodeService.persist`（新建）与 `Update`（编辑）——**只堵一条等于没堵**，用户可以先建合法节点再编辑成坏的。
+出站配置与域名列表在**落库之前**交给真实 xray 校验，因此不需要事务回滚。出站的两个入口都接了：`OutboundNodeService.persist`（新建）与 `Update`（编辑）——**只堵一条等于没堵**，用户可以先建合法节点再编辑成坏的；域名组的新建与编辑共用 `encodeDomainsFromForm` 这一个收口。
 
 策略是 **fail open**：只有 xray 明确判定配置非法才拒绝；二进制缺失、老版本不认 `run -test` 参数、执行超时，一律放行并记日志。校验是辅助手段，不能因它自身故障就把用户锁在门外。
 
-**当前实现是「用最小配置包住单个 outbound / 域名列表」，只能发现该对象自身的错误，发现不了任何组合层面的冲突**（重复 tag、指向不存在出站的 `proxySettings.tag` 等）。设计文档 §5.4.2 要求的是校验**完整生成配置**——实测 `xray run -test` 含加载 10MB geosite 仅约 18ms，成本不构成理由。改动此处时应优先补上完整配置校验。
+校验针对的是**完整生成配置**（设计 §5.4.2）：`validateWithFullConfig` 先 `GetXrayConfig()` 拿到「不做本次改动的话 xray 会拿到的那份配置」，把候选对象应用上去再送检。只包住单个对象的最小配置在原理上发现不了组合层面的冲突（与注入器发出的 tag 撞名、指向不存在出站的 `proxySettings.tag` 等），`a-ui-block` 撞名事故正是因此才一路没被拦住。
+
+编辑出站走 `ValidateOutboundReplacing(ob, old.Tag)`，它会先把完整配置里那份旧的同 tag 出站摘掉，否则候选对象会和它自己撞名而被误拒；但**保留 tag 绝不摘**，否则一个 tag 为 `a-ui-block` 的脏数据节点会「校验通过」。
+
+fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二进制缺失/老版本/超时）、取不到完整配置时退回最小配置校验、以及**改动之前配置就已经不合法时放行**——那不是本次改动的错，拒绝会把管理员锁在门外，连修复用的操作都做不了。
 
 ### `util/link` 包
 
@@ -190,9 +192,11 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 - `go.mod` 声明 `go 1.21`（`util/link` 用到 `any` 与 `maps.Copy`），CI 用 Go 1.22 构建；依赖版本较老（gin 1.7.1、xray-core v1.4.2 仅用于 gRPC stats 客户端，与实际运行的 `bin/xray-*` 版本无关）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
 - `util/sys/psutil.go` 用 `//go:linkname` 侵入 gopsutil 内部包，升级 gopsutil 时会断。
-- **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题——需要自己 `ParseFS` 一遍让错误暴露出来。
+- **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题。`web/html_test.go` 的 `TestAllTemplatesParse` 走同样的遍历但不忽略错误，改完模板跑它即可。
+- **Vue 指令写在根元素之外是死代码，且完全静默。** Vue 2 只编译 `el` 指向的那棵子树。分流页的三个 `<a-modal>` 曾整块落在 `<a-layout id="app">` 之后——页面渲染完全正常、数据也照常加载，但所有「添加 / 编辑」按钮点了毫无反应（`visible = true` 改的是没有任何绑定的数据），控制台不报任何错。弹窗要么留在 `#app` 内，要么照 `inbound_modal.html` 的做法给它自己的根元素和 `new Vue({el:'#xxx'})`。`web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 对所有顶层页面守这条不变量（用 `golang.org/x/net/html` 解析渲染结果，比对 `v-*` / `@*` / `:*` 属性的位置）。
+- **`a-tabs` 的非活动面板仍在 DOM 里**，只是被隐藏。写选择器或做页面自动化时必须限定到 `.ant-tabs-tabpane-active`，否则会命中隐藏面板里的同名元素。
 - **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
 - **面板报告的 xray 状态可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 和 `bin/config.json` 跑一次 `xray run -test` 为准，不要相信面板首页**。
-- **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。
+- **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。分流子系统靠三个 `Check*Refs` 守卫堵住了这条路，**新增任何存 id 外键的表都要照做**。
 - **cron 任务没有 panic 恢复。** `Server.Start()` 里 `cron.New(...)` 未配 `cron.WithChain(cron.Recover(...))`，`robfig/cron/v3` 自身也不 recover。定时任务（含每 10 秒的 xray 重启消费任务）里的任何 panic 都会**杀掉整个面板进程**。在这些路径上写代码要格外注意 nil map、越界等运行时 panic。
