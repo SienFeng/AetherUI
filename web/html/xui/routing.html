@@ -54,6 +54,12 @@
                                 <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
                                 <a-tag v-else color="blue">[[ nodeName(rule.outboundId) ]]</a-tag>
                             </template>
+                            <template slot="warn" slot-scope="text, rule">
+                                <a-tooltip v-if="sniffingOff(rule)"
+                                           title="该入站未开启 sniffing（http/tls），xray 在路由阶段拿不到域名，这条域名规则不会命中">
+                                    <a-icon type="warning" style="color: #faad14;"></a-icon>
+                                </a-tooltip>
+                            </template>
                             <template slot="action" slot-scope="text, rule">
                                 <a-icon type="edit" @click="openRule(rule)"></a-icon>
                                 <a-divider type="vertical"></a-divider>
@@ -91,6 +97,9 @@
         <a-form-item label="分享链接">
             <a-input type="textarea" :rows="4" v-model="nodeModal.link"
                      placeholder="vmess:// vless:// trojan:// ss:// socks:// hysteria2://"></a-input>
+        </a-form-item>
+        <a-form-item>
+            <a-button @click="parseLink" :disabled="!nodeModal.link.trim()">解析预览</a-button>
         </a-form-item>
         <a-form-item label="或直接粘贴 outbound JSON（高级）">
             <a-input type="textarea" :rows="6" v-model="nodeModal.config"></a-input>
@@ -167,6 +176,7 @@
                 { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140 },
                 { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140 },
                 { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
+                { title: '', width: 40, scopedSlots: { customRender: 'warn' } },
                 { title: '优先级', dataIndex: 'priority', width: 80 },
                 { title: '操作', width: 100, scopedSlots: { customRender: 'action' } },
             ],
@@ -276,6 +286,31 @@
             async delRule(rule) {
                 const msg = await this.post('xui/routing/rule/del/' + rule.id);
                 if (msg.success) await this.loadAll();
+            },
+            async parseLink() {
+                const msg = await this.post('xui/routing/outbound/parse', {
+                    link: this.nodeModal.link.trim(),
+                });
+                if (msg.success) {
+                    this.nodeModal.config = msg.obj;
+                    this.$message.success('解析成功，可在下方核对后保存');
+                }
+            },
+            // 域名分流依赖 sniffing 拿到 SNI/Host。入站关掉 sniffing 或
+            // destOverride 不含 http/tls 时，域名规则永远不会命中。
+            sniffingOff(rule) {
+                if (!rule.inboundId) return false;
+                const inbound = this.inbounds.find(x => x.id === rule.inboundId);
+                if (!inbound) return false;
+                let sniffing;
+                try {
+                    sniffing = JSON.parse(inbound.sniffing || '{}');
+                } catch (e) {
+                    return true;
+                }
+                if (!sniffing.enabled) return true;
+                const dest = sniffing.destOverride || [];
+                return !dest.includes('http') && !dest.includes('tls');
             },
         },
         async mounted() {

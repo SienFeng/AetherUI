@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"encoding/json"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"a-ui/database/model"
+	"a-ui/util/link"
 	"a-ui/web/service"
 )
 
@@ -48,6 +50,7 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	ob.POST("/add", a.addOutbound)
 	ob.POST("/update/:id", a.updateOutbound)
 	ob.POST("/del/:id", a.delOutbound)
+	ob.POST("/parse", a.parseOutboundLink)
 
 	rl := g.Group("/rule")
 	rl.POST("/list", a.listRules)
@@ -192,6 +195,26 @@ func (a *RoutingController) delOutbound(c *gin.Context) {
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// parseOutboundLink 只解析不落库，供前端预览。
+func (a *RoutingController) parseOutboundLink(c *gin.Context) {
+	form := &addOutboundForm{}
+	if err := c.ShouldBind(form); err != nil {
+		jsonMsg(c, "解析链接", err)
+		return
+	}
+	result, err := link.ParseLink(form.Link)
+	if err != nil {
+		jsonMsg(c, "解析链接", err)
+		return
+	}
+	encoded, err := json.MarshalIndent(result.Outbound, "", "  ")
+	if err != nil {
+		jsonMsg(c, "解析链接", err)
+		return
+	}
+	jsonObj(c, string(encoded), nil)
 }
 
 // 分流规则
