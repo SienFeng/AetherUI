@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/util/json_util"
 	"a-ui/xray"
 )
@@ -20,7 +21,7 @@ type RoutingInjector struct {
 }
 
 func (s *RoutingInjector) Inject(cfg *xray.Config) error {
-	outbounds, err := s.buildOutbounds(cfg.OutboundConfigs)
+	outbounds, usableOutboundTags, err := s.buildOutbounds(cfg.OutboundConfigs)
 	if err != nil {
 		return err
 	}
@@ -30,7 +31,7 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encodedOutbounds)
 
-	blockRules, proxyRules, err := s.buildRules()
+	blockRules, proxyRules, err := s.buildRules(usableOutboundTags)
 	if err != nil {
 		return err
 	}
@@ -57,26 +58,36 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	return nil
 }
 
-func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, error) {
+// buildOutbounds 返回注入后的出站数组，以及「实际写入了配置的」节点 id -> tag 映射。
+//
+// 第二个返回值是关键：buildRules 必须只认这些 tag。一个 Config 损坏而被跳过的节点，
+// 如果其 tag 仍被规则引用，就会形成悬空 outboundTag —— 而 xray 对此不报错，运行时
+// 会静默回落到默认出站（直连），造成「以为分流/封禁了，其实直连出去」。
+func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, error) {
 	outbounds := make([]any, 0)
 	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &outbounds); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	nodes, err := s.outboundService.GetEnabled()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	usable := make(map[int]string, len(nodes))
 	for _, node := range nodes {
 		var ob map[string]any
 		if err := json.Unmarshal([]byte(node.Config), &ob); err != nil {
-			// 单个节点配置损坏时跳过，不能让整份配置生成失败
+			// 单个节点配置损坏时跳过，不让整份配置生成失败；但必须记录，
+			// 否则管理员无从察觉这个节点已经不生效了。
+			logger.Warning("skip outbound node with corrupt config, id:", node.Id,
+				"tag:", node.Tag, "err:", err)
 			continue
 		}
 		ob["tag"] = node.Tag
 		outbounds = append(outbounds, ob)
+		usable[node.Id] = node.Tag
 	}
 
 	// 黑洞出站始终注入，不复用模板里的 blocked——用户可能把它删掉，
@@ -86,10 +97,10 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 		"protocol": "blackhole",
 		"settings": map[string]any{},
 	})
-	return outbounds, nil
+	return outbounds, usable, nil
 }
 
-func (s *RoutingInjector) buildRules() ([]any, []any, error) {
+func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []any, error) {
 	rules, err := s.ruleService.GetEnabled()
 	if err != nil {
 		return nil, nil, err
@@ -107,15 +118,6 @@ func (s *RoutingInjector) buildRules() ([]any, []any, error) {
 		if in.Enable {
 			inboundTagById[in.Id] = in.Tag
 		}
-	}
-
-	nodes, err := s.outboundService.GetEnabled()
-	if err != nil {
-		return nil, nil, err
-	}
-	outboundTagById := make(map[int]string, len(nodes))
-	for _, node := range nodes {
-		outboundTagById[node.Id] = node.Tag
 	}
 
 	blockRules := make([]any, 0)

@@ -79,7 +79,7 @@ func TestInjectAppendsBlockOutboundAndKeepsFreedomFirst(t *testing.T) {
 	}
 }
 
-func TestInjectSkipsRuleWithEmptyDomainGroup(t *testing.T) {
+func TestInjectSkipsRuleWhenDomainGroupMissing(t *testing.T) {
 	setupDB(t)
 	// 直接建一条引用不存在域名组的规则，绕过 service 校验，模拟脏数据
 	rule := &model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock, Enable: true}
@@ -228,5 +228,103 @@ func TestInjectIsDeterministic(t *testing.T) {
 	}
 	if !first.Equals(second) {
 		t.Error("Config.Equals must report the two generated configs as equal")
+	}
+}
+
+// 域名组存在但域名列表为空：规则必须整条丢弃。
+// 若退而求其次输出一条 domain 为空的规则，xray 会把「缺失的条件」当作「不限制」，
+// 规则就从「访问这批域名走某节点」退化成「该入站全部流量走某节点」，且不报错。
+func TestInjectSkipsRuleWhenDomainListEmpty(t *testing.T) {
+	setupDB(t)
+	empty := &model.DomainGroup{Remark: "empty", Domains: "[]"}
+	if err := database.GetDB().Save(empty).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{DomainGroupId: empty.Id, Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	if got := len(decodeRules(t, cfg)); got != 1 {
+		t.Errorf("rule count = %d, want 1 (only the template rule)", got)
+	}
+}
+
+// 规则指向的入站已被删除：规则必须整条丢弃。
+// InboundService 没有引用检查，管理员通过正常界面就能删掉被规则引用的入站。
+func TestInjectSkipsRuleWhenInboundDeleted(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundId: in.Id, DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 先确认规则本来是会生成的，否则本测试可能因为规则从未生成而假通过
+	before := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(before); err != nil {
+		t.Fatalf("Inject before: %v", err)
+	}
+	if got := len(decodeRules(t, before)); got != 2 {
+		t.Fatalf("before deletion: rule count = %d, want 2", got)
+	}
+
+	if err := database.GetDB().Delete(model.Inbound{}, in.Id).Error; err != nil {
+		t.Fatalf("delete inbound: %v", err)
+	}
+
+	after := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(after); err != nil {
+		t.Fatalf("Inject after: %v", err)
+	}
+	if got := len(decodeRules(t, after)); got != 1 {
+		t.Errorf("after deletion: rule count = %d, want 1 (the orphaned rule must be dropped)", got)
+	}
+}
+
+// 节点的 Config 损坏：该节点不进 outbounds，引用它的规则也必须一并丢弃，
+// 否则规则会带着一个未写入配置的 outboundTag，形成悬空引用。
+func TestInjectSkipsRuleWhenOutboundConfigCorrupt(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	node, err := (&OutboundNodeService{}).AddFromLink("socks5://1.2.3.4:1080", "hk")
+	if err != nil {
+		t.Fatalf("AddFromLink: %v", err)
+	}
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 绕过服务层校验，直接把库里的 Config 弄坏
+	if err := database.GetDB().Model(model.OutboundNode{}).
+		Where("id = ?", node.Id).UpdateColumn("config", "{not json").Error; err != nil {
+		t.Fatalf("corrupt config: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	// 该节点不应出现在 outbounds 里
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if ob["tag"] == node.Tag {
+			t.Errorf("outbound %q was emitted despite a corrupt config", node.Tag)
+		}
+	}
+	// 引用它的规则也不应出现——否则就是一个悬空 outboundTag，
+	// xray 不会报错，流量会静默回落到默认出站（直连）。
+	for _, r := range decodeRules(t, cfg) {
+		if r["outboundTag"] == node.Tag {
+			t.Errorf("rule referencing %q was emitted, leaving a dangling outboundTag", node.Tag)
+		}
 	}
 }
