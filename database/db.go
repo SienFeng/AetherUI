@@ -41,6 +41,16 @@ func initSetting() error {
 	return db.AutoMigrate(&model.Setting{})
 }
 
+func initRouting() error {
+	if err := db.AutoMigrate(&model.DomainGroup{}); err != nil {
+		return err
+	}
+	if err := db.AutoMigrate(&model.OutboundNode{}); err != nil {
+		return err
+	}
+	return db.AutoMigrate(&model.RoutingRule{})
+}
+
 func InitDB(dbPath string) error {
 	dir := path.Dir(dbPath)
 	err := os.MkdirAll(dir, fs.ModeDir)
@@ -73,6 +83,10 @@ func InitDB(dbPath string) error {
 		return err
 	}
 	err = initSetting()
+	if err != nil {
+		return err
+	}
+	err = initRouting()
 	if err != nil {
 		return err
 	}
