@@ -46,7 +46,7 @@
                                     <a-tag color="red">[[ brokenRules.length ]]</a-tag>
                                 </a-tooltip>
                             </a-col>
-                            <a-col :span="6">
+                            <a-col :xs="24" :sm="24" :lg="6">
                                 订阅异常：
                                 <a-tag :color="subscriptionErrorCount ? 'red' : 'green'">[[ subscriptionErrorCount ]]</a-tag>
                             </a-col>
@@ -66,13 +66,18 @@
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
                                          style="margin-top: 20px">
                                     <template slot="domains" slot-scope="text, group">
-                                        <a-tag v-for="d in group.preview" :key="d">[[ d ]]</a-tag>
-                                        <span v-if="group.effectiveCount > group.preview.length" style="color: #888;">
-                                            +[[ group.effectiveCount - group.preview.length ]]
+                                        <span v-if="group.broken" style="color: #f5222d;">
+                                            数据损坏，这条组的规则不会写进配置
                                         </span>
-                                        <span v-if="group.effectiveCount === 0" style="color: #f5222d;">
-                                            空（引用它的规则不会写进配置）
-                                        </span>
+                                        <template v-else>
+                                            <a-tag v-for="d in group.preview" :key="d">[[ d ]]</a-tag>
+                                            <span v-if="group.effectiveCount > group.preview.length" style="color: #888;">
+                                                +[[ group.effectiveCount - group.preview.length ]]
+                                            </span>
+                                            <span v-if="group.effectiveCount === 0" style="color: #f5222d;">
+                                                空（引用它的规则不会写进配置）
+                                            </span>
+                                        </template>
                                     </template>
                                     <template slot="subscribe" slot-scope="text, group">
                                         <span v-if="group.subscribeState === 'none'" style="color: #bbb;">—</span>
@@ -548,8 +553,10 @@
                 return Math.floor(diff / 86400000) + ' 天前';
             },
             async refreshGroup(group) {
-                const msg = await this.post('xui/routing/domain-group/refresh/' + group.id);
-                if (msg.success) await this.loadAll();
+                // 失败也要重新加载：DB 里已经写了 lastError，不刷新的话这一行
+                // 会继续显示刷新前的绿色「N 小时前」，看不出刚刚这次失败了。
+                await this.post('xui/routing/domain-group/refresh/' + group.id);
+                await this.loadAll();
             },
             groupMissing(id) {
                 return !this.groups.find(x => x.id === id);

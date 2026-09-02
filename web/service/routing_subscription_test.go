@@ -3,6 +3,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +134,42 @@ func TestParseSubscriptionRejectsGarbageEntries(t *testing.T) {
 	}
 	if skipped != 2 {
 		t.Errorf("skipped = %d, want 2", skipped)
+	}
+}
+
+// 纯 IP 字面量满足域名格式的所有其他检查（含点、无非法字符），但作为
+// xray 的 domain 条件永远匹配不到任何流量——订阅一份纯 IP 列表不该「成功」。
+func TestParseSubscriptionRejectsPlainIPLiterals(t *testing.T) {
+	domains, skipped, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\n1.1.1.1\n8.8.8.8\n2001:4860:4860::8888\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(domains) != 1 || domains[0] != "domain:qq.com" {
+		t.Errorf("got = %v, want [domain:qq.com]", domains)
+	}
+	if skipped != 3 {
+		t.Errorf("skipped = %d, want 3", skipped)
+	}
+}
+
+// 部分订阅源（尤其 Windows 工具导出的）在文件开头带 UTF-8 BOM，
+// 不去掉的话会粘在第一行规则类型前面，导致该行匹配全部失配、被误计成跳过。
+func TestParseSubscriptionTrimsLeadingBOM(t *testing.T) {
+	domains, skipped, err := ParseSubscription("\uFEFFDOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"domain:qq.com", "domain:163.com"}
+	if len(domains) != len(want) {
+		t.Fatalf("len = %d, want %d: %v", len(domains), len(want), domains)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Errorf("domains[%d] = %q, want %q", i, domains[i], want[i])
+		}
+	}
+	if skipped != 0 {
+		t.Errorf("skipped = %d, want 0 (BOM 不应被算成一条被跳过的规则)", skipped)
 	}
 }
 
@@ -373,46 +410,55 @@ func TestUpdateKeepsSubscribedDataWhenUrlUnchanged(t *testing.T) {
 	}
 }
 
-// Update 不得写回它 Get 时捕获的订阅字段：那中间可能有一次成功的 Refresh，
-// 整行写入会把它静默回滚。这里用「Get 之后、Save 之前第三方改了库」来模拟。
-func TestUpdateDoesNotClobberConcurrentRefresh(t *testing.T) {
-	setupDB(t)
-	group := &model.DomainGroup{
-		Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
-		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111,
+// updateFieldsFor 是 Update 要写的列的纯函数版本，直接断言它的返回值。
+//
+// 这条不变量——「订阅地址没变时不碰订阅列」——用行为测试测不出来了：Update
+// 现在是单条原子的 Updates(map) 语句，不再有 Get 之后、写入之前的窗口供测试
+// 从外部并发改库来验证「没有被覆盖」。把字段映射抽成纯函数后可以直接检查
+// 它到底往 map 里放了什么 key，这是唯一还能锁住这条不变量的方式。
+func TestUpdateFieldsForKeepsSubscriptionColumnsWhenUrlUnchanged(t *testing.T) {
+	old := &model.DomainGroup{
+		Id: 1, Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
+		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111, LastSkipped: 3,
 	}
-	if err := database.GetDB().Save(group).Error; err != nil {
-		t.Fatalf("save group: %v", err)
-	}
-
-	s := &DomainGroupService{}
-	stale := &model.DomainGroup{
-		Id: group.Id, Remark: "改了备注", Domains: `["domain:manual.com"]`,
+	next := &model.DomainGroup{
+		Id: 1, Remark: "改了备注", Domains: `["domain:manual.com"]`,
 		SubscribeUrl: "http://a.example.com/list",
 	}
 
-	// 模拟并发 Refresh：在 Update 之前直接改库，代表一次刚刚成功的刷新
-	if err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
-		Updates(map[string]any{
-			"subscribed_domains": `["domain:fresh.com"]`,
-			"last_updated_at":    999,
-		}).Error; err != nil {
-		t.Fatalf("simulate refresh: %v", err)
+	got := updateFieldsFor(old, next)
+
+	want := map[string]any{
+		"remark":  "改了备注",
+		"domains": `["domain:manual.com"]`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("updateFieldsFor() = %#v, want %#v (地址没变时不该碰订阅列)", got, want)
+	}
+}
+
+func TestUpdateFieldsForClearsSubscriptionColumnsWhenUrlChanges(t *testing.T) {
+	old := &model.DomainGroup{
+		Id: 1, Remark: "组", Domains: "[]", SubscribeUrl: "http://a.example.com/list",
+		SubscribedDomains: `["domain:old.com"]`, LastUpdatedAt: 111, LastError: "boom", LastSkipped: 3,
+	}
+	next := &model.DomainGroup{
+		Id: 1, Remark: "组", Domains: "[]", SubscribeUrl: "http://b.example.com/list",
 	}
 
-	if err := s.Update(stale); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
+	got := updateFieldsFor(old, next)
 
-	got, _ := s.Get(group.Id)
-	if got.SubscribedDomains != `["domain:fresh.com"]` {
-		t.Errorf("SubscribedDomains = %q, 刷新结果被 Update 回滚了", got.SubscribedDomains)
+	want := map[string]any{
+		"remark":             "组",
+		"domains":            "[]",
+		"subscribe_url":      "http://b.example.com/list",
+		"subscribed_domains": "",
+		"last_updated_at":    0,
+		"last_error":         "",
+		"last_skipped":       0,
 	}
-	if got.LastUpdatedAt != 999 {
-		t.Errorf("LastUpdatedAt = %d, want 999", got.LastUpdatedAt)
-	}
-	if got.Remark != "改了备注" {
-		t.Errorf("Remark = %q, 备注应当被更新", got.Remark)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("updateFieldsFor() = %#v, want %#v", got, want)
 	}
 }
 
@@ -558,5 +604,47 @@ func TestRefreshDueContinuesAfterFailure(t *testing.T) {
 	}
 	if got, _ := s.Get(g1.Id); got.LastError == "" {
 		t.Error("坏的组应当记录失败原因")
+	}
+}
+
+// 订阅地址在拉取过程中被改掉时，这次拉取的结果必须作废。
+// 否则组的 URL 是 B、域名却是 A 的内容，界面还显示「刚刚更新」——
+// spec §5.5 把这种「用错误的数据分流」列为比规则不生效更危险。
+func TestRefreshDiscardsResultWhenUrlChangedDuringFetch(t *testing.T) {
+	setupDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,from-old-url.com\n"))
+	}))
+	defer srv.Close()
+
+	group := &model.DomainGroup{Remark: "组", Domains: "[]", SubscribeUrl: srv.URL}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	// 模拟：管理员在拉取过程中把订阅地址改成了别的
+	stale := &model.DomainGroup{
+		Id: group.Id, Remark: group.Remark, Domains: group.Domains,
+		SubscribeUrl: srv.URL, // refreshLocked 拿到的是旧地址
+	}
+	if err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Update("subscribe_url", "http://changed.example.com/list").Error; err != nil {
+		t.Fatalf("simulate url change: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	subscriptionMu.Lock()
+	err := s.refreshLocked(stale)
+	subscriptionMu.Unlock()
+	if err == nil {
+		t.Error("订阅地址已变，本次结果应当作废并报错")
+	}
+
+	got, _ := s.Get(group.Id)
+	if got.SubscribedDomains != "" {
+		t.Errorf("SubscribedDomains = %q, 旧地址拉来的内容不得写入", got.SubscribedDomains)
+	}
+	if got.LastUpdatedAt != 0 {
+		t.Errorf("LastUpdatedAt = %d, 不得标记为已成功更新", got.LastUpdatedAt)
 	}
 }

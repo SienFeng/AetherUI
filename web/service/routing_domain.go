@@ -106,28 +106,38 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 		return err
 	}
 
-	// 只写实际要改的列，不用 Save 写整行。整行写入会把 Get 那一刻捕获的
-	// SubscribedDomains/LastUpdatedAt 一并写回，而这中间可能有一次成功的
-	// Refresh 已经更新了它们——那次刷新会被静默回滚，无错误无日志。
-	// 注意：将来给 DomainGroup 加字段时，要更新的字段必须同时加进这个 map。
+	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Updates(updateFieldsFor(old, group)).Error
+}
+
+// updateFieldsFor 返回 DomainGroupService.Update 要写的列。
+//
+// 只写实际要改的列，不用 Save 写整行。整行写入会把 Get 那一刻捕获的
+// SubscribedDomains/LastUpdatedAt 一并写回，而这中间可能有一次成功的
+// Refresh 已经更新了它们——那次刷新会被静默回滚，无错误无日志。
+// 注意：将来给 DomainGroup 加字段时，要更新的字段必须同时加进这个 map，
+// 否则新字段会静默地无法通过编辑接口更新。
+//
+// 抽成纯函数是为了能直接断言「订阅地址没变时不碰订阅列」这条不变量——
+// Update 现在是单条原子语句，没有窗口可供行为测试插入验证。
+func updateFieldsFor(old, next *model.DomainGroup) map[string]any {
 	fields := map[string]any{
-		"remark":  group.Remark,
-		"domains": group.Domains,
+		"remark":  next.Remark,
+		"domains": next.Domains,
 	}
 
 	// 订阅地址变了：旧订阅内容来自另一个来源，继续拿它分流是「用错误的数据
 	// 生效」，比规则暂时不生效更危险。清空并把 LastUpdatedAt 置 0，
 	// SubscriptionJob 的「从未成功过」分支会在下一个检查窗口拉取新地址。
-	if old.SubscribeUrl != group.SubscribeUrl {
-		fields["subscribe_url"] = group.SubscribeUrl
+	if old.SubscribeUrl != next.SubscribeUrl {
+		fields["subscribe_url"] = next.SubscribeUrl
 		fields["subscribed_domains"] = ""
 		fields["last_updated_at"] = 0
 		fields["last_error"] = ""
 		fields["last_skipped"] = 0
 	}
 
-	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
-		Updates(fields).Error
+	return fields
 }
 
 // subscriptionMu 串行化所有订阅更新。定时任务与管理员点「立即更新」可能同时
@@ -172,13 +182,29 @@ func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
 
 	// 用 map 而不是 struct：GORM 的 struct 更新会跳过零值，
 	// LastError 与 LastSkipped 清不掉。
-	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+	//
+	// Where 里带上 subscribe_url：拉取耗时可达 30s，一批组更是分钟级，
+	// 这期间管理员可能已经把订阅地址改成了别的（Update 不取 subscriptionMu）。
+	// 不加这个条件，本次用旧地址拉到的内容会被当成新地址的结果写回——
+	// 组的 URL 是新的，域名却是旧地址的，界面还显示「刚刚更新」，
+	// 比规则单纯不生效更危险（见 spec §5.5）。
+	res := database.GetDB().Model(model.DomainGroup{}).
+		Where("id = ? AND subscribe_url = ?", group.Id, group.SubscribeUrl).
 		Updates(map[string]any{
 			"subscribed_domains": encoded,
 			"last_updated_at":    time.Now().UnixMilli(),
 			"last_error":         "",
 			"last_skipped":       skipped,
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		logger.Warning("refresh subscription discarded: subscribe url changed or group deleted during fetch, id:",
+			group.Id, "remark:", group.Remark)
+		return common.NewError("订阅地址在拉取期间已变化或该组已被删除，本次结果已作废, id:", group.Id)
+	}
+	return nil
 }
 
 // recordFailure 只写失败原因，绝不动 SubscribedDomains 与 LastUpdatedAt。
@@ -187,10 +213,17 @@ func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
 // 封禁的流量静默退回直连。上游改格式、URL 失效返回 404 页面、CDN 返回空响应
 // 都会走到这里，而它们都不该导致分流失效。宁可用旧数据。
 func (s *DomainGroupService) recordFailure(group *model.DomainGroup, cause error) error {
-	err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
-		Update("last_error", cause.Error()).Error
-	if err != nil {
-		logger.Warning("record subscription failure err:", err)
+	// 同样带 subscribe_url 条件：拉取期间地址被改掉的话，这次失败是旧地址
+	// 造成的，不该把 last_error 钉在管理员刚改好的新地址上。零行受影响不算
+	// 额外错误——原始失败原因（cause）仍然如实返回给调用方。
+	res := database.GetDB().Model(model.DomainGroup{}).
+		Where("id = ? AND subscribe_url = ?", group.Id, group.SubscribeUrl).
+		Update("last_error", cause.Error())
+	if res.Error != nil {
+		logger.Warning("record subscription failure err:", res.Error)
+	} else if res.RowsAffected == 0 {
+		logger.Warning("subscribe url changed or group deleted during failed fetch, not pinning stale error, id:",
+			group.Id, "remark:", group.Remark)
 	}
 	logger.Warning("refresh subscription failed, id:", group.Id,
 		"remark:", group.Remark, "err:", cause)

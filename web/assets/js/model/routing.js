@@ -23,6 +23,10 @@ class DomainGroup {
         this.lastUpdatedAt = json.lastUpdatedAt || 0;
         this.lastError = json.lastError || "";
         this.lastSkipped = json.lastSkipped || 0;
+        // Domains 或 SubscribedDomains 任一列 JSON 解码失败：buildRule 会因
+        // 「域名组数据损坏」整条丢弃引用它的规则，effectiveCount 已被后端强制
+        // 置 0，这里单独留一个标记方便渲染出与「本来就是空」不同的提示。
+        this.broken = json.broken || false;
     }
 
     static fromJson(json = {}) {

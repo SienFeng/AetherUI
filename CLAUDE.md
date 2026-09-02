@@ -79,6 +79,7 @@ go mod tidy && go vet ./...
 - `CheckXrayRunningJob`（30s）— 连续 2 次检测到未运行才置重启标志，避开重启窗口。
 - `XrayTrafficJob`（10s，启动后延迟 5s 注册）— 拉取流量并按 tag 累加到 Inbound 的 up/down（`reset=true`，xray 侧计数清零）。
 - `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。
+- `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（`entity.AllSetting.SubscriptionUpdateTime`），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
 另有两个在 controller 里注册的任务：`ServerController` 每 2 秒刷新系统状态（前端 3 分钟无请求即停刷）、`InboundController` 的重启消费任务。
 
@@ -96,7 +97,9 @@ go mod tidy && go vet ./...
 
 ### 设置系统
 
-settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` 的 `json` tag 与 key 对应（`GetAllSetting` / `UpdateAllSetting`），未落库的 key 回落到 `defaultValueMap`。**新增设置项 = 在 `defaultValueMap` 加默认值 + 在 `entity.AllSetting` 加字段（仅当需要前端可改）+ 在 `entity.CheckValid` 加校验 + 加对应 getter**。反射只支持 `int` 和 `string` 两种字段类型。
+settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` 的 `json` tag 与 key 对应（`GetAllSetting` / `UpdateAllSetting`），未落库的 key 回落到 `defaultValueMap`。**新增设置项 = 在 `defaultValueMap` 加默认值 + 在 `entity.AllSetting` 加字段（仅当需要前端可改）+ 在 `entity.CheckValid` 加校验 + 加对应 getter + 在 `web/assets/js/model/models.js` 的 `AllSetting` 构造函数里加同名字段**。反射只支持 `int` 和 `string` 两种字段类型。
+
+最后这一步（前端 JS 模型）不是可省的收尾工作，漏掉的后果不是「新设置项不生效」这么轻：`ObjectUtil.cloneProps`（`web/assets/js/util/utils.js`）只克隆目标对象已经拥有的 key，服务端返回的值会被直接丢弃，输入框永远回落到硬编码的初始值；而 `updateAllSetting` 提交的是这个 JS 对象，新字段在提交体里根本不存在，Gin 绑定成零值，若后端校验恰好拒绝零值（比如时间字符串要求非空），**整个保存配置接口都会失败**，端口、证书路径、time zone 等一切无关字段一起遭殃，报错信息还只指向新字段，具有很强的误导性。`ObjectUtil.equals` 同理只按旧对象的 key 做比较，新字段的改动不会点亮「保存」按钮。
 
 `secret`（session 加密密钥）的默认值是随机生成的，`GetSecret()` 检测到仍是默认值时会立刻落库固化，避免每次重启导致会话全部失效。
 
@@ -115,12 +118,19 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 三张表，规则是一条把前两者连起来的连线：
 
 ```
-DomainGroup   域名组     Remark + Domains(JSON 字符串数组)
+DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + 订阅五件套（见下）
 OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
 RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) + OutboundId + Priority + Enable
 ```
 
 **「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
+
+`DomainGroup` 的订阅五件套——`SubscribeUrl` / `SubscribedDomains` / `LastUpdatedAt` / `LastError` / `LastSkipped`——支撑域名组订阅更新（`web/service/routing_domain.go`、`routing_subscription.go`，`SubscriptionJob`）。两条不变量：
+
+- **`Domains`（手工）与 `SubscribedDomains`（订阅）物理隔离，各自只有一个写入方。** 管理员编辑表单只写 `Domains`；`SubscriptionJob`/「立即更新」只写 `SubscribedDomains` 及其伴随的 `LastUpdatedAt`/`LastError`/`LastSkipped`。`buildRule` 用 `MergeDomains(manual, subscribed)` 在生成期合并两者（手工在前、订阅在后，保留首次出现），任何一侧都不会覆盖另一侧。
+- **拉取失败保留上一次成功的数据，绝不清空。** 清空 `SubscribedDomains` 会让合并结果可能变空，`buildRule` 因「域名组为空」跳过整条规则——本该走指定节点或被封禁的流量静默退回直连，比规则单纯不生效更危险。同理，写回成功结果时要带 `subscribe_url` 相等的条件（compare-and-set）：拉取耗时可达 30s、批量刷新可达分钟级，这期间管理员可能已经把订阅地址改成了别的，不加条件的话旧地址拉到的内容会被当成新地址的结果写回，界面显示「刚刚更新」但域名其实是错的。
+
+`DomainGroupService.Update` 不用 `Save` 写整行，而是拼一个只含实际要改的列的 `map[string]any`（`updateFieldsFor`），原因正是上一条：整行写入会把 `Get` 那一刻捕获的 `SubscribedDomains`/`LastUpdatedAt` 一并写回，把中间一次刚成功的订阅刷新静默回滚。**代价是这份列名单要手动维护**——将来给 `DomainGroup` 加字段，若不在 `updateFieldsFor` 里加对应的 key，这个字段就会静默地无法通过编辑接口更新（`Get`/展示不受影响，容易被漏测）。
 
 三条不可动摇的字段约定：
 
@@ -149,7 +159,7 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 
 1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
 2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。
-3. **绝不输出条件残缺的规则**（见上）。
+3. **绝不输出条件残缺的规则**（见上）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。
 4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
 
 黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，而悬空 `outboundTag` 不报错，block 会静默变直连。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。

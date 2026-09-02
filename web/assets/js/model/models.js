@@ -167,6 +167,7 @@ class AllSetting {
         this.xrayTemplateConfig = "";
 
         this.timeLocation = "Asia/Shanghai";
+        this.subscriptionUpdateTime = "04:00";
 
         if (data == null) {
             return

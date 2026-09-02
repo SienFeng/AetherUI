@@ -49,6 +49,11 @@ type domainGroupSummary struct {
 	LastUpdatedAt   int64    `json:"lastUpdatedAt"`
 	LastError       string   `json:"lastError"`
 	LastSkipped     int      `json:"lastSkipped"`
+	// Broken 标记 Domains 或 SubscribedDomains 任一列 JSON 解码失败。这种组
+	// buildRule 会因「域名组数据损坏」整条丢弃规则，不能让 EffectiveCount 靠
+	// SubscribedDomains 单独撑起一个非零值而在列表里显得健康——那样规则表会
+	// 显示规则存活，实际配置里却没有它。
+	Broken bool `json:"broken"`
 }
 
 type domainGroupDetail struct {
@@ -64,17 +69,21 @@ type domainGroupDetail struct {
 }
 
 // decodeGroupDomains 解出一个组的手工域名与订阅域名。数据损坏时当作空列表，
-// 界面还能显示这个组的其余信息，管理员才有机会去修它。
-func decodeGroupDomains(group *model.DomainGroup) (manual, subscribed []string) {
+// 界面还能显示这个组的其余信息，管理员才有机会去修它；broken 如实报告是否
+// 有任一列解码失败，调用方不能靠 len(manual)+len(subscribed) 反推——那样会
+// 把「解码失败」和「本来就是空」混为一谈，这正是本 finding 要堵的洞。
+func decodeGroupDomains(group *model.DomainGroup) (manual, subscribed []string, broken bool) {
 	manual, err := service.DecodeDomains(group.Domains)
 	if err != nil {
 		manual = nil
+		broken = true
 	}
 	subscribed, err = service.DecodeSubscribedDomains(group.SubscribedDomains)
 	if err != nil {
 		subscribed = nil
+		broken = true
 	}
-	return manual, subscribed
+	return manual, subscribed, broken
 }
 
 type RoutingController struct {
@@ -125,8 +134,15 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 	}
 	summaries := make([]*domainGroupSummary, 0, len(groups))
 	for _, group := range groups {
-		manual, subscribed := decodeGroupDomains(group)
+		manual, subscribed, broken := decodeGroupDomains(group)
 		merged := service.MergeDomains(manual, subscribed)
+		effectiveCount := len(merged)
+		if broken {
+			// 数据损坏时 buildRule 会整条丢弃规则，不能让 SubscribedDomains
+			// 那一半仍然完好就把 EffectiveCount 撑成非零——那样列表显示健康，
+			// 引用它的规则却已经从生成的配置里消失了。
+			effectiveCount = 0
+		}
 		preview := merged
 		if len(preview) > domainGroupPreviewLimit {
 			preview = preview[:domainGroupPreviewLimit]
@@ -135,13 +151,14 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 			Id:              group.Id,
 			Remark:          group.Remark,
 			Preview:         preview,
-			EffectiveCount:  len(merged),
+			EffectiveCount:  effectiveCount,
 			ManualCount:     len(manual),
 			SubscribedCount: len(subscribed),
 			SubscribeUrl:    group.SubscribeUrl,
 			LastUpdatedAt:   group.LastUpdatedAt,
 			LastError:       group.LastError,
 			LastSkipped:     group.LastSkipped,
+			Broken:          broken,
 		})
 	}
 	jsonObj(c, summaries, nil)
@@ -160,7 +177,7 @@ func (a *RoutingController) detailDomainGroup(c *gin.Context) {
 		jsonMsg(c, "获取域名组", err)
 		return
 	}
-	manual, subscribed := decodeGroupDomains(group)
+	manual, subscribed, _ := decodeGroupDomains(group)
 	preview := subscribed
 	if len(preview) > subscribedPreviewLimit {
 		preview = preview[:subscribedPreviewLimit]

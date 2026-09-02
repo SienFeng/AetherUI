@@ -2,6 +2,7 @@ package service
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,11 @@ import (
 // 若在这里返回空列表，上游改格式或 URL 失效返回 404 页面时，域名组会被清空，
 // 引用它的规则被 buildRule 跳过，流量静默退回直连。
 func ParseSubscription(raw string) ([]string, int, error) {
+	// 部分订阅源（尤其是 Windows 工具导出的）在文件开头带 UTF-8 BOM，
+	// 不去掉的话它会粘在第一行的规则类型前面，导致该行的 switch/前缀匹配
+	// 全部失配而被当成一条跳过的规则——只丢一行，不易察觉，但仍是数据损失。
+	raw = strings.TrimPrefix(raw, "\uFEFF")
+
 	domains := make([]string, 0, 256)
 	seen := make(map[string]bool, 256)
 	skipped := 0
@@ -120,6 +126,13 @@ func isValidDomain(s string) bool {
 		return false
 	}
 	if strings.ContainsAny(s, " \t/\\:?#@<>\"'()[]{}|,") {
+		return false
+	}
+	// 纯 IP 字面量（如 "1.1.1.1"）满足上面所有检查——含点、无非法字符、
+	// 每个 label 都是合法字符——但作为 xray 的 domain 条件永远匹配不到任何
+	// 流量的 SNI/Host。放过它比拦下它更糟：订阅拉取会「成功」，界面显示一个
+	// 体面的域名条数，规则却是个静默的哑规则。
+	if net.ParseIP(s) != nil {
 		return false
 	}
 	for _, label := range strings.Split(s, ".") {
