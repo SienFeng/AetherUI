@@ -46,6 +46,10 @@
                                     <a-tag color="red">[[ brokenRules.length ]]</a-tag>
                                 </a-tooltip>
                             </a-col>
+                            <a-col :span="6">
+                                订阅异常：
+                                <a-tag :color="subscriptionErrorCount ? 'red' : 'green'">[[ subscriptionErrorCount ]]</a-tag>
+                            </a-col>
                         </a-row>
                     </a-card>
                 </transition>
@@ -62,9 +66,27 @@
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
                                          style="margin-top: 20px">
                                     <template slot="domains" slot-scope="text, group">
-                                        <a-tag v-for="d in group.domains" :key="d">[[ d ]]</a-tag>
+                                        <a-tag v-for="d in group.preview" :key="d">[[ d ]]</a-tag>
+                                        <span v-if="group.effectiveCount > group.preview.length" style="color: #888;">
+                                            +[[ group.effectiveCount - group.preview.length ]]
+                                        </span>
+                                        <span v-if="group.effectiveCount === 0" style="color: #f5222d;">
+                                            空（引用它的规则不会写进配置）
+                                        </span>
+                                    </template>
+                                    <template slot="subscribe" slot-scope="text, group">
+                                        <span v-if="group.subscribeState === 'none'" style="color: #bbb;">—</span>
+                                        <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
+                                            <a-tag color="red">拉取失败</a-tag>
+                                        </a-tooltip>
+                                        <a-tag v-else-if="group.subscribeState === 'pending'" color="orange">等待首次拉取</a-tag>
+                                        <a-tooltip v-else :title="'共 ' + group.subscribedCount + ' 条，已忽略 ' + group.lastSkipped + ' 条非域名规则'">
+                                            <a-tag color="green">[[ relativeTime(group.lastUpdatedAt) ]]</a-tag>
+                                        </a-tooltip>
                                     </template>
                                     <template slot="action" slot-scope="text, group">
+                                        <a-button v-if="group.subscribed" type="link" size="small"
+                                                  @click="refreshGroup(group)">立即更新</a-button>
                                         <a-dropdown :trigger="['click']">
                                             <a @click="e => e.preventDefault()">操作</a>
                                             <a-menu slot="overlay" @click="a => clickGroupAction(a, group)">
@@ -189,9 +211,34 @@
             <a-form-item label="备注">
                 <a-input v-model="groupModal.remark"></a-input>
             </a-form-item>
-            <a-form-item label="域名（一行一条）">
+            <a-form-item label="手工域名（一行一条）">
                 <a-input type="textarea" :rows="8" v-model="groupModal.domains"
-                         placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com"></a-input>
+                         placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com&#10;可留空，只用订阅内容"></a-input>
+            </a-form-item>
+            <a-form-item label="订阅地址">
+                <a-input v-model="groupModal.subscribeUrl"
+                         placeholder="留空表示不订阅，例如 https://example.com/rules.list"></a-input>
+                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                    支持 Surge/Clash 规则集与纯域名列表。IP-CIDR 等非域名规则会被忽略。
+                    保存后由定时任务拉取，或在列表里点「立即更新」。
+                </div>
+            </a-form-item>
+            <a-form-item v-if="groupModal.subscribeUrl" label="订阅内容">
+                <a-alert v-if="groupModal.lastError" type="error" :message="groupModal.lastError" show-icon
+                         style="margin-bottom: 8px;"></a-alert>
+                <a-alert v-else-if="!groupModal.lastUpdatedAt" type="warning" show-icon
+                         message="订阅地址已更改或尚未拉取，等待首次拉取" style="margin-bottom: 8px;"></a-alert>
+                <div v-if="groupModal.subscribedCount">
+                    <div style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                        共 [[ groupModal.subscribedCount ]] 条，已忽略 [[ groupModal.lastSkipped ]] 条非域名规则。
+                        <span v-if="groupModal.subscribedCount > groupModal.subscribedPreview.length">
+                            此处只显示前 [[ groupModal.subscribedPreview.length ]] 条。
+                        </span>
+                    </div>
+                    <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
+                        <a-tag v-for="d in groupModal.subscribedPreview" :key="d">[[ d ]]</a-tag>
+                    </div>
+                </div>
             </a-form-item>
         </a-form>
     </a-modal>
@@ -277,7 +324,8 @@
             groupColumns: [
                 { title: '备注', dataIndex: 'remark', width: 160 },
                 { title: '域名', scopedSlots: { customRender: 'domains' } },
-                { title: '操作', width: 100, scopedSlots: { customRender: 'action' } },
+                { title: '订阅', width: 220, scopedSlots: { customRender: 'subscribe' } },
+                { title: '操作', width: 140, scopedSlots: { customRender: 'action' } },
             ],
             nodeColumns: [
                 { title: '备注', dataIndex: 'remark', width: 160 },
@@ -295,7 +343,10 @@
                 { title: '优先级', dataIndex: 'priority', width: 80 },
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
-            groupModal: { visible: false, id: 0, remark: '', domains: '' },
+            groupModal: {
+                visible: false, id: 0, remark: '', domains: '', subscribeUrl: '',
+                subscribedPreview: [], subscribedCount: 0, lastError: '', lastSkipped: 0, lastUpdatedAt: 0,
+            },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule() },
         },
@@ -311,6 +362,9 @@
                 return this.brokenRules
                     .map(r => (r.remark || ('#' + r.id)) + '：' + this.ruleIssue(r))
                     .join('\n');
+            },
+            subscriptionErrorCount() {
+                return this.groups.filter(g => g.lastError).length;
             },
         },
         methods: {
@@ -349,14 +403,36 @@
                 const i = this.inbounds.find(x => x.id === id);
                 return i ? (i.remark || i.tag) : '(已删除)';
             },
-            openGroup(group) {
+            async openGroup(group) {
                 this.groupModal.id = group ? group.id : 0;
                 this.groupModal.remark = group ? group.remark : '';
-                this.groupModal.domains = group ? group.text : '';
+                this.groupModal.domains = '';
+                this.groupModal.subscribeUrl = '';
+                this.groupModal.subscribedPreview = [];
+                this.groupModal.subscribedCount = 0;
+                this.groupModal.lastError = '';
+                this.groupModal.lastSkipped = 0;
+                this.groupModal.lastUpdatedAt = 0;
+                if (group) {
+                    const msg = await this.post('xui/routing/domain-group/detail/' + group.id);
+                    if (!msg.success) return;
+                    const d = msg.obj;
+                    this.groupModal.domains = d.domains || '';
+                    this.groupModal.subscribeUrl = d.subscribeUrl || '';
+                    this.groupModal.subscribedPreview = d.subscribedPreview || [];
+                    this.groupModal.subscribedCount = d.subscribedCount || 0;
+                    this.groupModal.lastError = d.lastError || '';
+                    this.groupModal.lastSkipped = d.lastSkipped || 0;
+                    this.groupModal.lastUpdatedAt = d.lastUpdatedAt || 0;
+                }
                 this.groupModal.visible = true;
             },
             async saveGroup() {
-                const data = { remark: this.groupModal.remark, domains: this.groupModal.domains };
+                const data = {
+                    remark: this.groupModal.remark,
+                    domains: this.groupModal.domains,
+                    subscribeUrl: this.groupModal.subscribeUrl,
+                };
                 const url = this.groupModal.id
                     ? 'xui/routing/domain-group/update/' + this.groupModal.id
                     : 'xui/routing/domain-group/add';
@@ -463,6 +539,18 @@
                     this.$message.success('解析成功，可在下方核对后保存');
                 }
             },
+            relativeTime(ms) {
+                if (!ms) return '从未';
+                const diff = Date.now() - ms;
+                if (diff < 60000) return '刚刚';
+                if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+                if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+                return Math.floor(diff / 86400000) + ' 天前';
+            },
+            async refreshGroup(group) {
+                const msg = await this.post('xui/routing/domain-group/refresh/' + group.id);
+                if (msg.success) await this.loadAll();
+            },
             groupMissing(id) {
                 return !this.groups.find(x => x.id === id);
             },
@@ -483,7 +571,7 @@
                 if (!rule.enable) return '';
                 const group = this.groups.find(x => x.id === rule.domainGroupId);
                 if (!group) return '域名组已删除，这条规则不会写进配置';
-                if (!group.domains.length) return '域名组为空，这条规则不会写进配置';
+                if (!group.effectiveCount) return '域名组为空，这条规则不会写进配置';
                 if (rule.inboundId) {
                     const inbound = this.inbounds.find(x => x.id === rule.inboundId);
                     if (!inbound) return '入站已删除，这条规则不会写进配置';

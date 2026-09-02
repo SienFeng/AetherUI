@@ -8,25 +8,37 @@ const ACTION_LABEL = {
     block: "阻断",
 };
 
+// 列表接口返回的是摘要：域名组挂上订阅后可能有几万条域名，
+// 全量传给前端既没意义，渲染几万个 tag 还会卡死浏览器。
+// 编辑弹窗需要的手工域名原文由 detail 接口单独取。
 class DomainGroup {
-    constructor(id = 0, remark = "", domains = []) {
-        this.id = id;
-        this.remark = remark;
-        this.domains = domains;
+    constructor(json = {}) {
+        this.id = json.id || 0;
+        this.remark = json.remark || "";
+        this.preview = json.preview || [];
+        this.effectiveCount = json.effectiveCount || 0;
+        this.manualCount = json.manualCount || 0;
+        this.subscribedCount = json.subscribedCount || 0;
+        this.subscribeUrl = json.subscribeUrl || "";
+        this.lastUpdatedAt = json.lastUpdatedAt || 0;
+        this.lastError = json.lastError || "";
+        this.lastSkipped = json.lastSkipped || 0;
     }
 
     static fromJson(json = {}) {
-        let domains = [];
-        try {
-            domains = JSON.parse(json.domains || "[]");
-        } catch (e) {
-            domains = [];
-        }
-        return new DomainGroup(json.id, json.remark, domains);
+        return new DomainGroup(json);
     }
 
-    get text() {
-        return this.domains.join("\n");
+    get subscribed() {
+        return this.subscribeUrl !== "";
+    }
+
+    // 订阅状态：未订阅 / 失败 / 等待首次拉取 / 成功
+    get subscribeState() {
+        if (!this.subscribed) return "none";
+        if (this.lastError) return "error";
+        if (!this.lastUpdatedAt) return "pending";
+        return "ok";
     }
 }
 
