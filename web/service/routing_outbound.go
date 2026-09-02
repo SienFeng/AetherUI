@@ -74,6 +74,9 @@ func (s *OutboundNodeService) allocTag(remark string) (string, error) {
 
 // persist 把解析好的 outbound 写库，并把 tag 强制改写成本表分配的值。
 func (s *OutboundNodeService) persist(ob map[string]any, protocol, remark string) (*model.OutboundNode, error) {
+	if err := ValidateOutbound(ob); err != nil {
+		return nil, err
+	}
 	tag, err := s.allocTag(remark)
 	if err != nil {
 		return nil, err

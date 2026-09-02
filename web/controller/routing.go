@@ -73,6 +73,9 @@ func encodeDomainsFromForm(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := service.ValidateDomains(list); err != nil {
+		return "", err
+	}
 	return service.EncodeDomains(list)
 }
 
