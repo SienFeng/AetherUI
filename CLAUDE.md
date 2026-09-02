@@ -10,7 +10,7 @@ AetherUI（二进制与模块名均为 `a-ui`）是一个基于 Xray-core 的 We
 
 ## 常用命令
 
-本仓库**没有任何测试文件**，也没有 Makefile、lint 配置或前端构建流程。
+没有 Makefile、lint 配置或前端构建流程。测试只有标准 `go test`，集中在 `util/link`、`database`、`web/service` 三个包（其余包仍无测试）。
 
 ```bash
 # 构建（CGO 必须开启：gorm.io/driver/sqlite 依赖 mattn/go-sqlite3）
@@ -68,7 +68,11 @@ go mod tidy && go vet ./...
 
 `Process.Start()` 会把合成结果写到 `bin/config.json` 再 `exec bin/xray-<GOOS>-<GOARCH>`——**全是相对路径**，因此进程的工作目录必须是安装根目录（systemd 单元里的 `WorkingDirectory=/usr/local/a-ui/`）。
 
+合成的最后一步是 `RoutingInjector.Inject(cfg)`，它把出站节点与分流规则追加进 `OutboundConfigs` 与 `RouterConfig`（见「域名分流管理」）。
+
 重启去抖机制：任何改动 inbound 的 controller 调用 `xrayService.SetToNeedRestart()` 置原子标志；`InboundController.startTask()` 注册的 10 秒 cron 用 `IsNeedRestartAndSetFalse()` 消费该标志并调 `RestartXray(false)`；`RestartXray` 再用 `Config.Equals()`（`xray/config.go` 逐字段 `bytes.Equal`）判断配置是否真的变了。所以**新增会影响 xray 配置的字段时，必须同步扩展 `Config.Equals` / `InboundConfig.Equals`**，否则改动不会生效。
+
+对 `OutboundConfigs` / `RouterConfig` 这类 `json_util.RawMessage` 字段则不必改 `Equals`——它们按字节比较，内容变化天然被察觉。代价是**生成必须逐字节确定**，否则 `Equals` 恒为 false，上面那个 10 秒 cron 会不停重启 xray。
 
 ### 定时任务（`web/job/`，均注册在 `Server.startTask`）
 
@@ -102,6 +106,71 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 
 注意 `initI18n` 中的 `localizer` 是**闭包捕获的包外单变量**，被中间件按请求覆写——存在并发竞态，这是既有实现，改动相关代码时留意。
 
+## 域名分流管理
+
+让管理员配置「**哪个用户**访问**哪批域名**时走**哪个落地节点**，或直接黑洞掉」。设计文档在 `docs/superpowers/specs/2026-09-02-domain-routing-design.md`，是本子系统的约束来源，改动前先读它。
+
+### 数据模型（`database/model/routing.go`）
+
+三张表，规则是一条把前两者连起来的连线：
+
+```
+DomainGroup   域名组     Remark + Domains(JSON 字符串数组)
+OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
+RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) + OutboundId + Priority + Enable
+```
+
+**「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
+
+三条不可动摇的字段约定：
+
+- **规则存 `InboundId` 外键，不存 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。
+- **`InboundId = 0` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。
+- **出站 `Tag` 一经分配即不可变**，且不能由自增 Id 拼出（unique 约束要求 INSERT 前就确定，那时 Id 尚未分配）。用 `link.SuggestTag("a-ui", remark, idx)` 生成，重名由调用方追加序号——注意 `SuggestTag` 只在 remark 为空时才用 `idx`，remark 非空时对任何 idx 都返回同一个值。
+
+### xray 会静默接受错误配置——这是本子系统的全部设计动机
+
+以下均由真实 xray 26.7.28 实测确认，不是推断：
+
+| 情形 | xray 的反应 | 实际后果 |
+|---|---|---|
+| 规则引用已删除的**出站** | `Configuration OK` | 运行时静默回落默认出站（**直连**）。以为封禁/分流了，其实裸奔 |
+| 规则的 `domain` 为**空数组** | `Configuration OK` | xray 把缺失条件当作「不限制」，规则从「访问这批域名走 B」**退化成「该用户全部流量走 B」** |
+| 规则引用已删除的**入站** | `Configuration OK` | 规则永不命中（无害） |
+| tag 含中文 | `Configuration OK` | 合法，无需转写 |
+
+因此有**两道防线**，改动本子系统时都不能削弱：
+
+1. **删除时拒绝**——`DomainGroupService.Del` / `OutboundNodeService.Del` 先调 `RoutingRuleService.CheckDomainGroupRefs` / `CheckOutboundRefs`。
+2. **生成期跳过**——`buildRule` 返回 `nil` 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、入站不存在，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**
+
+入站没有引用守卫（管理员可以正常删掉被规则引用的入站），全靠第二道防线兜住。
+
+### 配置注入的四条不变量（`web/service/routing_inject.go`）
+
+1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
+2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。
+3. **绝不输出条件残缺的规则**（见上）。
+4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
+
+黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，而悬空 `outboundTag` 不报错，block 会静默变直连。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。
+
+`buildOutbounds` 返回它**实际写入配置的** id→tag 映射，`buildRules` 必须消费这个映射而不是自己再查一次——否则一个 `Config` 损坏而被跳过的节点，其 tag 仍会被规则引用，形成悬空引用。
+
+### 域名分流依赖 sniffing
+
+路由要靠 xray 嗅探拿到 SNI/Host。入站若关掉 sniffing 或 `destOverride` 不含 `http`/`tls`，**域名规则永远不会命中且无任何报错**。新建入站默认 `enabled=true, destOverride=['http','tls']`（`web/assets/js/model/xray.js` 的 `Sniffing` 类），页面的规则列表会对不满足的入站打黄色警告图标。
+
+### 输入侧校验（`web/service/routing_validate.go`）
+
+出站配置与域名列表在**落库之前**用一份最小配置交给真实 xray 校验，因此不需要事务回滚。两个入口都接了：`OutboundNodeService.persist`（新建）与 `Update`（编辑）——**只堵一条等于没堵**，用户可以先建合法节点再编辑成坏的。
+
+策略是 **fail open**：只有 xray 明确判定配置非法才拒绝；二进制缺失、老版本不认 `run -test` 参数、执行超时，一律放行并记日志。校验是辅助手段，不能因它自身故障就把用户锁在门外。
+
+### `util/link` 包
+
+移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
+
 ## 运维脚本
 
 四个 shell 脚本必须成对维护，改一个就要同步另一个：
@@ -113,8 +182,11 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 
 ## 已知偏差与注意事项
 
-- **README 描述的功能大部分不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 的「变更记录」继承自上游，**判断功能是否存在一律以代码为准**。
+- **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
 - 用户密码在数据库中**明文存储**，登录失败日志还会打印明文用户名密码（`web/controller/index.go`）。这是既有行为，涉及认证的改动请提高审查标准。
-- `go.mod` 声明 `go 1.16`，CI 用 Go 1.22 构建；依赖版本较老（gin 1.7.1、xray-core v1.4.2 仅用于 gRPC stats 客户端，与实际运行的 `bin/xray-*` 版本无关）。
+- `go.mod` 声明 `go 1.21`（`util/link` 用到 `any` 与 `maps.Copy`），CI 用 Go 1.22 构建；依赖版本较老（gin 1.7.1、xray-core v1.4.2 仅用于 gRPC stats 客户端，与实际运行的 `bin/xray-*` 版本无关）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
 - `util/sys/psutil.go` 用 `//go:linkname` 侵入 gopsutil 内部包，升级 gopsutil 时会断。
+- **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题——需要自己 `ParseFS` 一遍让错误暴露出来。
+- **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
+- **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
