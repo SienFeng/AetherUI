@@ -421,3 +421,120 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildRuleMergesManualAndSubscribedDomains(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark:            "国内",
+		Domains:           `["domain:my-nas.local"]`,
+		SubscribedDomains: `["domain:qq.com","domain:163.com"]`,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	rules := decodeRules(t, cfg)
+	last := rules[len(rules)-1]
+	domains, ok := last["domain"].([]any)
+	if !ok {
+		t.Fatalf("domain is not an array: %#v", last["domain"])
+	}
+	want := []string{"domain:my-nas.local", "domain:qq.com", "domain:163.com"}
+	if len(domains) != len(want) {
+		t.Fatalf("len = %d, want %d: %v", len(domains), len(want), domains)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Errorf("domain[%d] = %v, want %q (手工在前、订阅在后)", i, domains[i], want[i])
+		}
+	}
+}
+
+func TestBuildRuleWorksWithOnlySubscribedDomains(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "纯订阅", Domains: "[]", SubscribedDomains: `["domain:qq.com"]`,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 2 {
+		t.Fatalf("规则应当生成: %v", rules)
+	}
+}
+
+// 只有订阅、而订阅从未成功拉取过的组，合并结果为空，规则必须整条跳过。
+func TestBuildRuleSkipsWhenBothSourcesEmpty(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "空", Domains: "[]", SubscribedDomains: "",
+		SubscribeUrl: "http://example.com/list",
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 1 {
+		t.Errorf("模板里那条 api 规则之外不应有别的: %v", rules)
+	}
+}
+
+// 生成必须逐字节确定，否则 Config.Equals 恒为 false，
+// 每 10 秒的重启 cron 会不停重启 xray。
+func TestInjectIsByteDeterministicWithSubscribedDomains(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark:            "国内",
+		Domains:           `["domain:b.com","domain:a.com"]`,
+		SubscribedDomains: `["domain:d.com","domain:c.com","domain:a.com"]`,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	first := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(first); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		again := newTemplateConfig(t)
+		if err := (&RoutingInjector{}).Inject(again); err != nil {
+			t.Fatalf("Inject %d: %v", i, err)
+		}
+		if string(again.RouterConfig) != string(first.RouterConfig) {
+			t.Fatalf("run %d differs:\n%s\n%s", i, first.RouterConfig, again.RouterConfig)
+		}
+	}
+}

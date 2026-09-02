@@ -165,6 +165,9 @@ func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []a
 //
 // 绝不能退而求其次生成一条缺少 domain 的规则：xray 把缺失的条件视为
 // 「不限制」，那样的规则会劫持该入站的全部流量，且不会有任何报错。
+//
+// 域名来自两个来源的合并：手工录入（Domains 字段）与订阅更新（SubscribedDomains 字段）。
+// 合并顺序确定（手工在前、订阅在后、保留首次出现），是「生成逐字节确定」不变量的一部分。
 func (s *RoutingInjector) buildRule(
 	rule *model.RoutingRule,
 	inboundTagById map[int]string,
@@ -174,10 +177,17 @@ func (s *RoutingInjector) buildRule(
 	if err != nil {
 		return nil, false, common.NewError("域名组不存在, id:", rule.DomainGroupId)
 	}
-	domains, err := DecodeDomains(group.Domains)
+	manual, err := DecodeDomains(group.Domains)
 	if err != nil {
 		return nil, false, common.NewError("域名组数据损坏, id:", rule.DomainGroupId, "err:", err)
 	}
+	subscribed, err := DecodeSubscribedDomains(group.SubscribedDomains)
+	if err != nil {
+		return nil, false, common.NewError("域名组订阅数据损坏, id:", rule.DomainGroupId, "err:", err)
+	}
+	// 合并顺序确定（手工在前、订阅在后、保留首次出现），
+	// 这是「生成逐字节确定」不变量的一部分。
+	domains := MergeDomains(manual, subscribed)
 	if len(domains) == 0 {
 		return nil, false, common.NewError("域名组为空, id:", rule.DomainGroupId,
 			"（域名条件为空会让规则退化成劫持该入站全部流量）")
