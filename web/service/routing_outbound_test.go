@@ -149,3 +149,43 @@ func TestUpdateKeepsTagWhenConfigEdited(t *testing.T) {
 			first["address"])
 	}
 }
+
+func TestUpdateRejectsInvalidOutboundConfig(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	s := OutboundNodeService{}
+
+	node, err := s.AddFromLink("socks5://1.2.3.4:1080", "hk")
+	if err != nil {
+		t.Fatalf("AddFromLink: %v", err)
+	}
+	original := node.Config
+
+	// 模拟用户在 JSON 高级模式里把一个已存在的节点编辑成 xray 不接受的配置。
+	// 必须在落库前被拒，否则整份 xray 配置会变成非法配置，xray 起不来，
+	// 所有用户一起断网。
+	bad := `{"protocol":"definitely-not-a-protocol","settings":{}}`
+	if err := s.Update(&model.OutboundNode{
+		Id: node.Id, Remark: "hk", Enable: true, Config: bad,
+	}); err == nil {
+		t.Fatal("Update accepted an invalid outbound config; it must be rejected before the write")
+	}
+
+	// 被拒之后，库里必须还是原来那份配置
+	reloaded, err := s.Get(node.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reloaded.Config != original {
+		t.Errorf("stored config changed despite the rejection:\n  got  %s\n  want %s",
+			reloaded.Config, original)
+	}
+
+	// 反向确认：合法的编辑仍然能通过，否则本测试可能只是因为 Update 恒失败而通过
+	good := `{"protocol":"socks","settings":{"servers":[{"address":"9.9.9.9","port":1080}]}}`
+	if err := s.Update(&model.OutboundNode{
+		Id: node.Id, Remark: "hk", Enable: true, Config: good,
+	}); err != nil {
+		t.Fatalf("Update rejected a valid config: %v", err)
+	}
+}

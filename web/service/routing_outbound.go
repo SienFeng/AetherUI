@@ -139,6 +139,11 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 			return common.NewError("outbound JSON 格式错误:", err)
 		}
 		ob["tag"] = old.Tag
+		// 编辑路径与新增路径一样要过真实 xray 校验：否则用户可以先建一个
+		// 合法节点、再把它编辑成坏配置，同样会让整份配置作废、全员断网。
+		if err := ValidateOutbound(ob); err != nil {
+			return err
+		}
 		encoded, err := json.Marshal(ob)
 		if err != nil {
 			return err

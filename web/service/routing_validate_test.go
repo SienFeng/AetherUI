@@ -9,12 +9,14 @@ import (
 	"a-ui/xray"
 )
 
-// xray.GetBinaryPath() 等函数返回的是相对路径（"bin/xray-..."），约定调用方的
-// 工作目录是仓库根目录——面板进程实际就是这样启动的。而 `go test` 默认把
-// 工作目录设为被测包所在目录（web/service），不是仓库根目录，会导致这里的
-// 二进制探测和下面 runXrayTest 里的探测都定位不到 bin/ 下已经存在的二进制，
-// 从而让本该真正执行的校验测试全部误判为「本机无二进制」而跳过。
-// 这里把工作目录切到仓库根目录，让测试环境与生产运行时的假设保持一致。
+// TestMain 把工作目录切到仓库根，因为 xray.GetBinaryPath() 返回的是相对路径
+// bin/xray-<GOOS>-<GOARCH>，而 go test 的默认工作目录是包目录，解析不到该文件，
+// 会让所有需要真实 xray 的测试静默 SKIP。切到仓库根也与生产环境一致——
+// systemd 单元里 WorkingDirectory=/usr/local/a-ui/，面板运行时 cwd 即安装根目录。
+//
+// 注意这是进程级副作用，影响本包所有测试：若今后在 web/service 下新增依赖
+// 包内相对路径（如 testdata/）的测试，请改用 t.TempDir() 或绝对路径，
+// 否则路径会相对仓库根解析。
 func TestMain(m *testing.M) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if ok {
