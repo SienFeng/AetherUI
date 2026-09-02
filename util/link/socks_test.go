@@ -2,6 +2,7 @@ package link
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -83,8 +84,15 @@ func TestParseSocksDefaultPort(t *testing.T) {
 }
 
 func TestParseSocksRejectsEmptyHost(t *testing.T) {
-	if _, err := ParseLink("socks5://"); err == nil {
-		t.Error("expected error for empty body")
+	_, err := ParseLink("socks5://")
+	if err == nil {
+		t.Fatal("expected error for empty body")
+	}
+	// Assert error comes from parseSocks itself, not from ParseLink's default case
+	// (which would return "unsupported link scheme") — otherwise this test would
+	// pass even before socks handling was wired up.
+	if !strings.Contains(err.Error(), "socks:") {
+		t.Errorf("error = %q, want an error from parseSocks (prefixed \"socks:\")", err)
 	}
 }
 
