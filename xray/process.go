@@ -248,10 +248,24 @@ func (p *process) GetTraffic(reset bool) ([]*Traffic, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseTraffics(resp.GetStat()), nil
+}
+
+// parseTraffics 把 xray 的 stats 条目按 tag 聚合成流量，无法识别的条目一律跳过。
+//
+// xray 返回的条目不止 inbound/outbound 两类：policy 开启用户级统计时会产生
+// user>>>xxx>>>traffic>>>uplink，与 x-ui 等同源面板共用同一个 api 端口时，读到的
+// 统计里同样会混入这类条目。trafficRegex 不匹配时 FindStringSubmatch 返回 nil，
+// 直接取下标会 panic；而本函数经 XrayTrafficJob 跑在 cron 里，cron 未配 Recover，
+// 一次 panic 就会带走整个面板进程。
+func parseTraffics(stats []*statsservice.Stat) []*Traffic {
 	tagTrafficMap := map[string]*Traffic{}
 	traffics := make([]*Traffic, 0)
-	for _, stat := range resp.GetStat() {
+	for _, stat := range stats {
 		matchs := trafficRegex.FindStringSubmatch(stat.Name)
+		if len(matchs) < 4 {
+			continue
+		}
 		isInbound := matchs[1] == "inbound"
 		tag := matchs[2]
 		isDown := matchs[3] == "downlink"
@@ -274,5 +288,5 @@ func (p *process) GetTraffic(reset bool) ([]*Traffic, error) {
 		}
 	}
 
-	return traffics, nil
+	return traffics
 }

@@ -341,7 +341,10 @@ func (s *Server) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	s.cron = cron.New(cron.WithLocation(loc), cron.WithSeconds())
+	// robfig/cron 自身不做 panic 恢复，任何一个定时任务 panic 都会直接带走整个
+	// 面板进程——实测过一次：XrayTrafficJob 解析流量时越界，面板启动 25 秒后静默
+	// 退出，systemd 只报 status=2。Recover 把 panic 限制在单次任务执行内。
+	s.cron = cron.New(cron.WithLocation(loc), cron.WithSeconds(), cron.WithChain(cron.Recover(cronLogger{})))
 	s.cron.Start()
 
 	engine, err := s.initRouter()
@@ -438,6 +441,18 @@ func (s *Server) Stop() error {
 
 func (s *Server) GetCtx() context.Context {
 	return s.ctx
+}
+
+// cronLogger 把 robfig/cron 的日志接进面板日志。cron.Recover 捕获到 panic 时
+// 只会调用 Error，带上完整堆栈。
+type cronLogger struct{}
+
+func (cronLogger) Info(msg string, keysAndValues ...interface{}) {
+	logger.Debug(append([]interface{}{"cron:", msg}, keysAndValues...)...)
+}
+
+func (cronLogger) Error(err error, msg string, keysAndValues ...interface{}) {
+	logger.Error(append([]interface{}{"cron:", msg, err}, keysAndValues...)...)
 }
 
 func (s *Server) GetCron() *cron.Cron {
