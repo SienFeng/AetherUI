@@ -32,6 +32,7 @@ func (j *AccessLogCollectJob) Run() {
 type AccessLogCleanupJob struct {
 	accessLogService service.AccessLogService
 	settingService   service.SettingService
+	banService       service.IPBanService
 }
 
 func NewAccessLogCleanupJob() *AccessLogCleanupJob {
@@ -58,5 +59,14 @@ func (j *AccessLogCleanupJob) Run() {
 		logger.Warning("清理孤儿访问日志失败:", err)
 	} else if pruned > 0 {
 		logger.Warningf("清理了 %v 条已删除入站遗留的访问日志", pruned)
+	}
+
+	// 过期封禁只是不再生效，行还留在库里。判定路径每秒都会走到，不适合顺手
+	// 做 DELETE 去抢主库写锁，因此挪到这个每小时一次的任务里清。
+	expired, err := j.banService.PruneExpired(time.Now())
+	if err != nil {
+		logger.Warning("清理过期封禁失败:", err)
+	} else if expired > 0 {
+		logger.Debugf("清理了 %v 条过期封禁", expired)
 	}
 }

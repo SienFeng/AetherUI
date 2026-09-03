@@ -207,7 +207,7 @@ func TestConcurrencyLimitedInboundsOnlyReturnsEnabledOnesWithLimit(t *testing.T)
 	mk(30003, 5, false) // 已停用，xray 里根本没这个入站
 
 	s := ConcurrencyService{}
-	got, err := s.limitedInbounds()
+	got, err := s.limitedInbounds(time.Now())
 	if err != nil {
 		t.Fatalf("limitedInbounds: %v", err)
 	}

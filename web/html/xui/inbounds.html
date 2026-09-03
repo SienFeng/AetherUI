@@ -92,6 +92,10 @@
                                             </template>
                                             <a-tag color="orange">闲置</a-tag>
                                         </a-tooltip>
+                                        <a-tooltip v-if="online.banned">
+                                            <template slot="title">[[ banDesc(online) ]]</template>
+                                            <a-tag color="red">已封禁</a-tag>
+                                        </a-tooltip>
                                     </template>
                                     <template slot="location" slot-scope="text, online">
                                         <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>
@@ -114,6 +118,8 @@
                                         <a-button v-if="online.conns > 0" type="link" size="small"
                                                   style="color: #FF4D4F"
                                                   @click="kickOnline(dbInbound, online)">踢下线</a-button>
+                                        <a-button v-if="online.banned" type="link" size="small"
+                                                  @click="unbanOnline(dbInbound, online)">解除封禁</a-button>
                                         <a-button type="link" size="small"
                                                   @click="showAccessLog(dbInbound, online.ip)">访问日志</a-button>
                                     </template>
@@ -336,6 +342,8 @@
             expandedKeys: [],
             onlines: {},
             onlineTimer: null,
+            // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
+            kickBanSeconds: 0,
         },
         methods: {
             loading(spinning=true) {
@@ -552,19 +560,60 @@
                 accessLogModal.show({ dbInbound: dbInbound, ip: ip });
             },
             kickOnline(dbInbound, online) {
+                // 只断开的话客户端下一秒就能重连，并发额度判定每轮重算、额度够了照样放行。
+                // 所以这里让管理员选一个封禁时长，0 保留原来的「只断开」行为。
+                this.kickBanSeconds = 0;
                 this.$confirm({
-                    title: '踢下线',
-                    content: `确定要断开 ${online.ip} 在该入站上的全部连接吗？这只断开当前连接，客户端通常会立即重连。`,
-                    okText: '踢下线',
+                    title: `踢下线 - ${online.ip}`,
+                    okText: '确定',
                     cancelText: '取消',
+                    content: (h) => h('div', [
+                        h('p', '选择封禁时长。封禁期内该来源每一轮都会被断开，且不占用并发额度。'),
+                        // 用非受控的 defaultValue：$confirm 的 content 只渲染一次，
+                        // 传受控 value 的话点了选不上（组件拿不到更新后的值）。
+                        h('a-radio-group', {
+                            props: { defaultValue: 0 },
+                            on: { change: (e) => { this.kickBanSeconds = e.target.value; } },
+                        }, [
+                            h('a-radio', { props: { value: 0 }, style: { display: 'block', lineHeight: '30px' } }, '仅断开（客户端可立即重连）'),
+                            h('a-radio', { props: { value: 300 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 5 分钟'),
+                            h('a-radio', { props: { value: 1800 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 30 分钟'),
+                            h('a-radio', { props: { value: 3600 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 1 小时'),
+                            h('a-radio', { props: { value: 86400 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 24 小时'),
+                            h('a-radio', { props: { value: -1 }, style: { display: 'block', lineHeight: '30px' } }, '永久封禁（需手动解除）'),
+                        ]),
+                    ]),
                     onOk: async () => {
-                        const msg = await HttpUtil.post(`/xui/inbound/kick/${dbInbound.id}`, { ip: online.ip });
+                        const banSeconds = this.kickBanSeconds;
+                        const msg = await HttpUtil.post(`/xui/inbound/kick/${dbInbound.id}`,
+                            { ip: online.ip, banSeconds: banSeconds });
                         if (msg.success) {
-                            this.$message.success(`已断开 ${msg.obj} 条连接`);
+                            const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
+                            this.$message.success(`已断开 ${msg.obj} 条连接${suffix}`);
                             await this.loadOnlines(dbInbound.id);
                         }
                     },
                 });
+            },
+            unbanOnline(dbInbound, online) {
+                this.$confirm({
+                    title: '解除封禁',
+                    content: `确定解除对 ${online.ip} 的封禁吗？解除后它可以立即重新连接。`,
+                    okText: '解除',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        const msg = await HttpUtil.post(`/xui/inbound/unban/${dbInbound.id}`, { ip: online.ip });
+                        if (msg.success) {
+                            this.$message.success('已解除封禁');
+                            await this.loadOnlines(dbInbound.id);
+                        }
+                    },
+                });
+            },
+            banDesc(online) {
+                if (!online.banned) return '';
+                if (!online.banExpiresAt) return '永久封禁，需手动解除';
+                return '封禁至 ' + DateUtil.formatMillis(online.banExpiresAt);
             },
             async submit(url, data, modal) {
                 const msg = await HttpUtil.postWithModal(url, data, modal);

@@ -49,6 +49,12 @@ type OnlineIP struct {
 	// 只要不退出就一直是 ESTABLISHED，不判闲置的话一个挂着不用的客户端会
 	// 永久占着名额。
 	Idle bool `json:"idle"`
+	// Banned 为 true 表示该 IP 处于封禁期内，连接每轮都会被断开。
+	// 与 Blocked 的区别：Blocked 是并发额度算出来的、额度一腾出来就消失；
+	// Banned 是管理员显式设的，到期或手动解封才结束。
+	Banned bool `json:"banned"`
+	// BanExpiresAt 是封禁到期时间（毫秒），0 且 Banned 为 true 表示永久封禁。
+	BanExpiresAt int64 `json:"banExpiresAt"`
 	// Blocked 为 true 表示该 IP 当前超出并发额度、正被拒绝。
 	Blocked bool `json:"blocked"`
 	// RejectedAt 是最近一次被判超额的时间（毫秒），0 表示从未被拒。
@@ -330,6 +336,7 @@ type OnlineService struct {
 	inboundService InboundService
 	ipdbService    IPDBService
 	settingService SettingService
+	banService     IPBanService
 }
 
 func formatLocation(loc ipdb.Location) string {
@@ -468,16 +475,50 @@ func (s *OnlineService) GetOnlines(inboundId int) (*OnlineResult, error) {
 	if err := s.sample(); err != nil {
 		return nil, err
 	}
-	return &OnlineResult{
-		Supported: true,
-		List:      onlineTrackerInstance.snapshotIdle(inbound.Port, s.locate, idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())),
-	}, nil
+	list := onlineTrackerInstance.snapshotIdle(inbound.Port, s.locate,
+		idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout()))
+	// 封禁标记必须在这里补：被封的 IP 连接已经断干净，连接表里查不到它，
+	// 不补的话管理员在界面上看不到自己封了谁，也就无从解封。
+	bans, err := s.banService.ActiveBans(inbound.Id, time.Now())
+	if err != nil {
+		logger.Warning("读取封禁名单失败, 入站", inbound.Id, ":", err)
+	} else if len(bans) > 0 {
+		list = markBanned(list, bannedIPSet(bans))
+	}
+	return &OnlineResult{Supported: true, List: list}, nil
+}
+
+// KickAndBan 断开连接并按 banSeconds 封禁该来源。
+//
+// banSeconds == 0 时行为与 Kick 完全一致（只断当前连接，客户端下一秒就能
+// 重连）；> 0 封禁指定秒数；< 0 永久封禁。
+//
+// 先写封禁再断连接：反过来的话，两步之间客户端重连进来的那一瞬间是不设防的。
+func (s *OnlineService) KickAndBan(inboundId int, ipStr string, banSeconds int) (int, error) {
+	if banSeconds != 0 {
+		if net.ParseIP(ipStr) == nil {
+			return 0, common.NewError("IP 格式不正确:", ipStr)
+		}
+		duration := time.Duration(banSeconds) * time.Second
+		if banSeconds < 0 {
+			duration = 0 // 0 表示永久
+		}
+		if err := s.banService.Ban(inboundId, ipStr, duration, time.Now()); err != nil {
+			return 0, err
+		}
+	}
+	return s.Kick(inboundId, ipStr)
+}
+
+// Unban 解除封禁。
+func (s *OnlineService) Unban(inboundId int, ipStr string) error {
+	return s.banService.Unban(inboundId, ipStr)
 }
 
 // Kick 断开某入站上指定来源 IP 的全部 TCP 连接，返回实际断开的连接数。
 //
-// 注意它只是"断开当前连接"：客户端通常会立刻重连。真正的封禁属于并发限制
-// 子项目（运行时下发 xray 路由规则），这里不做。
+// 它只"断开当前连接"，不改变任何状态：并发额度判定每轮重算，客户端下一秒
+// 重连、额度够了就照样放行。要让踢下线真正留下效果，用 KickAndBan。
 func (s *OnlineService) Kick(inboundId int, ipStr string) (int, error) {
 	inbound, err := s.inboundService.GetInbound(inboundId)
 	if err != nil {

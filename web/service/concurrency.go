@@ -56,14 +56,20 @@ type ConcurrencyService struct {
 	inboundService InboundService
 	onlineService  OnlineService
 	settingService SettingService
+	banService     IPBanService
 }
 
 // limitedInbounds 返回真正需要做并发判定的入站：设了额度且处于启用状态。
 // 停用的入站根本不在 xray 配置里，没有连接可管。
-func (s *ConcurrencyService) limitedInbounds() ([]*model.Inbound, error) {
+func (s *ConcurrencyService) limitedInbounds(now time.Time) ([]*model.Inbound, error) {
 	var inbounds []*model.Inbound
+	// 有封禁的入站也要进判定，否则没设并发额度的入站上封禁永远不会被执行。
+	banned := database.GetDB().Model(&model.IPBan{}).
+		Select("inbound_id").
+		Where("expires_at = 0 or expires_at > ?", now.UnixMilli())
 	err := database.GetDB().Model(model.Inbound{}).
-		Where("concurrency_limit > 0 and enable = ?", true).
+		Where("enable = ?", true).
+		Where("concurrency_limit > 0 or id in (?)", banned).
 		Order("id asc").
 		Find(&inbounds).Error
 	if err != nil {
@@ -72,17 +78,41 @@ func (s *ConcurrencyService) limitedInbounds() ([]*model.Inbound, error) {
 	return inbounds, nil
 }
 
+// markBanned 给列表打上封禁标记，并把连接已经被断干净、因而不在连接表里的
+// 封禁来源补进来——不补的话管理员在界面上根本看不到自己封了谁，也就无从解封。
+func markBanned(list []OnlineIP, banned map[string]*model.IPBan) []OnlineIP {
+	seen := make(map[string]bool, len(list))
+	for i := range list {
+		seen[list[i].IP] = true
+		if b, ok := banned[list[i].IP]; ok {
+			list[i].Banned = true
+			list[i].BanExpiresAt = b.ExpiresAt
+		}
+	}
+	for ip, b := range banned {
+		if seen[ip] {
+			continue
+		}
+		list = append(list, OnlineIP{IP: ip, Banned: true, BanExpiresAt: b.ExpiresAt})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return bytes.Compare(net.ParseIP(list[i].IP).To16(), net.ParseIP(list[j].IP).To16()) < 0
+	})
+	return list
+}
+
 // Enforce 跑一轮并发判定。
 //
 // 它是**幂等收敛**的：每轮重新计算超额集合并对其执行断开，不依赖任何
 // 跳变事件。因此漏掉一轮、面板重启、客户端重连都不会让状态跑偏。
 func (s *ConcurrencyService) Enforce() error {
-	inbounds, err := s.limitedInbounds()
+	now := time.Now()
+	inbounds, err := s.limitedInbounds(now)
 	if err != nil {
 		return err
 	}
 	if len(inbounds) == 0 {
-		// 没人设额度就一次系统调用都不做，空转成本为零。
+		// 没人设额度、也没有封禁，就一次系统调用都不做，空转成本为零。
 		return nil
 	}
 	if !netdiag.Supported {
@@ -96,14 +126,44 @@ func (s *ConcurrencyService) Enforce() error {
 	// 得慢，也不要因为读配置失败就把所有人都当成闲置、并发限制整个失效。
 	idleAfter := idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())
 
-	now := time.Now()
 	for _, inbound := range inbounds {
 		list := onlineTrackerInstance.snapshotIdle(inbound.Port, noLocate, idleAfter)
+
+		// 封禁先于额度判定执行：被封的连接每轮都要断，而且断完之后它腾出来的
+		// 名额应当让给别人，所以它不能参与额度计算（liveOnly 已排除 Banned）。
+		bans, err := s.banService.ActiveBans(inbound.Id, now)
+		if err != nil {
+			logger.Warning("读取封禁名单失败, 入站", inbound.Id, ":", err)
+		} else if len(bans) > 0 {
+			list = markBanned(list, bannedIPSet(bans))
+			s.disconnectBanned(inbound, list)
+		}
+
 		over := planRejections(list, inbound.ConcurrencyLimit)
 		onlineTrackerInstance.setRejected(inbound.Port, over, now)
 		s.disconnect(inbound, over)
 	}
 	return nil
+}
+
+// disconnectBanned 断开封禁名单里仍有连接的来源。
+//
+// 没有连接的封禁来源直接跳过：Kick 会重新 dump 一次连接表，为一个早就断干净
+// 的 IP 每秒来一趟内核调用没有意义。
+func (s *ConcurrencyService) disconnectBanned(inbound *model.Inbound, list []OnlineIP) {
+	for _, e := range list {
+		if !e.Banned || e.Conns == 0 {
+			continue
+		}
+		killed, err := s.onlineService.Kick(inbound.Id, e.IP)
+		if err != nil {
+			logger.Warning("封禁断开失败, 入站", inbound.Id, "IP", e.IP, ":", err)
+			continue
+		}
+		if killed > 0 {
+			logger.Warning("封禁生效: 入站", inbound.Id, "IP", e.IP, "断开", killed, "条连接")
+		}
+	}
 }
 
 // noLocate 用于判定路径：这里不需要归属地，省掉每轮的查库开销。
@@ -124,10 +184,13 @@ func planRejections(list []OnlineIP, limit int) []string {
 //
 // 闲置来源被排除在外，两个方向都成立：它不占别人的额度，自己也不会被判超额
 // 而遭断开——断一个只是暂时没有流量的正常用户毫无意义。
+//
+// 被封禁的来源同样排除：它的连接每轮都会被断开，让它占着名额等于把额度
+// 白白吃掉。
 func liveOnly(list []OnlineIP) []OnlineIP {
 	live := make([]OnlineIP, 0, len(list))
 	for _, e := range list {
-		if e.Conns > 0 && !e.Idle {
+		if e.Conns > 0 && !e.Idle && !e.Banned {
 			live = append(live, e)
 		}
 	}

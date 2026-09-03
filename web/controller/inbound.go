@@ -36,6 +36,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/renew/:id", a.renewInbound)
 	g.POST("/onlines/:id", a.getOnlines)
 	g.POST("/kick/:id", a.kick)
+	g.POST("/unban/:id", a.unban)
 	g.POST("/accessLogs/:id", a.getAccessLogs)
 	g.POST("/provinces", a.getProvinces)
 }
@@ -161,19 +162,41 @@ func (a *InboundController) kick(c *gin.Context) {
 		return
 	}
 	// 同续期接口：前端 axios 拦截器发的是 urlencoded，必须用 form 标签。
+	// banSeconds：0 只断开当前连接，> 0 封禁该秒数，< 0 永久封禁。
 	form := struct {
-		IP string `form:"ip"`
+		IP         string `form:"ip"`
+		BanSeconds int    `form:"banSeconds"`
 	}{}
 	if err := c.ShouldBind(&form); err != nil {
 		jsonMsg(c, "踢下线", err)
 		return
 	}
-	killed, err := a.onlineService.Kick(id, form.IP)
+	killed, err := a.onlineService.KickAndBan(id, form.IP, form.BanSeconds)
 	if err != nil {
 		jsonMsg(c, "踢下线", err)
 		return
 	}
 	jsonObj(c, killed, nil)
+}
+
+func (a *InboundController) unban(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "解除封禁", err)
+		return
+	}
+	form := struct {
+		IP string `form:"ip"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "解除封禁", err)
+		return
+	}
+	if err := a.onlineService.Unban(id, form.IP); err != nil {
+		jsonMsg(c, "解除封禁", err)
+		return
+	}
+	jsonMsg(c, "解除封禁", nil)
 }
 
 func (a *InboundController) getAccessLogs(c *gin.Context) {
