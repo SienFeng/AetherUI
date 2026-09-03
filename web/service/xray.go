@@ -118,8 +118,11 @@ func (s *XrayService) RestartXray(isForce bool) error {
 		// 配置确实变了，但改动可能全都落在核心支持运行时重载的部分。
 		// 能热应用就不重启——重启会掐断所有人的连接，而绝大多数改动
 		// （加减分流规则、增删入站）本来不需要付这个代价。
+		//
+		// 成功时的日志由 tryHotApply 自己打：diff 为空（只有格式差异）与
+		// 真的发了 RPC 是两码事，混在一句「已通过控制面热应用」里会让
+		// 「明明什么都没改却说下发了」的日志误导排查。
 		if !isForce && s.tryHotApply(p, xrayConfig) {
-			logger.Info("xray 配置改动已通过控制面热应用，无需重启")
 			return nil
 		}
 		p.Stop()
@@ -143,8 +146,10 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 	}
 	if diff.Empty() {
 		// 配置只有格式差异（空白、key 顺序）。同步快照即可，否则下一轮
-		// cron 还会认为配置不同，白重启一次。
+		// cron 还会认为配置不同，白重启一次。没有任何 RPC 发生，措辞上
+		// 不能说成「已下发」。
 		process.SetConfig(newCfg)
+		logger.Info("xray 配置无实质变化，无需下发到控制面")
 		return true
 	}
 
@@ -176,6 +181,16 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 			return false
 		}
 	}
+	// 出站先删后加：xray 的 AddHandler 对已存在的 tag 会报 existing tag
+	// found，先加后删无法处理「编辑一个出站」这种同 tag 换内容的场景。
+	// 代价是编辑出站会有一个窗口——DelOutbound 与 AddOutbound 之间——引用
+	// 该 tag 的规则在核心里悬空；CLAUDE.md「xray 会静默接受错误配置」一节
+	// 记载的实测结论是，xray 对悬空 outboundTag 不报错，运行时静默回落
+	// 默认出站（直连）。这里刻意不做任何补偿（比如换个临时 tag 分两步搬）：
+	// 正常情况窗口只有一次回环 RPC（毫秒级），若 AddOutbound 失败，窗口会
+	// 拉长到退回重启完成（1~2 秒），但那已经在失败路径上——任何补偿逻辑
+	// 都是在增加新的失败面，与本子系统「失败即退回重启，不做部分回滚」的
+	// 设计原则冲突。
 	for _, tag := range diff.RemovedOutboundTags {
 		if err := api.DelOutbound(tag); err != nil {
 			logger.Debug("热应用：删除出站 [", tag, "] 失败，退回重启:", err)
@@ -196,6 +211,7 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 	}
 
 	process.SetConfig(newCfg)
+	logger.Info("xray 配置改动已通过控制面下发，无需重启")
 	return true
 }
 
