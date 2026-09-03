@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -76,11 +77,29 @@ func TestEnsureRoutingServiceInTemplate(t *testing.T) {
 	}
 }
 
-// 迁移只能碰 api.services，管理员在模板里写的别的东西一个字节都不能动。
+// 迁移只能碰 api.services，管理员在模板里写的别的东西必须逐字节透传。
+//
+// 断言刻意不走 JSON 归一化：若把两边都 unmarshal 成 map[string]any 再比较，
+// 一个「整份模板 map[string]any 往返」的坏实现也能通过——那种实现丢掉的恰恰
+// 是本设计要保住的字节保真。所以这里直接在输出文本里找原始字节。
+//
+// 两个值的字面量刻意写成键序非字母序，且**不含任何多余空白**：
+// encoding/json.Marshal 对任何实现了 MarshalJSON 的值（json.RawMessage 也
+// 不例外）都会在写出前跑一遍 compact()，插入的空白一律会被压掉——这一步
+// 与走不走 map[string]json.RawMessage 无关，两种实现都逃不掉，因此空白
+// 差异守不住任何东西（曾用带空白的字面量试过：即使是本文件里正确的
+// map[string]json.RawMessage 实现也会被判定为「改动了」，见 fix report 的
+// 验证记录）。真正只有 RawMessage 透传才保得住、map[string]any 往返保不住
+// 的，是嵌套对象内部的键序——map[string]any 在重新序列化时会把每一层的
+// map key 按字母序重排，RawMessage 因为把子树当不透明字节块搬运，键序
+// 原样不动。所以这里选的键序本身就不是字母序（handshake < statsUserUplink，
+// protocol < tag），一旦被按字母序重排，子串匹配就会失败。
 func TestEnsureRoutingServiceLeavesOtherKeysAlone(t *testing.T) {
+	policyValue := `{"levels":{"0":{"statsUserUplink":true,"handshake":10}}}`
+	outboundsValue := `[{"tag":"direct","protocol":"freedom"}]`
 	in := `{"api":{"services":["HandlerService"],"tag":"api"},` +
-		`"policy":{"levels":{"0":{"handshake":10}}},` +
-		`"outbounds":[{"protocol":"freedom","tag":"direct"}]}`
+		`"policy":` + policyValue + `,` +
+		`"outbounds":` + outboundsValue + `}`
 
 	out, changed, err := ensureRoutingServiceInTemplate(in)
 	if err != nil {
@@ -90,20 +109,15 @@ func TestEnsureRoutingServiceLeavesOtherKeysAlone(t *testing.T) {
 		t.Fatal("期望发生改动")
 	}
 
-	var got, want map[string]any
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("输出不是合法 JSON: %v", err)
+	if !strings.Contains(out, policyValue) {
+		t.Fatalf("policy 的原始字节未被保留\n输出: %s\n期望包含: %s", out, policyValue)
 	}
-	if err := json.Unmarshal([]byte(in), &want); err != nil {
-		t.Fatalf("输入不是合法 JSON: %v", err)
+	if !strings.Contains(out, outboundsValue) {
+		t.Fatalf("outbounds 的原始字节未被保留\n输出: %s\n期望包含: %s", out, outboundsValue)
 	}
-	// 把 api 摘掉后，其余部分必须逐键相等。
-	delete(got, "api")
-	delete(want, "api")
-	gotJSON, _ := json.Marshal(got)
-	wantJSON, _ := json.Marshal(want)
-	if string(gotJSON) != string(wantJSON) {
-		t.Fatalf("api 之外的内容被改动了\n实际: %s\n期望: %s", gotJSON, wantJSON)
+	// api 本身必须确实被改过，否则一个「什么都不做」的实现会让上面两条假通过。
+	if !strings.Contains(out, `"RoutingService"`) {
+		t.Fatalf("api.services 未补上 RoutingService\n输出: %s", out)
 	}
 }
 
