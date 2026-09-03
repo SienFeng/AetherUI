@@ -44,19 +44,36 @@ jobs:
           go-version: '1.22'
           cache: false
 
-      # 项目依赖 mattn/go-sqlite3，必须开 CGO，交叉编译需要目标架构的 gcc
+      # 项目依赖 mattn/go-sqlite3，必须开 CGO，交叉编译需要目标架构的 gcc。
+      # libc6-dev-arm64-cross 提供静态链接所需的 libc.a：它只是 gcc-aarch64-linux-gnu
+      # 的 Recommends，显式列出以免 apt 配置变化导致静态链接失败。
       - name: 安装 arm64 交叉工具链
         if: matrix.arch == 'arm64'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
+      # 必须静态链接：CI 宿主机的 glibc（ubuntu-latest 现为 2.39）远新于常见部署环境，
+      # 动态链接会把宿主 glibc 的符号版本烙进二进制，在 glibc < 2.34 的系统（Ubuntu 20.04、
+      # Debian 11 等）上动态链接器解析失败，进程连 main() 都到不了。
+      # netgo/osusergo 是静态链接 glibc 的必备配套——否则 DNS 解析与用户查找仍会走 cgo，
+      # 运行时去 dlopen NSS 模块而失败（面板拉取订阅、下载 xray 都依赖 DNS）。
+      # sqlite_omit_load_extension 去掉 go-sqlite3 对 dlopen 的依赖，本项目不使用该功能。
       - name: 编译
         run: |
           if [ "${{ matrix.arch }}" = "arm64" ]; then
             export CC=aarch64-linux-gnu-gcc
           fi
           CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.arch }} \
-            go build -trimpath -ldflags "-s -w" -o a-ui main.go
+            go build -trimpath \
+              -tags "netgo,osusergo,sqlite_omit_load_extension" \
+              -ldflags '-s -w -extldflags "-static"' \
+              -o a-ui main.go
           file a-ui
+          # 链接器在缺少 libc.a 时可能回退到动态链接而不报错，静默发布出去的包
+          # 会重现这个问题，因此在这里断言
+          if ! file a-ui | grep -q 'statically linked'; then
+            echo "::error::a-ui 不是静态链接，将在 glibc 较老的系统上无法启动"
+            exit 1
+          fi
 
       - name: 打包
         run: |
