@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/xray"
 )
 
 // hotReloadAPIPort 是模板里固定写死的 api 入站端口（web/service/config.json）。
@@ -37,6 +39,51 @@ func requirePgrep(t *testing.T) {
 	if _, err := exec.LookPath("pgrep"); err != nil {
 		t.Skip("pgrep 不可用，无法通过父子进程关系定位 xray 的 PID，跳过")
 	}
+}
+
+// requireXrayRoutingService 在 bin/xray-* 不提供 RoutingService 时跳过。
+//
+// 路由的热下发走 RoutingService.AddRule，而这个 gRPC 服务在老核心里根本不存在
+// （Xray 1.4.x 时代的构建里 RoutingService 符号数为 0）。核心不提供它时
+// tryHotApply 会连不上而退回整进程重启——这是设计好的失败兜底，不是缺陷，
+// 但本测试断言的恰恰是「不重启」，于是会以「PID 变了」失败，而那条信息与
+// 真正的热更新缺陷无法区分。先探测再跳过，把「核心太老」和「热更新坏了」分开。
+//
+// 探测方式是在二进制里找符号而不是发一次 RPC：此时 xray 还没启动，而启动之后
+// 再跳过就已经晚了——测试的前半段（起进程、记 PID）都已经跑过了。
+func requireXrayRoutingService(t *testing.T) {
+	t.Helper()
+	path := xray.GetBinaryPath()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Skipf("打不开 xray 二进制 %s，无法确认它是否提供 RoutingService，跳过: %v", path, err)
+	}
+	defer f.Close()
+
+	needle := []byte("RoutingService")
+	// 分块流式扫描，块间保留 len(needle)-1 字节的重叠，避免符号正好跨块边界被漏掉。
+	// 不整体读入：这个二进制有 35MB 以上。
+	const chunk = 1 << 20
+	buf := make([]byte, chunk+len(needle)-1)
+	carry := 0
+	for {
+		n, err := f.Read(buf[carry:])
+		if n > 0 && bytes.Contains(buf[:carry+n], needle) {
+			return
+		}
+		if err != nil {
+			break
+		}
+		if carry+n >= len(needle)-1 {
+			copy(buf, buf[carry+n-(len(needle)-1):carry+n])
+			carry = len(needle) - 1
+		} else {
+			carry += n
+		}
+	}
+	t.Skipf("xray 二进制 %s 不提供 RoutingService（疑为 1.4.x 时代的旧构建），"+
+		"路由热下发在它上面必然退回整进程重启，跳过；请把 bin/xray-* 更新到与 go.mod 里 "+
+		"xray-core 同版本的构建", path)
 }
 
 // xrayChildPID 返回当前测试进程刚拉起的 xray 子进程 PID。
@@ -174,6 +221,7 @@ func socksProbe(proxyAddr, domain string, port int) socksProbeResult {
 // 四个阶段对应设计里要证明的四件事，见各 t.Run 内的注释。
 func TestHotReloadEndToEndAgainstRealXray(t *testing.T) {
 	requireXrayBinary(t)
+	requireXrayRoutingService(t)
 	requirePgrep(t)
 	requireXrayAPIPortFree(t)
 	setupDB(t)

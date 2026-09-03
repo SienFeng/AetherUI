@@ -199,6 +199,12 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 四个 shell 脚本必须成对维护，改一个就要同步另一个：
 
 - `install.sh` / `install_en.sh` — 一键安装，从 GitHub Release 下载 tar.gz 解压到 `/usr/local/a-ui/`，安装管理脚本到 `/usr/bin/a-ui`，注册 systemd。
+
+**`a-ui update` 会把仓库里的 `bin/xray-*` 覆盖到用户机器上，所以那两个二进制的版本是发版内容的一部分。** `update()` 直接调 `install.sh`，而 `install.sh` 在解压前先 `rm -rf /usr/local/a-ui/`，再把发版包整个铺开——发版包里就带着 `bin/xray-linux-<arch>`（见 `release.yml` 的打包步骤）。后果是：管理员先前通过面板「安装 xray」升级过的核心，会在每次面板更新后被**降级回仓库里那一份**。
+
+这条一直是隐性的，直到配置热更新上线才暴露：仓库里的两个 Linux xray 二进制从 `first commit` 起就没动过，是 Xray 1.4.x 时代（go1.16.2）的构建，**里面根本没有 `RoutingService` 符号**，路由热下发在它上面必然连不上、退回整进程重启（`tryHotApply` 的失败兜底按预期工作，所以不报错、只是功能静默失效）。v1.2.8 起已把它们更新到与 `go.mod` 里 `xray-core` 同 commit 的 26.7.28。
+
+**因此升级 `xray-core` 依赖时，必须同时把 `bin/xray-linux-amd64` 与 `bin/xray-linux-arm64` 换成同版本的官方构建**，否则面板内的 `infra/conf` 与用户机器上实际运行的核心会错版。`web/service/xray_hot_reload_e2e_test.go` 的 `requireXrayRoutingService` 守着这条：核心不提供 `RoutingService` 时它跳过并说明原因，而不是以「PID 变了」这种和真实缺陷无法区分的形式失败。核对版本用 `go version -m bin/xray-linux-arm64`（读 Go 构建信息，不需要在目标平台上执行）。
 - `a-ui.sh` / `a-ui_en.sh` — 安装后的管理菜单（0-17 项：安装/更新/卸载、重置账号密码、端口、启停、开机自启、BBR、acme 申请 SSL、定时任务）。同时支持 `a-ui start|stop|restart|status|log|update|clear|geo|cron` 等直接子命令。
 
 脚本里硬编码了仓库地址 `SienFeng/AetherUI`，fork 后需一并修改。
