@@ -355,3 +355,89 @@ func TestSnapshotHidesAltWhenSourcesAgree(t *testing.T) {
 		t.Errorf("次判定 = %q，两源一致时不该显示", e.LocationAlt)
 	}
 }
+
+// 闲置连接必须停止占用并发额度。
+//
+// TCP 连接不会因为没有流量就消失：客户端进程只要不退出，连接一直是
+// ESTABLISHED，内核的 keepalive 只负责探测对端死没死，探测成功连接就继续
+// 保持。因此「断链才释放额度」的原语义下，一个挂着不用的客户端会**永久**
+// 占着名额，管理员看到实时网速 0 B/s 却怎么等都不释放。
+func TestSnapshotMarksIdleAfterTimeout(t *testing.T) {
+	tr := newOnlineTracker()
+	base := time.Now()
+	key := onlineKey{port: 1000, ip: "1.1.1.1"}
+	tr.ips[key] = &onlineEntry{
+		ip:           net.ParseIP("1.1.1.1"),
+		firstSeen:    base,
+		lastActiveAt: base,
+		conns:        3,
+	}
+
+	// 还没到阈值
+	list := tr.snapshotAt(1000, noLocate, 120*time.Second, base.Add(119*time.Second))
+	if len(list) != 1 || list[0].Idle {
+		t.Fatalf("119s 时不应判为闲置: %+v", list)
+	}
+
+	// 超过阈值
+	list = tr.snapshotAt(1000, noLocate, 120*time.Second, base.Add(121*time.Second))
+	if len(list) != 1 || !list[0].Idle {
+		t.Fatalf("121s 时应判为闲置: %+v", list)
+	}
+
+	// 闲置的条目仍然要显示出来，而且 firstSeen 不能丢——丢了的话这人一恢复
+	// 活跃就变成「最新来的」，在「保留最早 N 个」的判定里反而最先被踢。
+	if list[0].FirstSeen != base.UnixMilli() {
+		t.Errorf("firstSeen = %d, want %d（闲置不得重置首次观测时间）", list[0].FirstSeen, base.UnixMilli())
+	}
+	if list[0].Conns != 3 {
+		t.Errorf("conns = %d, want 3（连接仍在，只是没有流量）", list[0].Conns)
+	}
+}
+
+// idleAfter <= 0 表示关闭闲置判定，保持原有行为。
+func TestSnapshotIdleDisabledWhenTimeoutNotPositive(t *testing.T) {
+	tr := newOnlineTracker()
+	base := time.Now()
+	tr.ips[onlineKey{port: 1000, ip: "1.1.1.1"}] = &onlineEntry{
+		ip: net.ParseIP("1.1.1.1"), firstSeen: base, lastActiveAt: base,
+	}
+	list := tr.snapshotAt(1000, noLocate, 0, base.Add(24*time.Hour))
+	if len(list) != 1 || list[0].Idle {
+		t.Fatalf("关闭闲置判定时不应标记 idle: %+v", list)
+	}
+}
+
+// 闲置的 IP 不占额度：额度 1、两个来源，其中先来的那个已闲置时，
+// 后来的活跃来源不该被拒。
+func TestPlanRejectionsIgnoresIdle(t *testing.T) {
+	base := time.Now().UnixMilli()
+	list := []OnlineIP{
+		{IP: "1.1.1.1", FirstSeen: base, Conns: 2, Idle: true},
+		{IP: "2.2.2.2", FirstSeen: base + 1000, Conns: 1},
+	}
+	over := planRejections(list, 1)
+	if len(over) != 0 {
+		t.Errorf("被拒集合 = %v, want 空（闲置的 1.1.1.1 不该占用额度）", over)
+	}
+}
+
+// 闲置的来源自己也不该被「拒绝」——它没有占额度，断它的连接毫无意义，
+// 只会打断一个只是暂时没有流量的正常用户。
+func TestPlanRejectionsNeverRejectsIdleItself(t *testing.T) {
+	base := time.Now().UnixMilli()
+	list := []OnlineIP{
+		{IP: "1.1.1.1", FirstSeen: base, Conns: 1},
+		{IP: "2.2.2.2", FirstSeen: base + 1000, Conns: 1},
+		{IP: "3.3.3.3", FirstSeen: base + 2000, Conns: 5, Idle: true},
+	}
+	over := planRejections(list, 1)
+	for _, ip := range over {
+		if ip == "3.3.3.3" {
+			t.Errorf("闲置来源 3.3.3.3 被拒了: %v", over)
+		}
+	}
+	if len(over) != 1 || over[0] != "2.2.2.2" {
+		t.Errorf("被拒集合 = %v, want [2.2.2.2]", over)
+	}
+}

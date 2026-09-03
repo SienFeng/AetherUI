@@ -35,6 +35,7 @@ var defaultValueMap = map[string]string{
 	"qqwrySourceUrl":         "https://raw.githubusercontent.com/FW27623/qqwry/main/qqwry.dat",
 	"accessLogEnable":        "0",
 	"accessLogRetentionDays": "7",
+	"concurrencyIdleTimeout": "120",
 	"tcInterface":            "",
 }
 
@@ -274,6 +275,11 @@ func (s *SettingService) GetAccessLogEnable() (bool, error) {
 		return false, err
 	}
 	return v != 0, nil
+}
+
+// GetConcurrencyIdleTimeout 返回并发判定的闲置阈值（秒）。0 表示关闭闲置判定。
+func (s *SettingService) GetConcurrencyIdleTimeout() (int, error) {
+	return s.getInt("concurrencyIdleTimeout")
 }
 
 // GetAccessLogRetentionDays 返回访问日志保留天数。

@@ -44,6 +44,11 @@ type OnlineIP struct {
 	Up          int64  `json:"up"` // 本次在线期间的累计字节
 	Down        int64  `json:"down"`
 
+	// Idle 为 true 表示该 IP 的连接还在，但已经连续 idleAfter 没有任何字节
+	// 往来。闲置来源不占用并发额度：TCP 连接不会因为没有流量就消失，客户端
+	// 只要不退出就一直是 ESTABLISHED，不判闲置的话一个挂着不用的客户端会
+	// 永久占着名额。
+	Idle bool `json:"idle"`
 	// Blocked 为 true 表示该 IP 当前超出并发额度、正被拒绝。
 	Blocked bool `json:"blocked"`
 	// RejectedAt 是最近一次被判超额的时间（毫秒），0 表示从未被拒。
@@ -71,11 +76,15 @@ type connBytes struct {
 type onlineEntry struct {
 	ip        net.IP
 	firstSeen time.Time
-	conns     int
-	up        int64
-	down      int64
-	upSpeed   int64
-	downSpeed int64
+	// lastActiveAt 是最近一次观测到字节增长的时间，闲置判定以它为准。
+	// 与 firstSeen 分开维护：闲置不重置 firstSeen，否则这人一恢复活跃就
+	// 变成「最新来的」，在「保留最早 N 个」的判定里反而最先被踢。
+	lastActiveAt time.Time
+	conns        int
+	up           int64
+	down         int64
+	upSpeed      int64
+	downSpeed    int64
 }
 
 // onlineTracker 把两次内核连接表快照的差值折算成每个来源 IP 的实时网速。
@@ -189,11 +198,16 @@ func (t *onlineTracker) update(conns []netdiag.Conn, ports map[int]bool, now tim
 	for key, a := range aggs {
 		e := t.ips[key]
 		if e == nil {
-			e = &onlineEntry{ip: a.ip, firstSeen: now}
+			// 首次观测按活跃起算：还没有基准，拿不到字节增量，此时判成闲置
+			// 会让刚连上的人立刻被当作不占额度。
+			e = &onlineEntry{ip: a.ip, firstSeen: now, lastActiveAt: now}
 			t.ips[key] = e
 		}
 		e.conns = a.conns
 		if hasBaseline {
+			if a.up > 0 || a.down > 0 {
+				e.lastActiveAt = now
+			}
 			e.up += a.up
 			e.down += a.down
 			seconds := elapsed.Seconds()
@@ -227,7 +241,18 @@ func deltaBytes(now, prev uint64, seen bool) uint64 {
 	return now - prev
 }
 
+// snapshot 不做闲置判定，等价于 snapshotAt(port, locate, 0, now)。
 func (t *onlineTracker) snapshot(port int, locate func(net.IP) (primary, alt string)) []OnlineIP {
+	return t.snapshotAt(port, locate, 0, time.Now())
+}
+
+// snapshotIdle 按 idleAfter 判定闲置。idleAfter <= 0 表示关闭该判定。
+func (t *onlineTracker) snapshotIdle(port int, locate func(net.IP) (primary, alt string), idleAfter time.Duration) []OnlineIP {
+	return t.snapshotAt(port, locate, idleAfter, time.Now())
+}
+
+// snapshotAt 是核心实现，now 由调用方给出以便测试。
+func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) (primary, alt string), idleAfter time.Duration, now time.Time) []OnlineIP {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -247,6 +272,7 @@ func (t *onlineTracker) snapshot(port int, locate func(net.IP) (primary, alt str
 			DownSpeed:   e.downSpeed,
 			Up:          e.up,
 			Down:        e.down,
+			Idle:        idleAfter > 0 && now.Sub(e.lastActiveAt) > idleAfter,
 			Blocked:     t.rejectedNow[key],
 			RejectedAt:  millisOrZero(t.rejectedAt[key]),
 		})
@@ -303,6 +329,7 @@ var (
 type OnlineService struct {
 	inboundService InboundService
 	ipdbService    IPDBService
+	settingService SettingService
 }
 
 func formatLocation(loc ipdb.Location) string {
@@ -443,7 +470,7 @@ func (s *OnlineService) GetOnlines(inboundId int) (*OnlineResult, error) {
 	}
 	return &OnlineResult{
 		Supported: true,
-		List:      onlineTrackerInstance.snapshot(inbound.Port, s.locate),
+		List:      onlineTrackerInstance.snapshotIdle(inbound.Port, s.locate, idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())),
 	}, nil
 }
 

@@ -74,6 +74,33 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 // 第二个返回值是关键：buildRules 必须只认这些 tag。一个 Config 损坏而被跳过的节点，
 // 如果其 tag 仍被规则引用，就会形成悬空 outboundTag —— 而 xray 对此不报错，运行时
 // 会静默回落到默认出站（直连），造成「以为分流/封禁了，其实直连出去」。
+// tagDefaultOutbound 给模板里首个出站补上 tag。
+//
+// 首个出站就是 xray 的默认出站，未命中任何路由规则的流量都走它。xray 只在
+// 出站带 tag 时才往访问日志写 "[入站 -> 出站]"，裸出站产生的记录没有方括号，
+// 会被 accesslog.ParseLine 丢弃——直连流量在访问日志里整片消失，而分流出去的
+// 流量记录完好，管理员看到的是一份沉默地偏斜的记录。
+//
+// 只补首个：其余没有 tag 的出站无法被路由规则引用，本来就永远不会被选中。
+// 已经有 tag 的不覆盖——用户的路由规则可能正引用着它，改掉会让规则指向不存在
+// 的出站，而 xray 对悬空 outboundTag 不报错，只会静默回落直连。
+//
+// 只作用于模板里已有的出站，必须在 append 生成的出站之前调用：那些出站自带
+// tag，补上去会造成重复。
+func tagDefaultOutbound(outbounds []any) {
+	if len(outbounds) == 0 {
+		return
+	}
+	ob, ok := outbounds[0].(map[string]any)
+	if !ok || ob == nil {
+		return
+	}
+	if tag, ok := ob["tag"].(string); ok && tag != "" {
+		return
+	}
+	ob["tag"] = model.DefaultOutboundTag
+}
+
 func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, error) {
 	outbounds := make([]any, 0)
 	if len(existing) > 0 {
@@ -81,6 +108,7 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 			return nil, nil, err
 		}
 	}
+	tagDefaultOutbound(outbounds)
 
 	nodes, err := s.outboundService.GetEnabled()
 	if err != nil {

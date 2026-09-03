@@ -55,6 +55,7 @@ var (
 type ConcurrencyService struct {
 	inboundService InboundService
 	onlineService  OnlineService
+	settingService SettingService
 }
 
 // limitedInbounds 返回真正需要做并发判定的入站：设了额度且处于启用状态。
@@ -91,9 +92,13 @@ func (s *ConcurrencyService) Enforce() error {
 		return err
 	}
 
+	// 读不到配置时退回 0（关闭闲置判定），保持改动前的行为：宁可额度释放
+	// 得慢，也不要因为读配置失败就把所有人都当成闲置、并发限制整个失效。
+	idleAfter := idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())
+
 	now := time.Now()
 	for _, inbound := range inbounds {
-		list := onlineTrackerInstance.snapshot(inbound.Port, noLocate)
+		list := onlineTrackerInstance.snapshotIdle(inbound.Port, noLocate, idleAfter)
 		over := planRejections(list, inbound.ConcurrencyLimit)
 		onlineTrackerInstance.setRejected(inbound.Port, over, now)
 		s.disconnect(inbound, over)
@@ -115,10 +120,14 @@ func planRejections(list []OnlineIP, limit int) []string {
 // 这些条目只为界面展示而存在。把它们算进在线数会让被拒的 IP 永久占着一个
 // 名额：额度 1 时第一个被拒的人会把所有人（包括他自己）永远挡在门外，
 // 而且这个状态在保留期内自愈不了。
+// liveOnly 挑出真正占用并发额度的来源。
+//
+// 闲置来源被排除在外，两个方向都成立：它不占别人的额度，自己也不会被判超额
+// 而遭断开——断一个只是暂时没有流量的正常用户毫无意义。
 func liveOnly(list []OnlineIP) []OnlineIP {
 	live := make([]OnlineIP, 0, len(list))
 	for _, e := range list {
-		if e.Conns > 0 {
+		if e.Conns > 0 && !e.Idle {
 			live = append(live, e)
 		}
 	}
@@ -156,4 +165,16 @@ func takeLoggedSet(inboundId int, over []string) map[string]bool {
 	}
 	concurrencyLogged[inboundId] = next
 	return prev
+}
+
+// idleTimeoutOrZero 把设置项的秒数折算成 Duration，出错时返回 0（关闭判定）。
+func idleTimeoutOrZero(seconds int, err error) time.Duration {
+	if err != nil {
+		logger.Warning("读取并发闲置超时失败，本轮不做闲置判定:", err)
+		return 0
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }

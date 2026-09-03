@@ -667,3 +667,74 @@ func TestInjectSkipsRuleWithCorruptInboundIds(t *testing.T) {
 		}
 	}
 }
+
+// xray 只有在出站带 tag 时才会在访问日志里输出 "[入站 -> 出站]"。模板里的
+// freedom 出站是裸的、没有 tag，于是所有走默认出站（直连）的记录都不带方括号，
+// 被 accesslog.ParseLine 当作无法归属的行丢弃——访问日志里只剩下命中分流规则
+// 的流量，管理员看到的是一份沉默地缺了一大半的记录。
+func TestInjectTagsDefaultOutboundSoAccessLogCanAttributeIt(t *testing.T) {
+	setupDB(t)
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	obs := decodeOutbounds(t, cfg)
+	if obs[0]["protocol"] != "freedom" {
+		t.Fatalf("first outbound = %v, want freedom (it must stay xray's default outbound)", obs[0]["protocol"])
+	}
+	if obs[0]["tag"] != model.DefaultOutboundTag {
+		t.Errorf("default outbound tag = %v, want %s", obs[0]["tag"], model.DefaultOutboundTag)
+	}
+}
+
+// 用户自己给默认出站起了 tag 时不能覆盖：他的路由规则可能正引用着那个 tag，
+// 改掉会让规则指向不存在的出站，而 xray 对悬空 outboundTag 不报错，只会静默直连。
+func TestInjectKeepsExistingDefaultOutboundTag(t *testing.T) {
+	setupDB(t)
+	cfg := &xray.Config{}
+	tmpl := `{
+	  "outbounds": [
+	    {"protocol":"freedom","settings":{},"tag":"my-direct"},
+	    {"protocol":"blackhole","settings":{},"tag":"blocked"}
+	  ],
+	  "routing": {"rules": []}
+	}`
+	if err := json.Unmarshal([]byte(tmpl), cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	obs := decodeOutbounds(t, cfg)
+	if obs[0]["tag"] != "my-direct" {
+		t.Errorf("default outbound tag = %v, want my-direct (must not be overwritten)", obs[0]["tag"])
+	}
+}
+
+// 模板把 outbounds 写成空数组时，首位会是注入器自己生成的出站，它们本来就有
+// tag，不该被再补一次。
+func TestInjectDoesNotTagGeneratedOutboundsAsDefault(t *testing.T) {
+	setupDB(t)
+	cfg := &xray.Config{}
+	if err := json.Unmarshal([]byte(`{"outbounds":[],"routing":{"rules":[]}}`), cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	obs := decodeOutbounds(t, cfg)
+	for _, ob := range obs {
+		if ob["tag"] == model.DefaultOutboundTag {
+			t.Errorf("generated outbound was tagged %s: %v", model.DefaultOutboundTag, ob)
+		}
+	}
+}
+
+// a-ui-default 必须和 a-ui-block 一样是保留 tag：备注写 "default" 会让
+// SuggestTag 生成同名 tag，与注入器补上的默认出站撞名，xray 报
+// "existing tag found" 并拒绝启动——全员断网，面板首页却仍显示 running。
+func TestDefaultOutboundTagIsReserved(t *testing.T) {
+	if !model.IsReservedTag(model.DefaultOutboundTag) {
+		t.Errorf("IsReservedTag(%s) = false, want true", model.DefaultOutboundTag)
+	}
+}

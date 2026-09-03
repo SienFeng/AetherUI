@@ -122,6 +122,13 @@
                                                    v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
+                        <a-tab-pane key="8" tab="并发限制">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-list-item type="number" title="闲置超时（秒）"
+                                                   desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
+                                                   v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
                         <a-tab-pane key="6" tab="端口限速">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-action-item title="限速状态" :desc="shapingDesc()">

@@ -10,6 +10,10 @@ const (
 const (
 	OutboundTagPrefix = "a-ui"
 	BlockOutboundTag  = "a-ui-block"
+	// DefaultOutboundTag 补给模板里那个没有 tag 的首个出站（xray 的默认出站）。
+	// xray 只在出站带 tag 时才往访问日志写 "[入站 -> 出站]"，裸出站会让所有
+	// 走直连的记录不带方括号，被 accesslog.ParseLine 当作无法归属的行丢弃。
+	DefaultOutboundTag = "a-ui-default"
 )
 
 // IsReservedTag 判定一个 tag 是否由注入器自己发出，因而不能分配给出站节点。
@@ -24,7 +28,7 @@ const (
 // 生成端 RoutingInjector.buildOutbounds（修复前的脏数据不写进配置）、
 // 校验端 removeOutboundByTag（校验时绝不把注入器的黑洞出站当成旧版本摘掉）。
 func IsReservedTag(tag string) bool {
-	return tag == BlockOutboundTag
+	return tag == BlockOutboundTag || tag == DefaultOutboundTag
 }
 
 // DomainGroup 是一批可复用的域名集合。

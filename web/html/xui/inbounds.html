@@ -86,6 +86,12 @@
                                             </template>
                                             <a-tag color="red">超额被拒</a-tag>
                                         </a-tooltip>
+                                        <a-tooltip v-if="online.idle">
+                                            <template slot="title">
+                                                连接还在，但已超过设定的闲置超时没有任何流量，当前不占用并发额度
+                                            </template>
+                                            <a-tag color="orange">闲置</a-tag>
+                                        </a-tooltip>
                                     </template>
                                     <template slot="location" slot-scope="text, online">
                                         <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>

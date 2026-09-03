@@ -46,6 +46,7 @@ type AllSetting struct {
 
 	AccessLogEnable        int `json:"accessLogEnable" form:"accessLogEnable"`
 	AccessLogRetentionDays int `json:"accessLogRetentionDays" form:"accessLogRetentionDays"`
+	ConcurrencyIdleTimeout int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
 }
@@ -145,6 +146,11 @@ func (s *AllSetting) CheckValid() error {
 
 	// 不允许 0：0 在这里最容易被理解成「永不清除」，而实现上会变成
 	// 「立刻全删」，语义正好相反。要关闭记录请用上面的开关。
+	// 0 表示关闭闲置判定。下限 30 秒：常见应用层心跳在 30~60 秒，再短会把
+	// 只是暂时没有流量的正常用户判成离线。
+	if s.ConcurrencyIdleTimeout != 0 && (s.ConcurrencyIdleTimeout < 30 || s.ConcurrencyIdleTimeout > 86400) {
+		return common.NewError("并发闲置超时应为 0（关闭）或 30 ~ 86400 秒:", s.ConcurrencyIdleTimeout)
+	}
 	if s.AccessLogRetentionDays < 1 || s.AccessLogRetentionDays > 365 {
 		return common.NewError("访问日志保留天数应在 1 ~ 365 天之间:", s.AccessLogRetentionDays)
 	}
