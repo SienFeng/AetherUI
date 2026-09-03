@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -258,11 +259,29 @@ func ensureRoutingServiceInTemplate(template string) (string, bool, error) {
 	}
 	root["api"] = encodedAPI
 
-	out, err := json.Marshal(root)
-	if err != nil {
+	// 不能直接 json.Marshal(root)：root 的值是 json.RawMessage，标准库对
+	// 任何实现了 MarshalJSON 的值都会在写出前跑一遍 compact()，结果是整份
+	// 模板被压成不含空白的单行，还会把 <、>、& 转义成 \u003c 等（模板里的
+	// outbound/订阅地址常带 & 的 URL）。这份串随后经 setString 落库，
+	// GetAllSetting 又直接读回设置页——管理员保存过一次设置的部署（绝大
+	// 多数部署，UpdateAllSetting 会把 xrayTemplateConfig 一起落库）升级后
+	// 打开设置页就会看到模板变成一整行，是用户可见的编辑体验回退。
+	//
+	// 用 Encoder + SetEscapeHTML(false) 关掉转义；Encode 会在末尾追加一个
+	// 换行，交给 json.Indent 重新缩进时一并被丢弃（Indent 只保留输入里
+	// 合法 JSON 值对应的字节）。缩进两个空格，与内嵌默认模板
+	// web/service/config.json 的风格一致。
+	var compact bytes.Buffer
+	enc := json.NewEncoder(&compact)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(root); err != nil {
 		return "", false, err
 	}
-	return string(out), true, nil
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, compact.Bytes(), "", "  "); err != nil {
+		return "", false, err
+	}
+	return indented.String(), true, nil
 }
 
 // routingServiceName 是 xray api.services 里 RoutingService 的名字。
