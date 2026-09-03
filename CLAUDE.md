@@ -10,7 +10,7 @@ AetherUI（二进制与模块名均为 `a-ui`）是一个基于 Xray-core 的 We
 
 ## 常用命令
 
-没有 Makefile、lint 配置或前端构建流程。测试只有标准 `go test`，集中在 `util/link`、`database`、`web/service` 三个包（其余包仍无测试）。
+没有 lint 配置或前端构建流程。测试是标准 `go test`；目前有 14 个包带测试（`database`、`database/model`、`util/link`、`web/service`、`xray` 等，`make verify` 的输出即是当前清单），其余包仍无测试。`Makefile` 提供 `make build` / `make test` / `make vet` / `make verify`（vet + test + build，提交前的门禁）/ `make clean`；`.github/workflows/ci.yml` 在 push/PR 时跑 `make verify`，Go 版本从 `go.mod` 读取，不在工作流里硬编码。
 
 ```bash
 # 构建（CGO 必须开启：gorm.io/driver/sqlite 依赖 mattn/go-sqlite3）
@@ -70,7 +70,11 @@ go mod tidy && go vet ./...
 
 合成的最后一步是 `RoutingInjector.Inject(cfg)`，它把出站节点与分流规则追加进 `OutboundConfigs` 与 `RouterConfig`（见「域名分流管理」）。
 
-重启去抖机制：任何改动 inbound 的 controller 调用 `xrayService.SetToNeedRestart()` 置原子标志；`InboundController.startTask()` 注册的 10 秒 cron 用 `IsNeedRestartAndSetFalse()` 消费该标志并调 `RestartXray(false)`；`RestartXray` 再用 `Config.Equals()`（`xray/config.go` 逐字段 `bytes.Equal`）判断配置是否真的变了。所以**新增会影响 xray 配置的字段时，必须同步扩展 `Config.Equals` / `InboundConfig.Equals`**，否则改动不会生效。
+重启去抖机制：任何改动 inbound 的 controller 调用 `xrayService.SetToNeedRestart()` 置原子标志；`InboundController.startTask()` 注册的 10 秒 cron 用 `IsNeedRestartAndSetFalse()` 消费该标志并调 `RestartXray(false)`；`RestartXray` 再用 `Config.Equals()`（`xray/config.go` 逐字段 `bytes.Equal`）判断配置是否真的变了。所以**新增会影响 xray 配置的字段时，必须同步扩展 `Config.Equals` / `InboundConfig.Equals`**，否则改动不会生效——而且热更新上线后漏改的后果比改动前更重：改动前漏改只是**延迟生效**，配置别处一变就整进程重启，新字段照样能进核心；改动后，`diffInbounds` 用 `oldIb.Equals(newIb)` 判「这个入站没变，跳过」，随后 `SetConfig(newCfg)` 把新配置记成已应用，于是该字段**永远进不了核心，也不会有后续重启来纠正**——这是一个静默且持久的错误，不再是「早晚会被下一次改动带上」。
+
+判断「配置变了」之后，`RestartXray` 不再直接重启：先试 `tryHotApply`（`web/service/xray.go`），它用 `xray.ComputeHotDiff`（`xray/hot_diff.go`）比较新旧配置，能靠核心的 gRPC 控制面（`xray/api.go`，入站/出站增删 + 整体替换路由规则）追平的就走热应用，不重启进程；`ComputeHotDiff` 判断不了或涉及没有运行时重载接口的段（log / dns / transport / policy / api / stats / reverse / fakeDns，以及数组首位的默认出站、Reality 入站、routing 里 `domainStrategy`/`domainMatcher` 等）就返回「不能热应用」，退回原来的整进程重启。**新增会影响 xray 配置的字段时，除了按上一段扩展 `Equals`，还要判断它是走运行时重载接口热更新，还是必须重启**——归入 `ComputeHotDiff` 里的 `static` 列表还是新的 diff 分支，判断错了不会报错，只会让核心与面板的配置认知从此不一致。`web/service/xray_hot_reload_e2e_test.go`（`TestHotReloadEndToEndAgainstRealXray`）用真实 xray 进程验证了这条链路：改分流规则走热应用且不重启进程，改访问日志开关（改 `log` 段）仍会触发整进程重启。
+
+出站的增删（数组首位那个默认出站不算）能走热应用：`decodeOutbounds`（`xray/hot_diff.go`）只对数组首位放宽「tag 非空」的要求，因为 `RoutingInjector.buildOutbounds` 原样保留模板（`web/service/config.json`）里的出站数组再往后追加，而模板首位的 `freedom` 出站天然没有 tag——修复前 `decodeOutbounds` 对任何空 tag 一律判定「必须重启」，导致每一份真实生成的配置在出站层面必然走整进程重启，出站热更新事实上从未生效过。编辑一个出站（同 tag 换内容）在 `tryHotApply` 里走的是「先删后加」两条独立 RPC——xray 的 `AddHandler` 对已存在的 tag 会报 `existing tag found`，先加后删走不通。两条 RPC 之间有一个短窗口：引用该 tag 的规则在核心里是悬空的，按「域名分流管理 → xray 会静默接受错误配置」表「规则引用已删除的出站」一行的实测结论，xray 对此不报错，运行时**静默回落默认出站（直连）**。正常情况这个窗口只有一次回环 RPC（毫秒级）；若 `AddOutbound` 失败，窗口会拉长到退回重启完成（1~2 秒）。这是刻意接受、不做补偿的窗口——任何补偿逻辑（比如换临时 tag 分两步搬）都在增加新的失败面，与本子系统「失败即退回重启，不做部分回滚」的设计原则冲突。
 
 对 `OutboundConfigs` / `RouterConfig` 这类 `json_util.RawMessage` 字段则不必改 `Equals`——它们按字节比较，内容变化天然被察觉。代价是**生成必须逐字节确定**，否则 `Equals` 恒为 false，上面那个 10 秒 cron 会不停重启 xray。
 
@@ -203,14 +207,13 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 - **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
 - 用户密码在数据库中**明文存储**，登录失败日志还会打印明文用户名密码（`web/controller/index.go`）。这是既有行为，涉及认证的改动请提高审查标准。
-- `go.mod` 声明 `go 1.21`（`util/link` 用到 `any` 与 `maps.Copy`），CI 用 Go 1.22 构建；依赖版本较老（gin 1.7.1、xray-core v1.4.2 仅用于 gRPC stats 客户端，与实际运行的 `bin/xray-*` 版本无关）。
+- `go.mod` 声明 `go 1.27.0`，CI（`.github/workflows/ci.yml`）用 `actions/setup-go` 的 `go-version-file: go.mod` 读同一个版本构建，不在工作流里另行硬编码。`xray-core` 锁定在 `v1.260327.1-0.20260728075948-5ca6f4b7d4dc`，与 `bin/xray-*` 的 26.7.28 是同一个 commit，**必须与 `bin/xray-*` 保持同版本**——它不再只是 gRPC stats 客户端：`xray/api.go` 的控制面热应用还依赖它的 `infra/conf` 把面板发出的 JSON 编译成 typed message 再下发给 gRPC，用旧版本的解析器编译不出新协议/新字段的配置。gin 仍是 1.7.1。代价是二进制体积从约 24 MB 增长到约 40 MB（darwin/arm64 本地实测约 39 MB）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
-- `util/sys/psutil.go` 用 `//go:linkname` 侵入 gopsutil 内部包，升级 gopsutil 时会断。
 - **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题。`web/html_test.go` 的 `TestAllTemplatesParse` 走同样的遍历但不忽略错误，改完模板跑它即可。
 - **Vue 指令写在根元素之外是死代码，且完全静默。** Vue 2 只编译 `el` 指向的那棵子树。分流页的三个 `<a-modal>` 曾整块落在 `<a-layout id="app">` 之后——页面渲染完全正常、数据也照常加载，但所有「添加 / 编辑」按钮点了毫无反应（`visible = true` 改的是没有任何绑定的数据），控制台不报任何错。弹窗要么留在 `#app` 内，要么照 `inbound_modal.html` 的做法给它自己的根元素和 `new Vue({el:'#xxx'})`。`web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 对所有顶层页面守这条不变量（用 `golang.org/x/net/html` 解析渲染结果，比对 `v-*` / `@*` / `:*` 属性的位置）。
 - **`a-tabs` 的非活动面板仍在 DOM 里**，只是被隐藏。写选择器或做页面自动化时必须限定到 `.ant-tabs-tabpane-active`，否则会命中隐藏面板里的同名元素。
 - **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
-- **面板报告的 xray 状态可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 和 `bin/config.json` 跑一次 `xray run -test` 为准，不要相信面板首页**。
+- **面板报告的 xray 状态可能是假的，`bin/config.json` 现在也可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 为准，不要相信面板首页**。此前这里还建议「对 `bin/config.json` 跑一次 `xray run -test`」，热更新上线后这条不再可靠：`tryHotApply` 成功时只通过 gRPC 控制面把改动下发进正在跑的核心，**不会重写 `bin/config.json`**——该文件仍是上一次整进程重启（或面板启动）时写的那份，只有下一次真正触发重启才会被重新生成，中间这段时间它不反映核心的真实配置。确认核心当前真实状态，只能靠它的 gRPC 控制面（本项目目前没有现成的查询工具，`RoutingService.TestRoute` 落地前只能靠重启换回一份准确的 `bin/config.json`，或读面板日志里 `热应用：` 开头的 Debug 行辅助判断）。
 - **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。分流子系统靠三个 `Check*Refs` 守卫堵住了这条路，**新增任何存 id 外键的表都要照做**。
 - **cron 任务没有 panic 恢复。** `Server.Start()` 里 `cron.New(...)` 未配 `cron.WithChain(cron.Recover(...))`，`robfig/cron/v3` 自身也不 recover。定时任务（含每 10 秒的 xray 重启消费任务）里的任何 panic 都会**杀掉整个面板进程**。在这些路径上写代码要格外注意 nil map、越界等运行时 panic。

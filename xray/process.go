@@ -10,6 +10,7 @@ import (
 	"github.com/Workiva/go-datastructures/queue"
 	statsservice "github.com/xtls/xray-core/app/stats/command"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -113,6 +114,15 @@ func (p *Process) GetAPIPort() int {
 
 func (p *Process) GetConfig() *Config {
 	return p.config
+}
+
+// SetConfig 更新进程内的配置快照。
+//
+// 热应用成功后必须调它：RestartXray 是靠 GetConfig().Equals(新配置) 判断
+// "配置有没有变"的，不同步的话下一轮 cron 仍认为两者不同，于是真的去重启
+// 一次——热更新反而退化成延迟一轮的重启。
+func (p *Process) SetConfig(c *Config) {
+	p.config = c
 }
 
 func (p *process) refreshAPIPort() {
@@ -232,7 +242,12 @@ func (p *process) GetTraffic(reset bool) ([]*Traffic, error) {
 	if p.apiPort == 0 {
 		return nil, common.NewError("xray api port wrong:", p.apiPort)
 	}
-	conn, err := grpc.Dial(fmt.Sprintf("127.0.0.1:%v", p.apiPort), grpc.WithInsecure())
+	// 新版 grpc 移除了 Dial/WithInsecure。NewClient 不做阻塞式连接，
+	// 首次 RPC 时才建连——对本地回环的 stats 查询没有区别。
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("127.0.0.1:%v", p.apiPort),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, err
 	}

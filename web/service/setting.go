@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -177,8 +179,114 @@ func (s *SettingService) setInt(key string, value int) error {
 }
 
 func (s *SettingService) GetXrayConfigTemplate() (string, error) {
-	return s.getString("xrayTemplateConfig")
+	template, err := s.getString("xrayTemplateConfig")
+	if err != nil {
+		return "", err
+	}
+
+	// 补 RoutingService。存量部署的模板一旦被管理员改过就落进 settings 表，
+	// 改默认值对它们无效，所以在读取路径上补，读一次补一次（幂等）。
+	//
+	// 补完立刻写回，而不是每次读都在内存里补：写回后管理员在设置页看到的
+	// 模板与实际生效的一致；只在内存补的话，他保存一次就把 RoutingService
+	// 弄丢了，而且丢得毫无提示。
+	patched, changed, err := ensureRoutingServiceInTemplate(template)
+	if err != nil {
+		// 模板本来就不合法是既有问题，不是本次改动造成的。原样返回让
+		// 后续流程按老路径报错，不要在这里把管理员锁在门外。
+		logger.Warning("xray 模板无法解析，跳过 RoutingService 补齐:", err)
+		return template, nil
+	}
+	if changed {
+		if err := s.setString("xrayTemplateConfig", patched); err != nil {
+			logger.Warning("RoutingService 补齐后写回失败，本次仅在内存生效:", err)
+		} else {
+			logger.Info("已为 xray 模板补上 RoutingService，路由热更新与路由测试现在可用")
+		}
+	}
+	return patched, nil
 }
+
+// ensureRoutingServiceInTemplate 往模板的 api.services 里补上 RoutingService。
+//
+// 路由规则的热重载与路由测试都走 RoutingService，模板里不声明它，xray 就
+// 不会起这个 gRPC 服务，功能会静默不可用——不报错，只是永远连不上。
+//
+// 只在 api 段已存在时补齐：api 段整个缺失说明管理员刻意关掉了控制接口，
+// 那种情况下流量统计本来就是坏的，不该由这里替他做决定。
+//
+// 幂等：已含 RoutingService 时原样返回。api 之外的键不做任何改动——
+// 反序列化成 map[string]json.RawMessage 再序列化，其余键按原始字节透传。
+func ensureRoutingServiceInTemplate(template string) (string, bool, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(template), &root); err != nil {
+		return "", false, common.NewError("xray 模板不是合法 JSON:", err)
+	}
+
+	rawAPI, ok := root["api"]
+	if !ok {
+		return template, false, nil
+	}
+
+	var api map[string]json.RawMessage
+	if err := json.Unmarshal(rawAPI, &api); err != nil {
+		return "", false, common.NewError("xray 模板的 api 段不是合法 JSON 对象:", err)
+	}
+
+	var services []string
+	if rawServices, ok := api["services"]; ok {
+		if err := json.Unmarshal(rawServices, &services); err != nil {
+			return "", false, common.NewError("xray 模板的 api.services 不是字符串数组:", err)
+		}
+	}
+	for _, s := range services {
+		if s == routingServiceName {
+			return template, false, nil
+		}
+	}
+
+	// 追加到末尾而不是插入：顺序对 xray 无意义，但保持原有顺序能让
+	// 管理员对比前后模板时只看到多出的一行。
+	services = append(services, routingServiceName)
+	encoded, err := json.Marshal(services)
+	if err != nil {
+		return "", false, err
+	}
+	api["services"] = encoded
+
+	encodedAPI, err := json.Marshal(api)
+	if err != nil {
+		return "", false, err
+	}
+	root["api"] = encodedAPI
+
+	// 不能直接 json.Marshal(root)：root 的值是 json.RawMessage，标准库对
+	// 任何实现了 MarshalJSON 的值都会在写出前跑一遍 compact()，结果是整份
+	// 模板被压成不含空白的单行，还会把 <、>、& 转义成 \u003c 等（模板里的
+	// outbound/订阅地址常带 & 的 URL）。这份串随后经 setString 落库，
+	// GetAllSetting 又直接读回设置页——管理员保存过一次设置的部署（绝大
+	// 多数部署，UpdateAllSetting 会把 xrayTemplateConfig 一起落库）升级后
+	// 打开设置页就会看到模板变成一整行，是用户可见的编辑体验回退。
+	//
+	// 用 Encoder + SetEscapeHTML(false) 关掉转义；Encode 会在末尾追加一个
+	// 换行，交给 json.Indent 重新缩进时一并被丢弃（Indent 只保留输入里
+	// 合法 JSON 值对应的字节）。缩进两个空格，与内嵌默认模板
+	// web/service/config.json 的风格一致。
+	var compact bytes.Buffer
+	enc := json.NewEncoder(&compact)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(root); err != nil {
+		return "", false, err
+	}
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, compact.Bytes(), "", "  "); err != nil {
+		return "", false, err
+	}
+	return indented.String(), true, nil
+}
+
+// routingServiceName 是 xray api.services 里 RoutingService 的名字。
+const routingServiceName = "RoutingService"
 
 func (s *SettingService) GetListen() (string, error) {
 	return s.getString("webListen")
