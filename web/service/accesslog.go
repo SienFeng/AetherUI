@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -113,6 +114,7 @@ type AccessLogResult struct {
 
 type AccessLogService struct {
 	settingService SettingService
+	ipdbService    IPDBService
 }
 
 // Store 把解析出来的记录写进访问日志库，返回写入条数。
@@ -223,6 +225,69 @@ func (s *AccessLogService) Query(q AccessLogQuery) ([]model.AccessLog, int64, er
 }
 
 // Cleanup 删除超过保留期的记录，返回删除条数。
+// RecentSource 是从访问日志里聚合出来的一个来源，用于回答「谁来过」。
+type RecentSource struct {
+	IP          string `json:"ip"`
+	Location    string `json:"location"`
+	LocationAlt string `json:"locationAlt"`
+	FirstSeen   int64  `json:"firstSeen"` // 毫秒
+	LastSeen    int64  `json:"lastSeen"`
+	Count       int64  `json:"count"`
+}
+
+// recentSourcesDefaultLimit 是来源列表默认返回的条数。它只是给管理员一个
+// 「点进去看日志」的入口，不是分页列表，取太多没有意义。
+const recentSourcesDefaultLimit = 20
+
+// RecentSources 聚合某入站近期出现过的来源 IP，按最后出现时间倒序。
+//
+// 存在的理由：在线明细是瞬时视图，客户端一断开那行就消失，挂在行上的
+// 「访问日志」按钮也跟着没了——管理员恰恰在人走之后才最需要复盘。日志本身
+// 一直都在库里，缺的只是入口。
+//
+// 按 inbound_id 过滤天然排除了面板自己查 xray 流量统计留下的记录：那些行
+// 的 tag 是 api，库里没有对应入站，inbound_id 落为 0。
+func (s *AccessLogService) RecentSources(inboundId int, limit int) ([]RecentSource, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return []RecentSource{}, nil
+	}
+	if limit <= 0 {
+		limit = recentSourcesDefaultLimit
+	}
+
+	var rows []struct {
+		SourceIP  string
+		FirstSeen int64
+		LastSeen  int64
+		Cnt       int64
+	}
+	err := db.Model(&model.AccessLog{}).
+		Select("source_ip, min(time) as first_seen, max(time) as last_seen, count(*) as cnt").
+		Where("inbound_id = ?", inboundId).
+		Group("source_ip").
+		Order("last_seen desc").
+		Limit(limit).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	list := make([]RecentSource, 0, len(rows))
+	for _, r := range rows {
+		primary, alt := locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
+		list = append(list, RecentSource{
+			IP:          r.SourceIP,
+			Location:    primary,
+			LocationAlt: alt,
+			FirstSeen:   r.FirstSeen,
+			LastSeen:    r.LastSeen,
+			Count:       r.Cnt,
+		})
+	}
+	return list, nil
+}
+
 func (s *AccessLogService) Cleanup(retentionDays int, now time.Time) (int64, error) {
 	db := database.GetAccessLogDB()
 	if db == nil || retentionDays <= 0 {

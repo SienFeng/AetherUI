@@ -381,3 +381,123 @@ func TestQueryPaginationIsStableWithinTheSameMillisecond(t *testing.T) {
 		t.Errorf("翻完三页只见到 %d 条，期望 5 条", len(seen))
 	}
 }
+
+// 在线明细是瞬时视图，客户端一断开那一行就消失，挂在行上的「访问日志」按钮
+// 也跟着没了——管理员反而在最需要复盘的时候查不到这个人的记录。
+// RecentSources 从访问日志里聚合出「谁来过」，把入口从在线状态里解耦出来。
+func TestRecentSourcesAggregatesByIP(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50101)
+	s := AccessLogService{}
+
+	if _, err := s.Store([]accesslog.Entry{
+		entryAt(in.Tag, "1.1.1.1", "a.com:443", 1000),
+		entryAt(in.Tag, "1.1.1.1", "b.com:443", 2000),
+		entryAt(in.Tag, "1.1.1.1", "c.com:443", 3000),
+		entryAt(in.Tag, "2.2.2.2", "d.com:443", 5000),
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	got, err := s.RecentSources(in.Id, 10)
+	if err != nil {
+		t.Fatalf("RecentSources: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("来源数 = %d, want 2: %+v", len(got), got)
+	}
+	// 最近出现的排在前面：管理员想找的通常是刚断开的那个人
+	if got[0].IP != "2.2.2.2" {
+		t.Errorf("首位 = %s, want 2.2.2.2（按最后出现时间倒序）", got[0].IP)
+	}
+
+	var one *RecentSource
+	for i := range got {
+		if got[i].IP == "1.1.1.1" {
+			one = &got[i]
+		}
+	}
+	if one == nil {
+		t.Fatal("缺少 1.1.1.1")
+	}
+	if one.Count != 3 {
+		t.Errorf("记录数 = %d, want 3", one.Count)
+	}
+	if one.FirstSeen != time.Unix(1000, 0).UnixMilli() {
+		t.Errorf("FirstSeen = %d, want %d", one.FirstSeen, time.Unix(1000, 0).UnixMilli())
+	}
+	if one.LastSeen != time.Unix(3000, 0).UnixMilli() {
+		t.Errorf("LastSeen = %d, want %d", one.LastSeen, time.Unix(3000, 0).UnixMilli())
+	}
+}
+
+// 按入站隔离：不能把别人的来源混进来。
+func TestRecentSourcesIsScopedToInbound(t *testing.T) {
+	setupAccessLogDB(t)
+	a := mkInbound(t, 50102)
+	b := mkInbound(t, 50103)
+	s := AccessLogService{}
+	if _, err := s.Store([]accesslog.Entry{
+		entryAt(a.Tag, "1.1.1.1", "a.com:443", 1000),
+		entryAt(b.Tag, "9.9.9.9", "b.com:443", 1000),
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := s.RecentSources(a.Id, 10)
+	if err != nil {
+		t.Fatalf("RecentSources: %v", err)
+	}
+	if len(got) != 1 || got[0].IP != "1.1.1.1" {
+		t.Errorf("入站 %d 的来源 = %+v, want 只有 1.1.1.1", a.Id, got)
+	}
+}
+
+// 面板自己查 xray 流量统计产生的记录落在 inbound_id = 0（api 入站不在库里），
+// 它们不属于任何用户，绝不能出现在来源列表里——现网实测这类记录占了 87%。
+func TestRecentSourcesExcludesRecordsWithoutInbound(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50104)
+	s := AccessLogService{}
+	if _, err := s.Store([]accesslog.Entry{
+		entryAt(in.Tag, "1.1.1.1", "a.com:443", 1000),
+		entryAt("api", "127.0.0.1", "127.0.0.1:62789", 1000), // 无对应入站 → inbound_id = 0
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := s.RecentSources(in.Id, 10)
+	if err != nil {
+		t.Fatalf("RecentSources: %v", err)
+	}
+	for _, e := range got {
+		if e.IP == "127.0.0.1" {
+			t.Errorf("api 记录混进了来源列表: %+v", got)
+		}
+	}
+	if len(got) != 1 {
+		t.Errorf("来源数 = %d, want 1: %+v", len(got), got)
+	}
+}
+
+func TestRecentSourcesRespectsLimit(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50105)
+	s := AccessLogService{}
+	entries := make([]accesslog.Entry, 0, 8)
+	for i := 0; i < 8; i++ {
+		entries = append(entries, entryAt(in.Tag, "10.0.0."+itoaS(i+1), "x.com:443", int64(1000+i)))
+	}
+	if _, err := s.Store(entries); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := s.RecentSources(in.Id, 3)
+	if err != nil {
+		t.Fatalf("RecentSources: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("来源数 = %d, want 3", len(got))
+	}
+	// 保留的必须是最近的三个
+	if got[0].IP != "10.0.0.8" || got[2].IP != "10.0.0.6" {
+		t.Errorf("截断后 = %+v, want 最近的 10.0.0.8/7/6", got)
+	}
+}

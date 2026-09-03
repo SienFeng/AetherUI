@@ -361,7 +361,13 @@ func formatLocation(loc ipdb.Location) string {
 // 不做仲裁：实测两个离线库对同一批 IP 互有出入，谁也不是权威。把分歧原样
 // 显示给管理员，比替他挑一个更有用。
 func (s *OnlineService) locate(ip net.IP) (primary, alt string) {
-	db := s.ipdbService.DB()
+	return locateWithIPDB(s.ipdbService, ip)
+}
+
+// locateWithIPDB 判定 IP 归属地，返回主判定与另一个源给出的不同结论。
+// 在线明细与访问日志的来源列表共用同一套判定，避免两处结论对不上。
+func locateWithIPDB(svc IPDBService, ip net.IP) (primary, alt string) {
+	db := svc.DB()
 	if db == nil {
 		return "", ""
 	}

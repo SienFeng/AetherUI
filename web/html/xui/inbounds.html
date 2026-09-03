@@ -73,7 +73,7 @@
                                          :data-source="onlineOf(dbInbound.id).list"
                                          :row-key="online => online.ip"
                                          :pagination="false" size="small"
-                                         :locale="{ emptyText: '当前没有在线连接' }">
+                                         :locale="{ emptyText: '当前没有在线连接。人已离线时，可从左侧「操作 → 访问日志」查看他来过之后留下的记录' }">
                                     <template slot="firstSeen" slot-scope="text, online">
                                         <template v-if="online.firstSeen">[[ DateUtil.formatMillis(online.firstSeen) ]]</template>
                                         <template v-else>-</template>

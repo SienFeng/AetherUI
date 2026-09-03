@@ -38,6 +38,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/kick/:id", a.kick)
 	g.POST("/unban/:id", a.unban)
 	g.POST("/accessLogs/:id", a.getAccessLogs)
+	g.POST("/recentSources/:id", a.getRecentSources)
 	g.POST("/provinces", a.getProvinces)
 }
 
@@ -197,6 +198,22 @@ func (a *InboundController) unban(c *gin.Context) {
 		return
 	}
 	jsonMsg(c, "解除封禁", nil)
+}
+
+// getRecentSources 回答「谁来过」。在线明细是瞬时视图，人一断开那行就消失，
+// 挂在行上的访问日志入口也跟着没了；日志一直在库里，缺的只是入口。
+func (a *InboundController) getRecentSources(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取近期来源", err)
+		return
+	}
+	list, err := a.accessLogService.RecentSources(id, 0)
+	if err != nil {
+		jsonMsg(c, "获取近期来源", err)
+		return
+	}
+	jsonObj(c, list, nil)
 }
 
 func (a *InboundController) getAccessLogs(c *gin.Context) {

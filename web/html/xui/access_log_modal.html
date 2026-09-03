@@ -18,6 +18,22 @@
             <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
         </a-col>
     </a-row>
+    <div v-if="accessLogModal.sources.length" style="margin-bottom: 12px">
+        <span style="color: rgba(0,0,0,.45); margin-right: 8px">近期来源：</span>
+        <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
+            <template slot="title">
+                [[ src.location || '归属地未知' ]]<template v-if="src.locationAlt">（另一个源认为是 [[ src.locationAlt ]]）</template><br>
+                最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
+            </template>
+            <a-tag style="cursor: pointer; margin-bottom: 4px"
+                   :color="accessLogModal.ip === src.ip ? 'blue' : ''"
+                   @click="accessLogModal.pickSource(src.ip)">
+                [[ src.ip ]]<span style="opacity: .6"> · [[ src.count ]]</span>
+            </a-tag>
+        </a-tooltip>
+        <a-tag v-if="accessLogModal.ip" style="cursor: pointer; margin-bottom: 4px"
+               @click="accessLogModal.pickSource('')">显示全部</a-tag>
+    </div>
     <a-table :columns="accessLogModal.columns" :data-source="accessLogModal.list"
              :row-key="row => row.id" size="small" :loading="accessLogModal.loading"
              :pagination="{
@@ -49,6 +65,8 @@
         visible: false,
         loading: false,
         enabled: true,
+        // 近期来源：访问日志里出现过的 IP，让「谁来过」不依赖于他此刻是否在线
+        sources: [],
         title: '访问日志',
         inboundId: 0,
         ip: '',
@@ -77,8 +95,22 @@
             this.page = 1;
             this.list = [];
             this.total = 0;
+            this.sources = [];
             this.visible = true;
             this.load();
+            this.loadSources();
+        },
+        // 点标签即按该来源过滤；再点一次「显示全部」清掉过滤。
+        pickSource(ip) {
+            this.ip = ip;
+            this.key = '';
+            this.search();
+        },
+        async loadSources() {
+            const msg = await HttpUtil.post(`/xui/inbound/recentSources/${this.inboundId}`);
+            if (msg.success) {
+                this.sources = msg.obj || [];
+            }
         },
         close() {
             this.visible = false;
