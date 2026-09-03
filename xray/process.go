@@ -116,6 +116,15 @@ func (p *Process) GetConfig() *Config {
 	return p.config
 }
 
+// SetConfig 更新进程内的配置快照。
+//
+// 热应用成功后必须调它：RestartXray 是靠 GetConfig().Equals(新配置) 判断
+// "配置有没有变"的，不同步的话下一轮 cron 仍认为两者不同，于是真的去重启
+// 一次——热更新反而退化成延迟一轮的重启。
+func (p *Process) SetConfig(c *Config) {
+	p.config = c
+}
+
 func (p *process) refreshAPIPort() {
 	for _, inbound := range p.config.InboundConfigs {
 		if inbound.Tag == "api" {
