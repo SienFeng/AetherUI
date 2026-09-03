@@ -10,7 +10,7 @@ AetherUI（二进制与模块名均为 `a-ui`）是一个基于 Xray-core 的 We
 
 ## 常用命令
 
-没有 lint 配置或前端构建流程。测试只有标准 `go test`，集中在 `util/link`、`database`、`web/service` 三个包（其余包仍无测试）。`Makefile` 提供 `make build` / `make test` / `make vet` / `make verify`（vet + test + build，提交前的门禁）/ `make clean`；`.github/workflows/ci.yml` 在 push/PR 时跑 `make verify`，Go 版本从 `go.mod` 读取，不在工作流里硬编码。
+没有 lint 配置或前端构建流程。测试是标准 `go test`；目前有 14 个包带测试（`database`、`database/model`、`util/link`、`web/service`、`xray` 等，`make verify` 的输出即是当前清单），其余包仍无测试。`Makefile` 提供 `make build` / `make test` / `make vet` / `make verify`（vet + test + build，提交前的门禁）/ `make clean`；`.github/workflows/ci.yml` 在 push/PR 时跑 `make verify`，Go 版本从 `go.mod` 读取，不在工作流里硬编码。
 
 ```bash
 # 构建（CGO 必须开启：gorm.io/driver/sqlite 依赖 mattn/go-sqlite3）
@@ -72,7 +72,7 @@ go mod tidy && go vet ./...
 
 重启去抖机制：任何改动 inbound 的 controller 调用 `xrayService.SetToNeedRestart()` 置原子标志；`InboundController.startTask()` 注册的 10 秒 cron 用 `IsNeedRestartAndSetFalse()` 消费该标志并调 `RestartXray(false)`；`RestartXray` 再用 `Config.Equals()`（`xray/config.go` 逐字段 `bytes.Equal`）判断配置是否真的变了。所以**新增会影响 xray 配置的字段时，必须同步扩展 `Config.Equals` / `InboundConfig.Equals`**，否则改动不会生效。
 
-判断「配置变了」之后，`RestartXray` 不再直接重启：先试 `tryHotApply`（`web/service/xray.go`），它用 `xray.ComputeHotDiff`（`xray/hot_diff.go`）比较新旧配置，能靠核心的 gRPC 控制面（`xray/api.go`，入站/出站增删 + 整体替换路由规则）追平的就走热应用，不重启进程；`ComputeHotDiff` 判断不了或涉及没有运行时重载接口的段（log / dns / policy / api / stats / reverse / fakeDns，以及默认出站、Reality 入站、routing 里 `domainStrategy`/`domainMatcher` 等）就返回「不能热应用」，退回原来的整进程重启。**新增会影响 xray 配置的字段时，除了按上一段扩展 `Equals`，还要判断它是走运行时重载接口热更新，还是必须重启**——归入 `ComputeHotDiff` 里的 `static` 列表还是新的 diff 分支，判断错了不会报错，只会让核心与面板的配置认知从此不一致。`web/service/xray_hot_reload_e2e_test.go`（`TestHotReloadEndToEndAgainstRealXray`）用真实 xray 进程验证了这条链路：改分流规则走热应用且不重启进程，改访问日志开关（改 `log` 段）仍会触发整进程重启。
+判断「配置变了」之后，`RestartXray` 不再直接重启：先试 `tryHotApply`（`web/service/xray.go`），它用 `xray.ComputeHotDiff`（`xray/hot_diff.go`）比较新旧配置，能靠核心的 gRPC 控制面（`xray/api.go`，入站/出站增删 + 整体替换路由规则）追平的就走热应用，不重启进程；`ComputeHotDiff` 判断不了或涉及没有运行时重载接口的段（log / dns / transport / policy / api / stats / reverse / fakeDns，以及默认出站、Reality 入站、routing 里 `domainStrategy`/`domainMatcher` 等）就返回「不能热应用」，退回原来的整进程重启。**新增会影响 xray 配置的字段时，除了按上一段扩展 `Equals`，还要判断它是走运行时重载接口热更新，还是必须重启**——归入 `ComputeHotDiff` 里的 `static` 列表还是新的 diff 分支，判断错了不会报错，只会让核心与面板的配置认知从此不一致。`web/service/xray_hot_reload_e2e_test.go`（`TestHotReloadEndToEndAgainstRealXray`）用真实 xray 进程验证了这条链路：改分流规则走热应用且不重启进程，改访问日志开关（改 `log` 段）仍会触发整进程重启。
 
 对 `OutboundConfigs` / `RouterConfig` 这类 `json_util.RawMessage` 字段则不必改 `Equals`——它们按字节比较，内容变化天然被察觉。代价是**生成必须逐字节确定**，否则 `Equals` 恒为 false，上面那个 10 秒 cron 会不停重启 xray。
 
