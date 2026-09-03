@@ -198,12 +198,37 @@ func (s *RoutingInjector) buildRule(
 		"domain": domains,
 	}
 
-	if rule.InboundId > 0 {
-		tag, ok := inboundTagById[rule.InboundId]
-		if !ok {
-			return nil, false, common.NewError("入站不存在或已禁用, id:", rule.InboundId)
+	inboundIds, err := DecodeInboundIds(rule.InboundIds)
+	if err != nil {
+		return nil, false, common.NewError("规则的入站数据损坏, id:", rule.Id, "err:", err)
+	}
+	if len(inboundIds) > 0 {
+		tags := make([]string, 0, len(inboundIds))
+		missing := make([]int, 0)
+		for _, id := range inboundIds {
+			tag, ok := inboundTagById[id]
+			if !ok {
+				missing = append(missing, id)
+				continue
+			}
+			tags = append(tags, tag)
 		}
-		generated["inboundTag"] = []string{tag}
+		if len(tags) == 0 {
+			// 剩下空数组绝不能输出。实测（Xray 26.7.28）确认 xray 把
+			// inboundTag: [] 当作「不限制」而非「不匹配任何入站」——一条本该
+			// 只覆盖甲的规则会劫持所有人的这批域名，且 Configuration OK、
+			// 面板首页照样显示 running。与 domain 为空数组是同一类事故。
+			return nil, false, common.NewError("规则指定的入站全部不存在或已禁用, ids:", inboundIds)
+		}
+		if len(missing) > 0 {
+			// 部分失效不整条丢弃：剩下的入站仍该按规则走。但必须记录，
+			// 否则被剔除的那些用户会静默回落直连而无人察觉。
+			logger.Warning("routing rule drops inbounds that no longer exist or are disabled, rule id:",
+				rule.Id, "inbound ids:", missing)
+		}
+		// tags 的顺序由 InboundIds 的升序保证，不得改用遍历 inboundTagById
+		// 这个 map 来产生顺序——那样生成不再逐字节确定。
+		generated["inboundTag"] = tags
 	}
 
 	switch rule.Action {

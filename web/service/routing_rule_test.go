@@ -1,8 +1,11 @@
 package service
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
+	"a-ui/database"
 	"a-ui/database/model"
 )
 
@@ -52,7 +55,7 @@ func TestAddBlockRuleWithGlobalInbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	s := RoutingRuleService{}
-	r := &model.RoutingRule{Remark: "全局封禁", InboundId: 0, DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}
+	r := &model.RoutingRule{Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}
 	if err := s.Add(r); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -96,10 +99,11 @@ func TestCheckOutboundRefsBlocksDeletion(t *testing.T) {
 
 func TestGetEnabledRulesSortedByPriorityThenId(t *testing.T) {
 	setupDB(t)
-	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	// 故意乱序插入
-	for _, p := range []int{20, 10, 10} {
+	// 故意乱序插入。三条规则挂三个不同的域名组：同一个域名组下每个入站至多
+	// 被一条规则覆盖，而本测试关心的是排序，不该被冲突校验挡住。
+	for i, p := range []int{20, 10, 10} {
+		g := newTestGroup(t, "组 "+strconv.Itoa(i))
 		if err := s.Add(&model.RoutingRule{
 			DomainGroupId: g.Id, Action: model.ActionBlock, Priority: p, Enable: true,
 		}); err != nil {
@@ -207,7 +211,7 @@ func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	g := newTestGroup(t, "ChatGPT")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "甲的 ChatGPT", InboundId: in.Id, DomainGroupId: g.Id,
+		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id,
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -223,13 +227,13 @@ func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
 	}
 }
 
-// InboundId = 0 是全局规则，不指向任何具体入站，不该阻塞任何入站的删除。
+// 空的 InboundIds（「所有用户」）不指向任何具体入站，不该阻塞任何入站的删除。
 func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
 	setupDB(t)
 	in := newTestInbound(t, 10002)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "全员封禁", InboundId: 0, DomainGroupId: g.Id,
+		Remark: "全员封禁", InboundIds: "[]", DomainGroupId: g.Id,
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -237,5 +241,251 @@ func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
 
 	if err := (&InboundService{}).DelInbound(in.Id); err != nil {
 		t.Fatalf("a global rule must not block deleting an unrelated inbound: %v", err)
+	}
+}
+
+func TestEncodeInboundIdsSortsAndDedupes(t *testing.T) {
+	got, err := EncodeInboundIds([]int{5, 3, 5, 1})
+	if err != nil {
+		t.Fatalf("EncodeInboundIds: %v", err)
+	}
+	if got != "[1,3,5]" {
+		t.Errorf("got %q, want [1,3,5]", got)
+	}
+}
+
+// 非正数会被丢弃，于是 [0] 编码后是 []——而 [] 的语义是「所有用户」。
+// 严格版必须报错，绝不能让一条本该覆盖某个人的规则被静默放大到全体。
+func TestEncodeInboundIdsStrictRejectsAllInvalid(t *testing.T) {
+	if _, err := EncodeInboundIdsStrict([]int{0, -1}); err == nil {
+		t.Error("expected error: non-empty input with no valid id must not become []")
+	}
+	// 空输入是前端显式选了「所有用户」，必须放行
+	got, err := EncodeInboundIdsStrict(nil)
+	if err != nil {
+		t.Fatalf("empty input must be accepted: %v", err)
+	}
+	if got != "[]" {
+		t.Errorf("got %q, want []", got)
+	}
+}
+
+func TestDecodeInboundIdsTreatsBlankAsAllUsers(t *testing.T) {
+	for _, raw := range []string{"", "   ", "null"} {
+		got, err := DecodeInboundIds(raw)
+		if err != nil {
+			t.Fatalf("DecodeInboundIds(%q): %v", raw, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("DecodeInboundIds(%q) = %v, want empty", raw, got)
+		}
+	}
+}
+
+// 真正的语法错误必须返回 error，由 buildRule 整条丢弃该规则——
+// 当成空数组就等于把规则放大到所有用户。
+func TestDecodeInboundIdsRejectsCorruptData(t *testing.T) {
+	if _, err := DecodeInboundIds("{not json"); err == nil {
+		t.Error("expected error for corrupt data")
+	}
+}
+
+// 引用守卫必须能看穿多入站规则：SQLite 会复用被删除的自增 id，
+// 一条覆盖 [甲, 乙] 的规则在甲被删掉后，会静默重绑到捡到甲旧 id 的新入站上。
+func TestCheckInboundRefsSeesIdInTheMiddleOfAMultiInboundRule(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	a := newTestInbound(t, 10001)
+	b := newTestInbound(t, 10002)
+	c := newTestInbound(t, 10003)
+	s := RoutingRuleService{}
+	if err := s.Add(&model.RoutingRule{
+		InboundIds:    mustEncodeIds(t, []int{a.Id, b.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.CheckInboundRefs(b.Id); err == nil {
+		t.Error("expected error: inbound b is referenced by a multi-inbound rule")
+	}
+	if err := s.CheckInboundRefs(c.Id); err != nil {
+		t.Errorf("unreferenced inbound should be deletable, got %v", err)
+	}
+}
+
+// 「所有用户」规则不指向任何具体入站，不算引用——与旧语义 InboundId = 0 一致。
+// 否则一旦建了全局封禁规则，所有入站都删不掉了。
+func TestCheckInboundRefsIgnoresAllUsersRule(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "违规域名")
+	in := newTestInbound(t, 10001)
+	s := RoutingRuleService{}
+	if err := s.Add(&model.RoutingRule{
+		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.CheckInboundRefs(in.Id); err != nil {
+		t.Errorf("an all-users rule must not pin any specific inbound, got %v", err)
+	}
+}
+
+// newConflictFixture 建一个域名组和三个入站，供冲突测试复用。
+func newConflictFixture(t *testing.T) (*model.DomainGroup, *model.Inbound, *model.Inbound, *model.Inbound) {
+	t.Helper()
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	return g, newTestInbound(t, 10001), newTestInbound(t, 10002), newTestInbound(t, 10003)
+}
+
+func addRuleWith(t *testing.T, groupId int, ids []int, remark string) *model.RoutingRule {
+	t.Helper()
+	r := &model.RoutingRule{
+		Remark: remark, InboundIds: mustEncodeIds(t, ids),
+		DomainGroupId: groupId, Action: model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add %s: %v", remark, err)
+	}
+	return r
+}
+
+func TestConflictRejectsOverlappingInbounds(t *testing.T) {
+	g, a, b, c := newConflictFixture(t)
+	addRuleWith(t, g.Id, []int{a.Id, b.Id}, "甲乙走 B")
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "乙丙走 C", InboundIds: mustEncodeIds(t, []int{b.Id, c.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected conflict: inbound b is already covered in this domain group")
+	}
+}
+
+func TestConflictAllowsDisjointInbounds(t *testing.T) {
+	g, a, b, _ := newConflictFixture(t)
+	addRuleWith(t, g.Id, []int{a.Id}, "甲")
+
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "乙", InboundIds: mustEncodeIds(t, []int{b.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("disjoint inbounds must be accepted: %v", err)
+	}
+}
+
+// 严格互斥：一个域名组一旦有了「所有用户」规则，就不能再对它加任何规则。
+func TestConflictAllUsersBlocksSpecificUser(t *testing.T) {
+	g, a, _, _ := newConflictFixture(t)
+	addRuleWith(t, g.Id, nil, "所有用户")
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "甲", InboundIds: mustEncodeIds(t, []int{a.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected conflict: an all-users rule already covers this domain group")
+	}
+}
+
+// 反方向同样要挡：已有指定用户的规则时，「所有用户」也勾不上。
+func TestConflictSpecificUserBlocksAllUsers(t *testing.T) {
+	g, a, _, _ := newConflictFixture(t)
+	addRuleWith(t, g.Id, []int{a.Id}, "甲")
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "所有用户", InboundIds: "[]",
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected conflict: a specific-user rule already exists in this domain group")
+	}
+}
+
+func TestConflictAllUsersBlocksAnotherAllUsers(t *testing.T) {
+	g, _, _, _ := newConflictFixture(t)
+	addRuleWith(t, g.Id, nil, "所有用户")
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "所有用户 2", InboundIds: "[]",
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected conflict: two all-users rules in the same domain group")
+	}
+}
+
+// 不同域名组永不冲突，即使域名内容重叠——那种重叠由 Priority 决定先后，
+// 是既有语义，本功能不动它。
+func TestConflictIgnoresOtherDomainGroups(t *testing.T) {
+	g, a, _, _ := newConflictFixture(t)
+	other := newTestGroup(t, "另一个组")
+	addRuleWith(t, g.Id, []int{a.Id}, "甲在 ChatGPT 组")
+
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "甲在另一个组", InboundIds: mustEncodeIds(t, []int{a.Id}),
+		DomainGroupId: other.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("different domain groups must never conflict: %v", err)
+	}
+}
+
+// 禁用的规则同样占位，否则会出现「保存时没问题、一启用才发现撞车」。
+func TestConflictCountsDisabledRules(t *testing.T) {
+	g, a, _, _ := newConflictFixture(t)
+	r := addRuleWith(t, g.Id, []int{a.Id}, "甲（将被禁用）")
+	r.Enable = false
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "甲走别处", InboundIds: mustEncodeIds(t, []int{a.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected conflict: a disabled rule still holds its slot")
+	}
+}
+
+// 编辑自己不能算和自己冲突，否则任何一条规则都改不动了。
+func TestConflictExcludesTheRuleBeingUpdated(t *testing.T) {
+	g, a, b, _ := newConflictFixture(t)
+	r := addRuleWith(t, g.Id, []int{a.Id}, "甲")
+
+	r.InboundIds = mustEncodeIds(t, []int{a.Id, b.Id})
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("updating a rule must not conflict with itself: %v", err)
+	}
+}
+
+// 冲突报错必须点名到人和规则。只说「存在冲突」等于让管理员自己去翻规则表，
+// 而规则一多就根本找不出是哪一条挡住了。
+func TestConflictErrorNamesTheUserAndTheRule(t *testing.T) {
+	g, a, _, _ := newConflictFixture(t)
+	a.Remark = "甲"
+	if err := database.GetDB().Save(a).Error; err != nil {
+		t.Fatalf("save inbound remark: %v", err)
+	}
+	addRuleWith(t, g.Id, []int{a.Id}, "甲的 ChatGPT 走 B")
+
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "甲的 ChatGPT 走 C", InboundIds: mustEncodeIds(t, []int{a.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("expected a conflict")
+	}
+	msg := err.Error()
+	for _, want := range []string{"甲的 ChatGPT 走 B", "用户「甲」", "ChatGPT"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("conflict error must mention %q, got: %s", want, msg)
+		}
+	}
+	// NewError 走 fmt.Sprintln，会在参数之间插空格，拼出「「 甲 」」这种带
+	// 空隙的句子。这条断言把消息钉在 NewErrorf 的一次成型上。
+	if strings.Contains(msg, "「 ") || strings.Contains(msg, " 」") {
+		t.Errorf("conflict error has stray spaces inside the quotes: %s", msg)
 	}
 }

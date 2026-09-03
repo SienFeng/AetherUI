@@ -95,11 +95,11 @@ func TestGeneratedConfigIsAcceptedByRealXray(t *testing.T) {
 
 	ruleService := RoutingRuleService{}
 	for _, rule := range []*model.RoutingRule{
-		{Remark: "全员封禁违规域名", InboundId: 0, DomainGroupId: banned.Id,
+		{Remark: "全员封禁违规域名", InboundIds: "[]", DomainGroupId: banned.Id,
 			Action: model.ActionBlock, Priority: 0, Enable: true},
-		{Remark: "甲的 ChatGPT 走 B", InboundId: jia.Id, DomainGroupId: chatgpt.Id,
+		{Remark: "甲的 ChatGPT 走 B", InboundIds: mustEncodeIds(t, []int{jia.Id}), DomainGroupId: chatgpt.Id,
 			Action: model.ActionProxy, OutboundId: nodeB.Id, Priority: 1, Enable: true},
-		{Remark: "乙的 ChatGPT 走 C", InboundId: yi.Id, DomainGroupId: chatgpt.Id,
+		{Remark: "乙的 ChatGPT 走 C", InboundIds: mustEncodeIds(t, []int{yi.Id}), DomainGroupId: chatgpt.Id,
 			Action: model.ActionProxy, OutboundId: nodeC.Id, Priority: 2, Enable: true},
 	} {
 		if err := ruleService.Add(rule); err != nil {
@@ -143,10 +143,10 @@ func TestGeneratedConfigStaysValidWithDirtyData(t *testing.T) {
 		{Remark: "引用不存在的域名组", DomainGroupId: 999, Action: model.ActionBlock, Enable: true},
 		{Remark: "引用不存在的出站", DomainGroupId: group.Id, Action: model.ActionProxy,
 			OutboundId: 999, Enable: true},
-		{Remark: "引用不存在的入站", DomainGroupId: group.Id, InboundId: 999,
+		{Remark: "引用不存在的入站", DomainGroupId: group.Id, InboundIds: "[999]",
 			Action: model.ActionBlock, Enable: true},
 		{Remark: "动作未知", DomainGroupId: group.Id, Action: "definitely-not-an-action", Enable: true},
-		{Remark: "唯一一条好规则", DomainGroupId: group.Id, InboundId: in.Id,
+		{Remark: "唯一一条好规则", DomainGroupId: group.Id, InboundIds: mustEncodeIds(t, []int{in.Id}),
 			Action: model.ActionBlock, Enable: true},
 	} {
 		if err := db.Save(rule).Error; err != nil {
