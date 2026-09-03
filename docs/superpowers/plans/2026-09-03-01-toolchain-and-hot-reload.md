@@ -288,11 +288,13 @@ func HostProc(combineWith ...string) string {
 
 ```bash
 go test ./util/sys/ -run TestHostProc -v
-grep -rn "go:linkname" --include="*.go" . && echo "还有残留" || echo "已彻底移除"
+grep -rnE '^[[:space:]]*//go:linkname' --include="*.go" . && echo "还有残留" || echo "已彻底移除"
 make verify
 ```
 
 期望：测试全绿；`grep` 输出「已彻底移除」；`make verify` 通过。
+
+**说明：** 不能用不锚定的 `go:linkname` 作为 grep 模式，因为本任务在注释里提到了这个指令的名字，不锚定的 grep 会误伤注释内容，恒输出「还有残留」。只有以 `//go:` 开头独占一行的指令才是真正的 linkname 指令（可有前导空白），所以改用 `^[[:space:]]*//go:linkname` 来准确匹配。
 
 - [ ] **Step 5: 提交**
 
