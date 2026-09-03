@@ -2,6 +2,7 @@ package xray
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
 	"a-ui/util/json_util"
@@ -20,7 +21,13 @@ func baseConfig() *Config {
 			{Port: 62789, Protocol: "dokodemo-door", Tag: "api", Settings: rawf(`{"address":"127.0.0.1"}`)},
 			{Port: 10001, Protocol: "vless", Tag: "inbound-10001", Settings: rawf(`{"clients":[{"id":"u1"}]}`)},
 		},
-		OutboundConfigs: rawf(`[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"a-ui-block"}]`),
+		// 首位出站（默认出站）刻意不带 tag，与真实模板
+		// （web/service/config.json）一致——RoutingInjector.buildOutbounds
+		// 原样保留模板里的出站再往后追加，模板首位的 freedom 出站没有 tag。
+		// 之前这里给它也写了 tag，形状与线上不符，掩盖了 C1 那个「出站热
+		// 更新在真实配置上永不生效」的缺陷（decodeOutbounds 曾对任何空 tag
+		// 一律判定必须重启）。
+		OutboundConfigs: rawf(`[{"protocol":"freedom"},{"protocol":"blackhole","tag":"a-ui-block"}]`),
 		RouterConfig:    rawf(`{"domainStrategy":"AsIs","rules":[{"type":"field","domain":["geosite:openai"],"outboundTag":"a-ui-block"}]}`),
 	}
 }
@@ -139,7 +146,12 @@ func TestComputeHotDiff(t *testing.T) {
 		{
 			name: "新增出站可热应用",
 			mutate: func(c *Config) {
-				c.OutboundConfigs = rawf(`[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"a-ui-block"},{"protocol":"socks","tag":"a-ui-node1","settings":{"servers":[{"address":"1.2.3.4","port":1080}]}}]`)
+				// 前两个元素必须与 baseConfig 逐字节相同（尤其是无 tag 的
+				// 默认出站首位）——否则这条用例实际测的是「默认出站变了还
+				// 顺带加了一个出站」，而那必须整进程重启，不是这条用例的
+				// 本意。之前这里把首位也写成带 tag 的 direct，与 baseConfig
+				// 改前的形状凑巧一致，才没暴露这个问题。
+				c.OutboundConfigs = rawf(`[{"protocol":"freedom"},{"protocol":"blackhole","tag":"a-ui-block"},{"protocol":"socks","tag":"a-ui-node1","settings":{"servers":[{"address":"1.2.3.4","port":1080}]}}]`)
 			},
 			wantOK: true,
 			check: func(t *testing.T, d *HotDiff) {
@@ -210,5 +222,60 @@ func TestAddedInboundIsValidJSON(t *testing.T) {
 	}
 	if parsed["tag"] != "inbound-10002" {
 		t.Fatalf("tag = %v，期望 inbound-10002", parsed["tag"])
+	}
+}
+
+// TestComputeHotDiffAgainstRealDefaultTemplate 是 C1 的钉子测试：它不用
+// baseConfig() 这个手写夹具，而是直接读真实的默认模板
+// web/service/config.json（RoutingInjector.buildOutbounds 原样保留模板的
+// 出站数组再往后追加），确保测试夹具的形状与线上永远一致。
+//
+// 这条用例的存在理由：修复前，baseConfig() 给数组首位的出站也写了 tag，
+// 与真实模板（首位 freedom 出站没有 tag）形状不符，掩盖了 decodeOutbounds
+// 对任何空 tag 一律判定「必须重启」的缺陷——每一份真实生成的配置首位都
+// 无 tag，所以出站热更新在生产环境从未生效过。
+//
+// go test ./xray/ 的工作目录是 xray/ 包目录，所以用 ../web/service/config.json
+// 这个相对路径读取（不依赖 web/service 包的 TestMain 那个仓库根 chdir）。
+func TestComputeHotDiffAgainstRealDefaultTemplate(t *testing.T) {
+	raw, err := os.ReadFile("../web/service/config.json")
+	if err != nil {
+		t.Fatalf("读取默认模板失败: %v", err)
+	}
+
+	oldCfg := &Config{}
+	if err := json.Unmarshal(raw, oldCfg); err != nil {
+		t.Fatalf("默认模板无法解析成 xray.Config: %v", err)
+	}
+	newCfg := &Config{}
+	if err := json.Unmarshal(raw, newCfg); err != nil {
+		t.Fatalf("默认模板无法解析成 xray.Config: %v", err)
+	}
+
+	// 复刻 RoutingInjector.buildOutbounds 的动作：把模板的出站数组解出来，
+	// 追加一个新出站节点，再编回整段 RawMessage——这正是「新增一个出站
+	// 节点」在真实生成配置里的样子。
+	var outbounds []json.RawMessage
+	if err := json.Unmarshal(newCfg.OutboundConfigs, &outbounds); err != nil {
+		t.Fatalf("默认模板的 outbounds 段不是数组: %v", err)
+	}
+	outbounds = append(outbounds, json.RawMessage(
+		`{"protocol":"socks","tag":"a-ui-node1","settings":{"servers":[{"address":"1.2.3.4","port":1080}]}}`,
+	))
+	encoded, err := json.Marshal(outbounds)
+	if err != nil {
+		t.Fatalf("序列化新出站数组失败: %v", err)
+	}
+	newCfg.OutboundConfigs = json_util.RawMessage(encoded)
+
+	diff, ok := ComputeHotDiff(oldCfg, newCfg)
+	if !ok {
+		t.Fatal("对真实默认模板只新增一个出站节点，期望可热应用，实际判定必须整进程重启")
+	}
+	if len(diff.AddedOutbounds) != 1 {
+		t.Fatalf("期望新增 1 个出站，实际 %d 个：%+v", len(diff.AddedOutbounds), diff.AddedOutbounds)
+	}
+	if len(diff.RemovedOutboundTags) != 0 {
+		t.Fatalf("不该删除任何出站，实际 %v", diff.RemovedOutboundTags)
 	}
 }

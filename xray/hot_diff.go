@@ -3,6 +3,7 @@ package xray
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 
 	"a-ui/logger"
 	"a-ui/util/json_util"
@@ -38,6 +39,7 @@ func (d *HotDiff) Empty() bool {
 // 得多。
 func ComputeHotDiff(oldCfg, newCfg *Config) (*HotDiff, bool) {
 	if oldCfg == nil || newCfg == nil {
+		logger.Debug("hot diff: oldCfg 或 newCfg 为 nil，需要重启")
 		return nil, false
 	}
 
@@ -78,11 +80,11 @@ func ComputeHotDiff(oldCfg, newCfg *Config) (*HotDiff, bool) {
 
 // diffInbounds 计算入站的增删。改动过的入站按"先删后加"处理。
 func diffInbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
-	oldByTag, ok := inboundsByTag(oldCfg.InboundConfigs)
+	oldByTag, ok := inboundsByTag(oldCfg.InboundConfigs, "旧")
 	if !ok {
 		return false
 	}
-	newByTag, ok := inboundsByTag(newCfg.InboundConfigs)
+	newByTag, ok := inboundsByTag(newCfg.InboundConfigs, "新")
 	if !ok {
 		return false
 	}
@@ -107,6 +109,7 @@ func diffInbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 		if exists {
 			raw, err := json.Marshal(newIb)
 			if err != nil {
+				logger.Debug("hot diff: 入站 [", oldIb.Tag, "] 序列化失败，需要重启:", err)
 				return false
 			}
 			diff.AddedInbounds = append(diff.AddedInbounds, raw)
@@ -128,6 +131,7 @@ func diffInbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 		}
 		raw, err := json.Marshal(newIb)
 		if err != nil {
+			logger.Debug("hot diff: 新增入站 [", newIb.Tag, "] 序列化失败，需要重启:", err)
 			return false
 		}
 		diff.AddedInbounds = append(diff.AddedInbounds, raw)
@@ -137,14 +141,18 @@ func diffInbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 
 // inboundsByTag 按 tag 建索引。tag 为空或重复时返回 false——那种配置本身
 // 就有问题，交给重启路径让核心去报错，别在这里替它拼凑。
-func inboundsByTag(inbounds []InboundConfig) (map[string]*InboundConfig, bool) {
+//
+// label 只用于日志（"旧"/"新"），标出是哪一侧的配置有问题。
+func inboundsByTag(inbounds []InboundConfig, label string) (map[string]*InboundConfig, bool) {
 	byTag := make(map[string]*InboundConfig, len(inbounds))
 	for i := range inbounds {
 		ib := &inbounds[i]
 		if ib.Tag == "" {
+			logger.Debug("hot diff: ", label, " 配置第 ", i, " 个入站 tag 为空，需要重启")
 			return nil, false
 		}
 		if _, dup := byTag[ib.Tag]; dup {
+			logger.Debug("hot diff: ", label, " 配置的入站 tag [", ib.Tag, "] 重复，需要重启")
 			return nil, false
 		}
 		byTag[ib.Tag] = ib
@@ -165,7 +173,10 @@ func inboundUsesReality(ib *InboundConfig) bool {
 		// 的入站热塞进核心。
 		return true
 	}
-	return ss.Security == "reality"
+	// xray 把 security 小写化后再构建传输层（不区分大小写），所以
+	// "REALITY"/"Reality" 都是能工作的 Reality 入站；直接做字符串相等会
+	// 认不出它们，把一个实际用了 Reality 的入站错当成普通入站热交换掉。
+	return strings.EqualFold(ss.Security, "reality")
 }
 
 // diffOutbounds 计算出站的增删。
@@ -174,20 +185,22 @@ func inboundUsesReality(ib *InboundConfig) bool {
 // 所以先解成 []json.RawMessage 再按各自的 tag 索引。
 //
 // 数组首位是 xray 的默认出站，改动它会改变所有未命中规则的流量去向，而
-// 控制面没有"换默认出站"的接口——必须重启。
+// 控制面没有"换默认出站"的接口——必须重启；index ≥ 1 的出站增删则可以
+// 热应用，见 decodeOutbounds 与下面两个循环的注释。
 func diffOutbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 	if bytes.Equal(oldCfg.OutboundConfigs, newCfg.OutboundConfigs) {
 		return true
 	}
-	oldList, oldTags, ok := decodeOutbounds(oldCfg.OutboundConfigs)
+	oldList, oldTags, ok := decodeOutbounds(oldCfg.OutboundConfigs, "旧")
 	if !ok {
 		return false
 	}
-	newList, newTags, ok := decodeOutbounds(newCfg.OutboundConfigs)
+	newList, newTags, ok := decodeOutbounds(newCfg.OutboundConfigs, "新")
 	if !ok {
 		return false
 	}
 	if len(oldList) == 0 || len(newList) == 0 {
+		logger.Debug("hot diff: 出站列表一侧为空，需要重启")
 		return false
 	}
 	// 默认出站（首位）必须逐字节不变。
@@ -205,8 +218,15 @@ func diffOutbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 		newByTag[tag] = newList[i]
 	}
 
-	// 按原数组顺序遍历，保证操作序列本身也是确定的。
+	// 按原数组顺序遍历，保证操作序列本身也是确定的。index 0（默认出站）
+	// 跳过：它已经在上面被单独逐字节比对过，且真实生成的配置里它多半没有
+	// tag（见 decodeOutbounds 的注释）——把它放进这两个循环，要么会把空
+	// 字符串当 tag 传给 DelOutbound/走进 AddedOutbounds，要么（它恰好有
+	// tag 时）会把它错当成一个可以被增删的普通出站，而它其实从不参与增删。
 	for i, tag := range oldTags {
+		if i == 0 {
+			continue
+		}
 		newOb, exists := newByTag[tag]
 		if exists && rawEqualNormalized(oldList[i], newOb) {
 			continue
@@ -217,6 +237,9 @@ func diffOutbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 		}
 	}
 	for i, tag := range newTags {
+		if i == 0 {
+			continue
+		}
 		if _, exists := oldByTag[tag]; exists {
 			continue
 		}
@@ -226,25 +249,48 @@ func diffOutbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 }
 
 // decodeOutbounds 把出站数组解成逐条的原始 JSON 与对应的 tag。
-// tag 为空或重复时返回 false。
-func decodeOutbounds(raw json_util.RawMessage) ([]json.RawMessage, []string, bool) {
+//
+// index 0 是 xray 的默认出站。RoutingInjector.buildOutbounds 原样保留模板
+// （web/service/config.json）里的出站数组再往后追加，而模板首位的 freedom
+// 出站没有 tag——所以每一份真实生成的配置，数组首位都是无 tag 的。它豁免
+// 「tag 非空」这条要求：反正它已经在 diffOutbounds 里被单独逐字节比对，
+// 且天然不参与增删（改默认出站必须重启，见上）。index 0 若确实带了 tag，
+// 仍要参与下面的去重检查，不能和后面的出站撞名。
+//
+// index ≥ 1 的元素依旧要求 tag 非空且唯一——这些才是真正可以被 gRPC
+// 控制面增删的出站，tag 是核心用来定位它们的唯一标识。
+//
+// label 只用于日志（"旧"/"新"），标出是哪一侧的配置有问题。
+func decodeOutbounds(raw json_util.RawMessage, label string) ([]json.RawMessage, []string, bool) {
 	if len(raw) == 0 {
+		logger.Debug("hot diff: ", label, " 配置的出站段为空，需要重启")
 		return nil, nil, false
 	}
 	var list []json.RawMessage
 	if err := json.Unmarshal(raw, &list); err != nil {
+		logger.Debug("hot diff: ", label, " 配置的出站段不是合法的 JSON 数组，需要重启:", err)
 		return nil, nil, false
 	}
 	tags := make([]string, 0, len(list))
 	seen := make(map[string]bool, len(list))
-	for _, item := range list {
+	for i, item := range list {
 		var head struct {
 			Tag string `json:"tag"`
 		}
 		if err := json.Unmarshal(item, &head); err != nil {
+			logger.Debug("hot diff: ", label, " 配置第 ", i, " 个出站不是合法的 JSON 对象，需要重启:", err)
 			return nil, nil, false
 		}
-		if head.Tag == "" || seen[head.Tag] {
+		if head.Tag == "" {
+			if i != 0 {
+				logger.Debug("hot diff: ", label, " 配置第 ", i, " 个出站 tag 为空，需要重启")
+				return nil, nil, false
+			}
+			tags = append(tags, "")
+			continue
+		}
+		if seen[head.Tag] {
+			logger.Debug("hot diff: ", label, " 配置的出站 tag [", head.Tag, "] 重复，需要重启")
 			return nil, nil, false
 		}
 		seen[head.Tag] = true
@@ -264,14 +310,17 @@ func diffRouting(oldCfg, newCfg *Config, diff *HotDiff) bool {
 	// 一侧完全没有 routing 段，说明运行中的核心可能压根没起路由模块，
 	// 那样 RoutingService 也不在，只能重启。
 	if len(oldCfg.RouterConfig) == 0 || len(newCfg.RouterConfig) == 0 {
+		logger.Debug("hot diff: routing 段一侧缺失，需要重启")
 		return false
 	}
 	oldRest, ok := routingWithoutReloadable(oldCfg.RouterConfig)
 	if !ok {
+		logger.Debug("hot diff: 旧配置的 routing 段无法解析（去掉 rules/balancers 后），需要重启")
 		return false
 	}
 	newRest, ok := routingWithoutReloadable(newCfg.RouterConfig)
 	if !ok {
+		logger.Debug("hot diff: 新配置的 routing 段无法解析（去掉 rules/balancers 后），需要重启")
 		return false
 	}
 	if !bytes.Equal(oldRest, newRest) {
