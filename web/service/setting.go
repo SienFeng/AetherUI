@@ -2,6 +2,7 @@ package service
 
 import (
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -176,8 +177,96 @@ func (s *SettingService) setInt(key string, value int) error {
 }
 
 func (s *SettingService) GetXrayConfigTemplate() (string, error) {
-	return s.getString("xrayTemplateConfig")
+	template, err := s.getString("xrayTemplateConfig")
+	if err != nil {
+		return "", err
+	}
+
+	// 补 RoutingService。存量部署的模板一旦被管理员改过就落进 settings 表，
+	// 改默认值对它们无效，所以在读取路径上补，读一次补一次（幂等）。
+	//
+	// 补完立刻写回，而不是每次读都在内存里补：写回后管理员在设置页看到的
+	// 模板与实际生效的一致；只在内存补的话，他保存一次就把 RoutingService
+	// 弄丢了，而且丢得毫无提示。
+	patched, changed, err := ensureRoutingServiceInTemplate(template)
+	if err != nil {
+		// 模板本来就不合法是既有问题，不是本次改动造成的。原样返回让
+		// 后续流程按老路径报错，不要在这里把管理员锁在门外。
+		logger.Warning("xray 模板无法解析，跳过 RoutingService 补齐:", err)
+		return template, nil
+	}
+	if changed {
+		if err := s.setString("xrayTemplateConfig", patched); err != nil {
+			logger.Warning("RoutingService 补齐后写回失败，本次仅在内存生效:", err)
+		} else {
+			logger.Info("已为 xray 模板补上 RoutingService，路由热更新与路由测试现在可用")
+		}
+	}
+	return patched, nil
 }
+
+// ensureRoutingServiceInTemplate 往模板的 api.services 里补上 RoutingService。
+//
+// 路由规则的热重载与路由测试都走 RoutingService，模板里不声明它，xray 就
+// 不会起这个 gRPC 服务，功能会静默不可用——不报错，只是永远连不上。
+//
+// 只在 api 段已存在时补齐：api 段整个缺失说明管理员刻意关掉了控制接口，
+// 那种情况下流量统计本来就是坏的，不该由这里替他做决定。
+//
+// 幂等：已含 RoutingService 时原样返回。api 之外的键不做任何改动——
+// 反序列化成 map[string]json.RawMessage 再序列化，其余键按原始字节透传。
+func ensureRoutingServiceInTemplate(template string) (string, bool, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(template), &root); err != nil {
+		return "", false, common.NewError("xray 模板不是合法 JSON:", err)
+	}
+
+	rawAPI, ok := root["api"]
+	if !ok {
+		return template, false, nil
+	}
+
+	var api map[string]json.RawMessage
+	if err := json.Unmarshal(rawAPI, &api); err != nil {
+		return "", false, common.NewError("xray 模板的 api 段不是合法 JSON 对象:", err)
+	}
+
+	var services []string
+	if rawServices, ok := api["services"]; ok {
+		if err := json.Unmarshal(rawServices, &services); err != nil {
+			return "", false, common.NewError("xray 模板的 api.services 不是字符串数组:", err)
+		}
+	}
+	for _, s := range services {
+		if s == routingServiceName {
+			return template, false, nil
+		}
+	}
+
+	// 追加到末尾而不是插入：顺序对 xray 无意义，但保持原有顺序能让
+	// 管理员对比前后模板时只看到多出的一行。
+	services = append(services, routingServiceName)
+	encoded, err := json.Marshal(services)
+	if err != nil {
+		return "", false, err
+	}
+	api["services"] = encoded
+
+	encodedAPI, err := json.Marshal(api)
+	if err != nil {
+		return "", false, err
+	}
+	root["api"] = encodedAPI
+
+	out, err := json.Marshal(root)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
+// routingServiceName 是 xray api.services 里 RoutingService 的名字。
+const routingServiceName = "RoutingService"
 
 func (s *SettingService) GetListen() (string, error) {
 	return s.getString("webListen")
