@@ -36,8 +36,10 @@
             [[ row.target ]]
         </template>
         <template slot="route" slot-scope="text, row">
-            <a-tag v-if="row.route === 'a-ui-block'" color="red">已封禁</a-tag>
-            <a-tag v-else-if="row.route" color="green">[[ row.route ]]</a-tag>
+            <a-tooltip v-if="row.route">
+                <template slot="title">[[ routeTip(row.route) ]]</template>
+                <a-tag :color="routeColor(row.route)">[[ routeLabel(row.route) ]]</a-tag>
+            </a-tooltip>
             <a-tag v-else>-</a-tag>
         </template>
     </a-table>
@@ -110,10 +112,54 @@
         },
     };
 
+    // 生成的出站 tag 一律带 a-ui- 前缀（model.OutboundTagPrefix），
+    // 与用户手写模板里的 tag 隔离。
+    const A_UI_PREFIX = 'a-ui-';
+    const ROUTE_BLOCK = 'a-ui-block';
+    const ROUTE_DEFAULT = 'a-ui-default';
+
+    // 路由串经过中间出站时形如 "proxy-hk -> direct"，此时整串照原样显示：
+    // 拆开只取一段会把"经过了谁"这个信息丢掉。
+    function routeIsChained(route) {
+        return route.indexOf(' -> ') >= 0 || route.indexOf(' >> ') >= 0;
+    }
+
     new Vue({
         delimiters: ['[[', ']]'],
         el: '#access-log-modal',
         data: { accessLogModal },
+        methods: {
+            routeColor(route) {
+                if (routeIsChained(route)) return 'orange';
+                if (route === ROUTE_BLOCK) return 'red';
+                if (route === ROUTE_DEFAULT) return 'blue';
+                // 其余 a-ui- 开头的都是分流命中的出站节点
+                if (route.startsWith(A_UI_PREFIX)) return 'green';
+                // 用户手写模板里的出站，既不是直连也不是本面板生成的
+                return 'purple';
+            },
+            routeLabel(route) {
+                if (routeIsChained(route)) return route;
+                if (route === ROUTE_BLOCK) return '已阻断';
+                if (route === ROUTE_DEFAULT) return '直连';
+                // 去掉前缀，与出站节点的备注对得上，列宽也省下来
+                if (route.startsWith(A_UI_PREFIX)) return route.slice(A_UI_PREFIX.length);
+                return route;
+            },
+            routeTip(route) {
+                if (routeIsChained(route)) return '经过多级出站：' + route;
+                if (route === ROUTE_BLOCK) {
+                    return '命中封禁规则或地区限制，流量已被丢弃（出站 ' + route + '）';
+                }
+                if (route === ROUTE_DEFAULT) {
+                    return '未命中任何分流规则，走默认出站（' + route + '），也就是本机直连';
+                }
+                if (route.startsWith(A_UI_PREFIX)) {
+                    return '命中分流规则，走出站节点 ' + route;
+                }
+                return '走模板中自定义的出站 ' + route;
+            },
+        },
     });
 </script>
 {{end}}
