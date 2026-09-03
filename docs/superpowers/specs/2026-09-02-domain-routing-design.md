@@ -3,6 +3,8 @@
 日期：2026-09-02
 状态：待评审
 
+> **部分内容已被 `2026-09-02-routing-multi-inbound-design.md` 修订**：§3.2 的 `RoutingRule` 表结构、§3.3 中 `InboundId` 相关的两条设计点、§5.3 的第二道防线清单。其余内容继续有效。
+
 ## 1. 背景与目标
 
 当前面板只能管理入站（inbound）。所有流量统一走 `xrayTemplateConfig` 模板里的默认出站 `freedom`（直连），无法按用户区分去向。
@@ -80,7 +82,7 @@ type OutboundNode struct {
 type RoutingRule struct {
     Id            int    `json:"id" gorm:"primaryKey;autoIncrement"`
     Remark        string `json:"remark"`        // "甲的 ChatGPT 走香港"
-    InboundId     int    `json:"inboundId"`     // 0 = 所有入站（全局规则）
+    InboundIds    string `json:"inboundIds"`    // 已修订：JSON 整数数组，[] = 所有入站；见多入站设计文档
     DomainGroupId int    `json:"domainGroupId"`
     Action        string `json:"action"`        // "proxy" | "block"
     OutboundId    int    `json:"outboundId"`    // action=proxy 时有效
@@ -91,7 +93,7 @@ type RoutingRule struct {
 
 ### 3.3 三个关键设计点
 
-**规则存 `InboundId` 而非 tag。** `InboundService.UpdateInbound` 里有：
+**规则存 `InboundId` 而非 tag。**（已修订：字段现为 `InboundIds`，一条规则可覆盖多个入站，空数组表示全局。存 id 不存 tag 的理由不变。）`InboundService.UpdateInbound` 里有：
 
 ```go
 oldInbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
@@ -99,7 +101,7 @@ oldInbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
 
 入站 tag 由端口算出，用户改一次端口 tag 就变。存字符串 tag 会导致规则在改端口后静默失效。存 id，合成配置时实时查出当前 tag。
 
-**`InboundId = 0` 表示全局规则。** 违规域名封禁通常对所有人生效，不该逐个用户配。合成时该字段为 0 就不输出 `inboundTag`，规则自然匹配所有入站。这对 proxy 同样有用（「所有人的 ChatGPT 都走 B 节点」）。
+**`InboundId = 0` 表示全局规则。**（已修订：现在由 `InboundIds` 为空数组表示。）违规域名封禁通常对所有人生效，不该逐个用户配。合成时该字段为 0 就不输出 `inboundTag`，规则自然匹配所有入站。这对 proxy 同样有用（「所有人的 ChatGPT 都走 B 节点」）。
 
 **域名组元素沿用 xray 原生语法**，不自造格式：`domain:openai.com`、`full:chat.openai.com`、`geosite:openai`、`regexp:.*\.oaistatic\.com`。好处是内置域名集直接可用，一行 `geosite:openai` 顶一批手工域名。
 
@@ -169,6 +171,7 @@ tag 一经生成即固定，不随 remark 改名而变。否则改一次备注�
 
 - 规则的域名组不存在，或展开后域名列表为空 → **整条规则跳过，不输出**
 - 规则的出站节点不存在或已禁用 → **整条规则跳过，不输出**
+- （已修订，多入站后新增）规则指定的入站**全部**不存在或已禁用 → **整条规则跳过，不输出**。绝不能退而求其次输出空的 `inboundTag`：实测（Xray 26.7.28）确认 xray 把它当作「不限制」，规则会从「只覆盖甲」放大成「劫持所有人」。只有部分入站失效时，剔除失效的那些，规则照常生成
 
 宁可规则不生效（用户能察觉），也绝不输出一条条件残缺的规则（静默劫持全部流量，用户无从察觉）。这条不变量需有测试覆盖。
 
