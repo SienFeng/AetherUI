@@ -1,0 +1,22 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go 版本以 go.mod 为唯一事实来源，不在这里硬编码，
+      # 否则抬升 go.mod 时会漏掉工作流，CI 用旧版本跑出假绿。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: verify
+        run: make verify
