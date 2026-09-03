@@ -62,20 +62,28 @@ class OutboundNode {
 }
 
 class RoutingRule {
-    constructor(id = 0, remark = "", inboundId = 0, domainGroupId = 0,
-                action = RULE_ACTION.PROXY, outboundId = 0, priority = 0, enable = true) {
+    constructor(id = 0, remark = "", inboundIds = [], domainGroupId = 0,
+                action = RULE_ACTION.PROXY, outboundId = 0, priority = 0,
+                enable = true, broken = false) {
         this.id = id;
         this.remark = remark;
-        this.inboundId = inboundId;
+        // 空数组 = 所有用户（含以后新建的入站）。
+        // 注意它与「一个用户都没勾」在提交体里长得一模一样，弹窗必须自己
+        // 区分这两种意图，见 routing.html 的 saveRule。
+        this.inboundIds = inboundIds;
         this.domainGroupId = domainGroupId;
         this.action = action;
         this.outboundId = outboundId;
         this.priority = priority;
         this.enable = enable;
+        // broken 为真表示服务端解码 inboundIds 失败。这种规则不会写进配置，
+        // 但它的 inboundIds 是空数组，看起来和「所有用户」一样，必须区分渲染。
+        this.broken = broken;
     }
 
     static fromJson(json = {}) {
-        return new RoutingRule(json.id, json.remark, json.inboundId, json.domainGroupId,
-            json.action, json.outboundId, json.priority, json.enable);
+        return new RoutingRule(json.id, json.remark, json.inboundIds || [],
+            json.domainGroupId, json.action, json.outboundId, json.priority,
+            json.enable, json.broken);
     }
 }
