@@ -48,3 +48,9 @@ func IsDebug() bool {
 func GetDBPath() string {
 	return fmt.Sprintf("/etc/%s/%s.db", GetName(), GetName())
 }
+
+// GetAccessLogDBPath 是访问日志库的路径。与主库同目录但分文件，
+// 便于单独删除或迁移。
+func GetAccessLogDBPath() string {
+	return fmt.Sprintf("/etc/%s/%s-access.db", GetName(), GetName())
+}

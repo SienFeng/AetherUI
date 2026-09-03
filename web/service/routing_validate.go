@@ -229,3 +229,54 @@ func ValidateDomains(domains []string) error {
 		routing["rules"] = append(rules, probe)
 	}, minimal)
 }
+
+// removeInboundByTag 摘掉完整配置里同 tag 的那份旧入站。
+//
+// 编辑一个已存在的入站时必须先摘掉：候选对象与库里那份端口相同、tag 相同，
+// 不摘的话它会和自己撞名而被误拒。
+func removeInboundByTag(cfg map[string]any, tag string) {
+	if tag == "" {
+		return
+	}
+	inbounds, _ := cfg["inbounds"].([]any)
+	for i, item := range inbounds {
+		ib, ok := item.(map[string]any)
+		if !ok || ib["tag"] != tag {
+			continue
+		}
+		cfg["inbounds"] = append(inbounds[:i:i], inbounds[i+1:]...)
+		return
+	}
+}
+
+func appendInbound(cfg map[string]any, ib map[string]any) {
+	inbounds, _ := cfg["inbounds"].([]any)
+	cfg["inbounds"] = append(inbounds, ib)
+}
+
+func minimalInboundConfig(ib map[string]any) map[string]any {
+	return map[string]any{
+		"inbounds": []any{ib},
+		"outbounds": []any{
+			map[string]any{"protocol": "freedom", "settings": map[string]any{}},
+		},
+	}
+}
+
+// ValidateInboundReplacing 校验一个入站在应用到完整配置之后是否仍然合法。
+//
+// 存在的理由是一次真实事故：管理员在表单里开了 TLS 却没填证书路径，保存时
+// 一切正常，直到某次重启 xray 才发现——**xray 加载配置是全有或全无的**，
+// 这一个入站让整份配置加载失败，机器上所有用户一起断网，而面板首页只显示
+// 一个 error，看不出是哪个入站的问题。把校验放在保存时，问题就停在制造它的
+// 那一刻。
+//
+// replacedTag 是这个入站在库里已有的 tag（改端口时 tag 会变，必须传旧的）。
+// 沿用 validateWithFullConfig 的 fail open 边界：xray 自身故障、取不到完整
+// 配置、改动之前配置就已经不合法，三种情况一律放行。
+func ValidateInboundReplacing(ib map[string]any, replacedTag string) error {
+	return validateWithFullConfig(func(cfg map[string]any) {
+		removeInboundByTag(cfg, replacedTag)
+		appendInbound(cfg, ib)
+	}, minimalInboundConfig(ib))
+}

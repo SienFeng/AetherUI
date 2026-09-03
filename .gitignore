@@ -2,6 +2,9 @@
 tmp
 bin/xray-darwin-arm64
 bin/config.json
+bin/access.log
+bin/a-ui-geo.dat
+bin/ipdb-qqwry.dat
 dist/
 a-ui-*.tar.gz
 /a-ui
@@ -9,3 +12,5 @@ a-ui-*.tar.gz
 .sync*
 # superpowers SDD 工作区（ledger、审查包等临时产物）
 .superpowers/
+# 手工下载的 macOS 版 xray，仅本地开发用
+Xray-macos-*.zip

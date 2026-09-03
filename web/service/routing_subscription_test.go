@@ -91,9 +91,9 @@ func TestParseSubscriptionHandlesCRLF(t *testing.T) {
 // 这正是订阅源改格式或 URL 失效返回 404 页面时会走到的路径。
 func TestParseSubscriptionRejectsEmptyResult(t *testing.T) {
 	cases := map[string]string{
-		"全是 IP 规则":  "IP-CIDR,1.1.1.1/32\nIP-CIDR6,::1/128\n",
-		"全是注释":      "# nothing here\n# really\n",
-		"空文本":       "   \n\n  \n",
+		"全是 IP 规则": "IP-CIDR,1.1.1.1/32\nIP-CIDR6,::1/128\n",
+		"全是注释":     "# nothing here\n# really\n",
+		"空文本":      "   \n\n  \n",
 		"404 HTML": "<!DOCTYPE html>\n<html><body>404: Not Found</body></html>\n",
 	}
 	for name, raw := range cases {
@@ -486,14 +486,12 @@ func TestSubscriptionUpdateTimeDefault(t *testing.T) {
 }
 
 func TestAllSettingRejectsBadUpdateTime(t *testing.T) {
+	// 用共用基线：CheckValid 逐条串行校验，任何一项不合法都会让本测试
+	// 真正关心的那条走不到。
 	base := func(v string) *entity.AllSetting {
-		return &entity.AllSetting{
-			WebPort: 54321, WebBasePath: "/", TimeLocation: "Asia/Shanghai",
-			// CheckValid 会先 json.Unmarshal 这个字段，空字符串会让它在
-			// 到达时间格式校验之前就报错，测出来的就不是我们要测的东西了。
-			XrayTemplateConfig:     "{}",
-			SubscriptionUpdateTime: v,
-		}
+		s := validBaseSetting()
+		s.SubscriptionUpdateTime = v
+		return s
 	}
 	for _, bad := range []string{"25:00", "4:00pm", "0400", "", "04:60", "abc"} {
 		if err := base(bad).CheckValid(); err == nil {

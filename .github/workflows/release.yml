@@ -63,7 +63,7 @@ jobs:
           ARCH=${{ matrix.arch }}
           mkdir -p dist/a-ui/bin
           cp a-ui a-ui.service dist/a-ui/
-          cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat dist/a-ui/bin/
+          cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat bin/ipdb.dat dist/a-ui/bin/
           chmod +x dist/a-ui/a-ui dist/a-ui/bin/xray-linux-${ARCH}
 
           # 中文包

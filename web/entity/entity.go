@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 	"a-ui/util/common"
@@ -38,6 +39,42 @@ type AllSetting struct {
 	TimeLocation string `json:"timeLocation" form:"timeLocation"`
 
 	SubscriptionUpdateTime string `json:"subscriptionUpdateTime" form:"subscriptionUpdateTime"`
+
+	IPDBSourceUrl  string `json:"ipdbSourceUrl" form:"ipdbSourceUrl"`
+	QQWrySourceUrl string `json:"qqwrySourceUrl" form:"qqwrySourceUrl"`
+	IPDBUpdateTime string `json:"ipdbUpdateTime" form:"ipdbUpdateTime"`
+
+	AccessLogEnable        int `json:"accessLogEnable" form:"accessLogEnable"`
+	AccessLogRetentionDays int `json:"accessLogRetentionDays" form:"accessLogRetentionDays"`
+
+	TCInterface string `json:"tcInterface" form:"tcInterface"`
+}
+
+// checkIPDBSourceUrl 允许留空（表示不启用该源），非空时必须是完整的 http(s) 地址。
+func checkIPDBSourceUrl(label, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return common.NewError(label+"必须是 http 或 https 开头的完整地址:", raw)
+	}
+	return nil
+}
+
+func validInterfaceName(name string) bool {
+	if len(name) > 15 {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == ':' || r == '@':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *AllSetting) CheckValid() error {
@@ -81,6 +118,40 @@ func (s *AllSetting) CheckValid() error {
 	// 25:00 / 04:60 这类越界值它会直接拒绝。
 	if _, err := time.Parse("15:04", s.SubscriptionUpdateTime); err != nil {
 		return common.NewError("订阅更新时间格式不正确，应为 HH:MM:", s.SubscriptionUpdateTime)
+	}
+
+	// 两个归属地数据源的地址：留空表示不启用该源，但不能两个都空——
+	// 那样归属地显示与地区限制都会失效，而地址写错只有真正更新时才暴露。
+	if err := checkIPDBSourceUrl("IP 库源地址", s.IPDBSourceUrl); err != nil {
+		return err
+	}
+	if err := checkIPDBSourceUrl("纯真库源地址", s.QQWrySourceUrl); err != nil {
+		return err
+	}
+	if s.IPDBSourceUrl == "" && s.QQWrySourceUrl == "" {
+		return common.NewError("至少要保留一个 IP 归属地库的源地址，否则归属地与地区限制都会失效")
+	}
+
+	// 留空表示关闭自动更新。
+	if s.IPDBUpdateTime != "" {
+		if _, err := time.Parse("15:04", s.IPDBUpdateTime); err != nil {
+			return common.NewError("IP 库更新时间格式不正确，应为 HH:MM:", s.IPDBUpdateTime)
+		}
+	}
+
+	if s.AccessLogEnable != 0 && s.AccessLogEnable != 1 {
+		return common.NewError("访问日志开关只能是 0 或 1:", s.AccessLogEnable)
+	}
+
+	// 不允许 0：0 在这里最容易被理解成「永不清除」，而实现上会变成
+	// 「立刻全删」，语义正好相反。要关闭记录请用上面的开关。
+	if s.AccessLogRetentionDays < 1 || s.AccessLogRetentionDays > 365 {
+		return common.NewError("访问日志保留天数应在 1 ~ 365 天之间:", s.AccessLogRetentionDays)
+	}
+
+	// 网卡名会被拼进 tc/ip 的命令参数。留空表示自动探测。
+	if s.TCInterface != "" && !validInterfaceName(s.TCInterface) {
+		return common.NewError("限速网卡名不合法（只允许字母、数字和 . _ - : @，最长 15 字符）:", s.TCInterface)
 	}
 
 	return nil

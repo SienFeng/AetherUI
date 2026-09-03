@@ -30,6 +30,12 @@ var defaultValueMap = map[string]string{
 	"webBasePath":            "/",
 	"timeLocation":           "Asia/Shanghai",
 	"subscriptionUpdateTime": "04:00",
+	"ipdbSourceUrl":          "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ipv4_source.txt",
+	"ipdbUpdateTime":         "",
+	"qqwrySourceUrl":         "https://raw.githubusercontent.com/FW27623/qqwry/main/qqwry.dat",
+	"accessLogEnable":        "0",
+	"accessLogRetentionDays": "7",
+	"tcInterface":            "",
 }
 
 type SettingService struct {
@@ -235,6 +241,52 @@ func (s *SettingService) GetTimeLocation() (*time.Location, error) {
 // GetSubscriptionUpdateTime 返回域名组订阅的每日更新时刻，格式 HH:MM。
 func (s *SettingService) GetSubscriptionUpdateTime() (string, error) {
 	return s.getString("subscriptionUpdateTime")
+}
+
+// GetIPDBSourceUrl 返回 IP 归属地库的源数据地址。做成可配置是因为默认地址在
+// GitHub，部分网络下不可达。
+func (s *SettingService) GetIPDBSourceUrl() (string, error) {
+	return s.getString("ipdbSourceUrl")
+}
+
+// GetQQWrySourceUrl 返回纯真 IP 库的下载地址。留空表示不启用该数据源。
+//
+// 纯真库是第二个离线数据源：中文原生、每天有镜像更新，与 ip2region 交叉校验。
+func (s *SettingService) GetQQWrySourceUrl() (string, error) {
+	return s.getString("qqwrySourceUrl")
+}
+
+// GetIPDBUpdateTime 返回 IP 库的每日更新时刻，格式 HH:MM，留空表示关闭自动更新。
+//
+// 用「每天几点」而不是「隔几天」：管理员能把它放进自己的低谷时段，
+// 更新时机可预期，也不会出现「刚好在高峰期开始下 35 MB」这种事。
+func (s *SettingService) GetIPDBUpdateTime() (string, error) {
+	return s.getString("ipdbUpdateTime")
+}
+
+// GetAccessLogEnable 返回是否记录访问日志。
+//
+// 默认关闭：它是持续写盘的动作，记录的又是用户访问了哪些站点，
+// 该由管理员显式打开而不是替他决定。
+func (s *SettingService) GetAccessLogEnable() (bool, error) {
+	v, err := s.getInt("accessLogEnable")
+	if err != nil {
+		return false, err
+	}
+	return v != 0, nil
+}
+
+// GetAccessLogRetentionDays 返回访问日志保留天数。
+func (s *SettingService) GetAccessLogRetentionDays() (int, error) {
+	return s.getInt("accessLogRetentionDays")
+}
+
+// GetTCInterface 返回下发限速规则的网卡名。留空表示按默认路由自动探测。
+//
+// 做成可配置是因为多网卡机器（尤其是带隧道、带 NAT 的）上，默认路由所在的
+// 网卡未必就是客户端流量真正进出的那块。
+func (s *SettingService) GetTCInterface() (string, error) {
+	return s.getString("tcInterface")
 }
 
 func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {

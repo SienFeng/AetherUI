@@ -24,6 +24,20 @@
         background: white;
     }
 </style>
+<style>
+    .setting-action-col {
+        text-align: left;
+        margin-top: 8px;
+    }
+
+    @media (min-width: 1200px) {
+        /* 宽屏下与右侧的输入框列对齐；窄屏时栅格会换行，此时左对齐才自然 */
+        .setting-action-col {
+            text-align: right;
+            margin-top: 0;
+        }
+    }
+</style>
 <body>
 <a-layout id="app" v-cloak>
     {{ template "commonSider" . }}
@@ -71,7 +85,63 @@
                                 <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
-                        <a-tab-pane key="4" tab="其他设置">
+                        <a-tab-pane key="4" tab="IP 归属地库">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-action-item v-for="src in ipdb.sources" :key="src.key"
+                                                     :title="src.name" :desc="ipdbSourceDesc(src)">
+                                    <a-tag v-if="!src.enabled">未启用</a-tag>
+                                    <a-tag v-else-if="src.loaded" color="green">已加载</a-tag>
+                                    <a-tag v-else color="red">未下载</a-tag>
+                                    <a-button type="primary" size="small" style="margin-left: 8px"
+                                              :disabled="!src.enabled"
+                                              :loading="ipdbUpdating === src.key"
+                                              @click="updateIPDB(src.key)">更新</a-button>
+                                </setting-action-item>
+                                <setting-action-item title="更新全部数据源" desc="">
+                                    <a-button type="primary" :loading="ipdbUpdating === 'all'"
+                                              @click="updateIPDB('')">立即更新全部</a-button>
+                                </setting-action-item>
+                                <setting-list-item type="text" title="ip2region 源地址"
+                                                   desc="源数据约 35 MB，留空表示不启用"
+                                                   v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
+                                <setting-list-item type="text" title="纯真库源地址"
+                                                   desc="源数据约 25 MB，留空表示不启用。两个源不能都留空"
+                                                   v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
+                                <setting-list-item type="text" title="每日更新时刻"
+                                                   desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新"
+                                                   v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
+                        <a-tab-pane key="5" tab="访问日志">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-list-item type="switch" title="记录访问日志"
+                                                   desc="记录用户在什么时间访问了什么目标、走的哪条路由。开关变化约 10 秒后生效"
+                                                   v-model="allSetting.accessLogEnable"></setting-list-item>
+                                <setting-list-item type="number" title="日志保留天数"
+                                                   desc="超过该天数的记录每小时自动清除"
+                                                   v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
+                        <a-tab-pane key="6" tab="端口限速">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-action-item title="限速状态" :desc="shapingDesc()">
+                                    <a-tag v-if="!shaping.supported" color="red">不支持</a-tag>
+                                    <a-tag v-else-if="shaping.rolledBack" color="red">已自动撤销</a-tag>
+                                    <a-tag v-else-if="shaping.active" color="green">已生效</a-tag>
+                                    <a-tag v-else>未启用</a-tag>
+                                </setting-action-item>
+                                <setting-action-item title="清除全部限速"
+                                                     desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
+                                    <a-button type="danger" :loading="shapingClearing" @click="clearShaping">
+                                        清除全部限速
+                                    </a-button>
+                                </setting-action-item>
+                                <setting-list-item type="text" title="限速网卡"
+                                                   desc="留空则按默认路由自动探测。多网卡机器可手动指定"
+                                                   v-model.trim="allSetting.tcInterface"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
+                        <a-tab-pane key="7" tab="其他设置">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
                                 <setting-list-item type="text" title="订阅更新时间"
@@ -99,6 +169,10 @@
             allSetting: new AllSetting(),
             saveBtnDisable: true,
             user: {},
+            ipdb: { sources: [], updateTime: '' },
+            ipdbUpdating: null,
+            shaping: { supported: false, active: false, interface: '', rolledBack: false, reason: '' },
+            shapingClearing: false,
         },
         methods: {
             loading(spinning = true) {
@@ -120,6 +194,63 @@
                 this.loading(false);
                 if (msg.success) {
                     await this.getAllSetting();
+                }
+            },
+            async getIPDBStatus() {
+                const msg = await HttpUtil.post("/xui/setting/ipdbStatus");
+                if (msg.success) {
+                    this.ipdb = msg.obj;
+                }
+            },
+            shapingDesc() {
+                if (!this.shaping.supported || this.shaping.rolledBack) {
+                    return this.shaping.reason;
+                }
+                if (this.shaping.active) {
+                    return `限速规则已下发，网卡：${this.shaping.interface || '未知'}`;
+                }
+                return '当前没有入站配置限速，未对系统的队列规则做任何改动';
+            },
+            ipdbSourceDesc(src) {
+                if (!src.enabled) {
+                    return '源地址留空，该数据源未启用';
+                }
+                if (!src.loaded) {
+                    return '尚未下载，点击右侧「更新」获取';
+                }
+                return `生成于 ${DateUtil.formatMillis(src.builtAt)}，`
+                     + `收录 ${src.segmentCount} 个 IP 段、${src.provinceCount} 个省级地区`;
+            },
+            async getShapingStatus() {
+                const msg = await HttpUtil.post('/xui/setting/shapingStatus');
+                if (msg.success) {
+                    this.shaping = msg.obj;
+                }
+            },
+            clearShaping() {
+                this.$confirm({
+                    title: '清除全部限速',
+                    content: '将撤销本面板下发的所有 tc 队列规则并删除专用的 ifb 网卡。' +
+                             '入站上配置的限速值不会被清空，下一轮（约 10 秒）会重新下发。',
+                    okText: '清除',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        this.shapingClearing = true;
+                        await HttpUtil.post('/xui/setting/clearShaping');
+                        this.shapingClearing = false;
+                        await this.getShapingStatus();
+                    },
+                });
+            },
+            async updateIPDB(key) {
+                // 全量要下载约 60 MB 再重建，慢速网络下可能要好几分钟，
+                // 这里只锁对应的按钮不锁整页，避免管理员以为面板卡死。
+                this.ipdbUpdating = key || 'all';
+                const msg = await HttpUtil.post("/xui/setting/updateIPDB", { key: key || '' });
+                this.ipdbUpdating = null;
+                if (msg.success) {
+                    this.$message.success(`已更新 ${msg.obj.updated} 个数据源`);
+                    await this.getIPDBStatus();
                 }
             },
             async updateUser() {
@@ -152,6 +283,9 @@
         },
         async mounted() {
             await this.getAllSetting();
+            // 必须在下面那个死循环之前调用
+            await this.getIPDBStatus();
+            await this.getShapingStatus();
             while (true) {
                 await PromiseUtil.sleep(1000);
                 this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);

@@ -1,0 +1,119 @@
+{{define "accessLogModal"}}
+<a-modal id="access-log-modal" v-model="accessLogModal.visible" :title="accessLogModal.title"
+         :closable="true" :mask-closable="true" width="900px" :footer="null">
+    <a-alert v-if="!accessLogModal.enabled" type="warning" show-icon style="margin-bottom: 12px"
+             message="访问日志未开启"
+             description="请到「面板设置 → 访问日志」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
+    </a-alert>
+    <a-row :gutter="8" style="margin-bottom: 12px">
+        <a-col :span="8">
+            <a-input v-model.trim="accessLogModal.ip" placeholder="按来源 IP 过滤" allow-clear
+                     @pressEnter="accessLogModal.search()"></a-input>
+        </a-col>
+        <a-col :span="10">
+            <a-input v-model.trim="accessLogModal.key" placeholder="按目标关键字过滤，如 google" allow-clear
+                     @pressEnter="accessLogModal.search()"></a-input>
+        </a-col>
+        <a-col :span="6">
+            <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
+        </a-col>
+    </a-row>
+    <a-table :columns="accessLogModal.columns" :data-source="accessLogModal.list"
+             :row-key="row => row.id" size="small" :loading="accessLogModal.loading"
+             :pagination="{
+                current: accessLogModal.page,
+                pageSize: accessLogModal.pageSize,
+                total: accessLogModal.total,
+                showTotal: total => '共 ' + total + ' 条'
+             }"
+             :locale="{ emptyText: '没有符合条件的记录' }"
+             @change="p => accessLogModal.goto(p.current)">
+        <template slot="time" slot-scope="text, row">
+            [[ DateUtil.formatMillis(row.time) ]]
+        </template>
+        <template slot="target" slot-scope="text, row">
+            <a-tag v-if="row.network" color="blue">[[ row.network ]]</a-tag>
+            [[ row.target ]]
+        </template>
+        <template slot="route" slot-scope="text, row">
+            <a-tag v-if="row.route === 'a-ui-block'" color="red">已封禁</a-tag>
+            <a-tag v-else-if="row.route" color="green">[[ row.route ]]</a-tag>
+            <a-tag v-else>-</a-tag>
+        </template>
+    </a-table>
+</a-modal>
+<script>
+    const accessLogModal = {
+        visible: false,
+        loading: false,
+        enabled: true,
+        title: '访问日志',
+        inboundId: 0,
+        ip: '',
+        key: '',
+        page: 1,
+        pageSize: 20,
+        total: 0,
+        list: [],
+        columns: [{
+            title: "时间", align: 'center', width: 160,
+            scopedSlots: { customRender: 'time' },
+        }, {
+            title: "来源 IP", align: 'center', width: 130, dataIndex: "sourceIp",
+        }, {
+            title: "访问目标", align: 'left', scopedSlots: { customRender: 'target' },
+        }, {
+            title: "走的路由", align: 'center', width: 140,
+            scopedSlots: { customRender: 'route' },
+        }],
+
+        show({ dbInbound, ip }) {
+            this.inboundId = dbInbound.id;
+            this.title = `访问日志 - ${dbInbound.remark || dbInbound.tag}`;
+            this.ip = ip || '';
+            this.key = '';
+            this.page = 1;
+            this.list = [];
+            this.total = 0;
+            this.visible = true;
+            this.load();
+        },
+        close() {
+            this.visible = false;
+            this.list = [];
+        },
+        search() {
+            this.page = 1;
+            this.load();
+        },
+        goto(page) {
+            this.page = page;
+            this.load();
+        },
+        async load() {
+            this.loading = true;
+            const msg = await HttpUtil.post(`/xui/inbound/accessLogs/${this.inboundId}`, {
+                ip: this.ip,
+                key: this.key,
+                page: this.page,
+                pageSize: this.pageSize,
+            });
+            this.loading = false;
+            if (!msg.success) {
+                return;
+            }
+            this.enabled = msg.obj.enabled;
+            this.list = msg.obj.list;
+            this.total = msg.obj.total;
+            this.page = msg.obj.page;
+            this.pageSize = msg.obj.pageSize;
+        },
+    };
+
+    new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#access-log-modal',
+        data: { accessLogModal },
+    });
+</script>
+{{end}}

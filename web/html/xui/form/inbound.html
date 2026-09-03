@@ -52,6 +52,67 @@
         <a-date-picker :show-time="{ format: 'HH:mm' }" format="YYYY-MM-DD HH:mm"
                        v-model="dbInbound._expiryTime" style="width: 300px;"></a-date-picker>
     </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            地区限制
+            <a-tooltip>
+                <template slot="title">
+                    只允许所选地区的 IP 使用该节点，其余一律拒绝。留空表示不限制。<br/>
+                    可多选，例如同时选江苏与河南。<br/>
+                    <b>启用后该入站只监听 IPv4</b>，通过 IPv6 连接的客户端会被拒绝。<br/>
+                    地区数据来自「面板设置 → IP 归属地库」，未加载时这里是空的。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-select mode="multiple" v-model="dbInbound.regionList" style="width: 300px;"
+                  :filter-option="(input, option) => option.componentOptions.children[0].text.indexOf(input) >= 0"
+                  placeholder="留空表示不限制">
+            <a-select-option v-for="r in provinces" :key="r" :value="r">[[ r ]]</a-select-option>
+        </a-select>
+    </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            并发限制
+            <a-tooltip>
+                <template slot="title">
+                    同时使用该节点的不同来源 IP 数上限，0 表示不限制。<br/>
+                    按 IP 计而不是按连接数计：一个浏览器就会开几十条连接。<br/>
+                    超额时拒绝后来的 IP，已在线的人不受影响。<br/>
+                    仅对 TCP 类传输（tcp / ws / grpc / h2）生效，mKCP、QUIC 无法统计。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-input-number v-model="dbInbound.concurrencyLimit" :min="0" :max="1000"></a-input-number>
+    </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            下行限速(Mbps)
+            <a-tooltip>
+                <template slot="title">
+                    服务端发给客户端的方向，也就是用户的下载速度。0 表示不限制。<br/>
+                    由 Linux 的 tc 实现，仅在 Linux 上生效。<br/>
+                    未被限速的流量（包括 SSH）走不限速的默认队列，不受影响。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-input-number v-model="dbInbound.downMbit" :min="0" :max="100000"></a-input-number>
+    </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            上行限速(Mbps)
+            <a-tooltip>
+                <template slot="title">
+                    客户端发给服务端的方向，也就是用户的上传速度。0 表示不限制。<br/>
+                    上行限速需要 ifb 虚拟网卡（内核的 ifb 模块）。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-input-number v-model="dbInbound.upMbit" :min="0" :max="100000"></a-input-number>
+    </a-form-item>
 </a-form>
 
 <!-- vmess settings -->

@@ -1,6 +1,6 @@
 {{define "component/settingListItem"}}
 <a-list-item style="padding: 20px">
-    <a-row>
+    <a-row type="flex" align="middle" style="width: 100%">
         <a-col :lg="24" :xl="12">
             <a-list-item-meta :title="title" :description="desc"/>
         </a-col>
@@ -11,9 +11,27 @@
             <template v-else-if="type === 'number'">
                 <a-input type="number" :value="value" @input="$emit('input', $event.target.value)"></a-input>
             </template>
+            <template v-else-if="type === 'switch'">
+                <a-switch :checked="value === 1" @change="checked => $emit('input', checked ? 1 : 0)"></a-switch>
+            </template>
             <template v-else-if="type === 'textarea'">
                 <a-textarea :value="value" @input="$emit('input', $event.target.value)" :auto-size="{ minRows: 10, maxRows: 10 }"></a-textarea>
             </template>
+        </a-col>
+    </a-row>
+</a-list-item>
+{{end}}
+
+{{define "component/settingActionItem"}}
+<a-list-item style="padding: 20px">
+    <a-row type="flex" align="middle" style="width: 100%">
+        <a-col :lg="24" :xl="12">
+            <a-list-item-meta :title="title">
+                <template slot="description"><span v-html="desc"></span></template>
+            </a-list-item-meta>
+        </a-col>
+        <a-col :lg="24" :xl="12" class="setting-action-col">
+            <slot></slot>
         </a-col>
     </a-row>
 </a-list-item>
@@ -24,6 +42,14 @@
     Vue.component('setting-list-item', {
         props: ["type", "title", "desc", "value"],
         template: `{{template "component/settingListItem"}}`,
+    });
+
+    // 与 setting-list-item 同一套两栏栅格，只是右边放按钮/状态而不是输入框。
+    // 状态行不用它的话就会退化成「标题、说明、按钮」三行左对齐，
+    // 和这个页面上其余的行完全对不齐。
+    Vue.component('setting-action-item', {
+        props: ["title", "desc"],
+        template: `{{template "component/settingActionItem"}}`,
     });
 </script>
 {{end}}

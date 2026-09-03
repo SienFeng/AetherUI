@@ -20,6 +20,8 @@ type SettingController struct {
 	settingService service.SettingService
 	userService    service.UserService
 	panelService   service.PanelService
+	ipdbService    service.IPDBService
+	shapingService service.ShapingService
 }
 
 func NewSettingController(g *gin.RouterGroup) *SettingController {
@@ -35,6 +37,10 @@ func (a *SettingController) initRouter(g *gin.RouterGroup) {
 	g.POST("/update", a.updateSetting)
 	g.POST("/updateUser", a.updateUser)
 	g.POST("/restartPanel", a.restartPanel)
+	g.POST("/ipdbStatus", a.ipdbStatus)
+	g.POST("/updateIPDB", a.updateIPDB)
+	g.POST("/shapingStatus", a.shapingStatus)
+	g.POST("/clearShaping", a.clearShaping)
 }
 
 func (a *SettingController) getAllSetting(c *gin.Context) {
@@ -85,4 +91,42 @@ func (a *SettingController) updateUser(c *gin.Context) {
 func (a *SettingController) restartPanel(c *gin.Context) {
 	err := a.panelService.RestartPanel(time.Second * 3)
 	jsonMsg(c, "重启面板", err)
+}
+
+// ipdbStatus 返回各个 IP 归属地数据源的当前状态。某个源未加载时它的字段为零值，
+// 由前端提示管理员去更新，而不是把接口做成失败——库缺失不影响面板其它功能。
+func (a *SettingController) ipdbStatus(c *gin.Context) {
+	status, err := a.ipdbService.Status()
+	if err != nil {
+		jsonMsg(c, "获取 IP 库状态", err)
+		return
+	}
+	jsonObj(c, status, nil)
+}
+
+func (a *SettingController) updateIPDB(c *gin.Context) {
+	// 前端发的是 urlencoded，绑定标签必须是 form。key 留空表示更新全部。
+	form := struct {
+		Key string `form:"key"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "更新 IP 库", err)
+		return
+	}
+	updated, err := a.ipdbService.UpdateNow(form.Key)
+	if err != nil {
+		jsonMsg(c, "更新 IP 库", err)
+		return
+	}
+	jsonObj(c, gin.H{"updated": updated}, nil)
+}
+
+func (a *SettingController) shapingStatus(c *gin.Context) {
+	jsonObj(c, a.shapingService.Status(), nil)
+}
+
+// clearShaping 是 §4.5 要求的手动撤销入口：tc 出问题时，管理员必须有一个
+// 不依赖任何前置条件的清除手段。
+func (a *SettingController) clearShaping(c *gin.Context) {
+	jsonMsg(c, "清除限速规则", a.shapingService.Teardown())
 }

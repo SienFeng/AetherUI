@@ -55,7 +55,7 @@ func newTestInbound(t *testing.T, port int) *model.Inbound {
 	in := &model.Inbound{
 		UserId: 1, Port: port, Protocol: model.VLESS, Enable: true,
 		Tag:      "inbound-" + strconv.Itoa(port),
-		Settings: "{}", StreamSettings: "{}", Sniffing: "{}",
+		Settings: vlessSettings(), StreamSettings: plainTCPStream, Sniffing: "{}",
 	}
 	if err := database.GetDB().Save(in).Error; err != nil {
 		t.Fatalf("save inbound: %v", err)

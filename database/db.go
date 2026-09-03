@@ -13,6 +13,9 @@ import (
 
 var db *gorm.DB
 
+// accessDB 是访问日志专用的库，与主库物理分开，原因见 model.AccessLog。
+var accessDB *gorm.DB
+
 func initUser() error {
 	err := db.AutoMigrate(&model.User{})
 	if err != nil {
@@ -121,8 +124,39 @@ func InitDB(dbPath string) error {
 	return nil
 }
 
+// InitAccessLogDB 打开（必要时创建）访问日志库。
+//
+// 独立于 InitDB：即使这里失败，面板其余功能也必须照常可用——访问日志坏了
+// 不该让人登不上面板。
+func InitAccessLogDB(dbPath string) error {
+	dir := path.Dir(dbPath)
+	if err := os.MkdirAll(dir, fs.ModeDir); err != nil {
+		return err
+	}
+	var gormLogger logger.Interface
+	if config.IsDebug() {
+		gormLogger = logger.Default
+	} else {
+		gormLogger = logger.Discard
+	}
+	adb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: gormLogger})
+	if err != nil {
+		return err
+	}
+	if err := adb.AutoMigrate(&model.AccessLog{}); err != nil {
+		return err
+	}
+	accessDB = adb
+	return nil
+}
+
 func GetDB() *gorm.DB {
 	return db
+}
+
+// GetAccessLogDB 返回访问日志库；未初始化成功时为 nil，调用方必须判空。
+func GetAccessLogDB() *gorm.DB {
+	return accessDB
 }
 
 func IsNotFound(err error) bool {

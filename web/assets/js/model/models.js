@@ -36,6 +36,10 @@ class DBInbound {
         this.remark = "";
         this.enable = true;
         this.expiryTime = 0;
+        this.concurrencyLimit = 0;
+        this.regions = "[]";
+        this.upMbit = 0;
+        this.downMbit = 0;
 
         this.listen = "";
         this.port = 0;
@@ -49,6 +53,21 @@ class DBInbound {
             return;
         }
         ObjectUtil.cloneProps(this, data);
+    }
+
+    // regions 在库里是 JSON 字符串数组；表单要的是真数组，
+    // 这一对读写把两者接起来（与 totalGB 同一套做法）。
+    get regionList() {
+        try {
+            const list = JSON.parse(this.regions || "[]");
+            return Array.isArray(list) ? list : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    set regionList(list) {
+        this.regions = JSON.stringify(Array.isArray(list) ? list : []);
     }
 
     get totalGB() {
@@ -168,6 +187,13 @@ class AllSetting {
 
         this.timeLocation = "Asia/Shanghai";
         this.subscriptionUpdateTime = "04:00";
+
+        this.ipdbSourceUrl = "";
+        this.qqwrySourceUrl = "";
+        this.ipdbUpdateTime = "";
+        this.accessLogEnable = 0;
+        this.accessLogRetentionDays = 7;
+        this.tcInterface = "";
 
         if (data == null) {
             return

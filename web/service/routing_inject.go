@@ -19,6 +19,7 @@ type RoutingInjector struct {
 	outboundService    OutboundNodeService
 	ruleService        RoutingRuleService
 	inboundService     InboundService
+	ipdbService        IPDBService
 }
 
 func (s *RoutingInjector) Inject(cfg *xray.Config) error {
@@ -47,6 +48,15 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if rules == nil {
 		rules = make([]any, 0)
 	}
+	geoRules, err := s.buildGeoRules()
+	if err != nil {
+		return err
+	}
+	// 地区规则排在本项目生成的其余规则之前。这是对「一律 append 到末尾」
+	// 的一处受控例外：模板原有的安全规则仍保持更高优先级，但地区限制属于
+	// 准入判定，逻辑上必须先于任何分流决策。排在分流之后的话，非允许地区的
+	// 用户访问被分流的域名时会先命中分流规则走代理出站，限制被静默绕过。
+	rules = append(rules, geoRules...)
 	rules = append(rules, blockRules...)
 	rules = append(rules, proxyRules...)
 	routing["rules"] = rules
@@ -246,4 +256,37 @@ func (s *RoutingInjector) buildRule(
 	default:
 		return nil, false, common.NewError("未知的动作:", rule.Action)
 	}
+}
+
+// buildGeoRules 生成地区限制规则，并把允许集写进 bin/a-ui-geo.dat。
+//
+// 任何一步失败都返回错误让整份配置生成失败，绝不退而求其次地省掉规则：
+// 省掉等于地区限制失效，而面板上一切显示正常。配置生成失败时 xray 保持
+// 原状继续跑，是安全的一侧。
+func (s *RoutingInjector) buildGeoRules() ([]any, error) {
+	inbounds, err := s.inboundService.GetAllInbounds()
+	if err != nil {
+		return nil, err
+	}
+	if !AnyInboundUsesRegions(inbounds) {
+		return nil, nil
+	}
+
+	db := s.ipdbService.DB()
+	if db == nil {
+		return nil, common.NewError("已配置地区限制，但 IP 归属地库未加载；" +
+			"请到「面板设置 → IP 归属地库」更新，或清空入站的地区限制")
+	}
+	plan, err := buildGeoPlan(inbounds, db)
+	if err != nil {
+		return nil, err
+	}
+	if len(plan.Entries) == 0 {
+		return nil, nil
+	}
+	hash, err := writeGeoDat(geoDatPath, plan.Entries)
+	if err != nil {
+		return nil, common.NewError("生成地区限制数据文件失败:", err)
+	}
+	return rulesFromGeoPlan(inbounds, plan, hash), nil
 }

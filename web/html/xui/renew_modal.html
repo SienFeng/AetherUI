@@ -1,0 +1,117 @@
+{{define "renewModal"}}
+<a-modal id="renew-modal" v-model="renewModal.visible" title="续期"
+         :confirm-loading="renewModal.confirmLoading" :closable="true" :mask-closable="false"
+         ok-text="确认续期" cancel-text="取消" @ok="renewModal.ok">
+    <a-form layout="vertical">
+        <a-form-item label="续期时长">
+            <!-- 选了自定义日期后预设失效，这里直接置灰，避免"看着选中却不生效"的歧义 -->
+            <a-radio-group v-model="renewModal.days" button-style="solid"
+                           :disabled="!!renewModal.customDate"
+                           @change="renewModal.onDaysChange">
+                <a-radio-button v-for="p in renewModal.presets" :key="p.days" :value="p.days">
+                    [[ p.label ]]
+                </a-radio-button>
+            </a-radio-group>
+        </a-form-item>
+        <a-form-item label="或直接指定到期时间（选择后以此为准）">
+            <a-date-picker :show-time="{ format: 'HH:mm' }" format="YYYY-MM-DD HH:mm"
+                           v-model="renewModal.customDate" style="width: 100%"
+                           @change="renewModal.onCustomDateChange"></a-date-picker>
+        </a-form-item>
+        <a-alert :type="isNeverExpire ? 'warning' : 'info'">
+            <template slot="message">
+                当前到期时间：<b>[[ currentText ]]</b> → 续期后：<b>[[ newText ]]</b>
+            </template>
+            <template slot="description">
+                <span v-if="isNeverExpire">该入站当前为<b>无限期</b>，续期后将变成有期限的。</span>
+                <span v-if="willReenable">续期后将<b>重置已用流量</b>并<b>重新启用</b>该入站。</span>
+                <span v-else>新的到期时间不在将来，等同于立即停用：<b>不会</b>重置流量，也<b>不会</b>重新启用。</span>
+            </template>
+        </a-alert>
+    </a-form>
+</a-modal>
+
+<script>
+
+    const renewModal = {
+        visible: false,
+        confirmLoading: false,
+        dbInbound: null,
+        days: 30,
+        // moment 对象或 null。非空时以它为准，忽略 days。
+        customDate: null,
+        presets: [
+            { days: 7, label: '7 天' },
+            { days: 30, label: '1 个月' },
+            { days: 60, label: '2 个月' },
+            { days: 90, label: '3 个月' },
+            { days: 180, label: '半年' },
+            { days: 365, label: '1 年' },
+        ],
+        confirm(payload) {},
+        show({ dbInbound = null, confirm = (payload) => {} }) {
+            renewModal.dbInbound = dbInbound;
+            renewModal.days = 30;
+            renewModal.customDate = null;
+            renewModal.confirm = confirm;
+            renewModal.visible = true;
+        },
+        close() {
+            renewModal.visible = false;
+            renewModal.loading(false);
+        },
+        loading(loading = true) {
+            renewModal.confirmLoading = loading;
+        },
+        // 选了预设天数就放弃自定义日期，两者互斥——后端也只接受其中一个。
+        onDaysChange() {
+            renewModal.customDate = null;
+        },
+        onCustomDateChange(value) {
+            renewModal.customDate = value;
+        },
+        ok() {
+            const payload = renewModal.customDate
+                ? { days: 0, expiryTime: renewModal.customDate.valueOf() }
+                : { days: renewModal.days, expiryTime: 0 };
+            renewModal.confirm(payload);
+        },
+    };
+
+    const renewModalApp = new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#renew-modal',
+        data: {
+            renewModal: renewModal,
+        },
+        computed: {
+            currentExpiryTime() {
+                return this.renewModal.dbInbound ? this.renewModal.dbInbound.expiryTime : 0;
+            },
+            isNeverExpire() {
+                return this.currentExpiryTime === 0;
+            },
+            // 与后端 renewedExpiry 保持一致：未到期在原时间上叠加，
+            // 已过期或无限期从当前时刻起算。这里只用于预览，最终以后端写入的为准。
+            newExpiryTime() {
+                if (this.renewModal.customDate) {
+                    return this.renewModal.customDate.valueOf();
+                }
+                const now = new Date().getTime();
+                const base = this.currentExpiryTime > now ? this.currentExpiryTime : now;
+                return base + this.renewModal.days * oneDay;
+            },
+            currentText() {
+                return this.isNeverExpire ? '无限期' : DateUtil.formatMillis(this.currentExpiryTime);
+            },
+            newText() {
+                return DateUtil.formatMillis(this.newExpiryTime);
+            },
+            willReenable() {
+                return this.newExpiryTime > new Date().getTime();
+            },
+        },
+    });
+
+</script>
+{{end}}

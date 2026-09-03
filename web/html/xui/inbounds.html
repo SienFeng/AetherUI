@@ -11,6 +11,12 @@
     .ant-col-sm-24 {
         margin-top: 10px;
     }
+
+    /* 入站列表整行点击即展开（已去掉 antd 默认的 + 图标列），
+       给一个手型提示。内层在线明细表是 small 尺寸，排除掉。 */
+    #app .ant-table:not(.ant-table-small) .ant-table-tbody > tr {
+        cursor: pointer;
+    }
 </style>
 <body>
 <a-layout id="app" v-cloak>
@@ -51,11 +57,65 @@
                                  :data-source="dbInbounds"
                                  :loading="spinning" :scroll="{ x: 1500 }"
                                  :pagination="false"
+                                 :expanded-row-keys="expandedKeys"
+                                 :expand-row-by-click="true"
+                                 :expand-icon-as-cell="false"
+                                 :expand-icon-column-index="-1"
+                                 @expand="onExpand"
                                  style="margin-top: 20px"
                                  @change="() => getDBInbounds()">
+                            <template slot="expandedRowRender" slot-scope="dbInbound">
+                                <a-alert v-if="onlineOf(dbInbound.id).reason"
+                                         type="info" show-icon style="margin-bottom: 12px"
+                                         :message="onlineOf(dbInbound.id).reason"></a-alert>
+                                <a-table v-if="onlineOf(dbInbound.id).supported"
+                                         :columns="onlineColumns"
+                                         :data-source="onlineOf(dbInbound.id).list"
+                                         :row-key="online => online.ip"
+                                         :pagination="false" size="small"
+                                         :locale="{ emptyText: '当前没有在线连接' }">
+                                    <template slot="firstSeen" slot-scope="text, online">
+                                        <template v-if="online.firstSeen">[[ DateUtil.formatMillis(online.firstSeen) ]]</template>
+                                        <template v-else>-</template>
+                                    </template>
+                                    <template slot="onlineIp" slot-scope="text, online">
+                                        [[ online.ip ]]
+                                        <a-tooltip v-if="online.blocked">
+                                            <template slot="title">
+                                                超出并发额度，连接已被断开。最近一次：[[ DateUtil.formatMillis(online.rejectedAt) ]]
+                                            </template>
+                                            <a-tag color="red">超额被拒</a-tag>
+                                        </a-tooltip>
+                                    </template>
+                                    <template slot="location" slot-scope="text, online">
+                                        <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>
+                                        <a-tag v-else>未知</a-tag>
+                                        <a-tooltip v-if="online.locationAlt">
+                                            <template slot="title">
+                                                两个离线库判定不一致。另一个源认为是：[[ online.locationAlt ]]
+                                            </template>
+                                            <a-tag color="orange">存疑</a-tag>
+                                        </a-tooltip>
+                                    </template>
+                                    <template slot="speed" slot-scope="text, online">
+                                        <a-tag color="green">↑ [[ sizeFormat(online.upSpeed) ]]/s</a-tag>
+                                        <a-tag color="blue">↓ [[ sizeFormat(online.downSpeed) ]]/s</a-tag>
+                                    </template>
+                                    <template slot="onlineTraffic" slot-scope="text, online">
+                                        [[ sizeFormat(online.up) ]] / [[ sizeFormat(online.down) ]]
+                                    </template>
+                                    <template slot="onlineAction" slot-scope="text, online">
+                                        <a-button v-if="online.conns > 0" type="link" size="small"
+                                                  style="color: #FF4D4F"
+                                                  @click="kickOnline(dbInbound, online)">踢下线</a-button>
+                                        <a-button type="link" size="small"
+                                                  @click="showAccessLog(dbInbound, online.ip)">访问日志</a-button>
+                                    </template>
+                                </a-table>
+                            </template>
                             <template slot="action" slot-scope="text, dbInbound">
                                 <a-dropdown :trigger="['click']">
-                                    <a @click="e => e.preventDefault()">操作</a>
+                                    <a @click="e => { e.preventDefault(); e.stopPropagation(); }">操作</a>
                                     <a-menu slot="overlay" @click="a => clickAction(a, dbInbound)">
                                         <a-menu-item v-if="dbInbound.hasLink()" key="qrcode">
                                             <a-icon type="qrcode"></a-icon>二维码
@@ -65,6 +125,12 @@
                                         </a-menu-item>
                                         <a-menu-item key="resetTraffic">
                                             <a-icon type="retweet"></a-icon>重置流量
+                                        </a-menu-item>
+                                        <a-menu-item key="renew">
+                                            <a-icon type="clock-circle"></a-icon>续期
+                                        </a-menu-item>
+                                        <a-menu-item key="accessLog">
+                                            <a-icon type="file-search"></a-icon>访问日志
                                         </a-menu-item>
                                         <a-menu-item key="delete">
                                             <span style="color: #FF4D4F">
@@ -86,7 +152,7 @@
                                 <a-tag v-else color="green">无限制</a-tag>
                             </template>
                             <template slot="settings" slot-scope="text, dbInbound">
-                                <a-button type="link" @click="showInfo(dbInbound)">查看</a-button>
+                                <a-button type="link" @click.stop="showInfo(dbInbound)">查看</a-button>
                             </template>
                             <template slot="stream" slot-scope="text, dbInbound, index">
                                 <template v-if="dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS">
@@ -97,7 +163,30 @@
                                 <template v-else>无</template>
                             </template>
                             <template slot="enable" slot-scope="text, dbInbound">
-                                <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"></a-switch>
+                                <span @click.stop>
+                                    <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"></a-switch>
+                                </span>
+                            </template>
+                            <template slot="regions" slot-scope="text, dbInbound">
+                                <template v-if="dbInbound.regionList.length > 0">
+                                    <a-tag v-for="r in dbInbound.regionList" :key="r" color="purple">[[ r ]]</a-tag>
+                                </template>
+                                <a-tag v-else color="green">不限制</a-tag>
+                            </template>
+                            <template slot="concurrency" slot-scope="text, dbInbound">
+                                <a-tag v-if="dbInbound.concurrencyLimit > 0" color="orange">
+                                    [[ dbInbound.concurrencyLimit ]] IP
+                                </a-tag>
+                                <a-tag v-else color="green">无限制</a-tag>
+                            </template>
+                            <template slot="rate" slot-scope="text, dbInbound">
+                                <template v-if="dbInbound.upMbit > 0 || dbInbound.downMbit > 0">
+                                    <a-tag color="orange">
+                                        [[ dbInbound.upMbit > 0 ? dbInbound.upMbit + 'M' : '不限' ]] /
+                                        [[ dbInbound.downMbit > 0 ? dbInbound.downMbit + 'M' : '不限' ]]
+                                    </a-tag>
+                                </template>
+                                <a-tag v-else color="green">不限制</a-tag>
                             </template>
                             <template slot="expiryTime" slot-scope="text, dbInbound">
                                 <template v-if="dbInbound.expiryTime > 0">
@@ -170,7 +259,63 @@
         align: 'center',
         width: 80,
         scopedSlots: { customRender: 'expiryTime' },
+    }, {
+        title: "地区限制",
+        align: 'center',
+        width: 120,
+        scopedSlots: { customRender: 'regions' },
+    }, {
+        title: "并发限制",
+        align: 'center',
+        width: 60,
+        scopedSlots: { customRender: 'concurrency' },
+    }, {
+        title: "限速↑|↓",
+        align: 'center',
+        width: 110,
+        scopedSlots: { customRender: 'rate' },
     }];
+
+    // 展开行：某个入站上每个来源 IP 的在线明细。
+    const onlineColumns = [{
+        title: "上线时间",
+        align: 'center',
+        width: 140,
+        scopedSlots: { customRender: 'firstSeen' },
+    }, {
+        title: "来源 IP",
+        align: 'center',
+        width: 180,
+        scopedSlots: { customRender: 'onlineIp' },
+    }, {
+        title: "归属地",
+        align: 'center',
+        width: 160,
+        scopedSlots: { customRender: 'location' },
+    }, {
+        title: "连接数",
+        align: 'center',
+        width: 60,
+        dataIndex: "conns",
+    }, {
+        title: "实时网速",
+        align: 'center',
+        width: 200,
+        scopedSlots: { customRender: 'speed' },
+    }, {
+        title: "本次上线用量↑|↓",
+        align: 'center',
+        width: 140,
+        scopedSlots: { customRender: 'onlineTraffic' },
+    }, {
+        title: "操作",
+        align: 'center',
+        width: 160,
+        scopedSlots: { customRender: 'onlineAction' },
+    }];
+
+    // 展开行没有数据时的占位，避免模板里到处判空。
+    const emptyOnline = { supported: false, reason: '正在读取连接表...', list: [] };
 
     const app = new Vue({
         delimiters: ['[[', ']]'],
@@ -181,6 +326,10 @@
             inbounds: [],
             dbInbounds: [],
             searchKey: '',
+            onlineColumns,
+            expandedKeys: [],
+            onlines: {},
+            onlineTimer: null,
         },
         methods: {
             loading(spinning=true) {
@@ -227,6 +376,12 @@
                     case "resetTraffic":
                         this.resetTraffic(dbInbound);
                         break;
+                    case "renew":
+                        this.openRenew(dbInbound);
+                        break;
+                    case "accessLog":
+                        this.showAccessLog(dbInbound, '');
+                        break;
                     case "delete":
                         this.delInbound(dbInbound);
                         break;
@@ -265,6 +420,10 @@
                     remark: dbInbound.remark,
                     enable: dbInbound.enable,
                     expiryTime: dbInbound.expiryTime,
+                    concurrencyLimit: dbInbound.concurrencyLimit,
+                    regions: dbInbound.regions,
+                    upMbit: dbInbound.upMbit,
+                    downMbit: dbInbound.downMbit,
 
                     listen: inbound.listen,
                     port: inbound.port,
@@ -283,6 +442,10 @@
                     remark: dbInbound.remark,
                     enable: dbInbound.enable,
                     expiryTime: dbInbound.expiryTime,
+                    concurrencyLimit: dbInbound.concurrencyLimit,
+                    regions: dbInbound.regions,
+                    upMbit: dbInbound.upMbit,
+                    downMbit: dbInbound.downMbit,
 
                     listen: inbound.listen,
                     port: inbound.port,
@@ -292,6 +455,16 @@
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
                 await this.submit(`/xui/inbound/update/${dbInbound.id}`, data, inModal);
+            },
+            openRenew(dbInbound) {
+                renewModal.show({
+                    dbInbound: dbInbound,
+                    confirm: async (payload) => {
+                        renewModal.loading();
+                        await this.submit(`/xui/inbound/renew/${dbInbound.id}`, payload, renewModal);
+                        renewModal.close();
+                    },
+                });
             },
             resetTraffic(dbInbound) {
                 this.$confirm({
@@ -326,6 +499,67 @@
             switchEnable(dbInbound) {
                 this.submit(`/xui/inbound/update/${dbInbound.id}`, dbInbound);
             },
+            onlineOf(id) {
+                return this.onlines[id] || emptyOnline;
+            },
+            onExpand(expanded, dbInbound) {
+                if (expanded) {
+                    this.expandedKeys = this.expandedKeys.concat([dbInbound.id]);
+                    this.loadOnlines(dbInbound.id);
+                } else {
+                    this.expandedKeys = this.expandedKeys.filter(id => id !== dbInbound.id);
+                    this.$delete(this.onlines, dbInbound.id);
+                }
+                this.syncOnlineTimer();
+            },
+            async loadOnlines(id) {
+                // 这里刻意不用 HttpUtil：它会把每次失败都弹成 message，
+                // 而这个接口每 2 秒轮询一次，失败时会刷屏。错误就地显示在展开行里。
+                try {
+                    const resp = await axios.post(`/xui/inbound/onlines/${id}`);
+                    const data = resp.data;
+                    if (data && data.success) {
+                        this.$set(this.onlines, id, data.obj);
+                    } else {
+                        this.$set(this.onlines, id, {
+                            supported: false,
+                            reason: (data && data.msg) || '读取在线明细失败',
+                            list: [],
+                        });
+                    }
+                } catch (e) {
+                    this.$set(this.onlines, id, { supported: false, reason: e.toString(), list: [] });
+                }
+            },
+            syncOnlineTimer() {
+                const needTimer = this.expandedKeys.length > 0;
+                if (needTimer && this.onlineTimer == null) {
+                    this.onlineTimer = setInterval(() => {
+                        this.expandedKeys.forEach(id => this.loadOnlines(id));
+                    }, 2000);
+                } else if (!needTimer && this.onlineTimer != null) {
+                    clearInterval(this.onlineTimer);
+                    this.onlineTimer = null;
+                }
+            },
+            showAccessLog(dbInbound, ip) {
+                accessLogModal.show({ dbInbound: dbInbound, ip: ip });
+            },
+            kickOnline(dbInbound, online) {
+                this.$confirm({
+                    title: '踢下线',
+                    content: `确定要断开 ${online.ip} 在该入站上的全部连接吗？这只断开当前连接，客户端通常会立即重连。`,
+                    okText: '踢下线',
+                    cancelText: '取消',
+                    onOk: async () => {
+                        const msg = await HttpUtil.post(`/xui/inbound/kick/${dbInbound.id}`, { ip: online.ip });
+                        if (msg.success) {
+                            this.$message.success(`已断开 ${msg.obj} 条连接`);
+                            await this.loadOnlines(dbInbound.id);
+                        }
+                    },
+                });
+            },
             async submit(url, data, modal) {
                 const msg = await HttpUtil.postWithModal(url, data, modal);
                 if (msg.success) {
@@ -340,6 +574,12 @@
         },
         mounted() {
             this.getDBInbounds();
+        },
+        beforeDestroy() {
+            if (this.onlineTimer != null) {
+                clearInterval(this.onlineTimer);
+                this.onlineTimer = null;
+            }
         },
         computed: {
             total() {
@@ -362,5 +602,7 @@
 {{template "qrcodeModal"}}
 {{template "textModal"}}
 {{template "inboundInfoModal"}}
+{{template "renewModal"}}
+{{template "accessLogModal"}}
 </body>
 </html>

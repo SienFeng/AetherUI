@@ -32,6 +32,20 @@
             }
             this.confirm = confirm;
             this.visible = true;
+            this.loadProvinces();
+        },
+        provinces: [],
+        provincesLoaded: false,
+        async loadProvinces() {
+            // 只拉一次：地区列表来自本地 IP 库，一个进程周期内不会变。
+            if (this.provincesLoaded) {
+                return;
+            }
+            const msg = await HttpUtil.post('/xui/inbound/provinces');
+            if (msg.success) {
+                this.provinces = msg.obj.list;
+                this.provincesLoaded = true;
+            }
         },
         close() {
             inModal.visible = false;
@@ -64,6 +78,9 @@
             },
             get dbInbound() {
                 return inModal.dbInbound;
+            },
+            get provinces() {
+                return inModal.provinces;
             }
         },
         methods: {

@@ -80,6 +80,16 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		return nil, err
 	}
 
+	// 访问日志开关变化会改动配置字节，Config.Equals 因此能察觉，
+	// 那个 10 秒的重启消费任务会自动让它生效，不需要重启面板。
+	accessLogEnable, err := s.settingService.GetAccessLogEnable()
+	if err != nil {
+		return nil, err
+	}
+	if err := injectAccessLog(xrayConfig, accessLogEnable, accessLogPath); err != nil {
+		return nil, err
+	}
+
 	return xrayConfig, nil
 }
 

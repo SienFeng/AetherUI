@@ -176,6 +176,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupId → Action
 
 出站配置与域名列表在**落库之前**交给真实 xray 校验，因此不需要事务回滚。出站的两个入口都接了：`OutboundNodeService.persist`（新建）与 `Update`（编辑）——**只堵一条等于没堵**，用户可以先建合法节点再编辑成坏的；域名组的新建与编辑共用 `encodeDomainsFromForm` 这一个收口。
 
+**入站也走同一套校验**（`ValidateInboundReplacing`，接在 `InboundService.AddInbound` / `UpdateInbound`）。起因是一次真实事故：管理员在入站表单里开了 TLS 却没填证书路径，保存时一切正常，直到某次重启才发现——**xray 加载配置是全有或全无的**，这一个入站让整份 `bin/config.json` 加载失败，机器上所有用户一起断网，而面板首页只显示一个 `error`，看不出是哪个入站的问题。编辑时要传**旧** tag（改端口 tag 会变），否则候选对象会和库里那份自己撞名而被误拒；停用的入站同样校验，否则问题只是被推迟到它被启用的那一刻。
+
 策略是 **fail open**：只有 xray 明确判定配置非法才拒绝；二进制缺失、老版本不认 `run -test` 参数、执行超时，一律放行并记日志。校验是辅助手段，不能因它自身故障就把用户锁在门外。
 
 校验针对的是**完整生成配置**（设计 §5.4.2）：`validateWithFullConfig` 先 `GetXrayConfig()` 拿到「不做本次改动的话 xray 会拿到的那份配置」，把候选对象应用上去再送检。只包住单个对象的最小配置在原理上发现不了组合层面的冲突（与注入器发出的 tag 撞名、指向不存在出站的 `proxySettings.tag` 等），`a-ui-block` 撞名事故正是因此才一路没被拦住。

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 	"a-ui/config"
+	"a-ui/database"
 	"a-ui/logger"
 	"a-ui/util/common"
 	"a-ui/web/controller"
@@ -87,6 +88,9 @@ type Server struct {
 	xrayService    service.XrayService
 	settingService service.SettingService
 	inboundService service.InboundService
+	ipdbService    service.IPDBService
+
+	accessLogService service.AccessLogService
 
 	cron *cron.Cron
 
@@ -173,9 +177,20 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	})
 	engine.Use(func(c *gin.Context) {
 		uri := c.Request.RequestURI
-		if strings.HasPrefix(uri, assetsBasePath) {
-			c.Header("Cache-Control", "max-age=31536000")
+		if !strings.HasPrefix(uri, assetsBasePath) {
+			return
 		}
+		if config.IsDebug() {
+			// 调试模式下静态资源直接从磁盘读，缓存必须关掉。
+			//
+			// 静态资源的 URL 带的是 ?<版本号>，而版本号只在发版时变。开发时改了
+			// assets/js 但版本号不变，浏览器会命中这条一年期的强缓存继续用旧文件。
+			// 后果不只是「改了没生效」：models.js 落后一版时，ObjectUtil.cloneProps
+			// 会把服务端返回的新设置项直接丢掉，管理员一点保存就把那些项写成空值。
+			c.Header("Cache-Control", "no-store")
+			return
+		}
+		c.Header("Cache-Control", "max-age=31536000")
 	})
 	err = s.initI18n(engine)
 	if err != nil {
@@ -297,6 +312,22 @@ func (s *Server) startTask() {
 
 	// 每 10 分钟检查一次域名组订阅是否到了更新时间
 	s.cron.AddJob("@every 10m", job.NewSubscriptionJob())
+
+	// 每 10 分钟自检一次 IP 归属地库是否到了配置的更新时刻（默认关闭，关闭时不发请求）
+	s.cron.AddJob("@every 10m", job.NewIPDBUpdateJob())
+
+	// 并发判定每秒跑一次。没有任何入站设置额度时它会直接返回，
+	// 不做任何系统调用，所以常态下的开销只是一次极小的查库。
+	s.cron.AddJob("@every 1s", job.NewConcurrencyJob())
+
+	// 每 5 秒把 xray 写下的访问日志读进独立的库；关闭时直接返回
+	s.cron.AddJob("@every 5s", job.NewAccessLogCollectJob())
+
+	// 每小时按保留期清理访问日志
+	s.cron.AddJob("@every 1h", job.NewAccessLogCleanupJob())
+
+	// 每 10 秒对齐一次端口限速规则；没人配限速时不碰 tc
+	s.cron.AddJob("@every 10s", job.NewShapingJob())
 }
 
 func (s *Server) Start() (err error) {
@@ -357,6 +388,23 @@ func (s *Server) Start() (err error) {
 		logger.Info("web server run http on", listener.Addr())
 	}
 	s.listener = listener
+
+	// IP 归属地库缺失或损坏不阻断面板启动：只是归属地显示与地区限制不可用，
+	// 管理员可以在设置页点「更新 IP 库」补上。
+	if err := s.ipdbService.Load(); err != nil {
+		logger.Warning("load ip database failed, 归属地与地区限制将不可用:", err)
+	}
+
+	// 访问日志用独立的库。打不开只影响访问日志本身，不该让人登不上面板。
+	if err := database.InitAccessLogDB(config.GetAccessLogDBPath()); err != nil {
+		logger.Warning("open access log database failed, 访问日志将不可用:", err)
+	} else if pruned, err := s.accessLogService.PruneOrphans(); err != nil {
+		logger.Warning("清理孤儿访问日志失败:", err)
+	} else if pruned > 0 {
+		// 删除入站时若日志库恰好不可写，记录会留下来。启动时先扫一遍，
+		// 把窗口从「最多一小时」缩到「最多到下次重启」。
+		logger.Warning("清理了", pruned, "条已删除入站遗留的访问日志")
+	}
 
 	s.startTask()
 

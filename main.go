@@ -12,6 +12,7 @@ import (
 	"a-ui/config"
 	"a-ui/database"
 	"a-ui/logger"
+	"a-ui/util/tcshape"
 	"a-ui/v2ui"
 	"a-ui/web"
 	"a-ui/web/global"
@@ -151,6 +152,7 @@ func main() {
 		fmt.Println("    run            run web panel")
 		fmt.Println("    v2-ui          migrate form v2-ui")
 		fmt.Println("    setting        set settings")
+		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
 	}
 
 	flag.Parse()
@@ -177,6 +179,8 @@ func main() {
 		if err != nil {
 			fmt.Println("migrate from v2-ui failed:", err)
 		}
+	case "tc-clear":
+		clearTrafficShaping()
 	case "setting":
 		err := settingCmd.Parse(os.Args[2:])
 		if err != nil {
@@ -189,12 +193,45 @@ func main() {
 			updateSetting(port, username, password)
 		}
 	default:
-		fmt.Println("except 'run' or 'v2-ui' or 'setting' subcommands")
+		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' subcommands")
 		fmt.Println()
 		runCmd.Usage()
 		fmt.Println()
 		v2uiCmd.Usage()
 		fmt.Println()
 		settingCmd.Usage()
+	}
+}
+
+// clearTrafficShaping 不启动面板、不连数据库，直接把本面板下发的 tc 规则拆掉。
+//
+// 存在的理由：限速规则一旦配错就可能掐断整机网络，那时面板根本访问不到，
+// 界面上那个「清除全部限速」按钮就没用了。这条命令是从服务商控制台/串口
+// 登录进来之后的救援入口，不依赖任何前置条件。
+func clearTrafficShaping() {
+	if !tcshape.Supported {
+		fmt.Println("当前系统不支持 tc，无需清除")
+		return
+	}
+	iface, err := tcshape.DetectInterface()
+	if err != nil {
+		// 探测不出网卡也要把 ifb 那半边拆掉，否则 ingress 重定向会一直挂着。
+		fmt.Println("警告: 无法探测默认路由所在网卡:", err)
+		fmt.Println("将只清除本面板专用的 ifb 网卡；如需清除主网卡上的规则，请手动执行:")
+		fmt.Println("    tc qdisc del dev <网卡名> root")
+		fmt.Println("    tc qdisc del dev <网卡名> ingress")
+		iface = ""
+	}
+	cmds := tcshape.BuildTeardownPlan(iface)
+	if len(cmds) == 0 {
+		cmds = tcshape.BuildIfbTeardownPlan()
+	}
+	if err := tcshape.Run(cmds); err != nil {
+		fmt.Println("清除限速规则失败:", err)
+		return
+	}
+	fmt.Println("已清除本面板下发的全部限速规则")
+	if iface != "" {
+		fmt.Println("网卡:", iface)
 	}
 }
