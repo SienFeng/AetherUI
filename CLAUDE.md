@@ -120,7 +120,7 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 ```
 DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + 订阅五件套（见下）
 OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
-RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) + OutboundId + Priority + Enable
+RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupId → Action(proxy|block) + OutboundId + Priority + Enable
 ```
 
 **「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
@@ -132,10 +132,11 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 
 `DomainGroupService.Update` 不用 `Save` 写整行，而是拼一个只含实际要改的列的 `map[string]any`（`updateFieldsFor`），原因正是上一条：整行写入会把 `Get` 那一刻捕获的 `SubscribedDomains`/`LastUpdatedAt` 一并写回，把中间一次刚成功的订阅刷新静默回滚。**代价是这份列名单要手动维护**——将来给 `DomainGroup` 加字段，若不在 `updateFieldsFor` 里加对应的 key，这个字段就会静默地无法通过编辑接口更新（`Get`/展示不受影响，容易被漏测）。
 
-三条不可动摇的字段约定：
+五条不可动摇的字段约定：
 
-- **规则存 `InboundId` 外键，不存 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。
-- **`InboundId = 0` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。
+- **规则存 `InboundIds`（入站 id 的 JSON 数组）而不是 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。数组**升序去重**存储，这是「生成逐字节确定」的一部分。
+- **`InboundIds` 为空数组 `[]` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。**注意空数组与「一个都没选」在提交体里无法区分**：写入路径用 `EncodeInboundIdsStrict` 挡住「非空输入被过滤成空」，前端 `saveRule` 也拦一道——否则一条本该覆盖某个人的规则会被静默放大到全体。
+- **同一个域名组下，任何一个入站至多被一条规则覆盖**（`RoutingRuleService.checkConflict`，把空数组当全集做集合相交判定）。禁用的规则同样占位。只在写入路径校验，生成期不干预：迁移前留下的冲突数据照常生成两条规则，由界面标黄交给管理员处理。
 - **出站 `Tag` 一经分配即不可变**，且不能由自增 Id 拼出（unique 约束要求 INSERT 前就确定，那时 Id 尚未分配）。用 `link.SuggestTag("a-ui", remark, idx)` 生成，重名由调用方追加序号——注意 `SuggestTag` 只在 remark 为空时才用 `idx`，remark 非空时对任何 idx 都返回同一个值。
 - **`a-ui-block` 是保留 tag，任何用户可控的 tag 分配都必须排除它。** 数据库唯一约束管不到它——注入器发出的 tag 不在 `outbound_nodes` 表里。备注写「block」（含 `Block`/`BLOCK`/`block!`/` block ` 等，`SlugRemark` 会把它们归一到同一个 slug）就会生成 `a-ui-block`，与注入器的黑洞出站撞名，xray 报 `existing tag found: a-ui-block` 并拒绝启动。判定收敛在 `model.IsReservedTag()` 一处，分配端（`allocTag`）、生成端（`buildOutbounds`）与校验端（`removeOutboundByTag`）都只认它，**新增保留 tag 只改这一个函数**。生成端也要排除，是因为修复前分配出去的脏数据仍可能躺在库里。
 
@@ -147,19 +148,20 @@ RoutingRule   分流规则   InboundId × DomainGroupId → Action(proxy|block) 
 |---|---|---|
 | 规则引用已删除的**出站** | `Configuration OK` | 运行时静默回落默认出站（**直连**）。以为封禁/分流了，其实裸奔 |
 | 规则的 `domain` 为**空数组** | `Configuration OK` | xray 把缺失条件当作「不限制」，规则从「访问这批域名走 B」**退化成「该用户全部流量走 B」** |
+| 规则的 `inboundTag` 为**空数组** | `Configuration OK` | 与上一行同构：规则从「只覆盖甲」**放大成覆盖所有入站**。Xray 26.7.28 实测：两个入站访问目标域名都被命中，对照域名正常放行 |
 | 规则引用已删除的**入站** | `Configuration OK` | 规则永不命中（无害） |
 | tag 含中文 | `Configuration OK` | 合法，无需转写 |
 
 因此有**两道防线**，改动本子系统时都不能削弱：
 
-1. **删除时拒绝**——三条引用边都有守卫：`DomainGroupService.Del` / `OutboundNodeService.Del` / `InboundService.DelInbound` 分别调 `RoutingRuleService` 的 `CheckDomainGroupRefs` / `CheckOutboundRefs` / `CheckInboundRefs`。入站这条边**不能只靠第二道防线**：SQLite 会复用被删除的自增 id（见「已知偏差」），孤儿规则会绑到新入站上，那时引用不再悬空，跳过防线拦不住，规则列表还会渲染得很合理。`CheckInboundRefs` 不把 `InboundId = 0` 的全局规则算作引用。
-2. **生成期跳过**——`buildRule` 第三个返回值非 nil 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、入站不存在，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**跳过必须带原因并由 `buildRules` 记进 `logger.Warning`——否则这道防线对用户是隐形的：规则表照常渲染，配置里却没有它。
+1. **删除时拒绝**——三条引用边都有守卫：`DomainGroupService.Del` / `OutboundNodeService.Del` / `InboundService.DelInbound` 分别调 `RoutingRuleService` 的 `CheckDomainGroupRefs` / `CheckOutboundRefs` / `CheckInboundRefs`。入站这条边**不能只靠第二道防线**：SQLite 会复用被删除的自增 id（见「已知偏差」），孤儿规则会绑到新入站上，那时引用不再悬空，跳过防线拦不住，规则列表还会渲染得很合理。`CheckInboundRefs` 不把 `InboundIds` 为空数组的全局规则算作引用；它读出全部规则逐条解码判断，不能再用 `WHERE inbound_id = ?` 交给 SQL 去数。
+2. **生成期跳过**——`buildRule` 第三个返回值非 nil 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、规则指定的入站**全部**不存在或已禁用，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**跳过必须带原因并由 `buildRules` 记进 `logger.Warning`——否则这道防线对用户是隐形的：规则表照常渲染，配置里却没有它。
 
 ### 配置注入的四条不变量（`web/service/routing_inject.go`）
 
 1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
 2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。
-3. **绝不输出条件残缺的规则**（见上）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。
+3. **绝不输出条件残缺的规则**（见上）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。入站条件同理：`buildRule` 会剔除已删除/已禁用的入站，**剔完为空则整条丢弃**，绝不输出空的 `inboundTag`；只剔掉一部分时规则照常生成，被剔掉的记 `logger.Warning`。
 4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
 
 黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，而悬空 `outboundTag` 不报错，block 会静默变直连。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。

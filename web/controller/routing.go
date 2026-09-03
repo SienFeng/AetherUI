@@ -68,6 +68,51 @@ type domainGroupDetail struct {
 	LastSkipped       int      `json:"lastSkipped"`
 }
 
+type routingRuleForm struct {
+	Remark string `json:"remark" form:"remark"`
+	// InboundIds 为空数组表示「所有用户」。空与「全是非法 id」必须区分开，
+	// 转换时走 EncodeInboundIdsStrict——后者报错，前者才是合法的全局规则。
+	InboundIds    []int  `json:"inboundIds" form:"inboundIds"`
+	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
+	Action        string `json:"action" form:"action"`
+	OutboundId    int    `json:"outboundId" form:"outboundId"`
+	Priority      int    `json:"priority" form:"priority"`
+	Enable        bool   `json:"enable" form:"enable"`
+}
+
+type routingRuleView struct {
+	Id            int    `json:"id"`
+	Remark        string `json:"remark"`
+	InboundIds    []int  `json:"inboundIds"`
+	DomainGroupId int    `json:"domainGroupId"`
+	Action        string `json:"action"`
+	OutboundId    int    `json:"outboundId"`
+	Priority      int    `json:"priority"`
+	Enable        bool   `json:"enable"`
+	// Broken 标记 InboundIds 列解码失败。这种规则 buildRule 会整条丢弃，
+	// 但解码失败得到的空数组在前端看来就是「所有用户」——不带这个标记，
+	// 一条已经不生效的规则会在界面上显示成覆盖全员的正常规则。
+	Broken bool `json:"broken"`
+}
+
+// ruleFromForm 把表单转成待落库的规则。
+func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
+	encoded, err := service.EncodeInboundIdsStrict(form.InboundIds)
+	if err != nil {
+		return nil, err
+	}
+	return &model.RoutingRule{
+		Id:            id,
+		Remark:        form.Remark,
+		InboundIds:    encoded,
+		DomainGroupId: form.DomainGroupId,
+		Action:        form.Action,
+		OutboundId:    form.OutboundId,
+		Priority:      form.Priority,
+		Enable:        form.Enable,
+	}, nil
+}
+
 // decodeGroupDomains 解出一个组的手工域名与订阅域名。数据损坏时当作空列表，
 // 界面还能显示这个组的其余信息，管理员才有机会去修它；broken 如实报告是否
 // 有任一列解码失败，调用方不能靠 len(manual)+len(subscribed) 反推——那样会
@@ -403,16 +448,40 @@ func (a *RoutingController) listRules(c *gin.Context) {
 		jsonMsg(c, "获取分流规则", err)
 		return
 	}
-	jsonObj(c, rules, nil)
+	views := make([]*routingRuleView, 0, len(rules))
+	for _, rule := range rules {
+		ids, decodeErr := service.DecodeInboundIds(rule.InboundIds)
+		broken := decodeErr != nil
+		if broken {
+			ids = nil
+		}
+		if ids == nil {
+			// 必须是 []，不能是 null：前端对它做 .length / .includes，
+			// null 会在渲染规则列表时抛异常，整页数据都出不来。
+			ids = []int{}
+		}
+		views = append(views, &routingRuleView{
+			Id: rule.Id, Remark: rule.Remark, InboundIds: ids,
+			DomainGroupId: rule.DomainGroupId, Action: rule.Action,
+			OutboundId: rule.OutboundId, Priority: rule.Priority,
+			Enable: rule.Enable, Broken: broken,
+		})
+	}
+	jsonObj(c, views, nil)
 }
 
 func (a *RoutingController) addRule(c *gin.Context) {
-	rule := &model.RoutingRule{}
-	if err := c.ShouldBind(rule); err != nil {
+	form := &routingRuleForm{}
+	if err := c.ShouldBind(form); err != nil {
 		jsonMsg(c, "添加分流规则", err)
 		return
 	}
-	err := a.ruleService.Add(rule)
+	rule, err := ruleFromForm(0, form)
+	if err != nil {
+		jsonMsg(c, "添加分流规则", err)
+		return
+	}
+	err = a.ruleService.Add(rule)
 	jsonMsg(c, "添加分流规则", err)
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
@@ -425,8 +494,13 @@ func (a *RoutingController) updateRule(c *gin.Context) {
 		jsonMsg(c, "修改分流规则", err)
 		return
 	}
-	rule := &model.RoutingRule{Id: id}
-	if err := c.ShouldBind(rule); err != nil {
+	form := &routingRuleForm{}
+	if err := c.ShouldBind(form); err != nil {
+		jsonMsg(c, "修改分流规则", err)
+		return
+	}
+	rule, err := ruleFromForm(id, form)
+	if err != nil {
 		jsonMsg(c, "修改分流规则", err)
 		return
 	}

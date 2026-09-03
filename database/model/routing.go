@@ -66,8 +66,13 @@ type OutboundNode struct {
 type RoutingRule struct {
 	Id     int    `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
 	Remark string `json:"remark" form:"remark"`
-	// InboundId 为 0 表示对所有入站生效。
-	InboundId     int    `json:"inboundId" form:"inboundId"`
+	// InboundIds 是这条规则覆盖的入站 id，JSON 整数数组，升序去重存储。
+	// 空数组 [] 表示「所有用户」（含以后新建的入站）。
+	//
+	// 升序去重不是洁癖：buildRule 直接按这个顺序生成 inboundTag 数组，而
+	// 「生成逐字节确定」是 Config.Equals 能正确判断配置是否变化的前提；
+	// 顺序一抖动，那个 10 秒的重启 cron 就会不停重启 xray。
+	InboundIds    string `json:"inboundIds" form:"inboundIds"`
 	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
 	Action        string `json:"action" form:"action"`
 	// OutboundId 仅在 Action 为 ActionProxy 时有意义。

@@ -92,7 +92,7 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 }
 
 func (s *InboundService) DelInbound(id int) error {
-	// 分流规则存的是 InboundId 外键，而 SQLite 会复用被删除的自增 id：
+	// 分流规则存的是入站 id 外键，而 SQLite 会复用被删除的自增 id：
 	// 不拦住这里，孤儿规则会在下一个入站建出来时静默绑到新用户身上。
 	ruleService := RoutingRuleService{}
 	if err := ruleService.CheckInboundRefs(id); err != nil {

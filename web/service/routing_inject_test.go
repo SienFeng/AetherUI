@@ -162,7 +162,7 @@ func TestInjectGlobalRuleOmitsInboundTag(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundId: 0, DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestInjectPerInboundRuleUsesCurrentTag(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundId: in.Id, DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -201,10 +201,12 @@ func TestInjectPerInboundRuleUsesCurrentTag(t *testing.T) {
 // 那个 10 秒的 cron 会不停重启 xray。
 func TestInjectIsDeterministic(t *testing.T) {
 	setupDB(t)
-	g := newTestGroup(t, "ChatGPT")
 	node, _ := (&OutboundNodeService{}).AddFromLink("socks5://1.2.3.4:1080", "hk")
 	rs := RoutingRuleService{}
+	// 五条规则挂五个不同的域名组：同一个域名组下每个入站至多被一条规则覆盖，
+	// 而本测试关心的是多条规则的生成顺序是否逐字节稳定。
 	for i := 0; i < 5; i++ {
+		g := newTestGroup(t, "组 "+strconv.Itoa(i))
 		if err := rs.Add(&model.RoutingRule{
 			DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 		}); err != nil {
@@ -261,7 +263,7 @@ func TestInjectSkipsRuleWhenInboundDeleted(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundId: in.Id, DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -407,7 +409,7 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 	}{
 		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock}},
 		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, Action: model.ActionBlock}},
-		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, InboundId: 999, Action: model.ActionBlock}},
+		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, InboundIds: "[999]", Action: model.ActionBlock}},
 		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionProxy, OutboundId: 999}},
 		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, Action: "definitely-not-an-action"}},
 	}
@@ -535,6 +537,133 @@ func TestInjectIsByteDeterministicWithSubscribedDomains(t *testing.T) {
 		}
 		if string(again.RouterConfig) != string(first.RouterConfig) {
 			t.Fatalf("run %d differs:\n%s\n%s", i, first.RouterConfig, again.RouterConfig)
+		}
+	}
+}
+
+// mustEncodeIds 是测试里的小工具，避免每处都写一遍错误处理。
+func mustEncodeIds(t *testing.T, ids []int) string {
+	t.Helper()
+	encoded, err := EncodeInboundIds(ids)
+	if err != nil {
+		t.Fatalf("EncodeInboundIds: %v", err)
+	}
+	return encoded
+}
+
+func TestInjectMultiInboundRuleListsAllTagsInOrder(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	a := newTestInbound(t, 10001)
+	b := newTestInbound(t, 10002)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundIds:    mustEncodeIds(t, []int{b.Id, a.Id}), // 故意逆序传入
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	generated := decodeRules(t, cfg)[1]
+	tags, ok := generated["inboundTag"].([]any)
+	if !ok || len(tags) != 2 {
+		t.Fatalf("inboundTag = %v, want 2 tags", generated["inboundTag"])
+	}
+	// 升序存储 -> 生成顺序确定。顺序一抖动 Config.Equals 恒为 false，
+	// 那个 10 秒的 cron 会不停重启 xray。
+	if tags[0] != a.Tag || tags[1] != b.Tag {
+		t.Errorf("inboundTag = %v, want [%s %s]", tags, a.Tag, b.Tag)
+	}
+}
+
+func TestInjectMultiInboundRuleDropsDeadInboundsButKeepsRule(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	alive := newTestInbound(t, 10001)
+	dead := newTestInbound(t, 10002)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundIds:    mustEncodeIds(t, []int{alive.Id, dead.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 禁用其中一个入站：剩下的用户仍应受规则约束
+	dead.Enable = false
+	if err := database.GetDB().Save(dead).Error; err != nil {
+		t.Fatalf("disable inbound: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	generated := decodeRules(t, cfg)[1]
+	tags, ok := generated["inboundTag"].([]any)
+	if !ok || len(tags) != 1 || tags[0] != alive.Tag {
+		t.Errorf("inboundTag = %v, want [%s]", generated["inboundTag"], alive.Tag)
+	}
+}
+
+// 本次改动最重要的一条测试。
+//
+// 实测（Xray 26.7.28）确认 inboundTag: [] 的语义是「不限制」而非「不匹配
+// 任何入站」：两个入站访问目标域名都被规则命中，对照域名正常放行。所以
+// 一条指定入站全部失效的规则，若退而求其次输出空数组，就会从「只覆盖甲」
+// 放大成「劫持所有人的这批域名」，而 xray 报 Configuration OK、面板首页
+// 照样显示 running，无任何报错。宁可整条丢弃。
+func TestInjectSkipsRuleWhenAllInboundsAreGone(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundIds:    mustEncodeIds(t, []int{in.Id}),
+		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	in.Enable = false
+	if err := database.GetDB().Save(in).Error; err != nil {
+		t.Fatalf("disable inbound: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	for _, rule := range decodeRules(t, cfg) {
+		if tags, ok := rule["inboundTag"].([]any); ok && len(tags) == 0 {
+			t.Fatalf("generated a rule with an empty inboundTag: %v", rule)
+		}
+		if rule["outboundTag"] == model.BlockOutboundTag {
+			t.Fatalf("rule whose inbounds are all gone must be dropped entirely: %v", rule)
+		}
+	}
+}
+
+func TestInjectSkipsRuleWithCorruptInboundIds(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	r := &model.RoutingRule{
+		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 绕过 service 直接写坏数据，模拟手工改库 / 历史脏数据
+	if err := database.GetDB().Model(model.RoutingRule{}).Where("id = ?", r.Id).
+		Update("inbound_ids", "{not json").Error; err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	for _, rule := range decodeRules(t, cfg) {
+		if rule["outboundTag"] == model.BlockOutboundTag {
+			t.Fatalf("rule with corrupt inbound ids must be dropped: %v", rule)
 		}
 	}
 }
