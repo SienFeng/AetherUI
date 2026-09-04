@@ -178,7 +178,6 @@
                                 <template v-if="dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS">
                                     <a-tag color="green">[[ inbounds[index].stream.network ]]</a-tag>
                                     <a-tag v-if="inbounds[index].stream.isTls" color="blue">tls</a-tag>
-                                    <a-tag v-if="inbounds[index].stream.isXTls" color="blue">xtls</a-tag>
                                 </template>
                                 <template v-else>无</template>
                             </template>

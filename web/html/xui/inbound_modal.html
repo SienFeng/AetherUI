@@ -1,7 +1,8 @@
 {{define "inboundModal"}}
 <a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title" @ok="inModal.ok"
          :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
-         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'>
+         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'
+         :ok-button-props="{ props: { disabled: inbound.deprecatedFeatures.length > 0 } }">
     {{template "form/inbound"}}
 </a-modal>
 <script>
@@ -183,6 +184,43 @@
                     this.inbound.stream.reality.settings.mldsa65Verify = msg.obj.verify;
                 } finally {
                     this.mldsaLoading = false;
+                }
+            },
+            onSecurityChange(e) {
+                const security = e.target ? e.target.value : e;
+                if (security !== 'reality') {
+                    return;
+                }
+                // 选中 REALITY 时给一套安全默认：端口 443（核心明确警告非 443
+                // 会提高被封概率）、自动生成密钥与 shortId、flow 置 Vision。
+                if (this.inbound.port !== 443) {
+                    this.inbound.port = 443;
+                }
+                if (!this.inbound.stream.reality.privateKey) {
+                    this.genRealityKeys();
+                }
+                if (!this.inbound.stream.reality.shortIds) {
+                    this.genShortId();
+                }
+                if (this.inbound.canEnableVision()) {
+                    this.setFlow(FLOW_CONTROL.VISION);
+                }
+            },
+            setFlow(flow) {
+                const clients = this.inbound.settings
+                    && (this.inbound.settings.vlesses || this.inbound.settings.clients);
+                if (clients instanceof Array && clients.length > 0) {
+                    this.$set(clients[0], 'flow', flow);
+                }
+            },
+            onFlowChange(flow) {
+                this.setFlow(flow);
+                // Vision 要求外层 TLS 1.3：核心在运行期才检查
+                // （proxy/vless/inbound/inbound.go:573），配置校验发现不了，
+                // 表现为「保存成功但客户端连不上」。所以在这里锁死。
+                if (flow === FLOW_CONTROL.VISION && this.inbound.stream.security === 'tls') {
+                    this.inbound.stream.tls.minVersion = '1.3';
+                    this.inbound.stream.tls.maxVersion = '1.3';
                 }
             },
         }

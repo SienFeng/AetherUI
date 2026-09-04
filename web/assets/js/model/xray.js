@@ -709,18 +709,6 @@ class StreamSettings extends XrayCommonClass {
         this.security = isReality ? 'reality' : 'none';
     }
 
-    get isXTls() {
-        return this.security === "xtls";
-    }
-
-    set isXTls(isXTls) {
-        if (isXTls) {
-            this.security = 'xtls';
-        } else {
-            this.security = 'none';
-        }
-    }
-
     static fromJson(json={}) {
         let tls = TlsStreamSettings.fromJson(json.tlsSettings);
         return new StreamSettings(
@@ -824,22 +812,6 @@ class Inbound extends XrayCommonClass {
 
     set reality(isReality) {
         this.stream.security = isReality ? 'reality' : 'none';
-    }
-
-    get xtls() {
-        return this.stream.security === 'xtls';
-    }
-
-    set xtls(isXTls) {
-        if (isXTls) {
-            this.stream.security = 'xtls';
-        } else {
-            if (this.protocol === Protocols.TROJAN) {
-                this.tls = true;
-            } else {
-                this.stream.security = 'none';
-            }
-        }
     }
 
     get network() {
@@ -1080,17 +1052,6 @@ class Inbound extends XrayCommonClass {
             }
         }
         return found;
-    }
-
-    canEnableXTls() {
-        switch (this.protocol) {
-            case Protocols.VLESS:
-            case Protocols.TROJAN:
-                break;
-            default:
-                return false;
-        }
-        return this.network === "tcp";
     }
 
     canEnableStream() {

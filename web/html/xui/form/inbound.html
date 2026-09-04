@@ -1,4 +1,16 @@
 {{define "form/inbound"}}
+<!-- 已被当前 Xray 核心移除的配置项。不显式标出来的话，对应下拉会显示空白，
+     用户随手一保存就把配置静默改成别的。 -->
+<a-alert v-if="inbound.deprecatedFeatures.length > 0" type="error" show-icon
+         style="margin-bottom: 12px;"
+         message="此入站使用了当前 Xray 核心已移除的配置，必须修改后才能保存">
+    <template slot="description">
+        <div v-for="d in inbound.deprecatedFeatures" :key="d.field + d.value">
+            [[ d.field ]]：<b>[[ d.value ]]</b> —— [[ d.fix ]]
+        </div>
+    </template>
+</a-alert>
+
 <!-- base -->
 <a-form layout="inline">
     <a-form-item label='{{ i18n "remark" }}'>
@@ -154,6 +166,28 @@
 <template v-if="inbound.canEnableStream()">
     {{template "form/streamSettings"}}
 </template>
+
+<!-- 安全层 -->
+<a-form v-if="inbound.canEnableTls()" layout="inline">
+    <a-form-item>
+        <span slot="label">
+            安全层
+            <a-tooltip>
+                <template slot="title">
+                    reality 抗封锁最强且不需要自有域名；tls 需要域名和证书。<br/>
+                    reality 只支持 tcp 与 grpc 传输。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-radio-group v-model="inbound.stream.security" button-style="solid"
+                       @change="onSecurityChange">
+            <a-radio-button value="none">none</a-radio-button>
+            <a-radio-button value="tls">tls</a-radio-button>
+            <a-radio-button value="reality" :disabled="!inbound.canEnableReality()">reality</a-radio-button>
+        </a-radio-group>
+    </a-form-item>
+</a-form>
 
 <!-- tls settings -->
 <template v-if="inbound.canEnableTls()">
