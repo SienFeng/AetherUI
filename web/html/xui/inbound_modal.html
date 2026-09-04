@@ -63,7 +63,7 @@
             if (this.provincesLoaded) {
                 return;
             }
-            const msg = await HttpUtil.post('/xui/inbound/provinces');
+            const msg = await HttpUtil.post('/aui/inbound/provinces');
             if (msg.success) {
                 this.provinces = msg.obj.list;
                 this.provincesLoaded = true;

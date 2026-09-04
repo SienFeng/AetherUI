@@ -28,7 +28,7 @@ func newRenewRouter(t *testing.T) *gin.Engine {
 	}
 	r := gin.New()
 	a := &InboundController{}
-	a.initRouter(r.Group("/xui"))
+	a.initRouter(r.Group("/aui"))
 	return r
 }
 
@@ -66,7 +66,7 @@ func TestRenewEndpointBindsUrlencodedForm(t *testing.T) {
 	old := time.Now().Unix()*1000 + 10*86400000
 	in := createInbound(t, old, false, 123, 456)
 
-	msg := postForm(t, r, "/xui/inbound/renew/"+itoa(in.Id), "days=30&expiryTime=0")
+	msg := postForm(t, r, "/aui/inbound/renew/"+itoa(in.Id), "days=30&expiryTime=0")
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -88,7 +88,7 @@ func TestRenewEndpointBindsExplicitExpiryTime(t *testing.T) {
 	in := createInbound(t, 0, true, 0, 0)
 	want := time.Now().Unix()*1000 + 99*86400000
 
-	msg := postForm(t, r, "/xui/inbound/renew/"+itoa(in.Id), "days=0&expiryTime="+itoa64(want))
+	msg := postForm(t, r, "/aui/inbound/renew/"+itoa(in.Id), "days=0&expiryTime="+itoa64(want))
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -106,7 +106,7 @@ func TestRenewEndpointReportsFailureWithoutChangingData(t *testing.T) {
 	r := newRenewRouter(t)
 	in := createInbound(t, 0, true, 11, 22)
 
-	msg := postForm(t, r, "/xui/inbound/renew/"+itoa(in.Id), "days=0&expiryTime=0")
+	msg := postForm(t, r, "/aui/inbound/renew/"+itoa(in.Id), "days=0&expiryTime=0")
 
 	if msg.Success {
 		t.Fatal("success = true, want false（未指定天数也未指定日期）")

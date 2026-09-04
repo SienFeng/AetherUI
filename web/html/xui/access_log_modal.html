@@ -107,7 +107,7 @@
             this.search();
         },
         async loadSources() {
-            const msg = await HttpUtil.post(`/xui/inbound/recentSources/${this.inboundId}`);
+            const msg = await HttpUtil.post(`/aui/inbound/recentSources/${this.inboundId}`);
             if (msg.success) {
                 this.sources = msg.obj || [];
             }
@@ -126,7 +126,7 @@
         },
         async load() {
             this.loading = true;
-            const msg = await HttpUtil.post(`/xui/inbound/accessLogs/${this.inboundId}`, {
+            const msg = await HttpUtil.post(`/aui/inbound/accessLogs/${this.inboundId}`, {
                 ip: this.ip,
                 key: this.key,
                 page: this.page,

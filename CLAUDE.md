@@ -60,7 +60,7 @@ go mod tidy && go vet ./...
 - `web/service/` — 业务逻辑，所有 service 都是**无状态空结构体**，按值嵌入使用；跨请求状态（xray 进程 `p`、`isNeedXrayRestart`）是包级变量。
 - `database/model/model.go` — 仅 3 张表。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
 
-路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/xui/*`（需登录，下挂 `/xui/inbound/*` 与 `/xui/setting/*`）。
+路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/aui/*`（需登录，下挂 `/aui/inbound/*` 与 `/aui/setting/*`）。
 
 ### xray 进程与配置合成
 
