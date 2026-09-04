@@ -52,6 +52,12 @@ func TestRemovedTransportsAreRejectedByCore(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s 应当被核心拒绝——它还留在面板下拉里，用户选中就会导致全机断网", tc.name)
 			}
+			// 只判定「非 nil」会有假阳性：如果核心未来因为无关原因拒绝这份配置，
+			// 而这四个死选项本身已被重新支持，测试依然会静默通过。必须核实
+			// 拒绝理由确实指向我们以为的那个特性，而不是别的什么。
+			if !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("%s 被核心拒绝了，但错误理由不包含预期片段 %q——可能拒绝的是另一个原因，不是 %s 本身: %v", tc.name, tc.hint, tc.hint, err)
+			}
 			t.Logf("核心的拒绝理由: %v", err)
 		})
 	}
@@ -63,18 +69,32 @@ func TestRemovedFlowValuesAreRejectedByCore(t *testing.T) {
 	requireXrayBinary(t)
 	setupDB(t)
 
-	for _, flow := range []string{"xtls-rprx-origin", "xtls-rprx-direct"} {
-		t.Run(flow, func(t *testing.T) {
+	cases := []struct {
+		flow string
+		hint string
+	}{
+		// hint 只取「指向 flow 不被支持」这个稳定片段，不抄整句错误——
+		// 核心改一个标点、换一种措辞都不该让测试变红，但换成别的拒绝原因必须变红。
+		{flow: "xtls-rprx-origin", hint: `doesn't support "xtls-rprx-origin"`},
+		{flow: "xtls-rprx-direct", hint: `doesn't support "xtls-rprx-direct"`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.flow, func(t *testing.T) {
 			ib := map[string]any{
 				"tag": "inbound-flow-probe", "port": 44402, "protocol": "vless",
 				"settings": map[string]any{
-					"clients":    []any{map[string]any{"id": "b831381d-6324-4d53-ad4f-8cda48b30811", "flow": flow}},
+					"clients":    []any{map[string]any{"id": "b831381d-6324-4d53-ad4f-8cda48b30811", "flow": tc.flow}},
 					"decryption": "none",
 				},
 				"streamSettings": map[string]any{"network": "tcp", "security": "none"},
 			}
-			if err := ValidateInboundReplacing(ib, ""); err == nil {
-				t.Fatalf("flow=%s 应当被核心拒绝", flow)
+			err := ValidateInboundReplacing(ib, "")
+			if err == nil {
+				t.Fatalf("flow=%s 应当被核心拒绝", tc.flow)
+			}
+			if !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("flow=%s 被核心拒绝了，但错误理由不包含预期片段 %q——可能拒绝的是另一个原因，不是这个 flow 值本身不被支持: %v", tc.flow, tc.hint, err)
 			}
 		})
 	}
