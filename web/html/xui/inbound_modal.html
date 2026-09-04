@@ -93,12 +93,38 @@
                 return inModal.provinces;
             }
         },
+        computed: {
+            tlsCipherList() {
+                const raw = this.inbound.stream.tls.cipherSuites;
+                return raw ? raw.split(':').filter(s => s !== '') : [];
+            },
+        },
         methods: {
             streamNetworkChange(oldValue) {
                 if (oldValue === 'kcp') {
                     this.inModal.inbound.tls = false;
                 }
-            }
+            },
+            onTlsCipherChange(list) {
+                // 核心按 ":" 切分（transport/internet/tls/config.go:459），
+                // 且对查不到的名字静默丢弃，所以这里只允许从固定列表里选。
+                this.inbound.stream.tls.cipherSuites = list.join(':');
+            },
+            async genEchCert() {
+                this.echLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewEchCert', {
+                        serverName: this.inbound.stream.tls.server,
+                    });
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.tls.echServerKeys = msg.obj.echServerKeys;
+                    this.inbound.stream.tls.settings.echConfigList = msg.obj.echConfigList;
+                } finally {
+                    this.echLoading = false;
+                }
+            },
         }
     });
 

@@ -1028,6 +1028,15 @@ class Inbound extends XrayCommonClass {
         return this.stream.security === 'tls' || this.stream.security === 'reality';
     }
 
+    // 当前是否真的启用了 Vision。TLS 路径下它会把 minVersion 锁死为 1.3。
+    get visionEnabled() {
+        const clients = this.settings && (this.settings.vlesses || this.settings.clients);
+        if (!(clients instanceof Array) || clients.length === 0) {
+            return false;
+        }
+        return clients[0].flow === FLOW_CONTROL.VISION;
+    }
+
     // 已被当前 Xray 核心移除的配置项。它们仍可能存在于老入站里，
     // 而对应的下拉选项已经从界面上删掉了——如果不显式标出来，用户编辑
     // 这类入站时 a-select 只是显示空白，随手一保存就把传输方式静默改成
