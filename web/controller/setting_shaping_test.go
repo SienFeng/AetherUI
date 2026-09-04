@@ -23,7 +23,7 @@ func newSettingRouter(t *testing.T) *gin.Engine {
 		t.Fatalf("InitDB: %v", err)
 	}
 	r := gin.New()
-	(&SettingController{}).initRouter(r.Group("/xui"))
+	(&SettingController{}).initRouter(r.Group("/aui"))
 	return r
 }
 
@@ -46,7 +46,7 @@ func postSetting(t *testing.T, r *gin.Engine, path string) entity.Msg {
 func TestShapingStatusEndpointReportsPlatformSupport(t *testing.T) {
 	r := newSettingRouter(t)
 
-	msg := postSetting(t, r, "/xui/setting/shapingStatus")
+	msg := postSetting(t, r, "/aui/setting/shapingStatus")
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -67,7 +67,7 @@ func TestShapingStatusEndpointReportsPlatformSupport(t *testing.T) {
 func TestClearShapingEndpointExists(t *testing.T) {
 	r := newSettingRouter(t)
 
-	msg := postSetting(t, r, "/xui/setting/clearShaping")
+	msg := postSetting(t, r, "/aui/setting/clearShaping")
 
 	// 「清除全部限速规则」是 §4.5 要求的手动入口：tc 出问题时管理员
 	// 必须有一个不依赖任何前置条件的撤销手段。

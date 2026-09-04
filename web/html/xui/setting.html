@@ -83,6 +83,9 @@
                         <a-tab-pane key="3" tab="xray 相关设置">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                         <a-tab-pane key="4" tab="IP 归属地库">
@@ -187,7 +190,7 @@
             },
             async getAllSetting() {
                 this.loading(true);
-                const msg = await HttpUtil.post("/xui/setting/all");
+                const msg = await HttpUtil.post("/aui/setting/all");
                 this.loading(false);
                 if (msg.success) {
                     this.oldAllSetting = new AllSetting(msg.obj);
@@ -197,14 +200,14 @@
             },
             async updateAllSetting() {
                 this.loading(true);
-                const msg = await HttpUtil.post("/xui/setting/update", this.allSetting);
+                const msg = await HttpUtil.post("/aui/setting/update", this.allSetting);
                 this.loading(false);
                 if (msg.success) {
                     await this.getAllSetting();
                 }
             },
             async getIPDBStatus() {
-                const msg = await HttpUtil.post("/xui/setting/ipdbStatus");
+                const msg = await HttpUtil.post("/aui/setting/ipdbStatus");
                 if (msg.success) {
                     this.ipdb = msg.obj;
                 }
@@ -229,7 +232,7 @@
                      + `收录 ${src.segmentCount} 个 IP 段、${src.provinceCount} 个省级地区`;
             },
             async getShapingStatus() {
-                const msg = await HttpUtil.post('/xui/setting/shapingStatus');
+                const msg = await HttpUtil.post('/aui/setting/shapingStatus');
                 if (msg.success) {
                     this.shaping = msg.obj;
                 }
@@ -243,7 +246,7 @@
                     cancelText: '取消',
                     onOk: async () => {
                         this.shapingClearing = true;
-                        await HttpUtil.post('/xui/setting/clearShaping');
+                        await HttpUtil.post('/aui/setting/clearShaping');
                         this.shapingClearing = false;
                         await this.getShapingStatus();
                     },
@@ -253,7 +256,7 @@
                 // 全量要下载约 60 MB 再重建，慢速网络下可能要好几分钟，
                 // 这里只锁对应的按钮不锁整页，避免管理员以为面板卡死。
                 this.ipdbUpdating = key || 'all';
-                const msg = await HttpUtil.post("/xui/setting/updateIPDB", { key: key || '' });
+                const msg = await HttpUtil.post("/aui/setting/updateIPDB", { key: key || '' });
                 this.ipdbUpdating = null;
                 if (msg.success) {
                     const { updated, upToDate } = msg.obj;
@@ -273,7 +276,7 @@
             },
             async updateUser() {
                 this.loading(true);
-                const msg = await HttpUtil.post("/xui/setting/updateUser", this.user);
+                const msg = await HttpUtil.post("/aui/setting/updateUser", this.user);
                 this.loading(false);
                 if (msg.success) {
                     this.user = {};
@@ -290,7 +293,7 @@
                     });
                 });
                 this.loading(true);
-                const msg = await HttpUtil.post("/xui/setting/restartPanel");
+                const msg = await HttpUtil.post("/aui/setting/restartPanel");
                 this.loading(false);
                 if (msg.success) {
                     this.loading(true);

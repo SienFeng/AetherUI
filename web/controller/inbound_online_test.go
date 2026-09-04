@@ -28,7 +28,7 @@ func TestOnlinesEndpointAlwaysReturnsSupportedFlag(t *testing.T) {
 	r := newRenewRouter(t)
 	in := createInbound(t, 0, true, 0, 0)
 
-	msg := postForm(t, r, "/xui/inbound/onlines/"+itoa(in.Id), "")
+	msg := postForm(t, r, "/aui/inbound/onlines/"+itoa(in.Id), "")
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -52,7 +52,7 @@ func TestOnlinesEndpointAlwaysReturnsSupportedFlag(t *testing.T) {
 func TestOnlinesEndpointRejectsUnknownInbound(t *testing.T) {
 	r := newRenewRouter(t)
 
-	msg := postForm(t, r, "/xui/inbound/onlines/99999", "")
+	msg := postForm(t, r, "/aui/inbound/onlines/99999", "")
 
 	if msg.Success {
 		t.Fatal("success = true，不存在的入站应当报错")
@@ -68,13 +68,13 @@ func TestKickEndpointBindsIPFromUrlencodedForm(t *testing.T) {
 
 	// 合法 IP：能否真的踢掉取决于平台，但至少不能落到「IP 格式不正确」——
 	// 那说明 form 绑定没生效。
-	msg := postForm(t, r, "/xui/inbound/kick/"+itoa(in.Id), "ip=114.114.114.114")
+	msg := postForm(t, r, "/aui/inbound/kick/"+itoa(in.Id), "ip=114.114.114.114")
 	if strings.Contains(msg.Msg, "IP 格式不正确") {
 		t.Errorf("msg = %q，合法 IP 却报格式错误，说明请求体没被 form 绑定读到", msg.Msg)
 	}
 
 	// 非法 IP 必须被挡住，而不是拿去和连接表比对。
-	bad := postForm(t, r, "/xui/inbound/kick/"+itoa(in.Id), "ip=not-an-ip")
+	bad := postForm(t, r, "/aui/inbound/kick/"+itoa(in.Id), "ip=not-an-ip")
 	if bad.Success {
 		t.Fatal("success = true，非法 IP 应当报错")
 	}
@@ -83,7 +83,7 @@ func TestKickEndpointBindsIPFromUrlencodedForm(t *testing.T) {
 	}
 
 	// 完全不传 ip 同样按格式非法处理。
-	empty := postForm(t, r, "/xui/inbound/kick/"+itoa(in.Id), "")
+	empty := postForm(t, r, "/aui/inbound/kick/"+itoa(in.Id), "")
 	if empty.Success {
 		t.Fatal("success = true，未指定 IP 应当报错")
 	}

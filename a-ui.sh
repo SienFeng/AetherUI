@@ -774,6 +774,107 @@ disable_auto_clear_log() {
     fi
 }
 
+# 重新运行面板安全配置向导，用于首次安装时向导失败（证书没签发、伪装站
+# 不可用）后重试，或者想更换域名/伪装站重新配置一次。向导逻辑不在这里
+# 重复实现，直接调用最新的 install.sh 的向导部分，避免与 install.sh 漂移。
+# --wizard-only 会跳过 install.sh 里 setup_wizard 的幂等探测并强制覆盖
+# 现有配置——从菜单主动触发「重新配置」，用户的意图就是要覆盖。
+reconfig_domain() {
+    confirm "将重新运行配置向导，会覆盖现有的面板根路径与监听地址设置，确定继续吗" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh) --wizard-only
+    # 退出码必须检查：向导中途放弃（选伪装站时输入 q、证书没等到）会留下
+    # 「面板已在 127.0.0.1 + Caddy 可能已被停用」的状态，不检查的话这一切
+    # 会静默回到主菜单，用户只看到最后一句「已取消」，以为什么都没发生。
+    # 向导自己会打印救援命令，这里只负责把"没跑完"这件事说清楚。
+    local rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        LOGE "配置向导未正常完成（退出码 ${rc}），面板配置可能没有按预期更新"
+        LOGE "请按上面的提示排查；若面板打不开，用向导打印的恢复命令处理"
+    fi
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+# 停用 Caddy 并把面板恢复为直连访问。只停用不卸载软件包——用户可能拿
+# Caddy 跑其它站点。顺序不能颠倒：必须先把面板监听地址改回来、用真实
+# 探活确认面板直连真的可用，再停 Caddy；反过来会出现一段时间两边都
+# 进不去面板的窗口。
+#
+# 门槛不能只看 `systemctl status`（进程是否在跑）：main.go 的
+# updateSetting 对 SetListen 写库失败只 fmt.Println，不 os.Exit，`a-ui
+# setting` 整体仍返回 0——如果写库恰好失败（磁盘满、DB 被锁），面板会
+# 用旧的 webListen 正常重启起来，只看进程状态会误判"改好了"，紧接着
+# 停掉 Caddy，正好复现这个功能本要避免的"两边都进不去"。所以改成真的
+# 发一次 HTTP 请求到面板实际的端口和根路径，这与 install.sh 的
+# wait_for_panel_alive() 是同一个做法；但 a-ui.sh 是独立脚本、装机后
+# 跑在独立进程里，不与 install.sh 共享函数，只能照抄一份等价逻辑。
+restore_direct_panel() {
+    confirm "将停用 Caddy 并把面板恢复为直连访问，域名访问会立即失效，确定继续吗" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+
+    /usr/local/a-ui/a-ui setting -listen ""
+    systemctl restart a-ui
+
+    # 面板端口和根路径都可能是随机改过的，不能假设 54321 或 "/"：直接
+    # 问面板自己要——`a-ui setting -show` 是本次改动新增的只读入口，
+    # 不依赖 sqlite3 这类不保证装了的命令行工具（install_base 只装了
+    # wget/curl/tar/jq）。
+    local show_out port basepath
+    show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null)
+    if [[ $? != 0 ]]; then
+        LOGE "读取面板当前设置失败，为避免彻底进不去面板，本次不会停用 Caddy"
+        LOGE "请用 a-ui log 排查原因，确认面板可直连访问后再重新执行本操作"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+    port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
+    basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
+
+    local alive=1 i
+    if [[ -n "${port}" ]]; then
+        for i in 1 2 3 4 5; do
+            if curl -fsS -m 3 "http://127.0.0.1:${port}${basepath}" -o /dev/null 2>/dev/null; then
+                alive=0
+                break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ "${alive}" != "0" ]]; then
+        LOGE "面板重启后探活失败，127.0.0.1:${port}${basepath} 没有响应"
+        LOGE "为避免彻底进不去面板，本次不会停用 Caddy"
+        LOGE "请用 a-ui log 排查原因，确认面板可直连访问后再重新执行本操作"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+
+    systemctl stop caddy 2>/dev/null
+    systemctl disable caddy 2>/dev/null
+    LOGI "Caddy 已停用（软件包与配置均保留，systemctl enable --now caddy 可恢复）"
+    LOGI "面板现可通过 http://<本机IP>:${port}${basepath} 直连访问"
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
 show_usage() {
     echo "a-ui 管理脚本使用方法: "
     echo "------------------------------------------"
@@ -821,9 +922,12 @@ show_menu() {
   ${green}15.${plain} 一键安装 bbr (最新内核)
   ${green}16.${plain} 一键申请SSL证书(acme申请)
   ${green}17.${plain} 配置a-ui定时任务
+————————————————
+  ${green}18.${plain} 配置域名与伪装站
+  ${green}19.${plain} 卸载 Caddy 并恢复面板直连
  "
     show_status
-    echo && read -p "请输入选择 [0-17],查看面板登录信息请输入数字7:" num
+    echo && read -p "请输入选择 [0-19],查看面板登录信息请输入数字7:" num
 
     case "${num}" in
     0)
@@ -880,8 +984,14 @@ show_menu() {
     17)
         check_install && cron_jobs
         ;;
+    18)
+        check_install && reconfig_domain
+        ;;
+    19)
+        check_install && restore_direct_panel
+        ;;
     *)
-        LOGE "请输入正确的数字 [0-17],查看面板登录信息请输入数字7"
+        LOGE "请输入正确的数字 [0-19],查看面板登录信息请输入数字7"
         ;;
     esac
 }

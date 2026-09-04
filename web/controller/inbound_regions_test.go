@@ -7,7 +7,7 @@ import (
 func TestProvincesEndpointAlwaysReturnsUsableShape(t *testing.T) {
 	r := newRenewRouter(t)
 
-	msg := postForm(t, r, "/xui/inbound/provinces", "")
+	msg := postForm(t, r, "/aui/inbound/provinces", "")
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)

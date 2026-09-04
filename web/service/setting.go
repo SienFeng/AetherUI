@@ -39,6 +39,9 @@ var defaultValueMap = map[string]string{
 	"accessLogRetentionDays": "7",
 	"concurrencyIdleTimeout": "120",
 	"tcInterface":            "",
+	"defaultDomain":          "",
+	"defaultCertFile":        "",
+	"defaultKeyFile":         "",
 }
 
 type SettingService struct {
@@ -308,6 +311,10 @@ func (s *SettingService) GetListen() (string, error) {
 	return s.getString("webListen")
 }
 
+func (s *SettingService) SetListen(listen string) error {
+	return s.setString("webListen", listen)
+}
+
 func (s *SettingService) GetPort() (int, error) {
 	return s.getInt("webPort")
 }
@@ -320,8 +327,49 @@ func (s *SettingService) GetCertFile() (string, error) {
 	return s.getString("webCertFile")
 }
 
+// SetCertFile/SetKeyFile 此前没有对应的 setter——面板自身的直连 TLS 证书
+// 路径只能通过前端设置页写入。bootstrap 的 mode=caddy 分支需要在收编面板
+// 之前清空这两项（Caddy 已经终结 TLS，面板没有理由再自己监听 TLS），
+// 因此在这里补上。
+func (s *SettingService) SetCertFile(v string) error {
+	return s.setString("webCertFile", v)
+}
+
 func (s *SettingService) GetKeyFile() (string, error) {
 	return s.getString("webKeyFile")
+}
+
+func (s *SettingService) SetKeyFile(v string) error {
+	return s.setString("webKeyFile", v)
+}
+
+// defaultDomain / defaultCertFile / defaultKeyFile 是**新建入站时**表单的
+// 默认填充值，面板自身不使用（面板自己的证书是 webCertFile/webKeyFile）。
+// 安装脚本配置好域名与 Caddy 之后由 a-ui bootstrap 写入，此后管理员每建
+// 一个入站都不必再手填域名和证书路径——手填出错的代价是整份 xray 配置
+// 加载失败，机器上全部用户一起断网。
+func (s *SettingService) GetDefaultDomain() (string, error) {
+	return s.getString("defaultDomain")
+}
+
+func (s *SettingService) SetDefaultDomain(v string) error {
+	return s.setString("defaultDomain", v)
+}
+
+func (s *SettingService) GetDefaultCertFile() (string, error) {
+	return s.getString("defaultCertFile")
+}
+
+func (s *SettingService) SetDefaultCertFile(v string) error {
+	return s.setString("defaultCertFile", v)
+}
+
+func (s *SettingService) GetDefaultKeyFile() (string, error) {
+	return s.getString("defaultKeyFile")
+}
+
+func (s *SettingService) SetDefaultKeyFile(v string) error {
+	return s.setString("defaultKeyFile", v)
 }
 
 func (s *SettingService) GetSecret() ([]byte, error) {
@@ -347,6 +395,17 @@ func (s *SettingService) GetBasePath() (string, error) {
 		basePath += "/"
 	}
 	return basePath, nil
+}
+
+// SetBasePath 写入面板 URL 根路径，按 entity.CheckValid 的规则补齐首尾斜杠。
+func (s *SettingService) SetBasePath(basePath string) error {
+	if !strings.HasPrefix(basePath, "/") {
+		basePath = "/" + basePath
+	}
+	if !strings.HasSuffix(basePath, "/") {
+		basePath += "/"
+	}
+	return s.setString("webBasePath", basePath)
 }
 
 func (s *SettingService) GetTimeLocation() (*time.Location, error) {

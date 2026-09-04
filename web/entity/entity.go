@@ -49,6 +49,10 @@ type AllSetting struct {
 	ConcurrencyIdleTimeout int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
+
+	DefaultDomain   string `json:"defaultDomain" form:"defaultDomain"`
+	DefaultCertFile string `json:"defaultCertFile" form:"defaultCertFile"`
+	DefaultKeyFile  string `json:"defaultKeyFile" form:"defaultKeyFile"`
 }
 
 // checkIPDBSourceUrl 允许留空（表示不启用该源），非空时必须是完整的 http(s) 地址。
@@ -94,6 +98,21 @@ func (s *AllSetting) CheckValid() error {
 		_, err := tls.LoadX509KeyPair(s.WebCertFile, s.WebKeyFile)
 		if err != nil {
 			return common.NewErrorf("cert file <%v> or key file <%v> invalid: %v", s.WebCertFile, s.WebKeyFile, err)
+		}
+	}
+
+	// 只校验路径格式，不做 tls.LoadX509KeyPair。这三个是「新建入站时的默认
+	// 填充值」，面板自己不加载它们；证书尚未签发就填了路径是正常状态，
+	// 在这里做加载校验会让整个设置页保存失败，连带端口、时区一起遭殃。
+	for _, p := range []struct {
+		name  string
+		value string
+	}{
+		{"default cert file", s.DefaultCertFile},
+		{"default key file", s.DefaultKeyFile},
+	} {
+		if p.value != "" && !strings.HasPrefix(p.value, "/") {
+			return common.NewErrorf("%v must be an absolute path: %v", p.name, p.value)
 		}
 	}
 

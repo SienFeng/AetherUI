@@ -386,7 +386,7 @@
             },
             async getDBInbounds() {
                 this.loading();
-                const msg = await HttpUtil.post('/xui/inbound/list');
+                const msg = await HttpUtil.post('/aui/inbound/list');
                 this.loading(false);
                 if (!msg.success) {
                     return;
@@ -481,7 +481,7 @@
                     streamSettings: inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
-                await this.submit('/xui/inbound/add', data, inModal);
+                await this.submit('/aui/inbound/add', data, inModal);
             },
             async updateInbound(inbound, dbInbound) {
                 const data = {
@@ -503,14 +503,14 @@
                     streamSettings: inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
-                await this.submit(`/xui/inbound/update/${dbInbound.id}`, data, inModal);
+                await this.submit(`/aui/inbound/update/${dbInbound.id}`, data, inModal);
             },
             openRenew(dbInbound) {
                 renewModal.show({
                     dbInbound: dbInbound,
                     confirm: async (payload) => {
                         renewModal.loading();
-                        await this.submit(`/xui/inbound/renew/${dbInbound.id}`, payload, renewModal);
+                        await this.submit(`/aui/inbound/renew/${dbInbound.id}`, payload, renewModal);
                         renewModal.close();
                     },
                 });
@@ -535,7 +535,7 @@
                     content: '确定要删除入站吗?',
                     okText: '删除',
                     cancelText: '取消',
-                    onOk: () => this.submit('/xui/inbound/del/' + dbInbound.id),
+                    onOk: () => this.submit('/aui/inbound/del/' + dbInbound.id),
                 });
             },
             showQrcode(dbInbound) {
@@ -546,7 +546,7 @@
                 infoModal.show(dbInbound);
             },
             switchEnable(dbInbound) {
-                this.submit(`/xui/inbound/update/${dbInbound.id}`, dbInbound);
+                this.submit(`/aui/inbound/update/${dbInbound.id}`, dbInbound);
             },
             onlineCountOf(id) {
                 if (this.onlineCountError) {
@@ -559,7 +559,7 @@
                 // 每次失败都会弹一条 message，很快就能把屏幕刷满。错误就地
                 // 显示在那一列的 tooltip 里。
                 try {
-                    const resp = await axios.post('/xui/inbound/onlineCounts');
+                    const resp = await axios.post('/aui/inbound/onlineCounts');
                     const data = resp.data;
                     if (!data || !data.success) {
                         this.onlineCountError = (data && data.msg) || '读取在线设备数失败';
@@ -590,7 +590,7 @@
                 // 这里刻意不用 HttpUtil：它会把每次失败都弹成 message，
                 // 而这个接口每 2 秒轮询一次，失败时会刷屏。错误就地显示在展开行里。
                 try {
-                    const resp = await axios.post(`/xui/inbound/onlines/${id}`);
+                    const resp = await axios.post(`/aui/inbound/onlines/${id}`);
                     const data = resp.data;
                     if (data && data.success) {
                         this.$set(this.onlines, id, data.obj);
@@ -645,7 +645,7 @@
                     ]),
                     onOk: async () => {
                         const banSeconds = this.kickBanSeconds;
-                        const msg = await HttpUtil.post(`/xui/inbound/kick/${dbInbound.id}`,
+                        const msg = await HttpUtil.post(`/aui/inbound/kick/${dbInbound.id}`,
                             { ip: online.ip, banSeconds: banSeconds });
                         if (msg.success) {
                             const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
@@ -662,7 +662,7 @@
                     okText: '解除',
                     cancelText: '取消',
                     onOk: async () => {
-                        const msg = await HttpUtil.post(`/xui/inbound/unban/${dbInbound.id}`, { ip: online.ip });
+                        const msg = await HttpUtil.post(`/aui/inbound/unban/${dbInbound.id}`, { ip: online.ip });
                         if (msg.success) {
                             this.$message.success('已解除封禁');
                             await this.loadOnlines(dbInbound.id);
@@ -719,6 +719,16 @@
         },
     });
 
+</script>
+<script>
+    // 模板引擎是 html/template，script 上下文里的插值会自动做 JS 字符串
+    // 转义并补齐引号，所以这里不要自己加引号（写字面量花括号会被模板引擎
+    // 当成一个空的模板动作而解析失败，因此本注释里不能出现它）。
+    const PanelDefaults = {
+        domain: {{ .default_domain }},
+        certFile: {{ .default_cert_file }},
+        keyFile: {{ .default_key_file }},
+    };
 </script>
 {{template "inboundModal"}}
 {{template "promptModal"}}

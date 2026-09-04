@@ -1,0 +1,5 @@
+{
+  "settings": "{\"clients\":[{\"id\":\"11111111-2222-3333-4444-555555555555\",\"flow\":\"xtls-rprx-vision\"}],\"decryption\":\"none\",\"fallbacks\":[]}",
+  "streamSettings": "{\"network\":\"tcp\",\"security\":\"reality\",\"realitySettings\":{\"show\":false,\"xver\":0,\"target\":\"www.tesla.com:443\",\"serverNames\":[\"www.tesla.com\"],\"privateKey\":\"aGVsbG8td29ybGQtdGVzdC1wcml2YXRlLWtleTEyMw\",\"mldsa65Seed\":\"\",\"minClientVer\":\"\",\"maxClientVer\":\"\",\"maxTimeDiff\":0,\"shortIds\":[\"0123456789abcdef\"],\"settings\":{\"publicKey\":\"aGVsbG8td29ybGQtdGVzdC1wdWJsaWMta2V5MTIzNDU\",\"fingerprint\":\"chrome\",\"serverName\":\"\",\"spiderX\":\"/\",\"mldsa65Verify\":\"\"}},\"tcpSettings\":{\"header\":{\"type\":\"none\"}}}",
+  "sniffing": "{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"]}"
+}

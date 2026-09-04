@@ -34,8 +34,12 @@ go mod tidy && go vet ./...
 ./a-ui -v                                # 打印版本
 ./a-ui setting -port 54321               # 改面板端口
 ./a-ui setting -username x -password y   # 改首个用户的账号密码
+./a-ui setting -listen 127.0.0.1         # 改面板监听地址（-listen "" 恢复监听所有 IP，救援用）
+./a-ui setting -basepath /xxx/           # 改面板 url 根路径
+./a-ui setting -show                     # 只读打印当前端口/监听地址/根路径/账号密码，不写库
 ./a-ui setting -reset                    # 清空 settings 表（回落到默认值）
 ./a-ui v2-ui -db /etc/v2-ui/v2-ui.db     # 从 v2-ui 迁移 inbound
+./a-ui bootstrap -mode caddy ...         # 安装脚本用：写入面板配置并按需创建入站，见「安装向导与 Caddy 拓扑」
 ```
 
 环境变量：`XUI_DEBUG=true`（调试模式，见下）、`XUI_LOG_LEVEL=debug|info|warn|error`。变量名沿用上游的 `XUI_` 前缀，未随品牌改名。
@@ -60,7 +64,7 @@ go mod tidy && go vet ./...
 - `web/service/` — 业务逻辑，所有 service 都是**无状态空结构体**，按值嵌入使用；跨请求状态（xray 进程 `p`、`isNeedXrayRestart`）是包级变量。
 - `database/model/model.go` — 仅 3 张表。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
 
-路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/xui/*`（需登录，下挂 `/xui/inbound/*` 与 `/xui/setting/*`）。
+路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/aui/*`（需登录，下挂 `/aui/inbound/*` 与 `/aui/setting/*`）。
 
 ### xray 进程与配置合成
 
@@ -104,6 +108,8 @@ go mod tidy && go vet ./...
 settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` 的 `json` tag 与 key 对应（`GetAllSetting` / `UpdateAllSetting`），未落库的 key 回落到 `defaultValueMap`。**新增设置项 = 在 `defaultValueMap` 加默认值 + 在 `entity.AllSetting` 加字段（仅当需要前端可改）+ 在 `entity.CheckValid` 加校验 + 加对应 getter + 在 `web/assets/js/model/models.js` 的 `AllSetting` 构造函数里加同名字段**。反射只支持 `int` 和 `string` 两种字段类型。
 
 最后这一步（前端 JS 模型）不是可省的收尾工作，漏掉的后果不是「新设置项不生效」这么轻：`ObjectUtil.cloneProps`（`web/assets/js/util/utils.js`）只克隆目标对象已经拥有的 key，服务端返回的值会被直接丢弃，输入框永远回落到硬编码的初始值；而 `updateAllSetting` 提交的是这个 JS 对象，新字段在提交体里根本不存在，Gin 绑定成零值，若后端校验恰好拒绝零值（比如时间字符串要求非空），**整个保存配置接口都会失败**，端口、证书路径、time zone 等一切无关字段一起遭殃，报错信息还只指向新字段，具有很强的误导性。`ObjectUtil.equals` 同理只按旧对象的 key 做比较，新字段的改动不会点亮「保存」按钮。
+
+三个由安装向导写入的设置项——`defaultDomain` / `defaultCertFile` / `defaultKeyFile`（`entity.DefaultDomain`/`DefaultCertFile`/`DefaultKeyFile`）——只是**新建入站表单的默认填充值**，面板自己从不加载它们。`entity.CheckValid` 对面板自己要用的 `WebCertFile`/`WebKeyFile` 会调 `tls.LoadX509KeyPair` 实际打开证书文件，但这三个新字段**刻意只校验路径格式**（非空时须以 `/` 开头），不做同样的加载校验：证书尚未签发、只是先把将来的路径填进去，是这三项的正常状态（`bootstrap -mode caddy` 就是在证书由 Caddy 异步申请期间提前写入这三项），若在这里也 `LoadX509KeyPair`，会让整个设置页保存接口在证书签发前必然失败，且报错只指向这三个字段，误导管理员去查一个其实不相关的地方。
 
 `secret`（session 加密密钥）的默认值是随机生成的，`GetSecret()` 检测到仍是默认值时会立刻落库固化，避免每次重启导致会话全部失效。
 
@@ -194,11 +200,78 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
 
+## 安装向导与 Caddy 拓扑
+
+`install.sh` 的向导（`setup_wizard`）在装好面板后问一次「有没有已解析到本机的域名」，答案决定面板此后的暴露方式；改这条链路前先读 `docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md`，本节只讲落地后的约束和踩过的坑。
+
+### 端口拓扑
+
+有域名分支（`domain_flow`）：
+
+```
+:80/:443    Caddy   ACME 证书 + 80→443 跳转（308，不是 301）+ TLS 终止
+              ├─ /<随机 basePath>/*  → 127.0.0.1:<面板端口>
+              └─ 其它                → 伪装站（反代或本地静态页）
+127.0.0.1:<面板端口>   a-ui   明文 HTTP，外网不可达
+:2886 :2996 …          xray   各入站自己终止 TLS，证书路径来自 §「设置系统」的三个 defaultXxx 项
+```
+
+无域名分支（`reality_flow`）：面板监听随机高位端口 + 随机 basePath（不装 Caddy）；443 由 xray 的 VLESS+Vision+REALITY 入站独占，伪装目标是外部大站（`REALITY_TARGETS` / `xray.js` 的 `REALITY_TARGET_PRESETS`）。
+
+两个分支都**不对外暴露面板本来的默认端口/路径**，但管理员在面板里创建的入站端口（`:2886` 这类）该开多少还是开多少——见下方「能力边界」。
+
+### 伪装站：反代目标的三条硬判据
+
+`MASK_SITES` 里的候选与用户自填的网址都要过 `check_mask_site`，三条判据都是被真机打出来的，不能放宽：
+
+1. **地址不能带路径。** Caddy 的 `reverse_proxy` upstream 只接受 scheme/host/port（2.11.4 实测：`for now, URLs for proxy upstreams only support scheme, host, and port components`）。带路径的地址不在这里拦下，就会等到 `write_caddyfile` 才炸——那时旧的 web server 可能已经被停用，80/443 上什么都不监听。
+2. **根路径必须直接 2xx，任何跳转（含同域）一律拒绝。** 曾经有过一版"跟随一跳、把解析后的地址拿去反代"的逻辑：它从落地起就跑不通，因为 `%{redirect_url}` 给出的绝对地址几乎必然带 `/`，写进 Caddyfile 直接校验失败；预置候选全在根路径 2xx，所以这条死代码一直没被触发。
+3. **未知路径上不能跨域跳转。** `check_mask_site` 会对 `<候选>/aui-probe-<随机串>/` 单独探一次。只探根路径是不够的——伪装站被访问最多的恰恰是非根路径。`www.wikipedia.org` 就栽在这里：根路径干净的 200，任意未知路径回 `301 → https://en.wikipedia.org/<原路径>`，Caddy 把这个 `Location` 原样转发给访客，**一条响应同时说明"这不是那个站的域名"和"它在裸反代那个站"**。它已从 `MASK_SITES` 移除，不要加回来。
+
+`write_caddyfile` 生成的伪装块还有一层防御纵深：`header_down Location "^https?://[^/]+(/.*)?$" "https://{host}$1"`，把上游任何绝对 `Location` 的 host 换成访客请求里的域名。预检只探两个路径、站点策略也会变，这层兜底覆盖剩下的路径。代价是上游若真要把访客送去第三方站点，重写后会形成重定向回环——刻意接受的取舍：一个看起来坏掉的页面，远好过一条把整套伪装当场证伪的响应。
+
+### `a-ui bootstrap` 是脚本写库的唯一入口
+
+安装脚本不直接碰 SQLite。所有落库动作（`webListen`/`webPort`/`webBasePath`/三个 `defaultXxx`、REALITY 模式下的入站）都经 `bootstrap.Run`（`bootstrap/bootstrap.go`），理由和「域名分流管理」里入站必须走 `ValidateInboundReplacing` 是同一个：脚本手拼的 JSON 没有任何校验，写错只会在下次重启 xray 时静默失效，而 `bootstrap` 建 REALITY 入站时走的是 `InboundService.AddInbound`，能拿到真实 xray 的校验与「域名分流管理」同一套 fail-open 策略。**不打印节点分享链接**——链接生成逻辑只存在于前端 `xray.js` 的 `genVLESSLink`，Go 侧重新实现一份必然与之漂移，节点由管理员在面板里创建后随时可复制。
+
+`bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会 `rm -rf /usr/local/a-ui/` 重新解压，`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。
+
+### 失败不锁面板
+
+`bootstrap.Run` 里 `SetListen` **必须是最后一步**——改成 `127.0.0.1` 之后面板就只能经由 Caddy 访问，前面任何一步（Caddy 装失败、证书 60 秒未签发、伪装站预检全部不过、`a-ui bootstrap` 本身返回非零）失败都必须保持 `webListen` 原样，让面板继续监听所有 IP。真实吃过的亏：`mode=caddy` 分支一度没有清空面板自己的 `webCertFile`/`webKeyFile`——机器上若有历史遗留的证书路径，轻则 `AutoHttpsConn` 把 Caddy 转发来的明文连接误判成非 TLS、对每个请求回 307 造成死循环，重则证书文件已不存在导致 `tls.LoadX509KeyPair` 失败、`Server.Start()` 报错、`main.go` 只 `log` 一行就 `return`——进程以退出码 0 静默退出，而 `a-ui.service` 是 `Type=simple` 且没配 `Restart=`，面板从此彻底不再监听任何地址，且**当时唯一打印过的救援命令救不回来**（它只改 `webListen`，不碰这两个证书字段）。现在 `mode=caddy` 会在写 `webListen` 之前先清空这两项。
+
+`install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——`Type=simple` 无 `Restart=` 意味着「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来）。
+
+两条救援命令由 `print_rescue_hint` 统一打印。判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」，落成两条：
+
+- **`a-ui bootstrap` 调用点之后**的每一条失败分支无条件打印（`print_result` 成功收尾也打）：要么这次调用本身已经把 `webListen` 改成了 `127.0.0.1`，要么这是一次覆盖已有配置的重装，更早一次成功配置里就已经改过了。
+- **调用点之前**的失败分支走 `print_rescue_hint_if_force`：只有本次是 `force` 重跑（`--wizard-only`，即 `a-ui` 菜单「配置域名与伪装站」）时才打印。`force` 意味着面板此前已经被这个向导成功配置过一次，`webListen` 一定已经是 `127.0.0.1`，中途放弃并不会把它改回来。全新安装时 `webListen` 还是默认值、面板照常监听所有 IP，打印只是噪音。
+
+这条判据一度只写了前半条，代价是一个真实的死角：`--wizard-only` 重跑时 `port_user 80` 返回的是**我们自己上一次装的 Caddy**，`handle_existing_web_server` 把它停用并 disable，`install_caddy` 对「已安装」只 `enable` 不 `start`，接着用户在选伪装站时输入 `q`——屏幕上最后一句是「已取消」，而机器上 Caddy 停着、面板在 `127.0.0.1`，**从外网彻底不可达**。所以 `domain_flow` 失败退出前还要做两件事：`restart_own_caddy_if_stopped`（先前停用的若正是我们自己的 Caddy 就把它拉回来；nginx/apache 不动——用户刚明确确认过要停它们），以及 `write_caddyfile` 成功后清掉 `stopped_web_svc` 标记（否则后续失败分支会打印「80/443 上没有任何服务在监听」这句与事实相反的话）。同理，`wait_for_cert` 失败时那句「为避免把你锁在面板外，不修改面板监听地址」在重跑场景里是**主动的错误安慰**，现在按 `force` 分岔成两套文案。
+
+`--wizard-only` 的退出码必须如实透出（`setup_wizard force; exit $?`），`a-ui.sh`/`a-ui_en.sh` 的 `reconfig_domain` 也必须检查它——恒返回 0 会让上面整个状态一路静默回到主菜单：
+
+```
+a-ui setting -listen ""                        # 恢复监听所有 IP
+ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>    # 或走 SSH 隧道，端口用 a-ui setting -show 查
+```
+
+### 证书同步（`/root/cert/`）
+
+Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变，所以面板与各入站引用的是固定路径 `/root/cert/`，由 `a-ui-cert-sync`（systemd timer，每小时）从 Caddy 的存储同步过去。两条不能退回去的写法：
+
+- **先按 mtime 定位最新的证书目录，再从同一个目录取 cert 与 key。** 两次独立的 `find … | head -1` 会在某次续期从 Let's Encrypt 回落到 ZeroSSL（`certificates/` 下多出第二个 CA 目录）时各自命中不同目录：轻则 cert 与 key 配不上对，重则一直命中旧目录，`cmp` 每次都判「没变」，`/root/cert/` 的证书就此冻结到过期。这与 spec §8 记的那次「acme.sh 续期成功但 nginx 从没用上新证书」是同一个形状。同步脚本末尾的 `openssl x509 -checkend` 因此必须**无条件**跑，不能只在「这次真的复制了」时跑——冻结场景的表征恰恰是什么都没变。
+- **同步没成功就不写 `defaultCertFile`/`defaultKeyFile`。** `domain_flow` 在调 `bootstrap` 之前用 `[[ -s ... ]]` 验收 `/root/cert/` 下的两个文件，不满足就干脆不传这两个参数。写了一个空路径进去，管理员此后新建任何 TLS 入站都会被 `ValidateInboundReplacing` 用一个他从没输入过的路径拒掉。
+
+### 能力边界：不提升节点自身的抗探测能力
+
+这次改造收窄的是**面板**的暴露面（明文 HTTP、固定端口、默认根路径 `/`），**不是**已创建入站的暴露面。`:2886` 这类 vmess+ws+tls 入站改造前后一样直接监听在公网端口上，浏览器直连会得到 400 或断连，这个特征没有变化，443 上的伪装站也保护不到它们——伪装站只接管 Caddy 自己监听的 80/443。安装完成的提示文案必须如实告知这一点（`print_result` 末尾那段），不能让管理员误以为「配了域名 = 节点也变安全了」。真正把入站收编到 Caddy 之后（明文 ws 监听 127.0.0.1、按随机 path 由 Caddy 分流）是设计文档里明确写的下一期，不在本次范围。
+
 ## 运维脚本
 
 四个 shell 脚本必须成对维护，改一个就要同步另一个：
 
-- `install.sh` / `install_en.sh` — 一键安装，从 GitHub Release 下载 tar.gz 解压到 `/usr/local/a-ui/`，安装管理脚本到 `/usr/bin/a-ui`，注册 systemd。
+- `install.sh` / `install_en.sh` — 一键安装，从 GitHub Release 下载 tar.gz 解压到 `/usr/local/a-ui/`，安装管理脚本到 `/usr/bin/a-ui`，注册 systemd。有域名分支（`setup_wizard` → `domain_flow`）还会装 Caddy（官方源优先）并让它接管 80/443。若这两个端口已被 nginx/apache/caddy 占用，脚本走 `handle_existing_web_server`：列出对方当前服务的站点、备份其配置目录到 `/root/<name>-backup-<时间戳>.tar.gz`、**停用而非卸载**（`systemctl stop`+`disable`，软件包与配置全部保留，`systemctl enable --now <name>` 一条命令即可回滚），且必须输入完整的 `yes`（不是 `y`）才继续；占用者是未识别的进程则直接中止，不做任何猜测性操作。
 
 **`a-ui update` 会把仓库里的 `bin/xray-*` 覆盖到用户机器上，所以那两个二进制的版本是发版内容的一部分。** `update()` 直接调 `install.sh`，而 `install.sh` 在解压前先 `rm -rf /usr/local/a-ui/`，再把发版包整个铺开——发版包里就带着 `bin/xray-linux-<arch>`（见 `release.yml` 的打包步骤）。后果是：管理员先前通过面板「安装 xray」升级过的核心，会在每次面板更新后被**降级回仓库里那一份**。
 

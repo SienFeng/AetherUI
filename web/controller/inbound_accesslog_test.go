@@ -15,7 +15,7 @@ func TestAccessLogsEndpointReturnsEnabledFlagAndList(t *testing.T) {
 	}
 	in := createInbound(t, 0, true, 0, 0)
 
-	msg := postForm(t, r, "/xui/inbound/accessLogs/"+itoa(in.Id), "page=1&pageSize=20")
+	msg := postForm(t, r, "/aui/inbound/accessLogs/"+itoa(in.Id), "page=1&pageSize=20")
 
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -42,7 +42,7 @@ func TestAccessLogsEndpointBindsUrlencodedFilters(t *testing.T) {
 	// 过滤条件必须能从 urlencoded 请求体里读到。绑定标签写错的话这里
 	// 不会报错，只是过滤条件被静默忽略——所以断言的是「非法页码被纠正」
 	// 这种只有真读到参数才会发生的行为。
-	msg := postForm(t, r, "/xui/inbound/accessLogs/"+itoa(in.Id),
+	msg := postForm(t, r, "/aui/inbound/accessLogs/"+itoa(in.Id),
 		"ip=1.2.3.4&key=example.com&page=0&pageSize=99999")
 	if !msg.Success {
 		t.Fatalf("success = false, msg = %q", msg.Msg)
@@ -59,7 +59,7 @@ func TestAccessLogsEndpointBindsUrlencodedFilters(t *testing.T) {
 func TestAccessLogsEndpointRejectsUnknownInbound(t *testing.T) {
 	r := newRenewRouter(t)
 
-	msg := postForm(t, r, "/xui/inbound/accessLogs/99999", "page=1&pageSize=20")
+	msg := postForm(t, r, "/aui/inbound/accessLogs/99999", "page=1&pageSize=20")
 
 	if msg.Success {
 		t.Fatal("success = true，不存在的入站应当报错")

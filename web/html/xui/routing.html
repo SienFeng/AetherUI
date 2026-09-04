@@ -487,10 +487,10 @@
             },
             async loadAll() {
                 const [g, n, r, i] = await Promise.all([
-                    axios.post('xui/routing/domain-group/list'),
-                    axios.post('xui/routing/outbound/list'),
-                    axios.post('xui/routing/rule/list'),
-                    axios.post('xui/inbound/list'),
+                    axios.post('aui/routing/domain-group/list'),
+                    axios.post('aui/routing/outbound/list'),
+                    axios.post('aui/routing/rule/list'),
+                    axios.post('aui/inbound/list'),
                 ]);
                 this.groups = (g.data.obj || []).map(DomainGroup.fromJson);
                 this.nodes = (n.data.obj || []).map(OutboundNode.fromJson);
@@ -521,7 +521,7 @@
                 this.groupModal.lastSkipped = 0;
                 this.groupModal.lastUpdatedAt = 0;
                 if (group) {
-                    const msg = await this.post('xui/routing/domain-group/detail/' + group.id);
+                    const msg = await this.post('aui/routing/domain-group/detail/' + group.id);
                     if (!msg.success) return;
                     const d = msg.obj;
                     this.groupModal.domains = d.domains || '';
@@ -541,8 +541,8 @@
                     subscribeUrl: this.groupModal.subscribeUrl,
                 };
                 const url = this.groupModal.id
-                    ? 'xui/routing/domain-group/update/' + this.groupModal.id
-                    : 'xui/routing/domain-group/add';
+                    ? 'aui/routing/domain-group/update/' + this.groupModal.id
+                    : 'aui/routing/domain-group/add';
                 const msg = await this.post(url, data);
                 if (msg.success) {
                     this.groupModal.visible = false;
@@ -556,7 +556,7 @@
                     okText: '删除',
                     cancelText: '取消',
                     onOk: async () => {
-                        const msg = await this.post('xui/routing/domain-group/del/' + group.id);
+                        const msg = await this.post('aui/routing/domain-group/del/' + group.id);
                         if (msg.success) await this.loadAll();
                     },
                 });
@@ -577,11 +577,11 @@
                 if (n.id) {
                     // 编辑走 update：后端只认 remark / enable / config，tag 由它自己保持不变。
                     // 想按链接重新解析，先点「解析预览」把结果填进 config 框。
-                    msg = await this.post('xui/routing/outbound/update/' + n.id, {
+                    msg = await this.post('aui/routing/outbound/update/' + n.id, {
                         remark: n.remark, enable: n.enable, config: n.config.trim(),
                     });
                 } else {
-                    msg = await this.post('xui/routing/outbound/add', {
+                    msg = await this.post('aui/routing/outbound/add', {
                         remark: n.remark, link: n.link.trim(), config: n.config.trim(),
                     });
                 }
@@ -591,7 +591,7 @@
                 }
             },
             async toggleNode(node) {
-                const msg = await this.post('xui/routing/outbound/update/' + node.id, {
+                const msg = await this.post('aui/routing/outbound/update/' + node.id, {
                     remark: node.remark, enable: !node.enable, config: '',
                 });
                 if (msg.success) await this.loadAll();
@@ -603,7 +603,7 @@
                     okText: '删除',
                     cancelText: '取消',
                     onOk: async () => {
-                        const msg = await this.post('xui/routing/outbound/del/' + node.id);
+                        const msg = await this.post('aui/routing/outbound/del/' + node.id);
                         if (msg.success) await this.loadAll();
                     },
                 });
@@ -681,7 +681,7 @@
                     this.$message.error('请至少勾选一个用户，或勾选「所有用户」');
                     return;
                 }
-                const url = r.id ? 'xui/routing/rule/update/' + r.id : 'xui/routing/rule/add';
+                const url = r.id ? 'aui/routing/rule/update/' + r.id : 'aui/routing/rule/add';
                 const msg = await this.post(url, Object.assign({}, r, { inboundIds }));
                 if (msg.success) {
                     this.ruleModal.visible = false;
@@ -697,13 +697,13 @@
                     okText: '删除',
                     cancelText: '取消',
                     onOk: async () => {
-                        const msg = await this.post('xui/routing/rule/del/' + rule.id);
+                        const msg = await this.post('aui/routing/rule/del/' + rule.id);
                         if (msg.success) await this.loadAll();
                     },
                 });
             },
             async parseLink() {
-                const msg = await this.post('xui/routing/outbound/parse', {
+                const msg = await this.post('aui/routing/outbound/parse', {
                     link: this.nodeModal.link.trim(),
                 });
                 if (msg.success) {
@@ -722,7 +722,7 @@
             async refreshGroup(group) {
                 // 失败也要重新加载：DB 里已经写了 lastError，不刷新的话这一行
                 // 会继续显示刷新前的绿色「N 小时前」，看不出刚刚这次失败了。
-                await this.post('xui/routing/domain-group/refresh/' + group.id);
+                await this.post('aui/routing/domain-group/refresh/' + group.id);
                 await this.loadAll();
             },
             groupMissing(id) {

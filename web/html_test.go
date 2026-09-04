@@ -68,7 +68,7 @@ func renderPage(t *testing.T, tmpl *template.Template, name string) string {
 		"cur_ver":     "test",
 		"title":       "test",
 		"host":        "localhost",
-		"request_uri": "/xui/" + name,
+		"request_uri": "/aui/" + name,
 	}
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		t.Fatalf("渲染 %s: %v", name, err)
