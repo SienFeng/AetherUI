@@ -774,6 +774,77 @@ disable_auto_clear_log() {
     fi
 }
 
+# 重新运行面板安全配置向导，用于首次安装时向导失败（证书没签发、伪装站
+# 不可用）后重试，或者想更换域名/伪装站重新配置一次。向导逻辑不在这里
+# 重复实现，直接调用最新的 install.sh 的向导部分，避免与 install.sh 漂移。
+# --wizard-only 会跳过 install.sh 里 setup_wizard 的幂等探测并强制覆盖
+# 现有配置——从菜单主动触发「重新配置」，用户的意图就是要覆盖。
+reconfig_domain() {
+    confirm "将重新运行配置向导，会覆盖现有的面板根路径与监听地址设置，确定继续吗" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh) --wizard-only
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+# 停用 Caddy 并把面板恢复为直连访问。只停用不卸载软件包——用户可能拿
+# Caddy 跑其它站点。顺序不能颠倒：必须先把面板监听地址改回来、确认面板
+# 用直连方式重启成功，再停 Caddy；反过来会出现一段时间两边都进不去
+# 面板的窗口。若重启后未探测到面板在运行，为避免彻底进不去面板，本次
+# 不会继续停用 Caddy。
+restore_direct_panel() {
+    confirm "将停用 Caddy 并把面板恢复为直连访问，域名访问会立即失效，确定继续吗" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+
+    /usr/local/a-ui/a-ui setting -listen ""
+    systemctl restart a-ui
+    sleep 2
+    check_status
+    if [[ $? != 0 ]]; then
+        LOGE "面板重启后未检测到运行，为避免彻底进不去面板，本次不会停用 Caddy"
+        LOGE "请用 a-ui log 排查原因，确认面板可直连访问后再重新执行本操作"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+
+    systemctl stop caddy 2>/dev/null
+    systemctl disable caddy 2>/dev/null
+    LOGI "Caddy 已停用（软件包与配置均保留，systemctl enable --now caddy 可恢复）"
+
+    # 面板端口可能是随机改过的，不能假设 54321：探测正在跑的 a-ui 进程
+    # 实际监听的端口，探测不到就如实告知，不编一个可能是错的数字。
+    local pid port
+    pid=$(systemctl show -p MainPID a-ui 2>/dev/null | cut -d= -f2)
+    if [[ -n "${pid}" && "${pid}" != "0" ]]; then
+        port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
+    fi
+    if [[ -n "${port}" ]]; then
+        LOGI "面板现可通过 http://<本机IP>:${port}<面板根路径> 直连访问"
+    else
+        LOGI "面板现可通过 http://<本机IP>:<面板端口><面板根路径> 直连访问（未能探测到当前监听端口）"
+    fi
+    LOGI "面板根路径未变，仍是配置向导生成的那个；如果忘记了，可执行:"
+    LOGI "  sqlite3 /etc/a-ui/a-ui.db \"select value from settings where key='webBasePath';\""
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
 show_usage() {
     echo "a-ui 管理脚本使用方法: "
     echo "------------------------------------------"
@@ -821,9 +892,12 @@ show_menu() {
   ${green}15.${plain} 一键安装 bbr (最新内核)
   ${green}16.${plain} 一键申请SSL证书(acme申请)
   ${green}17.${plain} 配置a-ui定时任务
+————————————————
+  ${green}18.${plain} 配置域名与伪装站
+  ${green}19.${plain} 卸载 Caddy 并恢复面板直连
  "
     show_status
-    echo && read -p "请输入选择 [0-17],查看面板登录信息请输入数字7:" num
+    echo && read -p "请输入选择 [0-19],查看面板登录信息请输入数字7:" num
 
     case "${num}" in
     0)
@@ -880,8 +954,14 @@ show_menu() {
     17)
         check_install && cron_jobs
         ;;
+    18)
+        check_install && reconfig_domain
+        ;;
+    19)
+        check_install && restore_direct_panel
+        ;;
     *)
-        LOGE "请输入正确的数字 [0-17],查看面板登录信息请输入数字7"
+        LOGE "请输入正确的数字 [0-19],查看面板登录信息请输入数字7"
         ;;
     esac
 }

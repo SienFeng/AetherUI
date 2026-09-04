@@ -179,8 +179,15 @@ current_panel_port() {
 # 面板配置向导。任何一步失败都必须保证用户还能进面板：失败路径一律
 # 不修改 webListen，面板保持监听所有 IP。把面板锁死在一个连不上的
 # 127.0.0.1 上，比这个功能不存在糟糕得多。
+#
+# 参数 $1 传字面量 "force" 时：跳过下面的幂等探测（即使已配置过也重新
+# 走一遍向导），并把 -force 透传给后续 domain_flow/reality_flow 的
+# `a-ui bootstrap` 调用，让新配置真正覆盖旧的。--wizard-only 单独触发
+# （a-ui 菜单「配置域名与伪装站」）时用这个值——从菜单主动发起"重新
+# 配置"，用户的意图就是要覆盖，不该被这道幂等判断拦下。
 setup_wizard() {
-    if /usr/local/a-ui/a-ui bootstrap -check -json 2>/dev/null | grep -q '"skipped": true'; then
+    local force="$1"
+    if [[ "${force}" != "force" ]] && /usr/local/a-ui/a-ui bootstrap -check -json 2>/dev/null | grep -q '"skipped": true'; then
         echo -e "${yellow}检测到面板已配置过，保留现有设置，跳过配置向导${plain}"
         echo -e "${yellow}如需重新配置，安装完成后运行 a-ui 并选择「配置域名与伪装站」${plain}"
         return 0
@@ -195,9 +202,9 @@ setup_wizard() {
     local has_domain
     read -p "你有已经解析到本机的域名吗？[y/n]: " has_domain
     if [[ x"${has_domain}" == x"y" || x"${has_domain}" == x"Y" ]]; then
-        domain_flow
+        domain_flow "${force}"
     else
-        reality_flow
+        reality_flow "${force}"
     fi
 }
 
@@ -225,6 +232,7 @@ check_reality_target() {
 }
 
 reality_flow() {
+    local force="$1"
     echo -e ""
     echo -e "${green}请选择 REALITY 伪装目标：${plain}"
     local i=1
@@ -264,9 +272,13 @@ reality_flow() {
         port_args=(-port "${detected_port}")
     fi
 
+    local force_args=()
+    [[ "${force}" == "force" ]] && force_args=(-force)
+
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode reality \
-            -reality-dest "${target}:443" -basepath "${basepath}" "${port_args[@]}" -json 2>&1)
+            -reality-dest "${target}:443" -basepath "${basepath}" "${port_args[@]}" \
+            "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}配置失败：${out}${plain}"
         echo -e "${yellow}面板保持默认配置，仍可正常访问${plain}"
@@ -731,6 +743,7 @@ EOF
 }
 
 domain_flow() {
+    local force="$1"
     local domain
     read -p "请输入你的域名: " domain
     if [[ -z "${domain}" ]]; then
@@ -782,11 +795,14 @@ domain_flow() {
 
     install_cert_sync "${domain}"
 
+    local force_args=()
+    [[ "${force}" == "force" ]] && force_args=(-force)
+
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode caddy -domain "${domain}" \
             -basepath "${basepath}" -listen 127.0.0.1 -port "${panel_port}" \
             -cert-file /root/cert/fullchain.cer \
-            -key-file "/root/cert/${domain}.key" -json 2>&1)
+            -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}写入面板配置失败：${out}${plain}"
         return 1
@@ -893,9 +909,11 @@ install_a-ui() {
 
 # 单独触发安全配置向导，不做下载/解压/装 systemd 服务那一整套安装流程。
 # 用于面板已经装好之后重新配置（a-ui 菜单的「配置域名与伪装站」走这里），
-# 也是本地开发时验证向导本身的入口。
+# 也是本地开发时验证向导本身的入口。传 "force" 跳过 setup_wizard 的幂等
+# 探测并覆盖已有配置——从菜单主动触发就是明确要重新配置，不该被幂等
+# 判断挡住。
 if [[ "$1" == "--wizard-only" ]]; then
-    setup_wizard
+    setup_wizard force
     exit 0
 fi
 

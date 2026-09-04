@@ -200,8 +200,17 @@ current_panel_port() {
 # able to reach the panel: every failure path leaves webListen untouched,
 # so the panel keeps listening on all interfaces. Locking the panel behind
 # an unreachable 127.0.0.1 is worse than this feature not existing at all.
+#
+# When $1 is the literal string "force": skip the idempotency probe below
+# (re-run the wizard even if already configured), and pass -force through
+# to the later domain_flow/reality_flow `a-ui bootstrap` calls so the new
+# configuration actually overwrites the old one. --wizard-only (the a-ui
+# menu's "Configure domain and decoy site") uses this value: triggering
+# "reconfigure" from the menu means the user's intent is explicitly to
+# overwrite, so this idempotency check shouldn't block it.
 setup_wizard() {
-    if /usr/local/a-ui/a-ui bootstrap -check -json 2>/dev/null | grep -q '"skipped": true'; then
+    local force="$1"
+    if [[ "${force}" != "force" ]] && /usr/local/a-ui/a-ui bootstrap -check -json 2>/dev/null | grep -q '"skipped": true'; then
         echo -e "${yellow}Panel already configured, keeping existing settings and skipping the setup wizard${plain}"
         echo -e "${yellow}To reconfigure, after installation run a-ui and choose \"Configure domain and decoy site\"${plain}"
         return 0
@@ -216,9 +225,9 @@ setup_wizard() {
     local has_domain
     read -p "Do you have a domain pointing to this server? [y/n]: " has_domain
     if [[ x"${has_domain}" == x"y" || x"${has_domain}" == x"Y" ]]; then
-        domain_flow
+        domain_flow "${force}"
     else
-        reality_flow
+        reality_flow "${force}"
     fi
 }
 
@@ -249,6 +258,7 @@ check_reality_target() {
 }
 
 reality_flow() {
+    local force="$1"
     echo -e ""
     echo -e "${green}Choose a REALITY masquerade target:${plain}"
     local i=1
@@ -289,9 +299,13 @@ reality_flow() {
         port_args=(-port "${detected_port}")
     fi
 
+    local force_args=()
+    [[ "${force}" == "force" ]] && force_args=(-force)
+
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode reality \
-            -reality-dest "${target}:443" -basepath "${basepath}" "${port_args[@]}" -json 2>&1)
+            -reality-dest "${target}:443" -basepath "${basepath}" "${port_args[@]}" \
+            "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Configuration failed: ${out}${plain}"
         echo -e "${yellow}The panel keeps its default configuration and remains reachable${plain}"
@@ -808,6 +822,7 @@ EOF
 }
 
 domain_flow() {
+    local force="$1"
     local domain
     read -p "Enter your domain: " domain
     if [[ -z "${domain}" ]]; then
@@ -860,11 +875,14 @@ domain_flow() {
 
     install_cert_sync "${domain}"
 
+    local force_args=()
+    [[ "${force}" == "force" ]] && force_args=(-force)
+
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode caddy -domain "${domain}" \
             -basepath "${basepath}" -listen 127.0.0.1 -port "${panel_port}" \
             -cert-file /root/cert/fullchain.cer \
-            -key-file "/root/cert/${domain}.key" -json 2>&1)
+            -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to write the panel configuration: ${out}${plain}"
         return 1
@@ -971,8 +989,12 @@ install_a-ui() {
 # reconfigure after the panel is already installed (the a-ui menu's
 # "Configure domain and decoy site" goes through here), and is also the
 # entry point for testing the wizard itself during local development.
+# Passing "force" skips setup_wizard's idempotency probe and overwrites
+# any existing configuration -- triggering it from the menu already means
+# the user explicitly wants to reconfigure, so it shouldn't be blocked by
+# that check.
 if [[ "$1" == "--wizard-only" ]]; then
-    setup_wizard
+    setup_wizard force
     exit 0
 fi
 

@@ -774,6 +774,84 @@ disable_auto_clear_log() {
     fi
 }
 
+# Re-run the panel security setup wizard. Useful for retrying after the
+# initial install wizard failed (cert not issued, decoy site unreachable),
+# or to reconfigure with a different domain/decoy site. The wizard logic
+# isn't reimplemented here -- this calls straight into the latest
+# install_en.sh's wizard part, so this doesn't drift from install_en.sh.
+# --wizard-only skips install_en.sh's setup_wizard idempotency probe and
+# forces an overwrite of the existing configuration -- triggering
+# "reconfigure" from the menu already means the user wants to overwrite.
+reconfig_domain() {
+    confirm "this will re-run the setup wizard, overwriting the panel's current base path and listen address, continue" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+    bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh) --wizard-only
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
+# Stop Caddy and restore direct access to the panel. Only stops the
+# service, doesn't remove the package -- the user might be running other
+# sites on it. The order matters: the panel's listen address must be
+# restored and the panel restarted successfully with direct access first,
+# then Caddy is stopped -- doing it the other way round leaves a window
+# where the panel is unreachable through either path. If the panel isn't
+# detected running after the restart, Caddy is left running to avoid
+# locking the user out entirely.
+restore_direct_panel() {
+    confirm "this will stop Caddy and restore direct access to the panel, domain access will stop working immediately, continue" "n"
+    if [[ $? != 0 ]]; then
+        if [[ $# == 0 ]]; then
+            show_menu
+        fi
+        return 0
+    fi
+
+    /usr/local/a-ui/a-ui setting -listen ""
+    systemctl restart a-ui
+    sleep 2
+    check_status
+    if [[ $? != 0 ]]; then
+        LOGE "a-ui isn't detected running after the restart; to avoid locking you out entirely, Caddy will not be stopped this time"
+        LOGE "check a-ui log to find out why, then retry this once the panel is reachable directly"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+
+    systemctl stop caddy 2>/dev/null
+    systemctl disable caddy 2>/dev/null
+    LOGI "Caddy stopped (the package and its config are kept; systemctl enable --now caddy restores it)"
+
+    # The panel port may have been changed to a random one, don't assume
+    # 54321: probe the port the running a-ui process is actually bound to,
+    # and say so honestly if it can't be found rather than guessing.
+    local pid port
+    pid=$(systemctl show -p MainPID a-ui 2>/dev/null | cut -d= -f2)
+    if [[ -n "${pid}" && "${pid}" != "0" ]]; then
+        port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
+    fi
+    if [[ -n "${port}" ]]; then
+        LOGI "the panel is now reachable directly at http://<this server's IP>:${port}<panel base path>"
+    else
+        LOGI "the panel is now reachable directly at http://<this server's IP>:<panel port><panel base path> (couldn't detect the current listen port)"
+    fi
+    LOGI "the panel's base path is unchanged, still the one the setup wizard generated; if you forgot it, run:"
+    LOGI "  sqlite3 /etc/a-ui/a-ui.db \"select value from settings where key='webBasePath';\""
+
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
+}
+
 show_usage() {
     echo "a-ui control menu usages: "
     echo "------------------------------------------"
@@ -819,9 +897,12 @@ show_menu() {
   ${green}15.${plain} enable bbr 
   ${green}16.${plain} issuse certs
   ${green}17.${plain} a-ui cron jobs
+————————————————
+  ${green}18.${plain} configure domain and decoy site
+  ${green}19.${plain} uninstall Caddy and restore direct panel access
  "
     show_status
-    echo && read -p "please input a legal number[0-16],input 7 for checking login info:" num
+    echo && read -p "please input a legal number[0-19],input 7 for checking login info:" num
 
     case "${num}" in
     0)
@@ -878,8 +959,14 @@ show_menu() {
     17)
         check_install && cron_jobs
         ;;
+    18)
+        check_install && reconfig_domain
+        ;;
+    19)
+        check_install && restore_direct_panel
+        ;;
     *)
-        LOGE "please input a legal number[0-17],input 7 for checking login info"
+        LOGE "please input a legal number[0-19],input 7 for checking login info"
         ;;
     esac
 }
