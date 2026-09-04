@@ -22,12 +22,6 @@
         </a-select>
     </a-form-item>
 
-    <a-form-item v-if="realityTargetRisky">
-        <a-alert type="warning" show-icon
-                 message="这个伪装目标会提高 IP 被封锁的概率"
-                 description="Xray 核心对 .cn / .ru / .ir 后缀，以及含 apple / icloud / microsoft 的域名会发出该警告。核心只把它写进启动日志，面板不展示，所以在这里主动提示。建议换一个预置目标。">
-        </a-alert>
-    </a-form-item>
     <a-form-item>
         <span slot="label">
             serverNames
@@ -40,6 +34,16 @@
             </a-tooltip>
         </span>
         <a-input v-model.trim="inbound.stream.reality.serverNames" style="width: 280px;"></a-input>
+    </a-form-item>
+
+    <!-- 核心 transport_security.go:163-169 遍历的是 ServerNames（不是 target，
+         尽管核心日志文案写着 "as the target"），所以这条警告挂在 serverNames
+         下面，判定逻辑见 inbound_modal.html 的 realityTargetRisky。 -->
+    <a-form-item v-if="realityTargetRisky">
+        <a-alert type="warning" show-icon
+                 message="serverNames 里的域名会提高 IP 被封锁的概率"
+                 description="Xray 核心对 serverNames 中任意一项命中 .cn / .ru / .ir 后缀，或含 apple / icloud / microsoft 会发出该警告。核心只把它写进启动日志，面板不展示，所以在这里主动提示。建议把上面 serverNames 里的风险域名换掉。">
+        </a-alert>
     </a-form-item>
 
     <a-form-item v-if="inbound.port !== 443">
@@ -93,8 +97,8 @@
                     <a-tooltip>
                         <template slot="title">
                             <b style="color:#cf1322">留空最安全。</b>核心默认只接受 Xray v26.3.27 及以上的客户端。<br/>
-                            核心源码里写明：调低这个值会提高服务器 IP 被 GFW 封锁的概率。<br/>
-                            旧客户端连不上时，正确做法是升级客户端，而不是调低这里。
+                            核心源码里写明：只要填了这个值（不论调高调低），就会提高服务器 IP 被 GFW 封锁的概率。<br/>
+                            旧客户端连不上时，正确做法是升级客户端，而不是在这里填值。
                         </template>
                         <a-icon type="question-circle" theme="filled"></a-icon>
                     </a-tooltip>

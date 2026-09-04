@@ -98,21 +98,29 @@
                 const raw = this.inbound.stream.tls.cipherSuites;
                 return raw ? raw.split(':').filter(s => s !== '') : [];
             },
-            // 与核心 transport_security.go:164-170 的判定逐条对应：
-            // 后缀 .ru/.ir/.cn，或域名中含 apple/icloud/microsoft。
+            // 与核心 transport_security.go:163-169 的判定逐条对应。核心遍历的
+            // 是 config.ServerNames（表单里的 serverNames），不是伪装目标
+            // target——核心日志文案写着 "as the target" 具有误导性，实际读的
+            // 字段是 ServerNames。serverNames 在模型里是逗号分隔的字符串，
+            // 拆分规则与 RealityStreamSettings.splitList 一致（去空白、去空
+            // 项），任一项命中即视为风险。
             // 核心命中时只在启动日志里 LogWarning，配置照常加载，而面板从不
             // 展示 xray 日志——不在这里提示，管理员没有任何途径知道。
             realityTargetRisky() {
-                const target = (this.inbound.stream.reality.target || '').toLowerCase();
-                if (target === '') {
-                    return false;
+                const raw = this.inbound.stream.reality.serverNames || '';
+                for (const item of raw.split(',')) {
+                    const sn = item.trim().toLowerCase();
+                    if (sn === '') {
+                        continue;
+                    }
+                    if (sn.endsWith('.ru') || sn.endsWith('.ir') || sn.endsWith('.cn')) {
+                        return true;
+                    }
+                    if (sn.includes('apple') || sn.includes('icloud') || sn.includes('microsoft')) {
+                        return true;
+                    }
                 }
-                // target 形如 "www.example.com:443"，判定只看主机名部分。
-                const host = target.split(':')[0];
-                if (host.endsWith('.ru') || host.endsWith('.ir') || host.endsWith('.cn')) {
-                    return true;
-                }
-                return host.includes('apple') || host.includes('icloud') || host.includes('microsoft');
+                return false;
             },
         },
         methods: {
