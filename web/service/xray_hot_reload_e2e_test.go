@@ -2,13 +2,22 @@ package service
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,12 +35,27 @@ const hotReloadAPIPort = 62789
 
 func requireXrayAPIPortFree(t *testing.T) {
 	t.Helper()
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", hotReloadAPIPort))
-	if err != nil {
-		t.Skipf("端口 %d（xray 控制面 api 入站的固定端口）已被占用，本机可能已有一个 a-ui/xray 实例在跑，跳过: %v",
-			hotReloadAPIPort, err)
+	// 同一个 go test 进程里连续跑多个 e2e 用例时，前一个用例的 t.Cleanup
+	// 用 SIGKILL 结束上一个 xray 子进程——内核实际回收该进程（连带释放它
+	// 监听的端口）相对于 Kill() 调用的返回是异步的，紧接着起下一个用例
+	// 可能会撞上这个尚未回收完的极短窗口。这不是「端口被别的东西占用」，
+	// 短暂重试即可避免把它误判成真实占用而错误跳过。
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", hotReloadAPIPort))
+		if err == nil {
+			_ = ln.Close()
+			return
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	_ = ln.Close()
+	t.Skipf("端口 %d（xray 控制面 api 入站的固定端口）已被占用，本机可能已有一个 a-ui/xray 实例在跑，跳过: %v",
+		hotReloadAPIPort, lastErr)
 }
 
 func requirePgrep(t *testing.T) {
@@ -375,4 +399,153 @@ func TestHotReloadEndToEndAgainstRealXray(t *testing.T) {
 		}
 		t.Logf("重启后探测：握手成功，读到 %d 字节（0 = 规则仍生效）", len(res.Body))
 	})
+}
+
+// selfSignedCertForTest 生成一份仅用于测试的自签证书。Vision 要求外层是
+// TLS 1.3，所以这个入站必须真的配上证书才能起来。证书写进 t.TempDir()，
+// 测试结束自动清理——不要写进仓库。
+func selfSignedCertForTest(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试私钥: %v", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "hot-reload-vision.test"},
+		DNSNames:              []string{"hot-reload-vision.test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(crand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("签发测试证书: %v", err)
+	}
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		t.Fatal(err)
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keyOut.Close()
+	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+// 设计文档 §7.3 的待验证项：VLESS + tcp + TLS + Vision 的入站不命中
+// inboundUsesReality，会走热交换的「先删后加」两条 gRPC。删加能否正确
+// 重建一个 Vision 入站，此前没有证据——这个测试给出结论。
+//
+// 断言分两层，缺一不可：
+//  1. PID 不变     → 确实走了热应用，没有退回整进程重启
+//  2. 端口仍能完成 TLS 握手 → 入站真的被重建了，而不是删掉之后没加回来
+//
+// 只断言 PID 不变是不够的：热应用「成功」但入站没加回来，PID 同样不变，
+// 而所有用户已经断线——这正是本项目最忌讳的静默失效。
+func TestHotReloadRebuildsVisionInbound(t *testing.T) {
+	requireXrayBinary(t)
+	requirePgrep(t)
+	requireXrayAPIPortFree(t)
+	setupDB(t)
+
+	t.Cleanup(func() {
+		lock.Lock()
+		defer lock.Unlock()
+		if p != nil {
+			_ = p.Stop()
+			p = nil
+		}
+		result = ""
+	})
+
+	certPath, keyPath := selfSignedCertForTest(t)
+	visionPort := freePort(t)
+
+	stream := fmt.Sprintf(`{"network":"tcp","security":"tls",`+
+		`"tlsSettings":{"serverName":"hot-reload-vision.test",`+
+		`"minVersion":"1.3","maxVersion":"1.3","alpn":["h2","http/1.1"],`+
+		`"certificates":[{"certificateFile":%q,"keyFile":%q}]},`+
+		`"tcpSettings":{"header":{"type":"none"}}}`, certPath, keyPath)
+
+	in := &model.Inbound{
+		UserId: 1, Port: visionPort, Protocol: model.VLESS, Enable: true,
+		Tag:    "inbound-" + strconv.Itoa(visionPort),
+		Listen: "127.0.0.1",
+		Settings: `{"clients":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811",` +
+			`"flow":"xtls-rprx-vision","email":"before@e2e"}],"decryption":"none"}`,
+		StreamSettings: stream,
+		Sniffing:       "{}",
+	}
+	if err := database.GetDB().Save(in).Error; err != nil {
+		t.Fatalf("save inbound: %v", err)
+	}
+
+	xs := &XrayService{}
+	if err := xs.RestartXray(true); err != nil {
+		t.Fatalf("RestartXray(true): %v", err)
+	}
+	waitForPort(t, visionPort)
+	pidBefore := xrayChildPID(t)
+	t.Logf("Vision 入站已起来，PID=%d，端口=%d", pidBefore, visionPort)
+
+	// 改一个只落在 Settings 里的字段，触发这个入站的热交换（先删后加）。
+	in.Settings = `{"clients":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811",` +
+		`"flow":"xtls-rprx-vision","email":"after@e2e"}],"decryption":"none"}`
+	if err := database.GetDB().Save(in).Error; err != nil {
+		t.Fatalf("update inbound: %v", err)
+	}
+	if err := xs.RestartXray(false); err != nil {
+		t.Fatalf("RestartXray(false): %v", err)
+	}
+
+	pidAfter := xrayChildPID(t)
+	tlsOK := tlsHandshakeOK(t, visionPort)
+
+	switch {
+	case pidAfter == pidBefore && tlsOK:
+		t.Log("结论：Vision 入站可以安全热交换——PID 未变且端口仍能完成 TLS 握手")
+	case pidAfter == pidBefore && !tlsOK:
+		t.Fatal("热应用报告成功、进程也没重启，但入站已经不在了——" +
+			"这是静默断线，必须把 Vision 纳入强制重启判定（见 Step 3 结论 B）")
+	default:
+		t.Logf("结论：Vision 入站退回了整进程重启（PID %d -> %d）。"+
+			"功能正确但不是热应用，应把 Vision 纳入 inboundNeedsRestart 让这个行为显式化",
+			pidBefore, pidAfter)
+	}
+}
+
+// tlsHandshakeOK 只验证对端能完成 TLS 握手，不验证证书链——证书是自签的。
+// 握手成功即证明该入站仍在监听且 TLS 配置完好。
+func tlsHandshakeOK(t *testing.T, port int) bool {
+	t.Helper()
+	d := &net.Dialer{Timeout: 3 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", fmt.Sprintf("127.0.0.1:%d", port),
+		&tls.Config{InsecureSkipVerify: true, ServerName: "hot-reload-vision.test"})
+	if err != nil {
+		t.Logf("TLS 握手失败: %v", err)
+		return false
+	}
+	defer conn.Close()
+	return true
 }

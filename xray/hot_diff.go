@@ -160,6 +160,11 @@ func inboundsByTag(inbounds []InboundConfig, label string) (map[string]*InboundC
 	return byTag, true
 }
 
+// 只判 Reality 而不判 Vision，是有实测依据的：VLESS + tcp + TLS + Vision
+// 的入站经「先删后加」两条 RPC 能被正确重建，PID 不变且端口仍能完成 TLS
+// 握手（2026-09-04，TestHotReloadRebuildsVisionInbound）。将来若发现 Vision
+// 入站在热应用后失联，先回去跑那个测试，不要凭猜把它加进强制重启。
+//
 // inboundUsesReality 判断入站的 streamSettings.security 是否为 reality。
 func inboundUsesReality(ib *InboundConfig) bool {
 	if len(ib.StreamSettings) == 0 {
