@@ -327,8 +327,20 @@ func (s *SettingService) GetCertFile() (string, error) {
 	return s.getString("webCertFile")
 }
 
+// SetCertFile/SetKeyFile 此前没有对应的 setter——面板自身的直连 TLS 证书
+// 路径只能通过前端设置页写入。bootstrap 的 mode=caddy 分支需要在收编面板
+// 之前清空这两项（Caddy 已经终结 TLS，面板没有理由再自己监听 TLS），
+// 因此在这里补上。
+func (s *SettingService) SetCertFile(v string) error {
+	return s.setString("webCertFile", v)
+}
+
 func (s *SettingService) GetKeyFile() (string, error) {
 	return s.getString("webKeyFile")
+}
+
+func (s *SettingService) SetKeyFile(v string) error {
+	return s.setString("webKeyFile", v)
 }
 
 // defaultDomain / defaultCertFile / defaultKeyFile 是**新建入站时**表单的

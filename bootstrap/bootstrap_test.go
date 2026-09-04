@@ -185,3 +185,69 @@ func TestRunRealityModeCreatesInbound(t *testing.T) {
 		t.Fatalf("入站 UserId 期望 %d（管理员），实际 %d", admin.Id, inbounds[0].UserId)
 	}
 }
+
+// mode=caddy 必须清空面板自己的直连 TLS 证书（webCertFile/webKeyFile）：
+// Caddy 已经终结 TLS、以明文转发到面板，遗留值会被 network.AutoHttpsConn
+// 把明文连接误判成"非 TLS 连接"（对每个请求回 307 到原 URL，从外面看是
+// 死循环），若证书文件已不存在则 Server.Start() 直接失败、面板进程退出，
+// 而 a-ui.service 没有 Restart= 策略，面板从此彻底不再监听——这两种情况
+// 唯一被打印过的恢复命令 `a-ui setting -listen ""` 都救不回来，因为它只
+// 改 webListen，不碰这两项。
+func TestRunCaddyModeClearsWebTLS(t *testing.T) {
+	setupDB(t)
+
+	s := service.SettingService{}
+	if err := s.SetCertFile("/root/stale-cert.crt"); err != nil {
+		t.Fatalf("SetCertFile: %v", err)
+	}
+	if err := s.SetKeyFile("/root/stale-key.key"); err != nil {
+		t.Fatalf("SetKeyFile: %v", err)
+	}
+
+	if _, err := Run(Options{
+		Mode:     "caddy",
+		Domain:   "example.com",
+		BasePath: "/Ab3xK9pQ/",
+		Listen:   "127.0.0.1",
+		Port:     54321,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if v, _ := s.GetCertFile(); v != "" {
+		t.Fatalf("webCertFile 期望被清空，实际 %q", v)
+	}
+	if v, _ := s.GetKeyFile(); v != "" {
+		t.Fatalf("webKeyFile 期望被清空，实际 %q", v)
+	}
+}
+
+// mode=reality 下面板仍是直连暴露给外部，管理员可能确实需要给面板自己配
+// 一份 HTTPS，不能替他清掉。
+func TestRunRealityModeKeepsWebTLS(t *testing.T) {
+	setupDB(t)
+
+	s := service.SettingService{}
+	if err := s.SetCertFile("/root/panel-cert.crt"); err != nil {
+		t.Fatalf("SetCertFile: %v", err)
+	}
+	if err := s.SetKeyFile("/root/panel-key.key"); err != nil {
+		t.Fatalf("SetKeyFile: %v", err)
+	}
+
+	if _, err := Run(Options{
+		Mode:        "reality",
+		BasePath:    "/Zz9Yy8/",
+		Port:        45678,
+		RealityDest: "www.tesla.com:443",
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if v, _ := s.GetCertFile(); v != "/root/panel-cert.crt" {
+		t.Fatalf("webCertFile 不应被 mode=reality 触碰，实际 %q", v)
+	}
+	if v, _ := s.GetKeyFile(); v != "/root/panel-key.key" {
+		t.Fatalf("webKeyFile 不应被 mode=reality 触碰，实际 %q", v)
+	}
+}

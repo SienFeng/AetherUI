@@ -116,6 +116,31 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
+	// mode=caddy 必须清空面板自己的直连 TLS 证书（webCertFile/webKeyFile，
+	// 与上面写入的 defaultCertFile/defaultKeyFile 是完全不同的两个字段：
+	// 后者只是新建入站表单的默认填充值，前者是 web.Server.Start() 用来决定
+	// 要不要给自己的监听端口包一层 tls.Listener 的开关）。Caddy 已经终结
+	// TLS、以明文转发到面板，面板没有理由再自己监听 TLS：
+	//   - 遗留证书文件若仍存在，面板会用 network.AutoHttpsConn 窥探首包，
+	//     把 Caddy 转发来的明文连接误判为"非 TLS 连接"，对每个请求都回一个
+	//     307 到原 URL，从外面看就是死循环打不开。
+	//   - 遗留证书文件若已不存在（比"路径还在但过期"更常见），
+	//     tls.LoadX509KeyPair 会直接失败，Server.Start() 返回 error，
+	//     main.go 只 log 一行就 return，进程以退出码 0 结束——而
+	//     a-ui.service 是 Type=simple 且没有配 Restart=，面板从此彻底不再
+	//     监听任何地址。此时唯一被打印过的恢复命令
+	//     `a-ui setting -listen ""` 救不回来：它只改 webListen，不碰这两项。
+	// mode=reality 不清：那条路径面板本来就是直连暴露给外部，管理员可能
+	// 确实需要给面板自己配 HTTPS，不能替他关掉。
+	if opts.Mode == "caddy" {
+		if err := s.SetCertFile(""); err != nil {
+			return nil, fmt.Errorf("清空面板证书路径失败: %w", err)
+		}
+		if err := s.SetKeyFile(""); err != nil {
+			return nil, fmt.Errorf("清空面板密钥路径失败: %w", err)
+		}
+	}
+
 	// 监听地址放在最后写：改成 127.0.0.1 之后面板就只能经由 Caddy 访问，
 	// 前面任何一步失败都必须保持原样，否则会把管理员锁在门外。
 	if err := s.SetListen(opts.Listen); err != nil {

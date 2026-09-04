@@ -12,6 +12,12 @@ cur_dir=$(pwd)
 # 留空，向导据此决定要不要把 -port 传给 bootstrap，宁可不传也不去猜。
 panel_port=""
 
+# handle_existing_web_server 成功停用某个 web server 后记下它的服务名，
+# 供 domain_flow 在后续步骤（Caddy 装失败/Caddyfile 校验不过）失败时
+# 重复打印回滚命令——用户此时多半已经翻过"确认停用"那一步打印的提示，
+# 且此时 80/443 上是真的什么都不监听了，比第一次提示时更紧急。
+stopped_web_svc=""
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -356,10 +362,31 @@ handle_existing_web_server() {
         return 1
     fi
 
-    systemctl stop "${svc}" 2>/dev/null
-    systemctl disable "${svc}" 2>/dev/null
+    # stop 失败必须如实报告并中止：不能吞掉错误接着往下走——80/443 这时
+    # 仍被占用，后面 install_caddy/write_caddyfile 会顺着失败，但报错会
+    # 指向 Caddy 而不是这里的真正原因，非常误导。
+    local stop_err
+    if ! stop_err=$(systemctl stop "${svc}" 2>&1); then
+        echo -e "${red}停用 ${svc} 失败，80/443 可能仍被占用，请检查后重试：${plain}"
+        echo -e "${red}${stop_err}${plain}"
+        return 1
+    fi
+    local disable_err
+    if ! disable_err=$(systemctl disable "${svc}" 2>&1); then
+        echo -e "${yellow}${svc} 已停止运行，但取消开机自启失败，重启机器后可能重新占用 80/443：${plain}"
+        echo -e "${yellow}${disable_err}${plain}"
+    fi
+    stopped_web_svc="${svc}"
     echo -e "${green}${svc} 已停用（软件包与配置文件均保留）${plain}"
     return 0
+}
+
+# install_caddy/write_caddyfile 失败时，若上面已经停用过旧的 web server，
+# 此时 80/443 上完全没有服务在监听，必须重复提示回滚命令。
+print_stopped_svc_rollback_hint() {
+    [[ -z "${stopped_web_svc}" ]] && return 0
+    echo -e "${yellow}${stopped_web_svc} 已经被停用，此时 80/443 上没有任何服务在监听${plain}"
+    echo -e "${yellow}如需先恢复旧站点：systemctl enable --now ${stopped_web_svc}${plain}"
 }
 
 # apt 分支的命令已在 Ubuntu 20.04.6 aarch64 上实测通过（Caddy 2.11.4）。
@@ -472,6 +499,23 @@ wait_for_cert() {
     return 1
 }
 
+# a-ui.service 是 Type=simple 且没有配 Restart=：`systemctl restart` 返回
+# 成功只代表进程被 fork 出来了，不代表它没有立刻退出（比如遗留的
+# webCertFile/webKeyFile 指向一个已经不存在的证书文件，tls.LoadX509KeyPair
+# 失败、Server.Start() 返回 error，main.go 只 log 一行就 return）。这种
+# "起来了又立刻死了"从 systemctl 的返回码看不出来，必须真的探活。
+wait_for_panel_alive() {
+    local panel_port="$1" basepath="$2"
+    local i
+    for i in $(seq 1 5); do
+        if curl -fsS -m 3 "http://127.0.0.1:${panel_port}${basepath}" -o /dev/null 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # 把 Caddy 管理的证书同步到固定路径。面板与各入站用的是固定路径
 # /root/cert/，而 Caddy 自己的证书存储路径含 ACME CA 的目录名，切换
 # 签发机构时会变——直接指过去会在某次续期后静默失效。
@@ -556,7 +600,10 @@ domain_flow() {
         handle_existing_web_server "${occupant}" || return 1
     fi
 
-    install_caddy || return 1
+    if ! install_caddy; then
+        print_stopped_svc_rollback_hint
+        return 1
+    fi
 
     local mask_url
     mask_url=$(choose_mask_site) || return 1
@@ -565,7 +612,10 @@ domain_flow() {
     basepath="/$(gen_random_path)/"
     panel_port=54321
 
-    write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}" || return 1
+    if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
+        print_stopped_svc_rollback_hint
+        return 1
+    fi
     wait_for_cert "${domain}" || {
         echo -e "${yellow}证书未就绪，为避免把你锁在面板外，不修改面板监听地址${plain}"
         echo -e "${yellow}修好之后运行 a-ui 选择「配置域名与伪装站」重试${plain}"
@@ -584,6 +634,12 @@ domain_flow() {
         return 1
     fi
     systemctl restart a-ui
+    if ! wait_for_panel_alive "${panel_port}" "${basepath}"; then
+        echo -e "${red}面板重启后探活失败，127.0.0.1:${panel_port} 没有响应${plain}"
+        echo -e "${red}面板配置已写入，但进程可能启动后又退出了（常见原因：证书路径不存在或不可读）${plain}"
+        echo -e "${yellow}排查：journalctl -u a-ui -n 50${plain}"
+        return 1
+    fi
     print_result "${out}" "caddy"
 
     # 防火墙只提示不自动改：UFW/firewalld 的存在与规则差异过大，
