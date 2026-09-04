@@ -141,3 +141,47 @@ func TestRunRejectsCaddyModeWithoutDomain(t *testing.T) {
 		t.Fatal("mode=caddy 缺 -domain 应报错")
 	}
 }
+
+// mode=reality 是无域名分支：安装脚本不写证书/域名相关设置，改为直接建一个
+// VLESS+Vision+REALITY 入站。这个入站要走 InboundService.AddInbound（而不是
+// 直接写库），本机若没有 bin/xray-<GOOS>-<GOARCH>，其内部的 xray 校验按项目
+// 既定的 fail open 策略放行，测试仍应通过。
+func TestRunRealityModeCreatesInbound(t *testing.T) {
+	setupDB(t)
+
+	res, err := Run(Options{
+		Mode:        "reality",
+		BasePath:    "/Zz9Yy8/",
+		Port:        45678,
+		RealityDest: "www.tesla.com:443",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Skipped {
+		t.Fatal("全新数据库不应被跳过")
+	}
+
+	inboundService := service.InboundService{}
+	inbounds, err := inboundService.GetAllInbounds()
+	if err != nil {
+		t.Fatalf("GetAllInbounds: %v", err)
+	}
+	if len(inbounds) != 1 {
+		t.Fatalf("期望 1 个入站，实际 %d", len(inbounds))
+	}
+	if inbounds[0].Port != 443 {
+		t.Fatalf("入站端口期望 443，实际 %d", inbounds[0].Port)
+	}
+
+	// UserId 必须落到管理员账号上：InboundController.getInbounds 按
+	// user_id 过滤，落空会让这个入站在管理员登录后的列表里"隐形"。
+	userService := service.UserService{}
+	admin, err := userService.GetFirstUser()
+	if err != nil {
+		t.Fatalf("GetFirstUser: %v", err)
+	}
+	if inbounds[0].UserId != admin.Id {
+		t.Fatalf("入站 UserId 期望 %d（管理员），实际 %d", admin.Id, inbounds[0].UserId)
+	}
+}

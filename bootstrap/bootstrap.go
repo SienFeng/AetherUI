@@ -6,9 +6,14 @@
 package bootstrap
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/google/uuid"
 
 	"a-ui/web/service"
 )
@@ -105,6 +110,12 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
+	if opts.Mode == "reality" {
+		if err := createRealityInbound(opts); err != nil {
+			return nil, err
+		}
+	}
+
 	// 监听地址放在最后写：改成 127.0.0.1 之后面板就只能经由 Caddy 访问，
 	// 前面任何一步失败都必须保持原样，否则会把管理员锁在门外。
 	if err := s.SetListen(opts.Listen); err != nil {
@@ -112,6 +123,73 @@ func Run(opts Options) (*Result, error) {
 	}
 
 	return &Result{Mode: opts.Mode, PanelURL: panelURL(opts)}, nil
+}
+
+// createRealityInbound 走 InboundService.AddInbound 而不是直接写库：
+// 它内部会用真实 xray 校验完整生成配置，这道防线挡住的正是「配置非法
+// 导致整份 bin/config.json 加载失败、机器上全部用户一起断网」。
+func createRealityInbound(opts Options) error {
+	serverName, _, ok := strings.Cut(opts.RealityDest, ":")
+	if !ok || serverName == "" {
+		return fmt.Errorf("-reality-dest 应形如 www.example.com:443，实际 %q", opts.RealityDest)
+	}
+
+	serverService := service.ServerService{}
+	keys, err := serverService.GetNewX25519Cert()
+	if err != nil {
+		return fmt.Errorf("生成 REALITY 密钥失败: %w", err)
+	}
+	privateKey, _ := keys["privateKey"].(string)
+	publicKey, _ := keys["publicKey"].(string)
+	if privateKey == "" || publicKey == "" {
+		return fmt.Errorf("生成 REALITY 密钥失败: 返回了空值")
+	}
+
+	shortID, err := randomHex(8)
+	if err != nil {
+		return fmt.Errorf("生成 shortId 失败: %w", err)
+	}
+
+	inbound, err := BuildRealityInbound(RealityParams{
+		Port:       443,
+		UUID:       uuid.New().String(),
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+		ShortID:    shortID,
+		Target:     opts.RealityDest,
+		ServerName: serverName,
+		Remark:     "REALITY-" + serverName,
+	})
+	if err != nil {
+		return err
+	}
+
+	// InboundController.getInbounds 按 user_id 过滤（WHERE user_id = ?，
+	// 取自登录会话）。不设 UserId 的话入站落库时是 0，全新安装的 admin
+	// 用户 Id 是 1（initUser 在空表上创建的第一条记录），管理员登录后会
+	// 看到一个空的入站列表——入站其实建好了、也在跑，只是在面板里"隐形"。
+	// GetFirstUser 与 setting -username/-password 用的是同一个"首个用户
+	// 即管理员"的既有约定（main.go 的 UpdateFirstUser）。
+	userService := service.UserService{}
+	user, err := userService.GetFirstUser()
+	if err != nil {
+		return fmt.Errorf("查询管理员账号失败: %w", err)
+	}
+	inbound.UserId = user.Id
+
+	inboundService := service.InboundService{}
+	if err := inboundService.AddInbound(inbound); err != nil {
+		return fmt.Errorf("创建 REALITY 入站失败: %w", err)
+	}
+	return nil
+}
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func validate(opts Options) error {
