@@ -134,8 +134,12 @@ gen_random_path() {
 }
 
 # 返回占用指定端口的进程名，空表示没人占用。
+#
+# 必须带 -p 才会输出 users:(("进程名",pid=...)) 这一列——不带 -p 时
+# ss 的最后一列是对端地址（如 0.0.0.0:*），永远不含进程名，会让所有
+# 基于进程名的判断（nginx/apache/caddy）失效，一律落进"未知进程"分支。
 port_user() {
-    ss -ltnH "sport = :$1" 2>/dev/null | awk '{print $NF}' | head -1
+    ss -ltnHp "sport = :$1" 2>/dev/null | grep -oP '(?<=users:\(\(")[^"]+' | head -1
 }
 
 # 本机公网 IP。取不到返回空串，调用方必须容忍这种情况——机器可能在
@@ -156,7 +160,10 @@ current_panel_port() {
         return 0
     fi
     local pid port
-    pid=$(systemctl show -p MainPID --value a-ui 2>/dev/null)
+    # 不用 `--value`：该选项 systemd >=230 才支持，而本脚本声称支持
+    # 自带 systemd 219 的 CentOS 7，用 --value 在那上面会因未知选项直接报错。
+    # `systemctl show` 的输出固定是 `KEY=VALUE`，cut 取等号后半段等价且兼容更旧版本。
+    pid=$(systemctl show -p MainPID a-ui 2>/dev/null | cut -d= -f2)
     [[ -z "${pid}" || "${pid}" == "0" ]] && return 1
     port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
     [[ -z "${port}" ]] && return 1
@@ -305,6 +312,289 @@ print_result() {
     echo -e ""
     echo -e "${yellow}注意：本次配置隐藏的是面板。你在面板里创建的入站端口仍然对外暴露，${plain}"
     echo -e "${yellow}其抗探测能力与配置前相同。${plain}"
+}
+
+# 检测到 80/443 被占时不直接中止：已经用其它一键脚本搭过的机器上，面板
+# 往往正是明文 HTTP 暴露的状态，恰恰最需要这次改造。
+#
+# 停用而不是卸载：腾出端口只需要停用，apt remove 除了不可逆之外没有任何
+# 额外收益。用户反悔时一条 systemctl enable --now 就能恢复。
+handle_existing_web_server() {
+    local occupant="$1"
+    local svc="" confdir=""
+    case "${occupant}" in
+        *nginx*)  svc="nginx";  confdir="/etc/nginx" ;;
+        *apache*|*httpd*) svc="apache2"; confdir="/etc/apache2"
+                  [[ -d /etc/httpd ]] && svc="httpd" && confdir="/etc/httpd" ;;
+        *caddy*)  svc="caddy";  confdir="/etc/caddy" ;;
+        *)
+            echo -e "${red}80/443 被未知进程占用：${occupant}${plain}"
+            echo -e "${red}请先自行处理后再运行本脚本${plain}"
+            return 1 ;;
+    esac
+
+    echo -e ""
+    echo -e "${yellow}检测到 ${svc} 正在占用 80/443，当前为以下站点服务：${plain}"
+    if [[ "${svc}" == "nginx" ]]; then
+        grep -rhE "^\s*(server_name|root)\s" "${confdir}" 2>/dev/null | sed 's/^/    /' || \
+            echo "    （无法解析配置，请自行确认）"
+    else
+        echo "    （请自行确认 ${confdir} 下的站点配置）"
+    fi
+
+    local backup="/root/${svc}-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar czf "${backup}" "${confdir}" 2>/dev/null && \
+        echo -e "${green}已备份配置到 ${backup}${plain}"
+
+    echo -e ""
+    echo -e "${red}继续将停用 ${svc}，上述站点会立即无法访问。${plain}"
+    echo -e "${yellow}回滚命令：systemctl enable --now ${svc}${plain}"
+    local confirm
+    read -p "确认停用请输入完整的 yes（其它任何输入都会取消）: " confirm
+    if [[ "${confirm}" != "yes" ]]; then
+        echo -e "${yellow}已取消${plain}"
+        return 1
+    fi
+
+    systemctl stop "${svc}" 2>/dev/null
+    systemctl disable "${svc}" 2>/dev/null
+    echo -e "${green}${svc} 已停用（软件包与配置文件均保留）${plain}"
+    return 0
+}
+
+# apt 分支的命令已在 Ubuntu 20.04.6 aarch64 上实测通过（Caddy 2.11.4）。
+# 脚本以 root 运行（开头有 EUID 检查），所以不加 sudo。
+#
+# 两个 return 0 分支都要 enable：已安装但曾被手动停用/禁用（真机验证环境
+# 就是这个状态）同样要收编开机自启，否则重启后 a-ui 已按 systemd 自启但
+# Caddy 不起来，80/443 上什么都不监听，面板（已收编到 127.0.0.1）与
+# 伪装站一起从外网彻底消失——比配置向导本身失败更隐蔽。
+install_caddy() {
+    if command -v caddy &>/dev/null; then
+        echo -e "${green}检测到已安装 Caddy: $(caddy version | head -1)${plain}"
+        systemctl enable caddy 2>/dev/null
+        return 0
+    fi
+    echo -e "正在安装 Caddy…"
+    if [[ x"${release}" == x"centos" ]]; then
+        dnf install -y "dnf-command(copr)" >/dev/null 2>&1 || yum install -y yum-plugin-copr >/dev/null 2>&1
+        dnf copr enable -y @caddy/caddy >/dev/null 2>&1 || yum copr enable -y @caddy/caddy >/dev/null 2>&1
+        dnf install -y caddy >/dev/null 2>&1 || yum install -y caddy >/dev/null 2>&1
+    else
+        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1
+        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
+            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+            > /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq caddy >/dev/null 2>&1
+    fi
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${red}Caddy 安装失败${plain}"
+        echo -e "${yellow}请手动安装后重试：https://caddyserver.com/docs/install${plain}"
+        return 1
+    fi
+    echo -e "${green}Caddy 安装完成: $(caddy version | head -1)${plain}"
+    systemctl enable caddy 2>/dev/null
+    return 0
+}
+
+ensure_static_site() {
+    mkdir -p /var/www/html
+    [[ -f /var/www/html/index.html ]] && return 0
+    cat > /var/www/html/index.html <<'HTMLEOF'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Welcome</title></head>
+<body><h1>Welcome</h1><p>This site is under construction.</p></body></html>
+HTMLEOF
+}
+
+# 桩：Task 8 用完整实现（候选清单 + 预检 + 自填 URL）替换它。
+# stdout 输出空串表示使用本地静态页。
+choose_mask_site() {
+    ensure_static_site
+    echo ""
+}
+
+# Caddyfile 结构见 spec §7。两处关键点：
+#   1. 面板反代路径必须与写进面板的 webBasePath 完全一致，否则静态资源 404
+#   2. 伪装站放在最后的 handle，作为兜底
+# Caddy 直接占 80/443，证书与 80→443 跳转都靠它的自动 HTTPS，
+# 不需要 https_port / bind——这一点由 Task 0 验证过。
+write_caddyfile() {
+    local domain="$1" basepath="$2" panel_port="$3" mask_url="$4"
+    local mask_block
+
+    if [[ -n "${mask_url}" ]]; then
+        mask_block="        reverse_proxy ${mask_url} {
+            header_up Host {upstream_hostport}
+        }"
+    else
+        mask_block="        root * /var/www/html
+        file_server"
+    fi
+
+    cat > /etc/caddy/Caddyfile <<EOF
+${domain} {
+    handle ${basepath}* {
+        reverse_proxy 127.0.0.1:${panel_port}
+    }
+
+    handle {
+${mask_block}
+    }
+}
+EOF
+
+    if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
+        echo -e "${red}生成的 Caddyfile 未通过校验${plain}"
+        return 1
+    fi
+    systemctl restart caddy || return 1
+    return 0
+}
+
+# Caddy 是异步申请证书的，启动成功不代表证书已就绪。
+wait_for_cert() {
+    local domain="$1"
+    local i
+    echo -e "正在等待证书签发（最长 60 秒）…"
+    for i in $(seq 1 30); do
+        if curl -fsS -m 5 --resolve "${domain}:443:127.0.0.1" \
+                "https://${domain}/" -o /dev/null 2>/dev/null; then
+            echo -e "${green}证书已就绪${plain}"
+            return 0
+        fi
+        sleep 2
+    done
+    echo -e "${red}60 秒内未能通过 HTTPS 访问，证书可能尚未签发${plain}"
+    echo -e "${yellow}排查：journalctl -u caddy -n 50${plain}"
+    return 1
+}
+
+# 把 Caddy 管理的证书同步到固定路径。面板与各入站用的是固定路径
+# /root/cert/，而 Caddy 自己的证书存储路径含 ACME CA 的目录名，切换
+# 签发机构时会变——直接指过去会在某次续期后静默失效。
+#
+# Task 0 已实测确认 Caddy 事件钩子不可用（events.handlers.exec 模块
+# 未注册，caddy validate 直接报错），所以只有 systemd timer 一条路。
+install_cert_sync() {
+    local domain="$1"
+    mkdir -p /root/cert
+
+    cat > /usr/local/bin/a-ui-cert-sync <<'SYNCEOF'
+#!/usr/bin/env bash
+# 把 Caddy 管理的证书同步到固定路径。面板与各入站都读这两个文件——
+# Caddy 自己的存储路径含 ACME CA 目录名，签发机构一换就变，不能直接引用。
+set -euo pipefail
+domain="$1"
+src=$(find /var/lib/caddy -type f -name "${domain}.crt" 2>/dev/null | head -1)
+key=$(find /var/lib/caddy -type f -name "${domain}.key" 2>/dev/null | head -1)
+[[ -z "${src}" || -z "${key}" ]] && exit 0
+changed=0
+cmp -s "${src}" /root/cert/fullchain.cer || changed=1
+cmp -s "${key}" "/root/cert/${domain}.key" || changed=1
+[[ "${changed}" == "0" ]] && exit 0
+install -m 644 "${src}" /root/cert/fullchain.cer
+install -m 600 "${key}" "/root/cert/${domain}.key"
+logger -t a-ui-cert-sync "证书已同步到 /root/cert"
+SYNCEOF
+    chmod +x /usr/local/bin/a-ui-cert-sync
+
+    cat > /etc/systemd/system/a-ui-cert-sync.service <<EOF
+[Unit]
+Description=Sync Caddy certificates to /root/cert for a-ui
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/a-ui-cert-sync ${domain}
+EOF
+
+    cat > /etc/systemd/system/a-ui-cert-sync.timer <<'EOF'
+[Unit]
+Description=Sync Caddy certificates hourly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now a-ui-cert-sync.timer
+    # 立刻跑一次，别等第一个周期
+    systemctl start a-ui-cert-sync.service
+}
+
+domain_flow() {
+    local domain
+    read -p "请输入你的域名: " domain
+    if [[ -z "${domain}" ]]; then
+        echo -e "${red}域名不能为空${plain}"
+        return 1
+    fi
+
+    # 解析校验只警告不拦截：域名可能挂在 CDN 后面，或者只有 AAAA 记录，
+    # 硬拦会误伤合法配置。
+    local resolved myip
+    resolved=$(getent ahostsv4 "${domain}" 2>/dev/null | awk '{print $1; exit}')
+    myip=$(public_ip)
+    if [[ -n "${resolved}" && -n "${myip}" && "${resolved}" != "${myip}" ]]; then
+        echo -e "${yellow}警告：${domain} 解析到 ${resolved}，与本机公网 IP ${myip} 不一致${plain}"
+        echo -e "${yellow}若使用了 CDN 可忽略；否则证书申请会失败${plain}"
+        local go_on
+        read -p "继续？[y/n]: " go_on
+        [[ x"${go_on}" != x"y" && x"${go_on}" != x"Y" ]] && return 1
+    fi
+
+    local occupant
+    occupant=$(port_user 80)
+    [[ -z "${occupant}" ]] && occupant=$(port_user 443)
+    if [[ -n "${occupant}" ]]; then
+        handle_existing_web_server "${occupant}" || return 1
+    fi
+
+    install_caddy || return 1
+
+    local mask_url
+    mask_url=$(choose_mask_site) || return 1
+
+    local basepath panel_port
+    basepath="/$(gen_random_path)/"
+    panel_port=54321
+
+    write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}" || return 1
+    wait_for_cert "${domain}" || {
+        echo -e "${yellow}证书未就绪，为避免把你锁在面板外，不修改面板监听地址${plain}"
+        echo -e "${yellow}修好之后运行 a-ui 选择「配置域名与伪装站」重试${plain}"
+        return 1
+    }
+
+    install_cert_sync "${domain}"
+
+    local out
+    out=$(/usr/local/a-ui/a-ui bootstrap -mode caddy -domain "${domain}" \
+            -basepath "${basepath}" -listen 127.0.0.1 -port "${panel_port}" \
+            -cert-file /root/cert/fullchain.cer \
+            -key-file "/root/cert/${domain}.key" -json 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}写入面板配置失败：${out}${plain}"
+        return 1
+    fi
+    systemctl restart a-ui
+    print_result "${out}" "caddy"
+
+    # 防火墙只提示不自动改：UFW/firewalld 的存在与规则差异过大，
+    # 自动放行容易帮倒忙。
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        echo -e "${yellow}检测到 ufw 已启用，如未放行请执行: ufw allow 80,443/tcp${plain}"
+    fi
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        echo -e "${yellow}检测到 firewalld 已启用，如未放行请执行:${plain}"
+        echo -e "${yellow}  firewall-cmd --permanent --add-service={http,https} && firewall-cmd --reload${plain}"
+    fi
 }
 
 install_a-ui() {
