@@ -578,8 +578,13 @@ check_mask_site() {
     # web server 可能已经被停用，80/443 上什么都不监听了。Caddy 2.11.4 实测：
     # reverse_proxy https://www.python.org/ → for now, URLs for proxy upstreams
     # only support scheme, host, and port components。
+    # 尾斜杠是合法输入（浏览器地址栏复制出来就带），规范化掉而不是拒绝。
+    # 但它必须被规范化：caddy 2.11.4 实测 `reverse_proxy https://host/` 同样报
+    # "upstreams only support scheme, host, and port"——尾斜杠正是它拒绝的东西，
+    # 所以判据用 */* 而不是 */?*（后者会放行尾斜杠，让失败推迟到 write_caddyfile）。
+    url="${url%/}"
     after_scheme="${url#*://}"
-    if [[ "${after_scheme}" == */?* ]]; then
+    if [[ "${after_scheme}" == */* ]]; then
         echo "反代目标不能带路径（Caddy 的 upstream 只接受 scheme/host/port）"
         return 1
     fi
@@ -713,6 +718,11 @@ choose_mask_site() {
                 echo -e "${red}输入已结束，放弃配置${plain}" >&2
                 return 1
             fi
+            # 削掉尾斜杠：浏览器地址栏复制出来的地址天然带它，而 Caddy 的
+            # upstream 连一个尾斜杠都不接受。必须在这里规范化——check_mask_site
+            # 里那次规范化只作用于它自己的局部变量，传给 write_caddyfile 的是
+            # 下面 echo 出去的这一份。
+            url="${url%/}"
         elif [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -lt "${i}" ]]; then
             url="${MASK_SITES[$((choice - 1))]}"
         else

@@ -645,8 +645,15 @@ check_mask_site() {
     # and nothing is listening on 80/443. Verified on Caddy 2.11.4:
     # reverse_proxy https://www.python.org/ → for now, URLs for proxy
     # upstreams only support scheme, host, and port components.
+    # A trailing slash is legitimate input (it is what the browser address bar
+    # hands you), so normalise it away rather than reject it. Normalising is not
+    # optional though: caddy 2.11.4 rejects `reverse_proxy https://host/` with the
+    # very same "upstreams only support scheme, host, and port" error, so the glob
+    # is */* rather than */?* — the latter lets a trailing slash through and defers
+    # the failure all the way to write_caddyfile.
+    url="${url%/}"
     after_scheme="${url#*://}"
-    if [[ "${after_scheme}" == */?* ]]; then
+    if [[ "${after_scheme}" == */* ]]; then
         echo "the reverse-proxy target must not carry a path (Caddy upstreams only accept scheme/host/port)"
         return 1
     fi
@@ -807,6 +814,12 @@ choose_mask_site() {
                 echo -e "${red}Input ended, cancelling${plain}" >&2
                 return 1
             fi
+            # Strip the trailing slash: it is what the browser address bar gives
+            # you, and Caddy upstreams reject even a bare trailing slash. It has
+            # to happen here — the normalisation inside check_mask_site only
+            # touches its own local copy, while what reaches write_caddyfile is
+            # the value echoed below.
+            url="${url%/}"
         elif [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -lt "${i}" ]]; then
             url="${MASK_SITES[$((choice - 1))]}"
         else
