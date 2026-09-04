@@ -39,6 +39,9 @@ var defaultValueMap = map[string]string{
 	"accessLogRetentionDays": "7",
 	"concurrencyIdleTimeout": "120",
 	"tcInterface":            "",
+	"defaultDomain":          "",
+	"defaultCertFile":        "",
+	"defaultKeyFile":         "",
 }
 
 type SettingService struct {
@@ -326,6 +329,35 @@ func (s *SettingService) GetCertFile() (string, error) {
 
 func (s *SettingService) GetKeyFile() (string, error) {
 	return s.getString("webKeyFile")
+}
+
+// defaultDomain / defaultCertFile / defaultKeyFile 是**新建入站时**表单的
+// 默认填充值，面板自身不使用（面板自己的证书是 webCertFile/webKeyFile）。
+// 安装脚本配置好域名与 Caddy 之后由 a-ui bootstrap 写入，此后管理员每建
+// 一个入站都不必再手填域名和证书路径——手填出错的代价是整份 xray 配置
+// 加载失败，机器上全部用户一起断网。
+func (s *SettingService) GetDefaultDomain() (string, error) {
+	return s.getString("defaultDomain")
+}
+
+func (s *SettingService) SetDefaultDomain(v string) error {
+	return s.setString("defaultDomain", v)
+}
+
+func (s *SettingService) GetDefaultCertFile() (string, error) {
+	return s.getString("defaultCertFile")
+}
+
+func (s *SettingService) SetDefaultCertFile(v string) error {
+	return s.setString("defaultCertFile", v)
+}
+
+func (s *SettingService) GetDefaultKeyFile() (string, error) {
+	return s.getString("defaultKeyFile")
+}
+
+func (s *SettingService) SetDefaultKeyFile(v string) error {
+	return s.setString("defaultKeyFile", v)
 }
 
 func (s *SettingService) GetSecret() ([]byte, error) {
