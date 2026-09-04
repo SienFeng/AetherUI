@@ -2359,9 +2359,125 @@ git commit -m "feat(script): 管理菜单新增域名配置与恢复面板直连
 - [ ] 客户端用该入站能正常连通
 - [ ] `curl -I https://<IP>` 返回的是伪装目标站的响应
 
-- [ ] **Step 3: 更新 spec 状态并提交**
+- [ ] **Step 3: 补上执行过程中积累的四项待办**
+
+这些是 Task 1–10 执行过程中发现、当时判断不属于那个任务范围而记进 ledger 的，在这里一并收口。
+
+**(a) 验证「全新安装」这条从未被覆盖的时序**
+
+所有真机验证走的都是 `--wizard-only`（复用已装好的机器）。完整安装流程里 `setup_wizard` 排在 `systemctl daemon-reload` / `enable` / `start` **之前**——全新安装时 `a-ui.service` 刚被 `cp` 进 `/etc/systemd/system` 却尚未 `daemon-reload`，而 `domain_flow` 里已经在 `systemctl restart a-ui`，可能用的是旧的单元定义。
+
+这条路径至今零覆盖。在一台**干净的**机器（或快照回滚后的机器）上跑一次真正的全新安装验证它；若确认有问题，把 `setup_wizard` 移到 `daemon-reload`/`enable`/`start` 之后。
+
+**(b) 检测 acme.sh 与 Caddy 并存并提示**
+
+从 x-ui + acme.sh 迁移过来的用户（很常见）跑完向导后会留下这个状态：acme.sh 的 cron 仍在为同一域名续期，而它的 `reloadcmd` 指向已被停用的 nginx，续期时那一步必然失败；同时形成两套 ACME 客户端管同一个域名的冗余。
+
+在 `domain_flow` 成功后检测 `~/.acme.sh/` 是否存在且其配置里有本域名，有则提示用户：证书已由 Caddy 接管，acme.sh 的 cron 可以停掉（`crontab -e` 删掉那行），或至少把 `reloadcmd` 改成 `systemctl reload caddy`。**只提示，不自动改用户的 cron。**
+
+**(c) 清理真机上的验证残留**
+
+Task 6–10 的真机验证在 VPS 上留下了：`/home/ubuntu/aetherui-src/`（源码树 + 编译产物）、`/home/ubuntu/go`（GOPATH 模块缓存）、`/tmp` 与 `/root` 下多份数据库与 Caddyfile 备份、`/usr/local/go`（为编译临时装的 Go）。
+
+按项目规范「任务完成前清理本次任务创建的所有临时产物」，逐一清理。**但保留 `/root/pre-caddy-snapshot-*`**（那是用户的回滚快照）与 acme.sh 的证书备份（`*.expired-backup-*`）。清理前列出清单确认。
+
+**(d) 把最终版本部署到那台机器**
+
+Task 10 的验证结束时把二进制与脚本**还原成了验证前的版本**，所以那台机器现在跑的不是最终代码。把本分支最终版本编译部署上去（`/usr/local/a-ui/a-ui`、`/usr/bin/a-ui`），重启面板，确认面板仍可通过域名访问、菜单第 7 项可用。
+
+- [ ] **Step 4: 更新 spec 状态并提交**
 
 ```bash
 git add CLAUDE.md docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md
 git commit -m "docs: 记录安装向导与 Caddy 拓扑"
+```
+
+---
+
+## Task 12: 路由前缀 `/xui` → `/aui`（品牌一致性）
+
+**执行顺序上排在 Task 6 之前**（编号靠后只是因为它是后追加的）。理由：这是个机械改动，越早做，Task 6–11 的真机验证用的就是最终形态，不必验两遍。
+
+项目改名时改了二进制名（`a-ui`）、数据库路径（`/etc/a-ui/`），但路由前缀留在了上游 x-ui 的 `/xui`。本任务把它对齐。
+
+**先说清这个改动不是安全措施**：能拿到随机 `webBasePath` 的人早就进来了，`/xui` 只是他确认「这是个 x-ui 系面板」的最后一步。真正挡住全网扫描的是随机根路径本身。本任务的目的是品牌一致性，不要在提交信息或文档里把它写成安全加固。
+
+**Files:**
+- Modify: `web/controller/xui.go:24`
+- Modify: `web/html/xui/inbounds.html`（10 处）、`web/html/xui/setting.html`（8 处）、`web/html/xui/access_log_modal.html`（2 处）、`web/html/xui/inbound_modal.html`（1 处）
+- Modify: 测试中引用该路由的文件——`web/controller/inbound_online_test.go`、`inbound_regions_test.go`、`inbound_renew_test.go`、`inbound_accesslog_test.go`、`setting_shaping_test.go`
+- Modify: `CLAUDE.md:63`
+
+**Interfaces:**
+- Consumes: 无
+- Produces: 面板路由前缀 `/aui`；完整 URL 形态 `https://<域名><basePath>aui/inbounds`
+
+**三条边界：**
+
+1. **不改目录名 `web/html/xui/`。**那是文件系统路径，用户看不见；模板名由 `{{define}}` 决定、不依赖目录名，但 `web.go` 的 `getHtmlTemplate` 按目录遍历，改它风险大而收益为零。
+2. **不做 `/xui` → `/aui` 的兼容重定向。**目的是品牌一致性，留着旧前缀等于没改干净；老部署书签失效是可接受的一次性代价。
+3. **`web/html_test.go` 里的 `/xui` 若指的是目录路径而非路由，不要改。**先分辨再动手。
+
+- [ ] **Step 1: 确认改动面，区分路由与目录路径**
+
+```bash
+grep -rn '"/xui' --include='*.go' . | grep -v '^./.superpowers'
+grep -rn "/xui/" web/assets/js/ web/html/
+grep -rln "/xui" --include='*_test.go' . | grep -v '^./.superpowers'
+```
+
+逐个判断每一处是**路由前缀**（要改）还是**文件系统路径 `web/html/xui/`**（不改）。把判断结果写进报告。
+
+- [ ] **Step 2: 先让测试变红**
+
+改 `web/controller/xui.go:24`：
+
+```go
+	g = g.Group("/aui")
+```
+
+然后跑：
+
+```bash
+CGO_ENABLED=1 go test ./web/... 2>&1 | tail -20
+```
+
+Expected: `web/controller` 下那几个测试 FAIL（它们请求的还是 `/xui/...` 路径，现在会 404）。**这个红是预期的**，它证明这些测试确实覆盖到了路由，也确认了改动面完整。把失败输出记进报告。
+
+- [ ] **Step 3: 改前端 21 处**
+
+`web/html/xui/` 下四个文件里所有 `'/xui/inbound/...'`、`"/xui/setting/..."` 之类的请求路径改为 `/aui/...`。注意这些是 axios 的相对路径，`web/html/common/js.html:19` 的 `axios.defaults.baseURL = basePath` 会把它们拼成 `<basePath>/aui/...`——**不要**自己在前面加 basePath。
+
+改完必须跑（`getHtmlTemplate` 会吞掉 `ParseFS` 错误，`go build` 发现不了模板语法错误）：
+
+```bash
+CGO_ENABLED=1 go test ./web/ -run 'TestAllTemplatesParse|TestVueDirectivesLiveInsideAVueRoot' -v
+```
+
+- [ ] **Step 4: 改测试里的路由路径**
+
+把那几个 controller 测试里请求的 `/xui/...` 改成 `/aui/...`，然后：
+
+```bash
+CGO_ENABLED=1 go test ./web/... 2>&1 | tail -20
+```
+
+Expected: 全部 PASS（Step 2 造成的红全部转绿）。
+
+- [ ] **Step 5: 更新 CLAUDE.md**
+
+`CLAUDE.md:63` 的路由树描述里 `/xui/*`、`/xui/inbound/*`、`/xui/setting/*` 改为 `/aui/*` 等。**只改这一处描述**，不要顺手改文档里别的内容。
+
+- [ ] **Step 6: 全量验证**
+
+```bash
+make verify
+```
+Expected: 全绿。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add web/controller/xui.go web/html/xui/ web/controller/*_test.go CLAUDE.md
+git commit -m "refactor(route): 面板路由前缀 /xui 改为 /aui"
 ```
