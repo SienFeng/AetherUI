@@ -1028,6 +1028,51 @@ class Inbound extends XrayCommonClass {
         return this.stream.security === 'tls' || this.stream.security === 'reality';
     }
 
+    // 已被当前 Xray 核心移除的配置项。它们仍可能存在于老入站里，
+    // 而对应的下拉选项已经从界面上删掉了——如果不显式标出来，用户编辑
+    // 这类入站时 a-select 只是显示空白，随手一保存就把传输方式静默改成
+    // 别的，这是用户可见行为的静默变更。
+    //
+    // 返回的每一项都要能直接渲染成一句人话，所以带上 fix。
+    get deprecatedFeatures() {
+        const found = [];
+        if (this.stream.security === 'xtls') {
+            found.push({
+                field: '安全层',
+                value: 'xtls',
+                fix: '改用 tls 或 reality。Legacy XTLS 已从核心移除。',
+            });
+        }
+        if (this.stream.network === 'http' || this.stream.network === 'h2') {
+            found.push({
+                field: '传输方式',
+                value: this.stream.network,
+                fix: '改用 ws 或 grpc。HTTP/2 传输已从核心移除。',
+            });
+        }
+        if (this.stream.network === 'quic') {
+            found.push({
+                field: '传输方式',
+                value: 'quic',
+                fix: '改用 ws 或 grpc。QUIC 传输已从核心移除。',
+            });
+        }
+        const clients = this.settings && (this.settings.vlesses || this.settings.clients);
+        if (clients instanceof Array) {
+            for (const c of clients) {
+                if (c && c.flow && c.flow !== FLOW_CONTROL.VISION) {
+                    found.push({
+                        field: 'flow',
+                        value: c.flow,
+                        fix: '改用 xtls-rprx-vision 或留空。',
+                    });
+                    break;
+                }
+            }
+        }
+        return found;
+    }
+
     canEnableXTls() {
         switch (this.protocol) {
             case Protocols.VLESS:
