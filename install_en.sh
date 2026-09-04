@@ -309,9 +309,38 @@ reality_flow() {
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Configuration failed: ${out}${plain}"
         echo -e "${yellow}The panel keeps its default configuration and remains reachable${plain}"
+        # Usually true (the line above is accurate) — but if this is a
+        # reconfigure that overwrites an existing setup (e.g. switching back
+        # from domain mode to no-domain mode), webListen may already have
+        # been set to 127.0.0.1 by an earlier successful run, and this
+        # failed bootstrap call won't undo that. The rescue commands must
+        # still be printed — better than betting once on "usually fine" and
+        # swallowing the one case where it wasn't.
+        print_rescue_hint "${detected_port}"
         return 1
     fi
     print_result "${out}" "reality" "${detected_port}"
+}
+
+# The single source of the two rescue commands, shared by print_result and
+# every failure branch after the bootstrap call point — this is the last
+# safety net of the "a failure must never lock the panel out" principle;
+# duplicating this logic in two places would only drift. $1 is the panel
+# port: pass it when known, empty otherwise — falls back to "check the port
+# via menu option 7 first" instead of fabricating a number that might be wrong.
+print_rescue_hint() {
+    local port="$1"
+    echo -e ""
+    echo -e "${yellow}If the panel is unreachable, recover with either:${plain}"
+    echo -e "  a-ui setting -listen \"\"                       # restore listening on all interfaces"
+    if [[ -n "${port}" ]]; then
+        echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<server-IP>     # or an SSH tunnel"
+    else
+        # Can't fabricate a specific port number when detection failed —
+        # a wrong guess would make this lifeline useless.
+        echo -e "  SSH tunnel: first use a-ui menu option 7 to check the panel's actual port, then run"
+        echo -e "  ssh -L <port>:127.0.0.1:<port> root@<server-IP>"
+    fi
 }
 
 print_result() {
@@ -350,17 +379,7 @@ print_result() {
     if [[ "${mode}" == "reality" ]]; then
         echo -e "${green}A VLESS+Vision+REALITY inbound has been created (port 443); log in to the panel to view the share link and QR code${plain}"
     fi
-    echo -e ""
-    echo -e "${yellow}If the panel is unreachable, recover with either:${plain}"
-    echo -e "  a-ui setting -listen \"\"                       # restore listening on all interfaces"
-    if [[ -n "${port}" ]]; then
-        echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<server-IP>     # or an SSH tunnel"
-    else
-        # Can't fabricate a specific port number when detection failed —
-        # a wrong guess would make this lifeline useless.
-        echo -e "  SSH tunnel: first use a-ui menu option 7 to check the panel's actual port, then run"
-        echo -e "  ssh -L <port>:127.0.0.1:<port> root@<server-IP>"
-    fi
+    print_rescue_hint "${port}"
     echo -e ""
     echo -e "${yellow}Note: this setup hides the panel only. Inbound ports you create in the panel remain exposed,${plain}"
     echo -e "${yellow}with the same resistance to detection as before this setup.${plain}"
@@ -914,6 +933,15 @@ domain_flow() {
             -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to write the panel configuration: ${out}${plain}"
+        # This particular call most likely didn't manage to set webListen to
+        # 127.0.0.1 (bootstrap writes every other field first and -listen
+        # last, so a mid-way failure usually never reaches it). But if this
+        # is a reconfigure that overwrites an existing setup, webListen may
+        # already have been 127.0.0.1 from an earlier successful run —
+        # there's no way to tell "never touched" apart from "touched before,
+        # untouched this time" from here, so print it either way rather than
+        # bet once on a distinction we can't actually make.
+        print_rescue_hint "${panel_port}"
         return 1
     fi
     systemctl restart a-ui
@@ -921,6 +949,10 @@ domain_flow() {
         echo -e "${red}Panel health check failed after restart; 127.0.0.1:${panel_port} is not responding${plain}"
         echo -e "${red}The panel configuration was written, but the process may have exited right after starting (a common cause: the certificate path doesn't exist or isn't readable)${plain}"
         echo -e "${yellow}Troubleshoot: journalctl -u a-ui -n 50${plain}"
+        # bootstrap already succeeded by this point, so webListen has
+        # already been changed to 127.0.0.1 — this is exactly the moment
+        # these two commands exist for, not just a journalctl pointer.
+        print_rescue_hint "${panel_port}"
         return 1
     fi
     print_result "${out}" "caddy"

@@ -282,9 +282,33 @@ reality_flow() {
     if [[ $? -ne 0 ]]; then
         echo -e "${red}配置失败：${out}${plain}"
         echo -e "${yellow}面板保持默认配置，仍可正常访问${plain}"
+        # 通常这条分支面板确实没被动过（上面那句提示是对的）；但如果这是
+        # 一次覆盖已有配置的重装（比如从有域名模式切回无域名模式），
+        # webListen 完全可能在上一次成功配置里就已经被改成了 127.0.0.1，
+        # 这次 bootstrap 失败不会把它改回来——救援命令必须照样打印，
+        # 不能因为“通常情况下不需要”就省掉这唯一一次判断失误的兜底。
+        print_rescue_hint "${detected_port}"
         return 1
     fi
     print_result "${out}" "reality" "${detected_port}"
+}
+
+# 两条救援命令的唯一出处，print_result 与 bootstrap 调用点之后的每一条
+# 失败分支共用——这是「失败不锁面板」原则的最后一道保险，两份逻辑各写
+# 一遍必然漂移。参数 $1 是面板端口：拿得到就传，拿不到传空串，退化成
+# 「先用菜单第 7 项查看端口」的提示，不编造一个可能是错的数字。
+print_rescue_hint() {
+    local port="$1"
+    echo -e ""
+    echo -e "${yellow}如果面板打不开，用以下任一方式恢复：${plain}"
+    echo -e "  a-ui setting -listen \"\"                       # 恢复监听所有 IP"
+    if [[ -n "${port}" ]]; then
+        echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<本机IP>     # 或走 SSH 隧道"
+    else
+        # 端口没探测到就不能编出一个具体数字——猜错了这条救命通道就是废的。
+        echo -e "  ssh 隧道：先用 a-ui 菜单第 7 项查看面板实际端口，再执行"
+        echo -e "  ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>"
+    fi
 }
 
 print_result() {
@@ -317,16 +341,7 @@ print_result() {
     if [[ "${mode}" == "reality" ]]; then
         echo -e "${green}已创建 VLESS+Vision+REALITY 入站（443 端口），登录面板即可查看分享链接与二维码${plain}"
     fi
-    echo -e ""
-    echo -e "${yellow}如果面板打不开，用以下任一方式恢复：${plain}"
-    echo -e "  a-ui setting -listen \"\"                       # 恢复监听所有 IP"
-    if [[ -n "${port}" ]]; then
-        echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<本机IP>     # 或走 SSH 隧道"
-    else
-        # 端口没探测到就不能编出一个具体数字——猜错了这条救命通道就是废的。
-        echo -e "  ssh 隧道：先用 a-ui 菜单第 7 项查看面板实际端口，再执行"
-        echo -e "  ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>"
-    fi
+    print_rescue_hint "${port}"
     echo -e ""
     echo -e "${yellow}注意：本次配置隐藏的是面板。你在面板里创建的入站端口仍然对外暴露，${plain}"
     echo -e "${yellow}其抗探测能力与配置前相同。${plain}"
@@ -829,6 +844,13 @@ domain_flow() {
             -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}写入面板配置失败：${out}${plain}"
+        # 这次调用本身多半没能把 webListen 改成 127.0.0.1（bootstrap 按
+        # 「先写完其余字段、最后才写监听地址」的顺序执行，中途出错时 -listen
+        # 那一步大概率没跑到）。但如果这是一次覆盖已有配置的重装，webListen
+        # 完全可能在更早一次成功的配置里就已经是 127.0.0.1 了——这里没有
+        # 办法区分"从未改过"和"之前改过、这次没改动"，所以两种情况都打印，
+        # 让用户自己判断要不要用，比赌一次判断失误、把救援命令吞掉安全。
+        print_rescue_hint "${panel_port}"
         return 1
     fi
     systemctl restart a-ui
@@ -836,6 +858,10 @@ domain_flow() {
         echo -e "${red}面板重启后探活失败，127.0.0.1:${panel_port} 没有响应${plain}"
         echo -e "${red}面板配置已写入，但进程可能启动后又退出了（常见原因：证书路径不存在或不可读）${plain}"
         echo -e "${yellow}排查：journalctl -u a-ui -n 50${plain}"
+        # 走到这里 bootstrap 已经成功返回，webListen 已经被改成了
+        # 127.0.0.1——这是整个改造里最需要这两条命令的时刻，不能只给
+        # journalctl 排查提示。
+        print_rescue_hint "${panel_port}"
         return 1
     fi
     print_result "${out}" "caddy"

@@ -232,7 +232,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 `install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——`Type=simple` 无 `Restart=` 意味着「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来）。
 
-两条救援命令（`print_result` 每次成功/失败都会打印）：
+两条救援命令由 `print_rescue_hint` 统一打印，`print_result`（成功收尾）内部调用它，`domain_flow`/`reality_flow` 里 `a-ui bootstrap` 调用点**之后**的每一条失败分支也各自调用一次——判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」：`bootstrap` 调用之前的失败（域名为空、Caddy 装失败、伪装站预检不过等）不打印，那时 `webListen` 还没被动过，打印反而是噪音；`bootstrap` 已经跑过之后的失败（写入配置本身失败、写完配置后面板重启探活失败）都打印，因为要么这次调用本身已经把 `webListen` 改成了 `127.0.0.1`，要么这是一次覆盖已有配置的重装、`webListen` 在更早一次成功配置里就已经是 `127.0.0.1` 了——两种情况在脚本里区分不出来，宁可多打印一次不需要的提示，也不能在真正需要救援命令的时候把它吞掉：
 
 ```
 a-ui setting -listen ""                        # 恢复监听所有 IP
