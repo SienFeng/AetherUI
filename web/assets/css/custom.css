@@ -215,3 +215,10 @@ html, body {
 .ant-progress-inner {
     background-color: #EBEEF5;
 }
+
+/* 「添加入站」弹窗表单密度：antd a-form-item 默认 margin-bottom: 24px，
+ * 弹窗里十几行累积起来太松。限定到这个弹窗的 id，不影响分流管理、面板设置
+ * 等其他页面同样在用的 a-form-item。 */
+#inbound-modal .ant-form-item {
+    margin-bottom: 10px;
+}
