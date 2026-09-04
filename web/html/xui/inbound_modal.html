@@ -2,6 +2,7 @@
 <a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title" @ok="inModal.ok"
          :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
          :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'
+         :width="900"
          :ok-button-props="{ props: { disabled: inbound.deprecatedFeatures.length > 0 } }">
     {{template "form/inbound"}}
 </a-modal>
