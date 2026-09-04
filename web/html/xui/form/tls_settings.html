@@ -65,7 +65,7 @@
 <!-- tls 高级设置 -->
 <a-collapse v-if="inbound.stream.isTls" style="margin-top: 8px;">
     <a-collapse-panel header="TLS 高级设置（留空即安全默认）">
-        <a-form layout="horizontal" :label-col="{ span: 14 }" :wrapper-col="{ span: 9 }">
+        <a-form layout="horizontal">
             <a-row :gutter="16">
                 <a-col :span="6">
                     <a-form-item>
@@ -116,7 +116,7 @@
             </a-row>
         </a-form>
 
-        <a-form layout="horizontal" :label-col="{ span: 7 }" :wrapper-col="{ span: 16 }" style="margin-top: 8px;">
+        <a-form layout="horizontal" style="margin-top: 8px;">
             <a-form-item>
                 <span slot="label">
                     cipherSuites
@@ -129,14 +129,14 @@
                     </a-tooltip>
                 </span>
                 <a-select mode="multiple" :value="tlsCipherList"
-                          @change="onTlsCipherChange" style="width: 420px;"
+                          @change="onTlsCipherChange" style="width: 100%;"
                           placeholder="留空 = auto">
                     <a-select-option v-for="c in TLS_CIPHER_OPTION" :key="c" :value="c">[[ c ]]</a-select-option>
                 </a-select>
             </a-form-item>
         </a-form>
 
-        <a-form layout="horizontal" :label-col="{ span: 7 }" :wrapper-col="{ span: 16 }" style="margin-top: 8px;">
+        <a-form layout="horizontal" style="margin-top: 8px;">
             <a-form-item>
                 <span slot="label">
                     ECH
@@ -155,11 +155,11 @@
             </a-form-item>
             <a-form-item label="echServerKeys">
                 <a-input v-model.trim="inbound.stream.tls.echServerKeys"
-                         style="width: 320px;"></a-input>
+                         style="width: 100%;"></a-input>
             </a-form-item>
             <a-form-item label="echConfigList">
                 <a-input v-model.trim="inbound.stream.tls.settings.echConfigList"
-                         style="width: 320px;"></a-input>
+                         style="width: 100%;"></a-input>
             </a-form-item>
         </a-form>
     </a-collapse-panel>
