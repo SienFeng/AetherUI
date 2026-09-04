@@ -954,16 +954,49 @@ install_cert_sync() {
 # so it can't be referenced directly.
 set -euo pipefail
 domain="$1"
-src=$(find /var/lib/caddy -type f -name "${domain}.crt" 2>/dev/null | head -1)
-key=$(find /var/lib/caddy -type f -name "${domain}.key" 2>/dev/null | head -1)
-[[ -z "${src}" || -z "${key}" ]] && exit 0
-changed=0
-cmp -s "${src}" /root/cert/fullchain.cer || changed=1
-cmp -s "${key}" "/root/cert/${domain}.key" || changed=1
-[[ "${changed}" == "0" ]] && exit 0
-install -m 644 "${src}" /root/cert/fullchain.cer
-install -m 600 "${key}" "/root/cert/${domain}.key"
-logger -t a-ui-cert-sync "Certificate synced to /root/cert"
+
+# /var/lib/caddy not existing at all is a perfectly normal state (a
+# user-installed Caddy may keep its data in /root/.local/share/caddy, or
+# Caddy may not have created a certificate store yet). Without this guard,
+# under set -euo pipefail the failing find makes the whole run fail and
+# systemd records it as failed — a normal state reported as a fault.
+[[ -d /var/lib/caddy ]] || exit 0
+
+# Locate the newest certificate directory by mtime first, then take both
+# the cert and the key from **that same directory**. Two independent
+# `find | head -1` calls are a trap: when a Caddy renewal falls back from
+# Let's Encrypt to ZeroSSL, a second CA directory appears under
+# certificates/ and the two finds may land in different directories — at
+# best cert and key no longer match, at worst the same stale directory
+# keeps winning, cmp reports "unchanged" every time, and the certificate
+# in /root/cert/ stays frozen until it expires. That is the same shape as
+# the "acme.sh renewed fine but nginx never picked up the new cert"
+# incident recorded in spec §8, with a different mechanism.
+certdir=$(find /var/lib/caddy -type f -name "${domain}.crt" -printf '%T@ %h\n' 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)
+if [[ -n "${certdir}" && -f "${certdir}/${domain}.crt" && -f "${certdir}/${domain}.key" ]]; then
+    src="${certdir}/${domain}.crt"
+    key="${certdir}/${domain}.key"
+    changed=0
+    cmp -s "${src}" /root/cert/fullchain.cer || changed=1
+    cmp -s "${key}" "/root/cert/${domain}.key" || changed=1
+    if [[ "${changed}" == "1" ]]; then
+        install -m 644 "${src}" /root/cert/fullchain.cer
+        install -m 600 "${key}" "/root/cert/${domain}.key"
+        logger -t a-ui-cert-sync "Certificate synced to /root/cert"
+    fi
+fi
+
+# The expiry check must run unconditionally, not only when something was
+# actually copied: the freezing scenario above shows up precisely as
+# **nothing changing**, so a check on the copy path would never catch it.
+# It only warns and never tries to fix anything — renewal is Caddy's job
+# and this script has no business deciding otherwise.
+if command -v openssl >/dev/null 2>&1 && [[ -s /root/cert/fullchain.cer ]]; then
+    if ! openssl x509 -in /root/cert/fullchain.cer -checkend 86400 -noout >/dev/null 2>&1; then
+        logger -t a-ui-cert-sync "WARNING: /root/cert/fullchain.cer expires within 24 hours or has already expired; check Caddy's certificate renewal"
+    fi
+fi
 SYNCEOF
     chmod +x /usr/local/bin/a-ui-cert-sync
 
@@ -989,9 +1022,16 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now a-ui-cert-sync.timer
-    # Run it once immediately, don't wait for the first period
-    systemctl start a-ui-cert-sync.service
+    if ! systemctl enable --now a-ui-cert-sync.timer 2>/dev/null; then
+        echo -e "${yellow}Warning: could not enable the certificate sync timer; renewed certificates will not be synced to /root/cert automatically${plain}"
+    fi
+    # Run it once immediately, don't wait for the first period. The exit
+    # code has to be reported honestly: the caller decides from it whether
+    # to write the /root/cert/ paths into the panel's "default paths for
+    # new inbounds" — writing them after a failed sync would leave the
+    # admin with a default that inbound validation is guaranteed to reject.
+    systemctl start a-ui-cert-sync.service || return 1
+    return 0
 }
 
 # Detect whether acme.sh is also managing the domain that was just set up.

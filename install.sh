@@ -836,16 +836,42 @@ install_cert_sync() {
 # Caddy 自己的存储路径含 ACME CA 目录名，签发机构一换就变，不能直接引用。
 set -euo pipefail
 domain="$1"
-src=$(find /var/lib/caddy -type f -name "${domain}.crt" 2>/dev/null | head -1)
-key=$(find /var/lib/caddy -type f -name "${domain}.key" 2>/dev/null | head -1)
-[[ -z "${src}" || -z "${key}" ]] && exit 0
-changed=0
-cmp -s "${src}" /root/cert/fullchain.cer || changed=1
-cmp -s "${key}" "/root/cert/${domain}.key" || changed=1
-[[ "${changed}" == "0" ]] && exit 0
-install -m 644 "${src}" /root/cert/fullchain.cer
-install -m 600 "${key}" "/root/cert/${domain}.key"
-logger -t a-ui-cert-sync "证书已同步到 /root/cert"
+
+# /var/lib/caddy 整体不存在是完全正常的状态（用户自己装的 Caddy 数据目录
+# 可能在 /root/.local/share/caddy，或者 Caddy 还没建立过证书存储）。不加
+# 这道判断的话，set -euo pipefail 下 find 报错会让本次运行以失败告终，
+# systemd 把它记成 failed——一个正常状态被报成故障。
+[[ -d /var/lib/caddy ]] || exit 0
+
+# 先按 mtime 定位最新的那个证书目录，再从**同一个目录**里取 cert 与 key。
+# 两次独立的 `find | head -1` 是个陷阱：Caddy 某次续期从 Let's Encrypt 回落
+# 到 ZeroSSL 时，certificates/ 下会出现第二个 CA 目录，两次 find 可能各自
+# 命中不同目录——轻则 cert 与 key 配不上对，重则一直命中旧目录，cmp 每次
+# 都判"没变"，/root/cert/ 下的证书就此冻结到过期。这与 spec §8 记的那次
+# "acme.sh 续期成功但 nginx 从没用上新证书"是同一个形状，只是换了套机制。
+certdir=$(find /var/lib/caddy -type f -name "${domain}.crt" -printf '%T@ %h\n' 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)
+if [[ -n "${certdir}" && -f "${certdir}/${domain}.crt" && -f "${certdir}/${domain}.key" ]]; then
+    src="${certdir}/${domain}.crt"
+    key="${certdir}/${domain}.key"
+    changed=0
+    cmp -s "${src}" /root/cert/fullchain.cer || changed=1
+    cmp -s "${key}" "/root/cert/${domain}.key" || changed=1
+    if [[ "${changed}" == "1" ]]; then
+        install -m 644 "${src}" /root/cert/fullchain.cer
+        install -m 600 "${key}" "/root/cert/${domain}.key"
+        logger -t a-ui-cert-sync "证书已同步到 /root/cert"
+    fi
+fi
+
+# 有效期检查必须无条件跑，不能只在"这次真的复制了"时才跑：上面那种
+# 冻结场景的表征恰恰是**什么都没变**，只靠复制路径上的检查永远发现不了。
+# 只告警不做任何补救——续期是 Caddy 的事，这个脚本没有权限替它决定。
+if command -v openssl >/dev/null 2>&1 && [[ -s /root/cert/fullchain.cer ]]; then
+    if ! openssl x509 -in /root/cert/fullchain.cer -checkend 86400 -noout >/dev/null 2>&1; then
+        logger -t a-ui-cert-sync "警告：/root/cert/fullchain.cer 将在 24 小时内过期或已过期，请检查 Caddy 的证书续期状态"
+    fi
+fi
 SYNCEOF
     chmod +x /usr/local/bin/a-ui-cert-sync
 
@@ -871,9 +897,14 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now a-ui-cert-sync.timer
-    # 立刻跑一次，别等第一个周期
-    systemctl start a-ui-cert-sync.service
+    if ! systemctl enable --now a-ui-cert-sync.timer 2>/dev/null; then
+        echo -e "${yellow}警告：证书同步定时器启用失败，证书续期后不会自动同步到 /root/cert${plain}"
+    fi
+    # 立刻跑一次，别等第一个周期。返回码要如实透出：调用方据此决定要不要
+    # 把 /root/cert/ 下的路径写进面板的"新建入站默认值"——同步没成功却照写，
+    # 等于给管理员留了一个必然会被入站校验拒绝的默认值。
+    systemctl start a-ui-cert-sync.service || return 1
+    return 0
 }
 
 # 检测 acme.sh 是否也在管理刚配置好的这个域名。从 x-ui + acme.sh 迁移过来的

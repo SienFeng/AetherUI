@@ -256,6 +256,13 @@ a-ui setting -listen ""                        # 恢复监听所有 IP
 ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>    # 或走 SSH 隧道，端口用 a-ui setting -show 查
 ```
 
+### 证书同步（`/root/cert/`）
+
+Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变，所以面板与各入站引用的是固定路径 `/root/cert/`，由 `a-ui-cert-sync`（systemd timer，每小时）从 Caddy 的存储同步过去。两条不能退回去的写法：
+
+- **先按 mtime 定位最新的证书目录，再从同一个目录取 cert 与 key。** 两次独立的 `find … | head -1` 会在某次续期从 Let's Encrypt 回落到 ZeroSSL（`certificates/` 下多出第二个 CA 目录）时各自命中不同目录：轻则 cert 与 key 配不上对，重则一直命中旧目录，`cmp` 每次都判「没变」，`/root/cert/` 的证书就此冻结到过期。这与 spec §8 记的那次「acme.sh 续期成功但 nginx 从没用上新证书」是同一个形状。同步脚本末尾的 `openssl x509 -checkend` 因此必须**无条件**跑，不能只在「这次真的复制了」时跑——冻结场景的表征恰恰是什么都没变。
+- **同步没成功就不写 `defaultCertFile`/`defaultKeyFile`。** `domain_flow` 在调 `bootstrap` 之前用 `[[ -s ... ]]` 验收 `/root/cert/` 下的两个文件，不满足就干脆不传这两个参数。写了一个空路径进去，管理员此后新建任何 TLS 入站都会被 `ValidateInboundReplacing` 用一个他从没输入过的路径拒掉。
+
 ### 能力边界：不提升节点自身的抗探测能力
 
 这次改造收窄的是**面板**的暴露面（明文 HTTP、固定端口、默认根路径 `/`），**不是**已创建入站的暴露面。`:2886` 这类 vmess+ws+tls 入站改造前后一样直接监听在公网端口上，浏览器直连会得到 400 或断连，这个特征没有变化，443 上的伪装站也保护不到它们——伪装站只接管 Caddy 自己监听的 80/443。安装完成的提示文案必须如实告知这一点（`print_result` 末尾那段），不能让管理员误以为「配了域名 = 节点也变安全了」。真正把入站收编到 Caddy 之后（明文 ws 监听 127.0.0.1、按随机 path 由 Caddy 分流）是设计文档里明确写的下一期，不在本次范围。
