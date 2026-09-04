@@ -196,6 +196,10 @@ class AllSetting {
         this.concurrencyIdleTimeout = 120;
         this.tcInterface = "";
 
+        this.defaultDomain = "";
+        this.defaultCertFile = "";
+        this.defaultKeyFile = "";
+
         if (data == null) {
             return
         }

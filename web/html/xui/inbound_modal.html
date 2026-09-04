@@ -26,6 +26,7 @@
                 this.inbound = Inbound.fromJson(inbound.toJson());
             } else {
                 this.inbound = new Inbound();
+                this.applyPanelDefaults(this.inbound);
             }
             if (dbInbound) {
                 this.dbInbound = new DBInbound(dbInbound);
@@ -35,6 +36,25 @@
             this.confirm = confirm;
             this.visible = true;
             this.loadProvinces();
+        },
+        // 只对**新建**的入站生效：编辑既有入站时用的是它自己存下来的值，
+        // 覆盖会静默改掉管理员之前的配置。
+        applyPanelDefaults(inbound) {
+            if (typeof PanelDefaults === 'undefined') {
+                return;
+            }
+            if (PanelDefaults.domain) {
+                inbound.stream.tls.server = PanelDefaults.domain;
+            }
+            const cert = inbound.stream.tls.certs[0];
+            if (cert) {
+                if (PanelDefaults.certFile) {
+                    cert.certFile = PanelDefaults.certFile;
+                }
+                if (PanelDefaults.keyFile) {
+                    cert.keyFile = PanelDefaults.keyFile;
+                }
+            }
         },
         provinces: [],
         provincesLoaded: false,

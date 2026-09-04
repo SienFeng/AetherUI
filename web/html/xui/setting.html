@@ -83,6 +83,9 @@
                         <a-tab-pane key="3" tab="xray 相关设置">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                         <a-tab-pane key="4" tab="IP 归属地库">

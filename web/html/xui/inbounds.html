@@ -720,6 +720,16 @@
     });
 
 </script>
+<script>
+    // 模板引擎是 html/template，script 上下文里的插值会自动做 JS 字符串
+    // 转义并补齐引号，所以这里不要自己加引号（写字面量花括号会被模板引擎
+    // 当成一个空的模板动作而解析失败，因此本注释里不能出现它）。
+    const PanelDefaults = {
+        domain: {{ .default_domain }},
+        certFile: {{ .default_cert_file }},
+        keyFile: {{ .default_key_file }},
+    };
+</script>
 {{template "inboundModal"}}
 {{template "promptModal"}}
 {{template "qrcodeModal"}}
