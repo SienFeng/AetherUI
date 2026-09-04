@@ -428,19 +428,123 @@ install_caddy() {
 
 ensure_static_site() {
     mkdir -p /var/www/html
-    [[ -f /var/www/html/index.html ]] && return 0
+    if [[ -f /var/www/html/index.html ]]; then
+        return 0
+    fi
     cat > /var/www/html/index.html <<'HTMLEOF'
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Welcome</title></head>
-<body><h1>Welcome</h1><p>This site is under construction.</p></body></html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       max-width: 42rem; margin: 6rem auto; padding: 0 1.5rem; line-height: 1.7;
+       color: #24292f; }
+h1 { font-size: 1.5rem; font-weight: 600; }
+p { color: #57606a; }
+</style>
+</head>
+<body>
+<h1>Welcome</h1>
+<p>This site is under construction.</p>
+</body>
+</html>
 HTMLEOF
 }
 
-# 桩：Task 8 用完整实现（候选清单 + 预检 + 自填 URL）替换它。
-# stdout 输出空串表示使用本地静态页。
+# 判定不通过的三种情况：状态码非 2xx；跳转到别的域名；被 Cloudflare 拦截。
+# 探测者看到一个坏掉的镜像站，比看到一个朴素的静态页可疑得多。
+check_mask_site() {
+    local url="$1"
+    local ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    local resp code redirect headers
+
+    resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
+                -w '%{http_code} %{redirect_url}' "${url}" 2>/dev/null) || {
+        echo "无法连接"
+        return 1
+    }
+    code=$(echo "${resp}" | awk '{print $1}')
+    redirect=$(echo "${resp}" | awk '{print $2}')
+
+    if [[ ! "${code}" =~ ^2 ]]; then
+        echo "HTTP ${code}"
+        return 1
+    fi
+    if [[ -n "${redirect}" ]]; then
+        echo "跳转到 ${redirect}"
+        return 1
+    fi
+
+    headers=$(curl -sSI -m 10 -A "${ua}" "${url}" 2>/dev/null)
+    if echo "${headers}" | grep -qi "cf-mitigated"; then
+        echo "被 Cloudflare 拦截"
+        return 1
+    fi
+    return 0
+}
+
+# 候选来自真机实测（2026-09-04 于东京机房 IP）：状态码 2xx、无跳转、无 CF 拦截。
+# 必须从机房 IP 测，住宅 IP 的结果不作数——同一个站，住宅 IP 正常、
+# 机房 IP 吃 403 或人机验证非常常见。站点策略会变，隔一段时间要重测。
+#
+# 已实测拒绝、不要加回来的：gnu.org（连不上）、tesla.com（403）。
+# 注意 tesla.com 只是不能作为**反代目标**；它作为 REALITY 的 dest 完全可用，
+# 两者判据不同（REALITY 是 TCP 透传，不发 HTTP 请求）。
+MASK_SITES=(
+    "https://www.wikipedia.org"
+    "https://www.bing.com"
+    "https://www.microsoft.com"
+    "https://www.apple.com"
+    "https://www.amazon.co.jp"
+    "https://www.nicovideo.jp"
+    "https://www.python.org"
+    "https://www.debian.org"
+    "https://www.kernel.org"
+    "https://nginx.org"
+)
+
+# stdout 输出选定的 URL；输出空串表示使用本地静态页；返回非 0 表示用户放弃。
+# 提示全部写到 stderr——调用方用 $(...) 捕获 stdout 作为 URL。
+# read 显式从 /dev/tty 读：本函数跑在命令替换的子 shell 里，不这样写读不到终端输入。
 choose_mask_site() {
-    ensure_static_site
-    echo ""
+    echo -e "" >&2
+    echo -e "${green}请选择伪装站点：${plain}" >&2
+    local i=1
+    for s in "${MASK_SITES[@]}"; do
+        echo "  ${i}) ${s}" >&2
+        i=$((i + 1))
+    done
+    echo "  ${i}) 自己填一个网址" >&2
+    echo "  0) 不反代，使用自带静态页" >&2
+
+    local choice url reason
+    while true; do
+        read -p "请输入序号: " choice </dev/tty
+        if [[ "${choice}" == "0" ]]; then
+            ensure_static_site
+            echo ""
+            return 0
+        elif [[ "${choice}" == "${i}" ]]; then
+            read -p "请输入网址（含 https://）: " url </dev/tty
+        elif [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -lt "${i}" ]]; then
+            url="${MASK_SITES[$((choice - 1))]}"
+        else
+            echo -e "${red}无效的序号${plain}" >&2
+            continue
+        fi
+
+        echo -e "正在从本机测试 ${url} 是否可反代…" >&2
+        if reason=$(check_mask_site "${url}"); then
+            echo -e "${green}可用${plain}" >&2
+            echo "${url}"
+            return 0
+        fi
+        # 不静默回退到静态页：那会让用户以为伪装成了某站，实际不是。
+        echo -e "${red}${url} 不可用（${reason}），请另选${plain}" >&2
+    done
 }
 
 # Caddyfile 结构见 spec §7。两处关键点：
