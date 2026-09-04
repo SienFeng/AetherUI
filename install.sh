@@ -365,13 +365,15 @@ print_result() {
     local url
     url=$(echo "${json}" | jq -r '.panelUrl // empty' 2>/dev/null)
 
-    # panelUrl 里的 "<服务器IP>" 是 bootstrap 留给脚本填的占位符（面板
+    # panelUrl 里的 "{SERVER_IP}" 是 bootstrap 留给脚本填的占位符（面板
     # 进程不知道自己的公网 IP）；探测不到就保留占位符并额外提示，
-    # 不能默默打印一个看起来正常、实际打不开的地址。
-    if [[ "${url}" == *"<服务器IP>"* ]]; then
+    # 不能默默打印一个看起来正常、实际打不开的地址。占位符是语言无关的
+    # 字面量，中英两份脚本匹配的是同一个串（见 bootstrap/bootstrap.go 的
+    # panelURL）。
+    if [[ "${url}" == *"{SERVER_IP}"* ]]; then
         local ip
         ip=$(public_ip)
-        [[ -n "${ip}" ]] && url="${url//<服务器IP>/${ip}}"
+        [[ -n "${ip}" ]] && url="${url//\{SERVER_IP\}/${ip}}"
     fi
 
     echo -e ""
@@ -379,8 +381,8 @@ print_result() {
     if [[ -n "${url}" ]]; then
         echo -e "${green}面板地址: ${url}${plain}"
     fi
-    if [[ "${url}" == *"<服务器IP>"* ]]; then
-        echo -e "${yellow}（未能自动探测服务器公网 IP，请把地址中的 <服务器IP> 换成你的服务器公网 IP）${plain}"
+    if [[ "${url}" == *"{SERVER_IP}"* ]]; then
+        echo -e "${yellow}（未能自动探测服务器公网 IP，请把地址中的 {SERVER_IP} 换成你的服务器公网 IP）${plain}"
     fi
     if [[ "${url}" == *":0/"* ]]; then
         echo -e "${yellow}（未能确定面板当前监听的端口，请用 a-ui 菜单选项 7 查看实际端口）${plain}"

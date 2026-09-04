@@ -84,6 +84,19 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
+	// 建入站放在所有 Set* 之前：它是整个 Run 里唯一会做真实工作、也唯一
+	// 会真实失败的步骤（443 被占、checkPortExist 判重、xray 校验拒绝），
+	// 而它不依赖任何设置项。放在后面的话，一旦它失败，webBasePath 已经
+	// 被改成了新的随机路径，reality_flow 却照样打印"面板保持默认配置，
+	// 仍可正常访问"——管理员按原地址打不开面板，而屏幕上的提示告诉他
+	// 什么都没变。提到前面之后，reality 路径近似全有或全无：入站建不
+	// 起来就一个设置项都不写。
+	if opts.Mode == "reality" {
+		if err := createRealityInbound(opts); err != nil {
+			return nil, err
+		}
+	}
+
 	s := service.SettingService{}
 
 	if opts.Port > 0 {
@@ -107,12 +120,6 @@ func Run(opts Options) (*Result, error) {
 	if opts.KeyFile != "" {
 		if err := s.SetDefaultKeyFile(opts.KeyFile); err != nil {
 			return nil, fmt.Errorf("写入默认密钥路径失败: %w", err)
-		}
-	}
-
-	if opts.Mode == "reality" {
-		if err := createRealityInbound(opts); err != nil {
-			return nil, err
 		}
 	}
 
@@ -240,7 +247,10 @@ func panelURL(opts Options) string {
 	if opts.Mode == "caddy" {
 		return fmt.Sprintf("https://%v%v", opts.Domain, normalizedBasePath(opts.BasePath))
 	}
-	return fmt.Sprintf("http://<服务器IP>:%v%v", opts.Port, normalizedBasePath(opts.BasePath))
+	// 占位符必须语言无关：安装脚本靠子串匹配把它替换成探测到的公网 IP，
+	// 而中英两份脚本共用这一个字面量。写成中文的话，英文脚本要么匹配不到
+	// （那就在英文产品里漏出中文），要么被迫在自己的代码里硬编码一段中文。
+	return fmt.Sprintf("http://{SERVER_IP}:%v%v", opts.Port, normalizedBasePath(opts.BasePath))
 }
 
 func normalizedBasePath(p string) string {

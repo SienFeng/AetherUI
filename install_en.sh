@@ -409,7 +409,7 @@ print_result() {
     local url
     url=$(echo "${json}" | jq -r '.panelUrl // empty' 2>/dev/null)
 
-    # "<服务器IP>" in panelUrl is a placeholder bootstrap leaves for this
+    # "{SERVER_IP}" in panelUrl is a placeholder bootstrap leaves for this
     # script to fill in (the panel process doesn't know its own public
     # IP). Note: this placeholder is a literal string hardcoded in the Go
     # binary (bootstrap/bootstrap.go) and is not localized, so it must be
@@ -418,10 +418,10 @@ print_result() {
     # When the IP can't be detected, keep the placeholder and print an
     # extra hint instead of silently showing an address that looks fine
     # but doesn't actually work.
-    if [[ "${url}" == *"<服务器IP>"* ]]; then
+    if [[ "${url}" == *"{SERVER_IP}"* ]]; then
         local ip
         ip=$(public_ip)
-        [[ -n "${ip}" ]] && url="${url//<服务器IP>/${ip}}"
+        [[ -n "${ip}" ]] && url="${url//\{SERVER_IP\}/${ip}}"
     fi
 
     echo -e ""
@@ -429,8 +429,8 @@ print_result() {
     if [[ -n "${url}" ]]; then
         echo -e "${green}Panel URL: ${url}${plain}"
     fi
-    if [[ "${url}" == *"<服务器IP>"* ]]; then
-        echo -e "${yellow}(Could not auto-detect this server's public IP; please replace <服务器IP> in the address with your server's public IP)${plain}"
+    if [[ "${url}" == *"{SERVER_IP}"* ]]; then
+        echo -e "${yellow}(Could not auto-detect this server's public IP; please replace {SERVER_IP} in the address with your server's public IP)${plain}"
     fi
     if [[ "${url}" == *":0/"* ]]; then
         echo -e "${yellow}(Could not determine the panel's current listening port; use a-ui menu option 7 to check the actual port)${plain}"
