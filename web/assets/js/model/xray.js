@@ -40,10 +40,54 @@ const RULE_DOMAIN = {
     SPEEDTEST: 'geosite:speedtest',
 };
 
+// 当前 Xray 核心（infra/conf/vless.go:51）只接受 "" 与 xtls-rprx-vision。
+// 旧的 xtls-rprx-origin / xtls-rprx-direct 已被移除，填了会让整份配置加载失败。
 const FLOW_CONTROL = {
-    ORIGIN: "xtls-rprx-origin",
-    DIRECT: "xtls-rprx-direct",
+    VISION: "xtls-rprx-vision",
 };
+
+const TLS_VERSION_OPTION = ["1.0", "1.1", "1.2", "1.3"];
+
+// 只列真正生效的 TLS 1.2 套件。核心把这个串按 ":" 切开逐个查表，
+// 查不到的**静默丢弃**（transport/internet/tls/config.go:459-463，没有
+// else 分支），所以界面必须是下拉多选而不是自由文本框。
+// 另外 Go 的 crypto/tls 不接受 TLS 1.3 的套件配置——Vision 与 REALITY 都走
+// 1.3，这一项对它们完全无效。
+const TLS_CIPHER_OPTION = [
+    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+];
+
+// 不含 unsafe / hellogolang：核心在 transport_security.go:181 拒绝这两个值。
+// 注意那段校验只在 REALITY 作为**出站**时生效，入站侧核心根本不读这个字段，
+// 所以 xray run -test 验不出来，只能靠这个列表挡住。
+const UTLS_FINGERPRINT = [
+    "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq",
+    "random", "randomized",
+];
+
+const ALPN_OPTION = ["h3", "h2", "http/1.1"];
+
+const SNIFFING_OPTION = ["http", "tls", "quic", "fakedns"];
+
+// 伪装目标候选。四项判据（TLS1.3 / ALPN h2 / X25519 系密钥交换 / 证书有效）
+// 已于 2026-09-03 逐个实测确认，且均不命中核心的高风险判定
+// （transport_security.go:164-170：.ru/.ir/.cn 后缀，含 apple/icloud/microsoft）。
+// 五个域名当时都协商出 X25519MLKEM768，满足 3x-ui reality_scan.go:298 的判据。
+// 复核方式见本计划 Task 4 Step 1；域名的 TLS 配置会变，隔一段时间要重测。
+//
+// player.twitch.tv 曾是候选，因协商不出 ALPN h2 被淘汰——不要再加回来。
+const REALITY_TARGET_PRESETS = [
+    "www.lovelive-anime.jp",
+    "www.amazon.co.jp",
+    "www.tesla.com",
+    "www.cloudflare.com",
+    "www.nicovideo.jp",
+];
 
 Object.freeze(Protocols);
 Object.freeze(VmessMethods);
@@ -51,6 +95,12 @@ Object.freeze(SSMethods);
 Object.freeze(RULE_IP);
 Object.freeze(RULE_DOMAIN);
 Object.freeze(FLOW_CONTROL);
+Object.freeze(TLS_VERSION_OPTION);
+Object.freeze(TLS_CIPHER_OPTION);
+Object.freeze(UTLS_FINGERPRINT);
+Object.freeze(ALPN_OPTION);
+Object.freeze(SNIFFING_OPTION);
+Object.freeze(REALITY_TARGET_PRESETS);
 
 class XrayCommonClass {
 
@@ -331,67 +381,6 @@ class WsStreamSettings extends XrayCommonClass {
     }
 }
 
-class HttpStreamSettings extends XrayCommonClass {
-    constructor(path='/', host=['']) {
-        super();
-        this.path = path;
-        this.host = host.length === 0 ? [''] : host;
-    }
-
-    addHost(host) {
-        this.host.push(host);
-    }
-
-    removeHost(index) {
-        this.host.splice(index, 1);
-    }
-
-    static fromJson(json={}) {
-        return new HttpStreamSettings(json.path, json.host);
-    }
-
-    toJson() {
-        let host = [];
-        for (let i = 0; i < this.host.length; ++i) {
-            if (!ObjectUtil.isEmpty(this.host[i])) {
-                host.push(this.host[i]);
-            }
-        }
-        return {
-            path: this.path,
-            host: host,
-        }
-    }
-}
-
-class QuicStreamSettings extends XrayCommonClass {
-    constructor(security=VmessMethods.NONE,
-                key='', type='none') {
-        super();
-        this.security = security;
-        this.key = key;
-        this.type = type;
-    }
-
-    static fromJson(json={}) {
-        return new QuicStreamSettings(
-            json.security,
-            json.key,
-            json.header ? json.header.type : 'none',
-        );
-    }
-
-    toJson() {
-        return {
-            security: this.security,
-            key: this.key,
-            header: {
-                type: this.type,
-            }
-        }
-    }
-}
-
 class GrpcStreamSettings extends XrayCommonClass {
     constructor(serviceName="") {
         super();
@@ -492,8 +481,6 @@ class StreamSettings extends XrayCommonClass {
                 tcpSettings=new TcpStreamSettings(),
                 kcpSettings=new KcpStreamSettings(),
                 wsSettings=new WsStreamSettings(),
-                httpSettings=new HttpStreamSettings(),
-                quicSettings=new QuicStreamSettings(),
                 grpcSettings=new GrpcStreamSettings(),
                 ) {
         super();
@@ -503,8 +490,6 @@ class StreamSettings extends XrayCommonClass {
         this.tcp = tcpSettings;
         this.kcp = kcpSettings;
         this.ws = wsSettings;
-        this.http = httpSettings;
-        this.quic = quicSettings;
         this.grpc = grpcSettings;
     }
 
@@ -533,12 +518,7 @@ class StreamSettings extends XrayCommonClass {
     }
 
     static fromJson(json={}) {
-        let tls;
-        if (json.security === "xtls") {
-            tls = TlsStreamSettings.fromJson(json.xtlsSettings);
-        } else {
-            tls = TlsStreamSettings.fromJson(json.tlsSettings);
-        }
+        let tls = TlsStreamSettings.fromJson(json.tlsSettings);
         return new StreamSettings(
             json.network,
             json.security,
@@ -546,8 +526,6 @@ class StreamSettings extends XrayCommonClass {
             TcpStreamSettings.fromJson(json.tcpSettings),
             KcpStreamSettings.fromJson(json.kcpSettings),
             WsStreamSettings.fromJson(json.wsSettings),
-            HttpStreamSettings.fromJson(json.httpSettings),
-            QuicStreamSettings.fromJson(json.quicSettings),
             GrpcStreamSettings.fromJson(json.grpcSettings),
         );
     }
@@ -558,12 +536,9 @@ class StreamSettings extends XrayCommonClass {
             network: network,
             security: this.security,
             tlsSettings: this.isTls ? this.tls.toJson() : undefined,
-            xtlsSettings: this.isXTls ? this.tls.toJson() : undefined,
             tcpSettings: network === 'tcp' ? this.tcp.toJson() : undefined,
             kcpSettings: network === 'kcp' ? this.kcp.toJson() : undefined,
             wsSettings: network === 'ws' ? this.ws.toJson() : undefined,
-            httpSettings: network === 'http' ? this.http.toJson() : undefined,
-            quicSettings: network === 'quic' ? this.quic.toJson() : undefined,
             grpcSettings: network === 'grpc' ? this.grpc.toJson() : undefined,
         };
     }
@@ -673,10 +648,6 @@ class Inbound extends XrayCommonClass {
         return this.network === "kcp";
     }
 
-    get isQuic() {
-        return this.network === "quic"
-    }
-
     get isGrpc() {
         return this.network === "grpc";
     }
@@ -767,8 +738,6 @@ class Inbound extends XrayCommonClass {
             return this.stream.tcp.request.getHeader("Host");
         } else if (this.isWs) {
             return this.stream.ws.getHeader("Host");
-        } else if (this.isH2) {
-            return this.stream.http.host[0];
         }
         return null;
     }
@@ -778,22 +747,8 @@ class Inbound extends XrayCommonClass {
             return this.stream.tcp.request.path[0];
         } else if (this.isWs) {
             return this.stream.ws.path;
-        } else if (this.isH2) {
-            return this.stream.http.path[0];
         }
         return null;
-    }
-
-    get quicSecurity() {
-        return this.stream.quic.security;
-    }
-
-    get quicKey() {
-        return this.stream.quic.key;
-    }
-
-    get quicType() {
-        return this.stream.quic.type;
     }
 
     get kcpType() {
@@ -822,8 +777,6 @@ class Inbound extends XrayCommonClass {
         switch (this.network) {
             case "tcp":
             case "ws":
-            case "http":
-            case "quic":
             case "grpc":
                 return true;
             default:
@@ -833,6 +786,28 @@ class Inbound extends XrayCommonClass {
 
     canSetTls() {
         return this.canEnableTls();
+    }
+
+    // REALITY 只支持 RAW(tcp) / XHTTP / gRPC（infra/conf/transport_internet.go:100）。
+    // 本项目不做 XHTTP，因此只剩 tcp 与 grpc。
+    canEnableReality() {
+        switch (this.protocol) {
+            case Protocols.VLESS:
+            case Protocols.TROJAN:
+                break;
+            default:
+                return false;
+        }
+        return this.network === "tcp" || this.network === "grpc";
+    }
+
+    // Vision 只对 VLESS 有效，且外层必须是 TLS 1.3 或 REALITY
+    // （proxy/vless/inbound/inbound.go:573 在运行期检查，run -test 查不出来）。
+    canEnableVision() {
+        if (this.protocol !== Protocols.VLESS) {
+            return false;
+        }
+        return this.stream.security === 'tls' || this.stream.security === 'reality';
     }
 
     canEnableXTls() {
@@ -1207,7 +1182,10 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
 };
 Inbound.VLESSSettings.VLESS = class extends XrayCommonClass {
 
-    constructor(id=RandomUtil.randomUUID(), flow=FLOW_CONTROL.DIRECT) {
+    // 旧默认值 FLOW_CONTROL.DIRECT（xtls-rprx-direct）随 Step 2 一并移除；
+    // 默认不带 flow，用户需要 Vision 时通过表单显式选择
+    // （canEnableVision() 还要求外层是 tls/reality，新建入站默认两者都没开）。
+    constructor(id=RandomUtil.randomUUID(), flow='') {
         super();
         this.id = id;
         this.flow = flow;
@@ -1295,7 +1273,8 @@ Inbound.TrojanSettings = class extends Inbound.Settings {
     }
 };
 Inbound.TrojanSettings.Client = class extends XrayCommonClass {
-    constructor(password=RandomUtil.randomSeq(10), flow=FLOW_CONTROL.DIRECT) {
+    // 同上：旧默认值 FLOW_CONTROL.DIRECT 已随 Step 2 移除，默认不带 flow。
+    constructor(password=RandomUtil.randomSeq(10), flow='') {
         super();
         this.password = password;
         this.flow = flow;
