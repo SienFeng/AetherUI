@@ -6,8 +6,6 @@
             <a-select-option value="tcp">tcp</a-select-option>
             <a-select-option value="kcp">kcp</a-select-option>
             <a-select-option value="ws">ws</a-select-option>
-            <a-select-option value="http">http</a-select-option>
-            <a-select-option value="quic">quic</a-select-option>
             <a-select-option value="grpc">grpc</a-select-option>
         </a-select>
     </a-form-item>
@@ -26,16 +24,6 @@
 <!-- ws -->
 <template v-if="inbound.stream.network === 'ws'">
     {{template "form/streamWS"}}
-</template>
-
-<!-- http -->
-<template v-if="inbound.stream.network === 'http'">
-    {{template "form/streamHTTP"}}
-</template>
-
-<!-- quic -->
-<template v-if="inbound.stream.network === 'quic'">
-    {{template "form/streamQUIC"}}
 </template>
 
 <!-- grpc -->
