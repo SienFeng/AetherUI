@@ -107,9 +107,9 @@
 
 <!-- 限制与配额 -->
 <a-card size="small" title="限制与配额" style="margin-bottom: 8px;" :body-style="{ padding: '12px 16px' }">
-    <a-form layout="horizontal" :label-col="{ span: 6 }" :wrapper-col="{ span: 18 }">
+    <a-form layout="horizontal" :label-col="{ span: 14 }" :wrapper-col="{ span: 10 }">
         <a-row :gutter="16">
-            <a-col :span="12">
+            <a-col :span="8">
                 <a-form-item>
                     <span slot="label">
                         并发限制
@@ -126,7 +126,7 @@
                     <a-input-number v-model="dbInbound.concurrencyLimit" :min="0" :max="1000" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
-            <a-col :span="12">
+            <a-col :span="8">
                 <a-form-item>
                     <span slot="label">
                         下行限速(Mbps)
@@ -142,7 +142,7 @@
                     <a-input-number v-model="dbInbound.downMbit" :min="0" :max="100000" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
-            <a-col :span="12">
+            <a-col :span="8">
                 <a-form-item>
                     <span slot="label">
                         上行限速(Mbps)
@@ -216,7 +216,7 @@
     <template v-if="inbound.canEnableTls()">
         <a-form v-if="inbound.canEnableTls()" layout="horizontal" :label-col="{ span: 6 }" :wrapper-col="{ span: 18 }">
             <a-row :gutter="16">
-                <a-col :span="24">
+                <a-col :span="12">
                     <a-form-item>
                         <span slot="label">
                             安全层

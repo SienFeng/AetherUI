@@ -1,33 +1,43 @@
 {{define "form/streamSettings"}}
 <!-- select stream network -->
-<a-form layout="inline">
-    <a-form-item label="传输">
-        <a-select v-model="inbound.stream.network" @change="streamNetworkChange">
-            <a-select-option value="tcp">tcp</a-select-option>
-            <a-select-option value="kcp">kcp</a-select-option>
-            <a-select-option value="ws">ws</a-select-option>
-            <a-select-option value="grpc">grpc</a-select-option>
-        </a-select>
-    </a-form-item>
+<a-form layout="horizontal" :label-col="{ span: 6 }" :wrapper-col="{ span: 18 }">
+    <a-row :gutter="16">
+        <a-col :span="12">
+            <a-form-item label="传输">
+                <a-select v-model="inbound.stream.network" @change="streamNetworkChange">
+                    <a-select-option value="tcp">tcp</a-select-option>
+                    <a-select-option value="kcp">kcp</a-select-option>
+                    <a-select-option value="ws">ws</a-select-option>
+                    <a-select-option value="grpc">grpc</a-select-option>
+                </a-select>
+            </a-form-item>
+        </a-col>
+
+        <!-- tcp -->
+        <template v-if="inbound.stream.network === 'tcp'">
+            {{template "form/streamTCP"}}
+        </template>
+
+        <!-- kcp -->
+        <template v-if="inbound.stream.network === 'kcp'">
+            {{template "form/streamKCP"}}
+        </template>
+
+        <!-- ws -->
+        <template v-if="inbound.stream.network === 'ws'">
+            {{template "form/streamWS"}}
+        </template>
+
+        <!-- grpc -->
+        <template v-if="inbound.stream.network === 'grpc'">
+            {{template "form/streamGRPC"}}
+        </template>
+    </a-row>
 </a-form>
 
-<!-- tcp -->
+<!-- tcp 的 http 请求/响应伪装细节字段较多，且互相之间是 a-row 之外的独立块，
+     不适合塞进上面那个以 a-col 为直接子元素的传输行，因此单独放在行外。 -->
 <template v-if="inbound.stream.network === 'tcp'">
-    {{template "form/streamTCP"}}
-</template>
-
-<!-- kcp -->
-<template v-if="inbound.stream.network === 'kcp'">
-    {{template "form/streamKCP"}}
-</template>
-
-<!-- ws -->
-<template v-if="inbound.stream.network === 'ws'">
-    {{template "form/streamWS"}}
-</template>
-
-<!-- grpc -->
-<template v-if="inbound.stream.network === 'grpc'">
-    {{template "form/streamGRPC"}}
+    {{template "form/streamTCPRequestResponse"}}
 </template>
 {{end}}
