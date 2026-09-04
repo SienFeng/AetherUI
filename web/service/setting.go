@@ -308,6 +308,10 @@ func (s *SettingService) GetListen() (string, error) {
 	return s.getString("webListen")
 }
 
+func (s *SettingService) SetListen(listen string) error {
+	return s.setString("webListen", listen)
+}
+
 func (s *SettingService) GetPort() (int, error) {
 	return s.getInt("webPort")
 }
@@ -347,6 +351,17 @@ func (s *SettingService) GetBasePath() (string, error) {
 		basePath += "/"
 	}
 	return basePath, nil
+}
+
+// SetBasePath 写入面板 URL 根路径，按 entity.CheckValid 的规则补齐首尾斜杠。
+func (s *SettingService) SetBasePath(basePath string) error {
+	if !strings.HasPrefix(basePath, "/") {
+		basePath = "/" + basePath
+	}
+	if !strings.HasSuffix(basePath, "/") {
+		basePath += "/"
+	}
+	return s.setString("webBasePath", basePath)
 }
 
 func (s *SettingService) GetTimeLocation() (*time.Location, error) {

@@ -91,7 +91,46 @@ func resetSetting() {
 	}
 }
 
-func updateSetting(port int, username string, password string) {
+// settingFlags 是 `a-ui setting` 解析后的参数。
+//
+// Listen / BasePath 用指针：flag 包区分不了「没传 -listen」和「传了
+// -listen ""」，两者都是空字符串，而这两种语义完全相反——前者要保持
+// 原值不动，后者是面板被锁在 127.0.0.1 上时的救援入口（清空监听地址
+// = 监听所有 IP）。靠 flag.Visit 遍历实际出现过的 flag 来区分。
+type settingFlags struct {
+	Reset    bool
+	Port     int
+	Username string
+	Password string
+	Listen   *string
+	BasePath *string
+}
+
+func parseSettingFlags(args []string) (settingFlags, error) {
+	cmd := flag.NewFlagSet("setting", flag.ContinueOnError)
+	var f settingFlags
+	var listen, basePath string
+	cmd.BoolVar(&f.Reset, "reset", false, "reset all setting")
+	cmd.IntVar(&f.Port, "port", 0, "set panel port")
+	cmd.StringVar(&f.Username, "username", "", "set login username")
+	cmd.StringVar(&f.Password, "password", "", "set login password")
+	cmd.StringVar(&listen, "listen", "", "set panel listen ip, empty means all")
+	cmd.StringVar(&basePath, "basepath", "", "set panel url base path")
+	if err := cmd.Parse(args); err != nil {
+		return f, err
+	}
+	cmd.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "listen":
+			f.Listen = &listen
+		case "basepath":
+			f.BasePath = &basePath
+		}
+	})
+	return f, nil
+}
+
+func updateSetting(f settingFlags) {
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println(err)
@@ -100,17 +139,35 @@ func updateSetting(port int, username string, password string) {
 
 	settingService := service.SettingService{}
 
-	if port > 0 {
-		err := settingService.SetPort(port)
+	if f.Port > 0 {
+		err := settingService.SetPort(f.Port)
 		if err != nil {
 			fmt.Println("set port failed:", err)
 		} else {
-			fmt.Printf("set port %v success", port)
+			fmt.Printf("set port %v success\n", f.Port)
 		}
 	}
-	if username != "" || password != "" {
+	if f.Listen != nil {
+		err := settingService.SetListen(*f.Listen)
+		if err != nil {
+			fmt.Println("set listen failed:", err)
+		} else if *f.Listen == "" {
+			fmt.Println("set listen to all interfaces success")
+		} else {
+			fmt.Printf("set listen %v success\n", *f.Listen)
+		}
+	}
+	if f.BasePath != nil {
+		err := settingService.SetBasePath(*f.BasePath)
+		if err != nil {
+			fmt.Println("set base path failed:", err)
+		} else {
+			fmt.Printf("set base path %v success\n", *f.BasePath)
+		}
+	}
+	if f.Username != "" || f.Password != "" {
 		userService := service.UserService{}
-		err := userService.UpdateFirstUser(username, password)
+		err := userService.UpdateFirstUser(f.Username, f.Password)
 		if err != nil {
 			fmt.Println("set username and password failed:", err)
 		} else {
@@ -134,16 +191,6 @@ func main() {
 	var dbPath string
 	v2uiCmd.StringVar(&dbPath, "db", "/etc/v2-ui/v2-ui.db", "set v2-ui db file path")
 
-	settingCmd := flag.NewFlagSet("setting", flag.ExitOnError)
-	var port int
-	var username string
-	var password string
-	var reset bool
-	settingCmd.BoolVar(&reset, "reset", false, "reset all setting")
-	settingCmd.IntVar(&port, "port", 0, "set panel port")
-	settingCmd.StringVar(&username, "username", "", "set login username")
-	settingCmd.StringVar(&password, "password", "", "set login password")
-
 	oldUsage := flag.Usage
 	flag.Usage = func() {
 		oldUsage()
@@ -151,7 +198,7 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("    run            run web panel")
 		fmt.Println("    v2-ui          migrate form v2-ui")
-		fmt.Println("    setting        set settings")
+		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset）")
 		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
 	}
 
@@ -182,15 +229,15 @@ func main() {
 	case "tc-clear":
 		clearTrafficShaping()
 	case "setting":
-		err := settingCmd.Parse(os.Args[2:])
+		f, err := parseSettingFlags(os.Args[2:])
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		if reset {
+		if f.Reset {
 			resetSetting()
 		} else {
-			updateSetting(port, username, password)
+			updateSetting(f)
 		}
 	default:
 		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' subcommands")
@@ -198,8 +245,6 @@ func main() {
 		runCmd.Usage()
 		fmt.Println()
 		v2uiCmd.Usage()
-		fmt.Println()
-		settingCmd.Usage()
 	}
 }
 
