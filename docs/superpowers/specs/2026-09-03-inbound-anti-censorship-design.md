@@ -71,19 +71,33 @@
 
 这三条是本设计中伪装目标预置列表、`minClientVer` 默认值与 REALITY 端口策略的**直接依据**。三条都是 `LogWarning` 而非 `error`——**配置照常加载、`xray run -test` 照常返回 `Configuration OK`**，所以面板不主动提示的话，管理员永远不会知道自己踩了哪条：
 
-**（a）`transport_security.go:118`** — `minClientVer` 留空时默认 `[]byte{26, 3, 27}`，即只接受 Xray v26.3.27 及以上的客户端。紧邻的 `:116` 写着：
+**（a）`transport_security.go:118`** — `minClientVer` 留空时默认 `[]byte{26, 3, 27}`，即只接受 Xray v26.3.27 及以上的客户端。紧邻的 `:116`（位于 `if c.MinClientVer != ""` 分支内，因此**填任何非空值都会触发，不分调高调低**）写着：
 
 > `REALITY: Changing "minClientVer" will increase the likelihood of your server's IP being blocked by the GFW`
 
 也就是说**「兼容旧客户端」与「不被墙」在 REALITY 上直接冲突**。已与需求方确认：**安全优先，表单默认留空，交给核心用 26.3.27**。旧客户端必须升级。
 
-**（b）`transport_security.go:164-170`** — 核心对伪装目标做后缀与子串匹配，命中即警告「提高被 GFW 封锁的概率」：
+**（b）`transport_security.go:163-169`** — 核心遍历 **`serverNames`**（不是伪装目标 `target`／`dest`）做后缀与子串匹配，命中即警告「提高被 GFW 封锁的概率」：
 
 ```
 后缀 .ru / .ir / .cn，或包含 apple / icloud / microsoft
 ```
 
-**推论：预置的伪装目标列表必须避开这六类。** 社区里广为流传的 `www.microsoft.com`、`swdist.apple.com`、`gateway.icloud.com` 全部踩雷，不得进入预置列表。
+**这里有一个极易读错的地方，本文档初稿就读错了**：核心那条日志写的是 `Choosing "<sn>" as the target will increase...`，措辞指向「target」，但它遍历的切片是 `config.ServerNames`。判定的是 **serverNames**，与 `target`／`dest` 无关。
+
+```go
+for _, sn := range config.ServerNames {      // ← 不是 config.Dest
+    sn = strings.ToLower(sn)
+    if strings.HasSuffix(sn, ".ru") || strings.HasSuffix(sn, ".ir") || strings.HasSuffix(sn, ".cn") ||
+        strings.Contains(sn, "apple") || strings.Contains(sn, "icloud") || strings.Contains(sn, "microsoft") {
+        errors.LogWarning(context.Background(), `REALITY: Choosing "`, sn, `" as the target will increase ...`)
+    }
+}
+```
+
+按 target 判定会在「target 安全、serverNames 危险」时**漏报**——恰好复现本子系统要消灭的那类静默失效。此错误在实现期由代码审查发现并纠正（2026-09-04），面板侧的判定实现在 `web/html/xui/inbound_modal.html` 的 `realityTargetRisky`，读的是 `serverNames`（逗号分隔逐项判断，任一命中即警告）。
+
+**推论：预置的伪装目标列表与 serverNames 都必须避开这六类。** 社区里广为流传的 `www.microsoft.com`、`swdist.apple.com`、`gateway.icloud.com` 全部踩雷，不得进入预置列表。
 
 **（c）`infra/conf/xray.go:177-179`** — REALITY 入站的端口列表必须**恰好只有一个端口且等于 443**，否则警告：
 
@@ -117,9 +131,11 @@ ECH：`:391-398`，`echServerKeys` 走 `base64.StdEncoding` 解码（**注意与
 |---|---|---|---|
 | REALITY x25519 | `main/commands/all/curve25519.go:38-58` | `crypto/ecdh` + `encoding/base64` | 标准库 |
 | REALITY ML-DSA-65 | `main/commands/all/mldsa65.go:30-46` | `circl/sign/mldsa/mldsa65` | `go.mod` indirect 已有 `cloudflare/circl v1.6.4` |
-| TLS ECH | `main/commands/all/tls/ech.go:42-149` | `circl/hpke` + `golang.org/x/crypto/cryptobyte` | 两者均已在 indirect 区 |
+| TLS ECH | `main/commands/all/tls/ech.go:42-149` | **标准库 `crypto/hpke`**（Go 1.24+）+ `golang.org/x/crypto/cryptobyte` | 前者是标准库，后者已在 indirect 区 |
 
-**结论：不新增任何 Go 模块**，只把已有的两个 indirect 依赖提升为 direct。这满足路线图 §4.1「新增任何其他依赖前，先说明标准库与现有依赖为何不足」。
+**结论：不新增任何 Go 模块**，只把已有的两个 indirect 依赖（`cloudflare/circl`、`golang.org/x/crypto`）提升为 direct。这满足路线图 §4.1「新增任何其他依赖前，先说明标准库与现有依赖为何不足」。
+
+**本文档初稿在 ECH 一行写的是 `circl/hpke`，是错的**：xray-core 的 `main/commands/all/tls/ech.go:5` 导入的是标准库 `crypto/hpke`（Go 1.24 起提供，本仓库 `go.mod` 声明 go 1.27.0），其 `HKDFSHA256()` / `AES128GCM()` / `DHKEM()` 等函数式 API 与 circl 的类型化常量 API 并不兼容。此错误在实现期由 TDD 暴露并纠正（2026-09-03），实际实现用的是标准库。
 
 **不采用 exec `bin/xray x25519` 的方案**，理由：`bin/xray-darwin-arm64` 在 `.gitignore` 中，本地开发环境没有该文件，密钥生成会直接失败；而密钥生成与配置校验不同，**不能 fail open**——生成不出来就是生成不出来。
 

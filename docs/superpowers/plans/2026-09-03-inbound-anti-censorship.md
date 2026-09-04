@@ -459,7 +459,8 @@ import (
 	"encoding/base64"
 	"io"
 
-	"github.com/cloudflare/circl/hpke"
+	"crypto/hpke"
+
 	"golang.org/x/crypto/cryptobyte"
 )
 
@@ -2246,21 +2247,32 @@ REALITY 的表单不按 network 分支渲染（它自己的 `v-if="inbound.strea
 `computed` 加高风险目标判定——判定逻辑逐字对应核心的 `transport_security.go:164-170`：
 
 ```js
-            // 与核心 transport_security.go:164-170 的判定逐条对应：
-            // 后缀 .ru/.ir/.cn，或域名中含 apple/icloud/microsoft。
+            // 与核心 transport_security.go:163-169 的判定逐条对应。
+            //
+            // 【本计划初稿在这里写错过】核心那条日志的措辞是
+            // `Choosing "<sn>" as the target will increase...`，看着像在说
+            // 「伪装目标」，但它遍历的切片是 config.ServerNames。判定的是
+            // serverNames，与 target/dest 无关。按 target 判会在「target 安全、
+            // serverNames 危险」时漏报——恰好是本功能要消灭的那类静默失效。
+            //
             // 核心命中时只在启动日志里 LogWarning，配置照常加载，而面板从不
             // 展示 xray 日志——不在这里提示，管理员没有任何途径知道。
             realityTargetRisky() {
-                const target = (this.inbound.stream.reality.target || '').toLowerCase();
-                if (target === '') {
-                    return false;
+                const raw = this.inbound.stream.reality.serverNames || '';
+                // serverNames 存的是逗号分隔的多个域名，任一命中即为风险。
+                for (const item of String(raw).split(',')) {
+                    const sn = item.trim().toLowerCase();
+                    if (sn === '') {
+                        continue;
+                    }
+                    if (sn.endsWith('.ru') || sn.endsWith('.ir') || sn.endsWith('.cn')) {
+                        return true;
+                    }
+                    if (sn.includes('apple') || sn.includes('icloud') || sn.includes('microsoft')) {
+                        return true;
+                    }
                 }
-                // target 形如 "www.example.com:443"，判定只看主机名部分。
-                const host = target.split(':')[0];
-                if (host.endsWith('.ru') || host.endsWith('.ir') || host.endsWith('.cn')) {
-                    return true;
-                }
-                return host.includes('apple') || host.includes('icloud') || host.includes('microsoft');
+                return false;
             },
 ```
 
