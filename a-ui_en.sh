@@ -800,11 +800,24 @@ reconfig_domain() {
 # Stop Caddy and restore direct access to the panel. Only stops the
 # service, doesn't remove the package -- the user might be running other
 # sites on it. The order matters: the panel's listen address must be
-# restored and the panel restarted successfully with direct access first,
-# then Caddy is stopped -- doing it the other way round leaves a window
-# where the panel is unreachable through either path. If the panel isn't
-# detected running after the restart, Caddy is left running to avoid
-# locking the user out entirely.
+# restored and a real health probe (not just process status) must confirm
+# direct access actually works, before Caddy is stopped -- doing it the
+# other way round leaves a window where the panel is unreachable through
+# either path.
+#
+# The bar can't be just `systemctl status` (whether the process is
+# running): main.go's updateSetting only fmt.Println's on a SetListen
+# write failure, it doesn't os.Exit -- `a-ui setting` as a whole still
+# returns 0. If the write happens to fail (disk full, DB locked), the
+# panel restarts fine with the old webListen still in effect, so checking
+# only process status would wrongly conclude "fixed" and go on to stop
+# Caddy right after -- reproducing exactly the "unreachable through
+# either path" situation this feature exists to avoid. So this actually
+# fires an HTTP request at the panel's real port and base path instead,
+# the same approach as install.sh's wait_for_panel_alive(); but a-ui.sh
+# is a standalone script running in its own process after install, it
+# doesn't share functions with install.sh, so this just re-implements an
+# equivalent check.
 restore_direct_panel() {
     confirm "this will stop Caddy and restore direct access to the panel, domain access will stop working immediately, continue" "n"
     if [[ $? != 0 ]]; then
@@ -816,10 +829,38 @@ restore_direct_panel() {
 
     /usr/local/a-ui/a-ui setting -listen ""
     systemctl restart a-ui
-    sleep 2
-    check_status
+
+    # The panel's port and base path may have both been randomized, don't
+    # assume 54321 or "/" -- ask the panel itself. `a-ui setting -show`
+    # is a new readonly entry point added along with this change, so this
+    # doesn't depend on sqlite3, a tool that isn't guaranteed to be
+    # installed (install_base only installs wget/curl/tar/jq).
+    local show_out port basepath
+    show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null)
     if [[ $? != 0 ]]; then
-        LOGE "a-ui isn't detected running after the restart; to avoid locking you out entirely, Caddy will not be stopped this time"
+        LOGE "failed to read the panel's current settings; to avoid locking you out entirely, Caddy will not be stopped this time"
+        LOGE "check a-ui log to find out why, then retry this once the panel is reachable directly"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+    port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
+    basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
+
+    local alive=1 i
+    if [[ -n "${port}" ]]; then
+        for i in 1 2 3 4 5; do
+            if curl -fsS -m 3 "http://127.0.0.1:${port}${basepath}" -o /dev/null 2>/dev/null; then
+                alive=0
+                break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ "${alive}" != "0" ]]; then
+        LOGE "panel health check failed after restart; 127.0.0.1:${port}${basepath} is not responding"
+        LOGE "to avoid locking you out entirely, Caddy will not be stopped this time"
         LOGE "check a-ui log to find out why, then retry this once the panel is reachable directly"
         if [[ $# == 0 ]]; then
             before_show_menu
@@ -830,22 +871,7 @@ restore_direct_panel() {
     systemctl stop caddy 2>/dev/null
     systemctl disable caddy 2>/dev/null
     LOGI "Caddy stopped (the package and its config are kept; systemctl enable --now caddy restores it)"
-
-    # The panel port may have been changed to a random one, don't assume
-    # 54321: probe the port the running a-ui process is actually bound to,
-    # and say so honestly if it can't be found rather than guessing.
-    local pid port
-    pid=$(systemctl show -p MainPID a-ui 2>/dev/null | cut -d= -f2)
-    if [[ -n "${pid}" && "${pid}" != "0" ]]; then
-        port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
-    fi
-    if [[ -n "${port}" ]]; then
-        LOGI "the panel is now reachable directly at http://<this server's IP>:${port}<panel base path>"
-    else
-        LOGI "the panel is now reachable directly at http://<this server's IP>:<panel port><panel base path> (couldn't detect the current listen port)"
-    fi
-    LOGI "the panel's base path is unchanged, still the one the setup wizard generated; if you forgot it, run:"
-    LOGI "  sqlite3 /etc/a-ui/a-ui.db \"select value from settings where key='webBasePath';\""
+    LOGI "the panel is now reachable directly at http://<this server's IP>:${port}${basepath}"
 
     if [[ $# == 0 ]]; then
         before_show_menu

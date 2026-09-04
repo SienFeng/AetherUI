@@ -101,6 +101,7 @@ func resetSetting() {
 // = 监听所有 IP）。靠 flag.Visit 遍历实际出现过的 flag 来区分。
 type settingFlags struct {
 	Reset    bool
+	Show     bool
 	Port     int
 	Username string
 	Password string
@@ -113,6 +114,11 @@ func parseSettingFlags(args []string) (settingFlags, error) {
 	var f settingFlags
 	var listen, basePath string
 	cmd.BoolVar(&f.Reset, "reset", false, "reset all setting")
+	// 既有调用是 `a-ui setting -show true`（a-ui.sh 的 check_config，
+	// 沿用自更早、-show 尚不存在时的调用写法）。bool flag 只消费自己，
+	// 不吃下一个 token，所以那个多出来的 "true" 会被 flag 包当成剩余的
+	// 位置参数，不解析、不报错——加这个 flag 不需要连带改 a-ui.sh。
+	cmd.BoolVar(&f.Show, "show", false, "show current settings (readonly)")
 	cmd.IntVar(&f.Port, "port", 0, "set panel port")
 	cmd.StringVar(&f.Username, "username", "", "set login username")
 	cmd.StringVar(&f.Password, "password", "", "set login password")
@@ -178,6 +184,74 @@ func updateSetting(f settingFlags) {
 	}
 }
 
+// currentSettings 把面板当前设置读出来拼成展示文本，不做任何写入。
+//
+// 拆成独立函数（而不是内联进 showSetting 直接 os.Exit）是为了能在测试里
+// 验证"-show 不产生任何写入"：调用方先自己 InitDB 到一个临时库，再直接
+// 调这个函数，不用途经 os.Exit 就能拿到返回值——与 bootstrap.Run 假定
+// 调用方已 InitDB、自己不碰 os.Exit 是同一个道理。
+//
+// 输出密码是这个入口的既有契约（a-ui 菜单第 7 项、install.sh 里"忘记
+// 登录信息用菜单第 7 项查看"的提示都靠它），所以调用方需要在展示前
+// 提醒这会在终端打印明文密码。
+func currentSettings() (string, error) {
+	settingService := service.SettingService{}
+	port, err := settingService.GetPort()
+	if err != nil {
+		return "", fmt.Errorf("get port failed: %w", err)
+	}
+	listen, err := settingService.GetListen()
+	if err != nil {
+		return "", fmt.Errorf("get listen failed: %w", err)
+	}
+	basePath, err := settingService.GetBasePath()
+	if err != nil {
+		return "", fmt.Errorf("get base path failed: %w", err)
+	}
+
+	userService := service.UserService{}
+	user, err := userService.GetFirstUser()
+	if err != nil {
+		return "", fmt.Errorf("get user failed: %w", err)
+	}
+
+	// 空监听地址是合法配置（监听所有 IP），不能直接打印空白——那看起来
+	// 像是取值失败。与 updateSetting 里 "set listen to all interfaces
+	// success" 用词保持一致。
+	listenDisplay := listen
+	if listenDisplay == "" {
+		listenDisplay = "all interfaces"
+	}
+
+	return fmt.Sprintf(
+		"Warning: this will print your login password in plain text.\n"+
+			"Port: %v\n"+
+			"Listen: %v\n"+
+			"BasePath: %v\n"+
+			"Username: %v\n"+
+			"Password: %v\n",
+		port, listenDisplay, basePath, user.Username, user.Password,
+	), nil
+}
+
+// showSetting 是 `a-ui setting -show` 的入口，供 a-ui.sh 菜单第 7 项
+// （之前一直依赖一个不存在的 -show，会直接报错）与 restore_direct_panel
+// 恢复面板直连后查询端口/根路径使用，避免它们依赖一个不保证装了的
+// sqlite3 命令行工具。失败时以非零退出码结束——a-ui.sh 的
+// check_config() 靠这个退出码判断要不要提示"获取设置失败"。
+func showSetting() {
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	out, err := currentSettings()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Print(out)
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		runWebServer()
@@ -200,7 +274,7 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("    run            run web panel")
 		fmt.Println("    v2-ui          migrate form v2-ui")
-		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset）")
+		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset/-show）")
 		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
 		fmt.Println("    bootstrap      安装脚本用：写入面板配置并按需创建入站")
 	}
@@ -249,6 +323,8 @@ func main() {
 		}
 		if f.Reset {
 			resetSetting()
+		} else if f.Show {
+			showSetting()
 		} else {
 			updateSetting(f)
 		}

@@ -795,10 +795,18 @@ reconfig_domain() {
 }
 
 # 停用 Caddy 并把面板恢复为直连访问。只停用不卸载软件包——用户可能拿
-# Caddy 跑其它站点。顺序不能颠倒：必须先把面板监听地址改回来、确认面板
-# 用直连方式重启成功，再停 Caddy；反过来会出现一段时间两边都进不去
-# 面板的窗口。若重启后未探测到面板在运行，为避免彻底进不去面板，本次
-# 不会继续停用 Caddy。
+# Caddy 跑其它站点。顺序不能颠倒：必须先把面板监听地址改回来、用真实
+# 探活确认面板直连真的可用，再停 Caddy；反过来会出现一段时间两边都
+# 进不去面板的窗口。
+#
+# 门槛不能只看 `systemctl status`（进程是否在跑）：main.go 的
+# updateSetting 对 SetListen 写库失败只 fmt.Println，不 os.Exit，`a-ui
+# setting` 整体仍返回 0——如果写库恰好失败（磁盘满、DB 被锁），面板会
+# 用旧的 webListen 正常重启起来，只看进程状态会误判"改好了"，紧接着
+# 停掉 Caddy，正好复现这个功能本要避免的"两边都进不去"。所以改成真的
+# 发一次 HTTP 请求到面板实际的端口和根路径，这与 install.sh 的
+# wait_for_panel_alive() 是同一个做法；但 a-ui.sh 是独立脚本、装机后
+# 跑在独立进程里，不与 install.sh 共享函数，只能照抄一份等价逻辑。
 restore_direct_panel() {
     confirm "将停用 Caddy 并把面板恢复为直连访问，域名访问会立即失效，确定继续吗" "n"
     if [[ $? != 0 ]]; then
@@ -810,10 +818,37 @@ restore_direct_panel() {
 
     /usr/local/a-ui/a-ui setting -listen ""
     systemctl restart a-ui
-    sleep 2
-    check_status
+
+    # 面板端口和根路径都可能是随机改过的，不能假设 54321 或 "/"：直接
+    # 问面板自己要——`a-ui setting -show` 是本次改动新增的只读入口，
+    # 不依赖 sqlite3 这类不保证装了的命令行工具（install_base 只装了
+    # wget/curl/tar/jq）。
+    local show_out port basepath
+    show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null)
     if [[ $? != 0 ]]; then
-        LOGE "面板重启后未检测到运行，为避免彻底进不去面板，本次不会停用 Caddy"
+        LOGE "读取面板当前设置失败，为避免彻底进不去面板，本次不会停用 Caddy"
+        LOGE "请用 a-ui log 排查原因，确认面板可直连访问后再重新执行本操作"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
+    port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
+    basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
+
+    local alive=1 i
+    if [[ -n "${port}" ]]; then
+        for i in 1 2 3 4 5; do
+            if curl -fsS -m 3 "http://127.0.0.1:${port}${basepath}" -o /dev/null 2>/dev/null; then
+                alive=0
+                break
+            fi
+            sleep 1
+        done
+    fi
+    if [[ "${alive}" != "0" ]]; then
+        LOGE "面板重启后探活失败，127.0.0.1:${port}${basepath} 没有响应"
+        LOGE "为避免彻底进不去面板，本次不会停用 Caddy"
         LOGE "请用 a-ui log 排查原因，确认面板可直连访问后再重新执行本操作"
         if [[ $# == 0 ]]; then
             before_show_menu
@@ -824,21 +859,7 @@ restore_direct_panel() {
     systemctl stop caddy 2>/dev/null
     systemctl disable caddy 2>/dev/null
     LOGI "Caddy 已停用（软件包与配置均保留，systemctl enable --now caddy 可恢复）"
-
-    # 面板端口可能是随机改过的，不能假设 54321：探测正在跑的 a-ui 进程
-    # 实际监听的端口，探测不到就如实告知，不编一个可能是错的数字。
-    local pid port
-    pid=$(systemctl show -p MainPID a-ui 2>/dev/null | cut -d= -f2)
-    if [[ -n "${pid}" && "${pid}" != "0" ]]; then
-        port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
-    fi
-    if [[ -n "${port}" ]]; then
-        LOGI "面板现可通过 http://<本机IP>:${port}<面板根路径> 直连访问"
-    else
-        LOGI "面板现可通过 http://<本机IP>:<面板端口><面板根路径> 直连访问（未能探测到当前监听端口）"
-    fi
-    LOGI "面板根路径未变，仍是配置向导生成的那个；如果忘记了，可执行:"
-    LOGI "  sqlite3 /etc/a-ui/a-ui.db \"select value from settings where key='webBasePath';\""
+    LOGI "面板现可通过 http://<本机IP>:${port}${basepath} 直连访问"
 
     if [[ $# == 0 ]]; then
         before_show_menu

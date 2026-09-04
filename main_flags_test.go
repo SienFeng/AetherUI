@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"a-ui/database"
+	"a-ui/web/service"
+)
 
 func TestParseSettingFlagsDistinguishesUnsetFromEmpty(t *testing.T) {
 	t.Run("未传 -listen 时为 nil", func(t *testing.T) {
@@ -41,4 +47,80 @@ func TestParseSettingFlagsDistinguishesUnsetFromEmpty(t *testing.T) {
 			t.Fatalf("basepath 期望 /Ab3xK9pQ/，实际 %v", f.BasePath)
 		}
 	})
+}
+
+// -show 是 `a-ui setting -show` 的只读数据源，供 a-ui.sh 菜单第 7 项与
+// restore_direct_panel 查询端口/根路径用。同 bootstrap 包的
+// TestCheckIsReadOnly 一个思路：跑一遍只读入口前后对比设置有没有变，
+// 而不是走 os.Exit 的 showSetting，直接测不碰 os.Exit 的 currentSettings。
+func TestCurrentSettingsIsReadOnly(t *testing.T) {
+	if err := database.InitDB(t.TempDir() + "/test.db"); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+
+	settingService := service.SettingService{}
+	beforePort, err := settingService.GetPort()
+	if err != nil {
+		t.Fatalf("GetPort: %v", err)
+	}
+	beforeListen, err := settingService.GetListen()
+	if err != nil {
+		t.Fatalf("GetListen: %v", err)
+	}
+	beforeBasePath, err := settingService.GetBasePath()
+	if err != nil {
+		t.Fatalf("GetBasePath: %v", err)
+	}
+
+	userService := service.UserService{}
+	beforeUser, err := userService.GetFirstUser()
+	if err != nil {
+		t.Fatalf("GetFirstUser: %v", err)
+	}
+
+	out, err := currentSettings()
+	if err != nil {
+		t.Fatalf("currentSettings: %v", err)
+	}
+	if out == "" {
+		t.Fatal("期望非空输出")
+	}
+	if !strings.Contains(out, beforeUser.Username) {
+		t.Fatalf("输出里应包含用户名 %q，实际输出：%s", beforeUser.Username, out)
+	}
+	// 全新数据库的默认监听地址是空串（监听所有 IP），展示文本不能是空白，
+	// 否则看起来像是取值失败——见 currentSettings 里的换算逻辑。
+	if beforeListen == "" && !strings.Contains(out, "all interfaces") {
+		t.Fatalf("空监听地址应展示为 all interfaces，实际输出：%s", out)
+	}
+
+	afterPort, err := settingService.GetPort()
+	if err != nil {
+		t.Fatalf("GetPort after: %v", err)
+	}
+	afterListen, err := settingService.GetListen()
+	if err != nil {
+		t.Fatalf("GetListen after: %v", err)
+	}
+	afterBasePath, err := settingService.GetBasePath()
+	if err != nil {
+		t.Fatalf("GetBasePath after: %v", err)
+	}
+	afterUser, err := userService.GetFirstUser()
+	if err != nil {
+		t.Fatalf("GetFirstUser after: %v", err)
+	}
+
+	if beforePort != afterPort {
+		t.Fatalf("currentSettings 不应写入，port 被改成 %v（原为 %v）", afterPort, beforePort)
+	}
+	if beforeListen != afterListen {
+		t.Fatalf("currentSettings 不应写入，listen 被改成 %q（原为 %q）", afterListen, beforeListen)
+	}
+	if beforeBasePath != afterBasePath {
+		t.Fatalf("currentSettings 不应写入，basePath 被改成 %q（原为 %q）", afterBasePath, beforeBasePath)
+	}
+	if beforeUser.Username != afterUser.Username || beforeUser.Password != afterUser.Password {
+		t.Fatalf("currentSettings 不应写入，用户信息被改了：%+v -> %+v", beforeUser, afterUser)
+	}
 }
