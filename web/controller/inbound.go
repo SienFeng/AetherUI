@@ -35,6 +35,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/update/:id", a.updateInbound)
 	g.POST("/renew/:id", a.renewInbound)
 	g.POST("/onlines/:id", a.getOnlines)
+	g.POST("/onlineCounts", a.getOnlineCounts)
 	g.POST("/kick/:id", a.kick)
 	g.POST("/unban/:id", a.unban)
 	g.POST("/accessLogs/:id", a.getAccessLogs)
@@ -154,6 +155,20 @@ func (a *InboundController) getOnlines(c *gin.Context) {
 		return
 	}
 	jsonObj(c, result, nil)
+}
+
+// getOnlineCounts 一次性给出列表页每一行的在线设备数。
+//
+// 不让前端对每个入站各调一次 getOnlines：那边一次采样就更新了所有端口，
+// 逐个请求只是把同一份快照切开来取。
+func (a *InboundController) getOnlineCounts(c *gin.Context) {
+	user := session.GetLoginUser(c)
+	counts, err := a.onlineService.CountAll(user.Id)
+	if err != nil {
+		jsonMsg(c, "获取在线设备数", err)
+		return
+	}
+	jsonObj(c, counts, nil)
 }
 
 func (a *InboundController) kick(c *gin.Context) {

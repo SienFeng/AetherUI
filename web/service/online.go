@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/common"
 	"a-ui/util/ipdb"
@@ -29,6 +30,10 @@ const (
 	// 恰恰是连接表里没有的那个。
 	onlineRejectRetention = 5 * time.Minute
 )
+
+// onlineUnsupportedReason 是本平台读不到内核连接表时的统一说明。在线明细与
+// 在线设备数共用一份措辞，避免两处对同一件事给出不同的解释。
+const onlineUnsupportedReason = "在线明细依赖 Linux 内核连接表，当前系统不支持"
 
 // OnlineIP 是某个入站上一个来源 IP 的在线明细，对应展开行里的一行。
 type OnlineIP struct {
@@ -470,7 +475,7 @@ func (s *OnlineService) GetOnlines(inboundId int) (*OnlineResult, error) {
 		return nil, err
 	}
 	if !netdiag.Supported {
-		return &OnlineResult{Reason: "在线明细依赖 Linux 内核连接表，当前系统不支持", List: []OnlineIP{}}, nil
+		return &OnlineResult{Reason: onlineUnsupportedReason, List: []OnlineIP{}}, nil
 	}
 	if ok, reason := transportObservable(inbound.StreamSettings); !ok {
 		return &OnlineResult{Reason: reason, List: []OnlineIP{}}, nil
@@ -492,6 +497,93 @@ func (s *OnlineService) GetOnlines(inboundId int) (*OnlineResult, error) {
 		list = markBanned(list, bannedIPSet(bans))
 	}
 	return &OnlineResult{Supported: true, List: list}, nil
+}
+
+// OnlineCount 是入站列表页「在线设备」那一列的数据。
+//
+// Supported 为 false 时 Count 恒为 0，界面必须显示 Reason 而不是 0——
+// 与 OnlineResult 同一条铁律：「看不到」不能渲染成「没人在线」。
+type OnlineCount struct {
+	InboundId int    `json:"inboundId"`
+	Count     int    `json:"count"`
+	Supported bool   `json:"supported"`
+	Reason    string `json:"reason"`
+}
+
+// countLive 统计在线设备数：还有活连接的来源 IP 个数。一个 IP 视为一台设备，
+// NAT 后的多台设备会合并成一台，这是 IP 维度统计的固有限制，与并发额度同口径。
+//
+// 与 liveOnly 刻意不同，两处回答的是不同的问题：
+//   - 闲置计入。连接还在，人还挂在线上；liveOnly 排除它是因为那里问的是
+//     「谁占着并发名额」，一个暂时没流量的正常用户不该占名额、也不该被断开。
+//   - 封禁中但连接尚未被断掉的来源计入。它此刻确实连着，下一轮判定才会被断开；
+//     为了把它剔掉而每 2 秒查一次封禁表不值得，那是个转瞬即逝的状态。
+//
+// Conns == 0 的条目是超额被拒 / 被封禁后连接已断干净、仅为界面展示保留的
+// 历史记录，它们不是在线设备。
+func countLive(list []OnlineIP) int {
+	n := 0
+	for _, e := range list {
+		if e.Conns > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// countabilityOf 判断某入站的在线设备数能不能数出来，数不出来时给出原因。
+//
+// platformSupported 由调用方传入而不是就地引用 netdiag.Supported：后者是
+// 编译期常量，在非 Linux 上恒为 false，就地引用会让这段口径判定无法在
+// 开发机上被测到。
+func countabilityOf(inbound *model.Inbound, platformSupported bool) (bool, string) {
+	if !platformSupported {
+		return false, onlineUnsupportedReason
+	}
+	if ok, reason := transportObservable(inbound.StreamSettings); !ok {
+		return false, reason
+	}
+	return true, ""
+}
+
+// CountAll 返回该用户每个入站当前的在线设备数，供入站列表页那一列使用。
+//
+// 做成批量而不是让前端对每个入站各调一次 GetOnlines：sample() 本来就是一次
+// dump 整张连接表、更新所有端口，按入站逐个请求只是把同一份快照切开来取，
+// 白白多出 N-1 次往返。
+func (s *OnlineService) CountAll(userId int) ([]OnlineCount, error) {
+	inbounds, err := s.inboundService.GetInbounds(userId)
+	if err != nil {
+		return nil, err
+	}
+
+	counts := make([]OnlineCount, 0, len(inbounds))
+	// 采样推迟到确实有入站需要它时才做：全部停用、或全是 mKCP/QUIC、
+	// 或平台根本不支持时，这个每 2 秒一次的接口一次系统调用都不产生。
+	sampled := false
+	for _, inbound := range inbounds {
+		if ok, reason := countabilityOf(inbound, netdiag.Supported); !ok {
+			counts = append(counts, OnlineCount{InboundId: inbound.Id, Reason: reason})
+			continue
+		}
+		if !inbound.Enable {
+			// 停用的入站不在 xray 配置里，没有连接可言，0 在这里是诚实的。
+			counts = append(counts, OnlineCount{InboundId: inbound.Id, Supported: true})
+			continue
+		}
+		if !sampled {
+			if err := s.sample(); err != nil {
+				return nil, err
+			}
+			sampled = true
+		}
+		counts = append(counts, OnlineCount{
+			InboundId: inbound.Id,
+			Supported: true,
+			Count:     countLive(onlineTrackerInstance.snapshot(inbound.Port, noLocate)),
+		})
+	}
+	return counts, nil
 }
 
 // KickAndBan 断开连接并按 banSeconds 封禁该来源。

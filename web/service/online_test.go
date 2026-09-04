@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"a-ui/database/model"
 	"a-ui/util/ipdb"
 	"a-ui/util/netdiag"
 )
@@ -439,5 +440,77 @@ func TestPlanRejectionsNeverRejectsIdleItself(t *testing.T) {
 	}
 	if len(over) != 1 || over[0] != "2.2.2.2" {
 		t.Errorf("被拒集合 = %v, want [2.2.2.2]", over)
+	}
+}
+
+// ---- 在线设备数（入站列表页那一列）----
+
+// 在线设备数按「还有活连接的来源 IP」计数：一个 IP 一台设备，同一台设备
+// 开多条连接不能算成多台。
+func TestCountLiveCountsSourceIPsNotConnections(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{
+		conn(1, testPort, "1.1.1.1", 100, 100),
+		conn(2, testPort, "1.1.1.1", 100, 100),
+		conn(3, testPort, "2.2.2.2", 100, 100),
+	}, testPorts, now)
+
+	if n := countLive(tk.snapshot(testPort, noLocation)); n != 2 {
+		t.Errorf("在线设备数 = %d，期望 2（两个来源 IP，其中一个开了两条连接）", n)
+	}
+
+	tk.update(nil, testPorts, now.Add(2*time.Second))
+	if n := countLive(tk.snapshot(testPort, noLocation)); n != 0 {
+		t.Errorf("全部断开后在线设备数 = %d，期望 0", n)
+	}
+}
+
+// 超额被拒 / 被封禁之后连接已断干净的条目只为界面展示而保留，它们不是
+// 在线设备——算进去的话「已封禁」的人会永远显示为在线。
+func TestCountLiveSkipsEntriesWithoutConnections(t *testing.T) {
+	list := []OnlineIP{
+		{IP: "1.1.1.1", Conns: 2},
+		{IP: "2.2.2.2", Conns: 0, Blocked: true, RejectedAt: 1},
+		{IP: "3.3.3.3", Conns: 0, Banned: true},
+	}
+	if n := countLive(list); n != 1 {
+		t.Errorf("在线设备数 = %d，期望 1：连接已断干净的历史条目不是在线设备", n)
+	}
+}
+
+// 闲置设备的连接还在，人还挂在线上，必须计入。
+//
+// 这与 liveOnly（并发额度口径）刻意不同：那里回答的是「谁占着名额」，
+// 这里回答的是「有几台设备连着」。两个口径必须同时存在且互不替代。
+func TestCountLiveIncludesIdleDevices(t *testing.T) {
+	list := []OnlineIP{{IP: "1.1.1.1", Conns: 3, Idle: true}}
+
+	if n := countLive(list); n != 1 {
+		t.Errorf("在线设备数 = %d，期望 1：闲置只是暂时没有流量，连接还在", n)
+	}
+	if n := len(liveOnly(list)); n != 0 {
+		t.Errorf("并发额度口径 = %d，期望 0；两个口径若一致，本用例就失去意义了", n)
+	}
+}
+
+// 数不出来必须与「没人在线」区分开：前者要给出原因让界面显示 —，
+// 后者才是 0。
+func TestCountabilityDistinguishesUnknownFromZero(t *testing.T) {
+	tcp := &model.Inbound{StreamSettings: `{"network":"tcp"}`}
+	kcp := &model.Inbound{StreamSettings: `{"network":"kcp"}`}
+
+	// platformSupported 显式传入而不是直接引用 netdiag.Supported：后者是
+	// 编译期常量，在非 Linux 开发机上恒为 false，直接引用会让用例结果
+	// 随开发机而变。
+	if ok, reason := countabilityOf(tcp, false); ok || reason == "" {
+		t.Errorf("非 Linux 平台 ok = %v reason = %q，必须判为数不出来并给出原因", ok, reason)
+	}
+	if ok, reason := countabilityOf(kcp, true); ok || reason == "" {
+		t.Errorf("mKCP 入站 ok = %v reason = %q，UDP 在内核连接表里看不到单个客户端", ok, reason)
+	}
+	if ok, reason := countabilityOf(tcp, true); !ok || reason != "" {
+		t.Errorf("tcp 入站 ok = %v reason = %q，期望可观测", ok, reason)
 	}
 }

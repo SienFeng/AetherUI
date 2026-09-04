@@ -185,6 +185,20 @@
                                 </template>
                                 <a-tag v-else color="green">不限制</a-tag>
                             </template>
+                            <template slot="online" slot-scope="text, dbInbound">
+                                <template v-if="onlineCountOf(dbInbound.id).supported">
+                                    <a-tag v-if="onlineCountOf(dbInbound.id).count > 0" color="green">
+                                        [[ onlineCountOf(dbInbound.id).count ]] 台
+                                    </a-tag>
+                                    <a-tag v-else>0</a-tag>
+                                </template>
+                                <a-tooltip v-else>
+                                    <!-- 数不出来必须显示「—」而不是 0：把「看不到」渲染成「没人在线」，
+                                         管理员就会对着一个假的 0 做判断。 -->
+                                    <template slot="title">[[ onlineCountOf(dbInbound.id).reason ]]</template>
+                                    <a-tag style="cursor: help">—</a-tag>
+                                </a-tooltip>
+                            </template>
                             <template slot="concurrency" slot-scope="text, dbInbound">
                                 <a-tag v-if="dbInbound.concurrencyLimit > 0" color="orange">
                                     [[ dbInbound.concurrencyLimit ]] IP
@@ -277,6 +291,11 @@
         width: 120,
         scopedSlots: { customRender: 'regions' },
     }, {
+        title: "在线设备",
+        align: 'center',
+        width: 80,
+        scopedSlots: { customRender: 'online' },
+    }, {
         title: "并发限制",
         align: 'center',
         width: 60,
@@ -329,6 +348,10 @@
     // 展开行没有数据时的占位，避免模板里到处判空。
     const emptyOnline = { supported: false, reason: '正在读取连接表...', list: [] };
 
+    // 「在线设备」列首次拉到数据之前的占位。不能直接显示 0——「还没数出来」
+    // 与「没人在线」是两回事，与展开行同一条口径。
+    const emptyOnlineCount = { supported: false, count: 0, reason: '正在读取连接表...' };
+
     const app = new Vue({
         delimiters: ['[[', ']]'],
         el: '#app',
@@ -342,6 +365,11 @@
             expandedKeys: [],
             onlines: {},
             onlineTimer: null,
+            // 列表页那一列：inboundId -> OnlineCount。整个接口失败时用
+            // onlineCountError 逐行退回「—」，而不是让所有行显示 0。
+            onlineCounts: {},
+            onlineCountError: '',
+            onlineCountTimer: null,
             // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
             kickBanSeconds: 0,
         },
@@ -513,6 +541,31 @@
             switchEnable(dbInbound) {
                 this.submit(`/xui/inbound/update/${dbInbound.id}`, dbInbound);
             },
+            onlineCountOf(id) {
+                if (this.onlineCountError) {
+                    return { supported: false, count: 0, reason: this.onlineCountError };
+                }
+                return this.onlineCounts[id] || emptyOnlineCount;
+            },
+            async loadOnlineCounts() {
+                // 同 loadOnlines：这个接口每 2 秒轮询一次，走 HttpUtil 的话
+                // 每次失败都会弹一条 message，很快就能把屏幕刷满。错误就地
+                // 显示在那一列的 tooltip 里。
+                try {
+                    const resp = await axios.post('/xui/inbound/onlineCounts');
+                    const data = resp.data;
+                    if (!data || !data.success) {
+                        this.onlineCountError = (data && data.msg) || '读取在线设备数失败';
+                        return;
+                    }
+                    const counts = {};
+                    (data.obj || []).forEach(c => { counts[c.inboundId] = c; });
+                    this.onlineCounts = counts;
+                    this.onlineCountError = '';
+                } catch (e) {
+                    this.onlineCountError = e.toString();
+                }
+            },
             onlineOf(id) {
                 return this.onlines[id] || emptyOnline;
             },
@@ -629,11 +682,19 @@
         },
         mounted() {
             this.getDBInbounds();
+            this.loadOnlineCounts();
+            // 与展开行同频。两者共用同一份采样快照（sample() 有 500ms 闸门），
+            // 所以多开一个轮询不会增加读内核连接表的次数。
+            this.onlineCountTimer = setInterval(() => this.loadOnlineCounts(), 2000);
         },
         beforeDestroy() {
             if (this.onlineTimer != null) {
                 clearInterval(this.onlineTimer);
                 this.onlineTimer = null;
+            }
+            if (this.onlineCountTimer != null) {
+                clearInterval(this.onlineCountTimer);
+                this.onlineCountTimer = null;
             }
         },
         computed: {
