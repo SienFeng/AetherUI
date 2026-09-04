@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/op/go-logging"
@@ -231,8 +232,18 @@ func main() {
 	case "setting":
 		f, err := parseSettingFlags(os.Args[2:])
 		if err != nil {
-			fmt.Println(err)
-			return
+			// parseSettingFlags 内部用 flag.ContinueOnError（而非旧代码的
+			// ExitOnError）是为了让 -listen/-basepath 能用 flag.Visit 探测
+			// 「是否出现过」，但退出码语义必须维持不变：flag 包在
+			// ContinueOnError 下已经把错误信息和 usage 都打印过一遍，这里
+			// 只需要按错误类型补上正确的退出码，不能再重复打印。
+			// -h/-help 对应 flag.ErrHelp，旧的 ExitOnError 对它是 os.Exit(0)。
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
+			// 其余解析错误，旧的 ExitOnError 是 os.Exit(2)；退出码 0 会被
+			// install.sh 之类调用方误判为成功，是本项目要严防的静默失败。
+			os.Exit(2)
 		}
 		if f.Reset {
 			resetSetting()
