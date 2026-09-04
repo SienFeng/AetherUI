@@ -1,16 +1,20 @@
 {{define "form/streamWS"}}
-<a-form layout="inline">
+<a-col :span="12">
     <a-form-item label="路径">
         <a-input v-model.trim="inbound.stream.ws.path"></a-input>
     </a-form-item>
+</a-col>
+<a-col :span="24">
     <a-form-item label="请求头">
-        <a-row>
-            <a-button size="small"
-                      @click="inbound.stream.ws.addHeader('Host', '')">
-                +
-            </a-button>
-        </a-row>
-        <a-input-group v-for="(header, index) in inbound.stream.ws.headers">
+        <!-- + 按钮与名称/值输入组都设为 inline-block，让新增的输入组显示在
+             按钮右侧、同一行内，而不是各自单独占一行。addHeader/removeHeader
+             调用与 header.name/header.value 绑定未改动，只是外层排列方式。 -->
+        <a-button size="small" style="display: inline-block; vertical-align: middle; margin-right: 8px;"
+                  @click="inbound.stream.ws.addHeader('Host', '')">
+            +
+        </a-button>
+        <a-input-group v-for="(header, index) in inbound.stream.ws.headers"
+                        style="display: inline-block; width: 300px; vertical-align: middle; margin-right: 8px; margin-bottom: 8px;">
             <a-input style="width: 50%" v-model.trim="header.name"
                      addon-before="名称"></a-input>
             <a-input style="width: 50%" v-model.trim="header.value"
@@ -24,5 +28,5 @@
             </a-input>
         </a-input-group>
     </a-form-item>
-</a-form>
+</a-col>
 {{end}}

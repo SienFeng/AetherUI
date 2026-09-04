@@ -3,8 +3,12 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/host"
@@ -298,4 +302,50 @@ func (s *ServerService) UpdateXray(version string) error {
 
 	return nil
 
+}
+
+// GetNewX25519Cert 生成一对 REALITY 用的 X25519 密钥。
+//
+// 复刻 xray-core 的 main/commands/all/curve25519.go:38-58。两个易错点：
+//   1. 私钥必须按 https://cr.yp.to/ecdh.html 做 clamping，漏掉会生成出
+//      核心不接受的私钥；
+//   2. 编码必须是 base64.RawURLEncoding，与核心 REALITYConfig.Build
+//      （infra/conf/transport_security.go:100）的解码方式一致。用 StdEncoding
+//      长度照样是 32 字节，但核心会拒绝整份配置。
+//
+// 不 exec `bin/xray x25519`：bin/xray-darwin-arm64 在 .gitignore 中，本地开发
+// 环境没有该文件。密钥生成与配置校验不同，不能 fail open——生成不出来就是
+// 生成不出来，不能放行一个空密钥。
+func (s *ServerService) GetNewX25519Cert() (map[string]any, error) {
+	priv := make([]byte, 32)
+	if _, err := rand.Read(priv); err != nil {
+		return nil, err
+	}
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
+
+	key, err := ecdh.X25519().NewPrivateKey(priv)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"privateKey": base64.RawURLEncoding.EncodeToString(priv),
+		"publicKey":  base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()),
+	}, nil
+}
+
+// GetNewMldsa65 生成 REALITY 的 ML-DSA-65 后量子签名密钥对。
+// 复刻 main/commands/all/mldsa65.go:30-46。seed 落进入站的 realitySettings.mldsa65Seed，
+// verify 落进分享链接的 pqv 参数。
+func (s *ServerService) GetNewMldsa65() (map[string]any, error) {
+	var seed [32]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return nil, err
+	}
+	pub, _ := mldsa65.NewKeyFromSeed(&seed)
+	return map[string]any{
+		"seed":   base64.RawURLEncoding.EncodeToString(seed[:]),
+		"verify": base64.RawURLEncoding.EncodeToString(pub.Bytes()),
+	}, nil
 }

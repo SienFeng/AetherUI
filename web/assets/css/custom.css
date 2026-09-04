@@ -215,3 +215,51 @@ html, body {
 .ant-progress-inner {
     background-color: #EBEEF5;
 }
+
+/* 「添加入站」弹窗表单密度：antd a-form-item 默认 margin-bottom: 24px，
+ * 弹窗里十几行累积起来太松。限定到这个弹窗的 id，不影响分流管理、面板设置
+ * 等其他页面同样在用的 a-form-item。这条对弹窗里 layout="horizontal" 和
+ * layout="inline" 的表单都生效——inline 表单（REALITY 设置等）字段会换行，
+ * 换行后的行间距同样需要它。 */
+#inbound-modal .ant-form-item {
+    margin-bottom: 10px;
+}
+
+/* antd 表单标签默认右对齐（text-align: right）。同样对 horizontal 和
+ * inline 表单都生效，维持既有外观。 */
+#inbound-modal .ant-form-item-label {
+    text-align: left;
+}
+
+/* 入站弹窗里 layout="horizontal" 的表单：栅格（a-row/a-col）负责分列，
+ * 列内部原来靠 label-col/wrapper-col 按栅格比例分标签/控件宽度——这个表单
+ * 的标签长度从 2 字（id）到 16 字（rejectUnknownSni）不等，按比例分宽的话，
+ * 短标签会空出一大截、长标签会撑爆并与控件重叠。改用 flex 后标签宽度随
+ * 内容自适应、控件填满列内剩余宽度，才能同时满足两端标签。
+ *
+ * 限定到 .ant-form-horizontal 而不是弹窗里全部 .ant-form-item：这个弹窗
+ * 还有多处 layout="inline" 的表单（REALITY 设置、TLS 域名/证书行、tcp
+ * request/response、trojan/vless 的 fallbacks），这些表单的字段本来就要
+ * 并排显示、靠 antd 自身的 display:inline-block 换行分组，从未用过
+ * label-col/wrapper-col。.ant-form-item 是两种表单共用的同一套 DOM
+ * 结构，不加这层限定的话 display:flex 会把 inline 表单的
+ * display:inline-block 一并覆盖掉，把本该并排的字段拆成逐行堆叠——这不是
+ * 本次要解决的问题，也不在「预期效果」范围内。 */
+#inbound-modal .ant-form-horizontal .ant-form-item {
+    display: flex;
+    align-items: center;
+}
+
+#inbound-modal .ant-form-horizontal .ant-form-item-label {
+    flex: 0 0 auto;      /* 标签宽度随内容 */
+    width: auto;
+    max-width: none;
+    padding-right: 8px;  /* 标签与控件之间的固定间距 */
+    line-height: 32px;   /* 与 antd 默认控件高度对齐 */
+    white-space: nowrap; /* 标签不折行 */
+}
+
+#inbound-modal .ant-form-horizontal .ant-form-item-control-wrapper {
+    flex: 1 1 auto;      /* 控件填满剩余空间 */
+    min-width: 0;        /* 允许收缩，避免溢出列宽 */
+}

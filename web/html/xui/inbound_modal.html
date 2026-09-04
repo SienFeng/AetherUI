@@ -1,7 +1,9 @@
 {{define "inboundModal"}}
 <a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title" @ok="inModal.ok"
          :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
-         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'>
+         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'
+         :width="900"
+         :ok-button-props="{ props: { disabled: inbound.deprecatedFeatures.length > 0 } }">
     {{template "form/inbound"}}
 </a-modal>
 <script>
@@ -73,6 +75,16 @@
             inModal: inModal,
             Protocols: protocols,
             SSMethods: SSMethods,
+            FLOW_CONTROL: FLOW_CONTROL,
+            TLS_VERSION_OPTION: TLS_VERSION_OPTION,
+            TLS_CIPHER_OPTION: TLS_CIPHER_OPTION,
+            UTLS_FINGERPRINT: UTLS_FINGERPRINT,
+            ALPN_OPTION: ALPN_OPTION,
+            SNIFFING_OPTION: SNIFFING_OPTION,
+            REALITY_TARGET_PRESETS: REALITY_TARGET_PRESETS,
+            echLoading: false,
+            realityLoading: false,
+            mldsaLoading: false,
             get inbound() {
                 return inModal.inbound;
             },
@@ -83,12 +95,147 @@
                 return inModal.provinces;
             }
         },
+        computed: {
+            tlsCipherList() {
+                const raw = this.inbound.stream.tls.cipherSuites;
+                return raw ? raw.split(':').filter(s => s !== '') : [];
+            },
+            // 与核心 transport_security.go:163-169 的判定逐条对应。核心遍历的
+            // 是 config.ServerNames（表单里的 serverNames），不是伪装目标
+            // target——核心日志文案写着 "as the target" 具有误导性，实际读的
+            // 字段是 ServerNames。serverNames 在模型里是逗号分隔的字符串，
+            // 拆分规则与 RealityStreamSettings.splitList 一致（去空白、去空
+            // 项），任一项命中即视为风险。
+            // 核心命中时只在启动日志里 LogWarning，配置照常加载，而面板从不
+            // 展示 xray 日志——不在这里提示，管理员没有任何途径知道。
+            realityTargetRisky() {
+                const raw = this.inbound.stream.reality.serverNames || '';
+                for (const item of raw.split(',')) {
+                    const sn = item.trim().toLowerCase();
+                    if (sn === '') {
+                        continue;
+                    }
+                    if (sn.endsWith('.ru') || sn.endsWith('.ir') || sn.endsWith('.cn')) {
+                        return true;
+                    }
+                    if (sn.includes('apple') || sn.includes('icloud') || sn.includes('microsoft')) {
+                        return true;
+                    }
+                }
+                return false;
+            },
+        },
         methods: {
             streamNetworkChange(oldValue) {
                 if (oldValue === 'kcp') {
                     this.inModal.inbound.tls = false;
                 }
-            }
+                // REALITY 仅在 tcp/grpc 下受核心支持（canEnableReality()，
+                // infra/conf/transport_internet.go:100）。表单只把安全层单
+                // 选按钮置灰（:disabled），没有联动重置——已经选中 reality
+                // 后再把传输切到 ws/kcp，security 会停在 'reality' 不再合
+                // 法，核心对此不是忽略而是拒绝整份配置（实测原文：
+                // "REALITY only supports RAW, XHTTP and gRPC for now."）。
+                // 按本项目"xray 加载配置是全有或全无"的性质，这意味着机器
+                // 上所有用户一起断网，且 ValidateInboundReplacing 是
+                // fail open 的，挡不住。
+                if (!this.inbound.canEnableReality() && this.inbound.stream.security === 'reality') {
+                    this.inbound.stream.security = 'none';
+                }
+            },
+            onTlsCipherChange(list) {
+                // 核心按 ":" 切分（transport/internet/tls/config.go:459），
+                // 且对查不到的名字静默丢弃，所以这里只允许从固定列表里选。
+                this.inbound.stream.tls.cipherSuites = list.join(':');
+            },
+            async genEchCert() {
+                this.echLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewEchCert', {
+                        serverName: this.inbound.stream.tls.server,
+                    });
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.tls.echServerKeys = msg.obj.echServerKeys;
+                    this.inbound.stream.tls.settings.echConfigList = msg.obj.echConfigList;
+                } finally {
+                    this.echLoading = false;
+                }
+            },
+            async genRealityKeys() {
+                this.realityLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewX25519Cert');
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.reality.privateKey = msg.obj.privateKey;
+                    this.inbound.stream.reality.settings.publicKey = msg.obj.publicKey;
+                } finally {
+                    this.realityLoading = false;
+                }
+            },
+            genShortId() {
+                // 核心要求 shortId 是十六进制且不超过 16 位
+                // （transport_security.go:140-145 走 hex.Decode）。
+                const hex = '0123456789abcdef';
+                let out = '';
+                for (let i = 0; i < 16; i++) {
+                    out += hex[Math.floor(Math.random() * 16)];
+                }
+                this.inbound.stream.reality.shortIds = out;
+            },
+            async genMldsa65() {
+                this.mldsaLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewMldsa65');
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.reality.mldsa65Seed = msg.obj.seed;
+                    this.inbound.stream.reality.settings.mldsa65Verify = msg.obj.verify;
+                } finally {
+                    this.mldsaLoading = false;
+                }
+            },
+            onSecurityChange(e) {
+                const security = e.target ? e.target.value : e;
+                if (security !== 'reality') {
+                    return;
+                }
+                // 选中 REALITY 时给一套安全默认：端口 443（核心明确警告非 443
+                // 会提高被封概率）、自动生成密钥与 shortId、flow 置 Vision。
+                if (this.inbound.port !== 443) {
+                    this.inbound.port = 443;
+                }
+                if (!this.inbound.stream.reality.privateKey) {
+                    this.genRealityKeys();
+                }
+                if (!this.inbound.stream.reality.shortIds) {
+                    this.genShortId();
+                }
+                if (this.inbound.canEnableVision()) {
+                    this.setFlow(FLOW_CONTROL.VISION);
+                }
+            },
+            setFlow(flow) {
+                const clients = this.inbound.settings
+                    && (this.inbound.settings.vlesses || this.inbound.settings.clients);
+                if (clients instanceof Array && clients.length > 0) {
+                    this.$set(clients[0], 'flow', flow);
+                }
+            },
+            onFlowChange(flow) {
+                this.setFlow(flow);
+                // Vision 要求外层 TLS 1.3：核心在运行期才检查
+                // （proxy/vless/inbound/inbound.go:573），配置校验发现不了，
+                // 表现为「保存成功但客户端连不上」。所以在这里锁死。
+                if (flow === FLOW_CONTROL.VISION && this.inbound.stream.security === 'tls') {
+                    this.inbound.stream.tls.minVersion = '1.3';
+                    this.inbound.stream.tls.maxVersion = '1.3';
+                }
+            },
         }
     });
 

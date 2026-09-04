@@ -5,12 +5,16 @@
                 sniffing
                 <a-tooltip>
                     <template slot="title">
-                        没有特殊需求保持默认即可
+                        嗅探出目标域名，域名分流规则依赖它。<br/>
+                        <b>关掉 sniffing，或 destOverride 不含 http/tls，域名分流规则就永远不会命中，而且没有任何报错。</b>
                     </template>
                     <a-icon type="question-circle" theme="filled"></a-icon>
                 </a-tooltip>
             </span>
     <a-switch v-model="inbound.sniffing.enabled"></a-switch>
+  </a-form-item>
+  <a-form-item v-if="inbound.sniffing.enabled">
+    <a-checkbox-group v-model="inbound.sniffing.destOverride" :options="SNIFFING_OPTION"></a-checkbox-group>
   </a-form-item>
 </a-form>
 {{end}}

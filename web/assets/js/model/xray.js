@@ -40,10 +40,54 @@ const RULE_DOMAIN = {
     SPEEDTEST: 'geosite:speedtest',
 };
 
+// 当前 Xray 核心（infra/conf/vless.go:51）只接受 "" 与 xtls-rprx-vision。
+// 旧的 xtls-rprx-origin / xtls-rprx-direct 已被移除，填了会让整份配置加载失败。
 const FLOW_CONTROL = {
-    ORIGIN: "xtls-rprx-origin",
-    DIRECT: "xtls-rprx-direct",
+    VISION: "xtls-rprx-vision",
 };
+
+const TLS_VERSION_OPTION = ["1.0", "1.1", "1.2", "1.3"];
+
+// 只列真正生效的 TLS 1.2 套件。核心把这个串按 ":" 切开逐个查表，
+// 查不到的**静默丢弃**（transport/internet/tls/config.go:459-463，没有
+// else 分支），所以界面必须是下拉多选而不是自由文本框。
+// 另外 Go 的 crypto/tls 不接受 TLS 1.3 的套件配置——Vision 与 REALITY 都走
+// 1.3，这一项对它们完全无效。
+const TLS_CIPHER_OPTION = [
+    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+];
+
+// 不含 unsafe / hellogolang：核心在 transport_security.go:181 拒绝这两个值。
+// 注意那段校验只在 REALITY 作为**出站**时生效，入站侧核心根本不读这个字段，
+// 所以 xray run -test 验不出来，只能靠这个列表挡住。
+const UTLS_FINGERPRINT = [
+    "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq",
+    "random", "randomized",
+];
+
+const ALPN_OPTION = ["h3", "h2", "http/1.1"];
+
+const SNIFFING_OPTION = ["http", "tls", "quic", "fakedns"];
+
+// 伪装目标候选。四项判据（TLS1.3 / ALPN h2 / X25519 系密钥交换 / 证书有效）
+// 已于 2026-09-03 逐个实测确认，且均不命中核心的高风险判定
+// （transport_security.go:164-170：.ru/.ir/.cn 后缀，含 apple/icloud/microsoft）。
+// 五个域名当时都协商出 X25519MLKEM768，满足 3x-ui reality_scan.go:298 的判据。
+// 复核方式见本计划 Task 4 Step 1；域名的 TLS 配置会变，隔一段时间要重测。
+//
+// player.twitch.tv 曾是候选，因协商不出 ALPN h2 被淘汰——不要再加回来。
+const REALITY_TARGET_PRESETS = [
+    "www.lovelive-anime.jp",
+    "www.amazon.co.jp",
+    "www.tesla.com",
+    "www.cloudflare.com",
+    "www.nicovideo.jp",
+];
 
 Object.freeze(Protocols);
 Object.freeze(VmessMethods);
@@ -51,6 +95,12 @@ Object.freeze(SSMethods);
 Object.freeze(RULE_IP);
 Object.freeze(RULE_DOMAIN);
 Object.freeze(FLOW_CONTROL);
+Object.freeze(TLS_VERSION_OPTION);
+Object.freeze(TLS_CIPHER_OPTION);
+Object.freeze(UTLS_FINGERPRINT);
+Object.freeze(ALPN_OPTION);
+Object.freeze(SNIFFING_OPTION);
+Object.freeze(REALITY_TARGET_PRESETS);
 
 class XrayCommonClass {
 
@@ -331,67 +381,6 @@ class WsStreamSettings extends XrayCommonClass {
     }
 }
 
-class HttpStreamSettings extends XrayCommonClass {
-    constructor(path='/', host=['']) {
-        super();
-        this.path = path;
-        this.host = host.length === 0 ? [''] : host;
-    }
-
-    addHost(host) {
-        this.host.push(host);
-    }
-
-    removeHost(index) {
-        this.host.splice(index, 1);
-    }
-
-    static fromJson(json={}) {
-        return new HttpStreamSettings(json.path, json.host);
-    }
-
-    toJson() {
-        let host = [];
-        for (let i = 0; i < this.host.length; ++i) {
-            if (!ObjectUtil.isEmpty(this.host[i])) {
-                host.push(this.host[i]);
-            }
-        }
-        return {
-            path: this.path,
-            host: host,
-        }
-    }
-}
-
-class QuicStreamSettings extends XrayCommonClass {
-    constructor(security=VmessMethods.NONE,
-                key='', type='none') {
-        super();
-        this.security = security;
-        this.key = key;
-        this.type = type;
-    }
-
-    static fromJson(json={}) {
-        return new QuicStreamSettings(
-            json.security,
-            json.key,
-            json.header ? json.header.type : 'none',
-        );
-    }
-
-    toJson() {
-        return {
-            security: this.security,
-            key: this.key,
-            header: {
-                type: this.type,
-            }
-        }
-    }
-}
-
 class GrpcStreamSettings extends XrayCommonClass {
     constructor(serviceName="") {
         super();
@@ -411,10 +400,24 @@ class GrpcStreamSettings extends XrayCommonClass {
 
 class TlsStreamSettings extends XrayCommonClass {
     constructor(serverName='',
-                certificates=[new TlsStreamSettings.Cert()]) {
+                minVersion='1.2',
+                maxVersion='1.3',
+                cipherSuites='',
+                rejectUnknownSni=false,
+                alpn=['h2', 'http/1.1'],
+                echServerKeys='',
+                certificates=[new TlsStreamSettings.Cert()],
+                settings=new TlsStreamSettings.Settings()) {
         super();
         this.server = serverName;
+        this.minVersion = minVersion;
+        this.maxVersion = maxVersion;
+        this.cipherSuites = cipherSuites;
+        this.rejectUnknownSni = rejectUnknownSni;
+        this.alpn = alpn;
+        this.echServerKeys = echServerKeys;
         this.certs = certificates;
+        this.settings = settings;
     }
 
     addCert(cert) {
@@ -432,26 +435,73 @@ class TlsStreamSettings extends XrayCommonClass {
         }
         return new TlsStreamSettings(
             json.serverName,
+            json.minVersion,
+            json.maxVersion,
+            json.cipherSuites,
+            json.rejectUnknownSni,
+            json.alpn,
+            json.echServerKeys,
             certs,
+            TlsStreamSettings.Settings.fromJson(json.settings),
         );
     }
 
     toJson() {
         return {
             serverName: this.server,
+            minVersion: this.minVersion,
+            maxVersion: this.maxVersion,
+            cipherSuites: this.cipherSuites,
+            rejectUnknownSni: this.rejectUnknownSni,
+            alpn: this.alpn,
+            echServerKeys: this.echServerKeys,
             certificates: TlsStreamSettings.toJsonArray(this.certs),
+            settings: this.settings.toJson(),
         };
     }
 }
 
+// settings 是**面板私有**的客户端半边参数，核心的 TLSConfig 里没有这个键。
+// 已实测确认核心忽略它而不是拒绝（web/service/inbound_stream_contract_test.go
+// 的 TestPanelOnlySettingsKeyIsIgnoredByCore）。存在这里是为了让分享链接
+// 能带上 fp / ech 两个参数——它们是客户端要用的，服务端不读。
+TlsStreamSettings.Settings = class extends XrayCommonClass {
+    constructor(fingerprint='chrome', allowInsecure=false, echConfigList='') {
+        super();
+        this.fingerprint = fingerprint;
+        this.allowInsecure = allowInsecure;
+        this.echConfigList = echConfigList;
+    }
+
+    static fromJson(json={}) {
+        if (ObjectUtil.isEmpty(json)) {
+            return new TlsStreamSettings.Settings();
+        }
+        return new TlsStreamSettings.Settings(
+            json.fingerprint,
+            json.allowInsecure,
+            json.echConfigList,
+        );
+    }
+
+    toJson() {
+        return {
+            fingerprint: this.fingerprint,
+            allowInsecure: this.allowInsecure,
+            echConfigList: this.echConfigList,
+        };
+    }
+};
+
 TlsStreamSettings.Cert = class extends XrayCommonClass {
-    constructor(useFile=true, certificateFile='', keyFile='', certificate='', key='') {
+    constructor(useFile=true, certificateFile='', keyFile='', certificate='', key='', ocspStapling=3600) {
         super();
         this.useFile = useFile;
         this.certFile = certificateFile;
         this.keyFile = keyFile;
         this.cert = certificate instanceof Array ? certificate.join('\n') : certificate;
         this.key = key instanceof Array ? key.join('\n') : key;
+        this.ocspStapling = ocspStapling;
     }
 
     static fromJson(json={}) {
@@ -460,12 +510,15 @@ TlsStreamSettings.Cert = class extends XrayCommonClass {
                 true,
                 json.certificateFile,
                 json.keyFile,
+                '', '',
+                json.ocspStapling,
             );
         } else {
             return new TlsStreamSettings.Cert(
                 false, '', '',
                 json.certificate.join('\n'),
                 json.key.join('\n'),
+                json.ocspStapling,
             );
         }
     }
@@ -475,13 +528,143 @@ TlsStreamSettings.Cert = class extends XrayCommonClass {
             return {
                 certificateFile: this.certFile,
                 keyFile: this.keyFile,
+                ocspStapling: this.ocspStapling,
             };
         } else {
             return {
                 certificate: this.cert.split('\n'),
                 key: this.key.split('\n'),
+                ocspStapling: this.ocspStapling,
             };
         }
+    }
+};
+
+class RealityStreamSettings extends XrayCommonClass {
+    // serverNames 与 shortIds 在这里存成逗号分隔的字符串（表单好填），
+    // toJson 时再拆成数组。核心要求两者都非空
+    // （infra/conf/transport_security.go:95 与 :136）。
+    constructor(show=false,
+                xver=0,
+                target='',
+                serverNames='',
+                privateKey='',
+                mldsa65Seed='',
+                minClientVer='',
+                maxClientVer='',
+                maxTimeDiff=0,
+                shortIds='',
+                settings=new RealityStreamSettings.Settings()) {
+        super();
+        this.show = show;
+        this.xver = xver;
+        this.target = target;
+        this.serverNames = serverNames;
+        this.privateKey = privateKey;
+        this.mldsa65Seed = mldsa65Seed;
+        this.minClientVer = minClientVer;
+        this.maxClientVer = maxClientVer;
+        this.maxTimeDiff = maxTimeDiff;
+        this.shortIds = shortIds;
+        this.settings = settings;
+    }
+
+    // 拆分逗号分隔串：去空白、去空项、去重且保持首次出现的顺序。
+    // 保持顺序而不是排序，是因为项目要求生成逐字节确定——只要规则确定即可，
+    // 但绝不能依赖遍历 map 的顺序（见路线图 §4.2）。
+    static splitList(value) {
+        if (ObjectUtil.isEmpty(value)) {
+            return [];
+        }
+        const seen = new Set();
+        const out = [];
+        for (const raw of String(value).split(',')) {
+            const item = raw.trim();
+            if (item === '' || seen.has(item)) {
+                continue;
+            }
+            seen.add(item);
+            out.push(item);
+        }
+        return out;
+    }
+
+    static joinList(value) {
+        return value instanceof Array ? value.join(',') : (value || '');
+    }
+
+    static fromJson(json={}) {
+        // dest 与 target 在核心里是别名（transport_security.go:59-61）。
+        // 老配置、外部工具和面板早期版本写的都是 dest。不做这个映射的话，
+        // 面板读进来 target 为空，用户编辑后一保存就把工作正常的 dest 抹掉，
+        // 而且要到下一次重启才暴露。
+        const target = ObjectUtil.isEmpty(json.target) ? json.dest : json.target;
+        return new RealityStreamSettings(
+            json.show,
+            json.xver,
+            target,
+            RealityStreamSettings.joinList(json.serverNames),
+            json.privateKey,
+            json.mldsa65Seed,
+            json.minClientVer,
+            json.maxClientVer,
+            json.maxTimediff === undefined ? json.maxTimeDiff : json.maxTimediff,
+            RealityStreamSettings.joinList(json.shortIds),
+            RealityStreamSettings.Settings.fromJson(json.settings),
+        );
+    }
+
+    toJson() {
+        return {
+            show: this.show,
+            xver: this.xver,
+            target: this.target,
+            serverNames: RealityStreamSettings.splitList(this.serverNames),
+            privateKey: this.privateKey,
+            mldsa65Seed: this.mldsa65Seed,
+            minClientVer: this.minClientVer,
+            maxClientVer: this.maxClientVer,
+            maxTimeDiff: this.maxTimeDiff,
+            shortIds: RealityStreamSettings.splitList(this.shortIds),
+            settings: this.settings.toJson(),
+        };
+    }
+}
+
+// 与 TlsStreamSettings.Settings 同理：面板私有的客户端半边，核心忽略它。
+// publicKey 是 x25519 密钥对的公钥，mldsa65Verify 是 ML-DSA-65 的验证公钥，
+// 两者都只出现在分享链接里（分别是 pbk 与 pqv 参数）。
+RealityStreamSettings.Settings = class extends XrayCommonClass {
+    constructor(publicKey='', fingerprint='chrome', serverName='', spiderX='/', mldsa65Verify='') {
+        super();
+        this.publicKey = publicKey;
+        this.fingerprint = fingerprint;
+        this.serverName = serverName;
+        this.spiderX = spiderX;
+        this.mldsa65Verify = mldsa65Verify;
+    }
+
+    static fromJson(json={}) {
+        if (ObjectUtil.isEmpty(json)) {
+            return new RealityStreamSettings.Settings();
+        }
+        return new RealityStreamSettings.Settings(
+            json.publicKey,
+            json.fingerprint,
+            json.serverName,
+            json.spiderX,
+            json.mldsa65Verify,
+        );
+    }
+
+    toJson() {
+        return {
+            publicKey: this.publicKey,
+            fingerprint: this.fingerprint,
+            serverName: this.serverName,
+            spiderX: this.spiderX,
+            mldsa65Verify: this.mldsa65Verify,
+        };
     }
 };
 
@@ -492,9 +675,8 @@ class StreamSettings extends XrayCommonClass {
                 tcpSettings=new TcpStreamSettings(),
                 kcpSettings=new KcpStreamSettings(),
                 wsSettings=new WsStreamSettings(),
-                httpSettings=new HttpStreamSettings(),
-                quicSettings=new QuicStreamSettings(),
                 grpcSettings=new GrpcStreamSettings(),
+                realitySettings=new RealityStreamSettings(),
                 ) {
         super();
         this.network = network;
@@ -503,9 +685,8 @@ class StreamSettings extends XrayCommonClass {
         this.tcp = tcpSettings;
         this.kcp = kcpSettings;
         this.ws = wsSettings;
-        this.http = httpSettings;
-        this.quic = quicSettings;
         this.grpc = grpcSettings;
+        this.reality = realitySettings;
     }
 
     get isTls() {
@@ -520,21 +701,22 @@ class StreamSettings extends XrayCommonClass {
         }
     }
 
-    get isXTls() {
-        return this.security === "xtls";
+    get isReality() {
+        return this.security === 'reality';
     }
 
-    set isXTls(isXTls) {
-        if (isXTls) {
-            this.security = 'xtls';
-        } else {
-            this.security = 'none';
-        }
+    set isReality(isReality) {
+        this.security = isReality ? 'reality' : 'none';
     }
 
     static fromJson(json={}) {
+        // 遗留 security=xtls 的入站把证书配置存在 xtlsSettings 而不是
+        // tlsSettings。写入侧（toJson）不再输出 xtlsSettings——那是产生非
+        // 法配置的源头，已经被 deprecatedFeatures 挡住；但读取侧仍要兼容，
+        // 否则打开这类存量入站时 serverName 与证书会显示为空，看不出原来
+        // 配了什么。
         let tls;
-        if (json.security === "xtls") {
+        if (json.security === 'xtls') {
             tls = TlsStreamSettings.fromJson(json.xtlsSettings);
         } else {
             tls = TlsStreamSettings.fromJson(json.tlsSettings);
@@ -546,9 +728,8 @@ class StreamSettings extends XrayCommonClass {
             TcpStreamSettings.fromJson(json.tcpSettings),
             KcpStreamSettings.fromJson(json.kcpSettings),
             WsStreamSettings.fromJson(json.wsSettings),
-            HttpStreamSettings.fromJson(json.httpSettings),
-            QuicStreamSettings.fromJson(json.quicSettings),
             GrpcStreamSettings.fromJson(json.grpcSettings),
+            RealityStreamSettings.fromJson(json.realitySettings),
         );
     }
 
@@ -558,19 +739,17 @@ class StreamSettings extends XrayCommonClass {
             network: network,
             security: this.security,
             tlsSettings: this.isTls ? this.tls.toJson() : undefined,
-            xtlsSettings: this.isXTls ? this.tls.toJson() : undefined,
+            realitySettings: this.isReality ? this.reality.toJson() : undefined,
             tcpSettings: network === 'tcp' ? this.tcp.toJson() : undefined,
             kcpSettings: network === 'kcp' ? this.kcp.toJson() : undefined,
             wsSettings: network === 'ws' ? this.ws.toJson() : undefined,
-            httpSettings: network === 'http' ? this.http.toJson() : undefined,
-            quicSettings: network === 'quic' ? this.quic.toJson() : undefined,
             grpcSettings: network === 'grpc' ? this.grpc.toJson() : undefined,
         };
     }
 }
 
 class Sniffing extends XrayCommonClass {
-    constructor(enabled=true, destOverride=['http', 'tls']) {
+    constructor(enabled=true, destOverride=['http', 'tls', 'quic']) {
         super();
         this.enabled = enabled;
         this.destOverride = destOverride;
@@ -626,31 +805,15 @@ class Inbound extends XrayCommonClass {
     }
 
     set tls(isTls) {
-        if (isTls) {
-            this.stream.security = 'tls';
-        } else {
-            if (this.protocol === Protocols.TROJAN) {
-                this.xtls = true;
-            } else {
-                this.stream.security = 'none';
-            }
-        }
+        this.stream.security = isTls ? 'tls' : 'none';
     }
 
-    get xtls() {
-        return this.stream.security === 'xtls';
+    get reality() {
+        return this.stream.security === 'reality';
     }
 
-    set xtls(isXTls) {
-        if (isXTls) {
-            this.stream.security = 'xtls';
-        } else {
-            if (this.protocol === Protocols.TROJAN) {
-                this.tls = true;
-            } else {
-                this.stream.security = 'none';
-            }
-        }
+    set reality(isReality) {
+        this.stream.security = isReality ? 'reality' : 'none';
     }
 
     get network() {
@@ -671,10 +834,6 @@ class Inbound extends XrayCommonClass {
 
     get isKcp() {
         return this.network === "kcp";
-    }
-
-    get isQuic() {
-        return this.network === "quic"
     }
 
     get isGrpc() {
@@ -756,8 +915,12 @@ class Inbound extends XrayCommonClass {
     }
 
     get serverName() {
-        if (this.stream.isTls || this.stream.isXTls) {
+        if (this.stream.isTls) {
             return this.stream.tls.server;
+        }
+        if (this.stream.isReality) {
+            const names = RealityStreamSettings.splitList(this.stream.reality.serverNames);
+            return names.length > 0 ? names[0] : "";
         }
         return "";
     }
@@ -767,8 +930,6 @@ class Inbound extends XrayCommonClass {
             return this.stream.tcp.request.getHeader("Host");
         } else if (this.isWs) {
             return this.stream.ws.getHeader("Host");
-        } else if (this.isH2) {
-            return this.stream.http.host[0];
         }
         return null;
     }
@@ -778,22 +939,8 @@ class Inbound extends XrayCommonClass {
             return this.stream.tcp.request.path[0];
         } else if (this.isWs) {
             return this.stream.ws.path;
-        } else if (this.isH2) {
-            return this.stream.http.path[0];
         }
         return null;
-    }
-
-    get quicSecurity() {
-        return this.stream.quic.security;
-    }
-
-    get quicKey() {
-        return this.stream.quic.key;
-    }
-
-    get quicType() {
-        return this.stream.quic.type;
     }
 
     get kcpType() {
@@ -822,8 +969,6 @@ class Inbound extends XrayCommonClass {
         switch (this.network) {
             case "tcp":
             case "ws":
-            case "http":
-            case "quic":
             case "grpc":
                 return true;
             default:
@@ -835,7 +980,9 @@ class Inbound extends XrayCommonClass {
         return this.canEnableTls();
     }
 
-    canEnableXTls() {
+    // REALITY 只支持 RAW(tcp) / XHTTP / gRPC（infra/conf/transport_internet.go:100）。
+    // 本项目不做 XHTTP，因此只剩 tcp 与 grpc。
+    canEnableReality() {
         switch (this.protocol) {
             case Protocols.VLESS:
             case Protocols.TROJAN:
@@ -843,7 +990,70 @@ class Inbound extends XrayCommonClass {
             default:
                 return false;
         }
-        return this.network === "tcp";
+        return this.network === "tcp" || this.network === "grpc";
+    }
+
+    // Vision 只对 VLESS 有效，且外层必须是 TLS 1.3 或 REALITY
+    // （proxy/vless/inbound/inbound.go:573 在运行期检查，run -test 查不出来）。
+    canEnableVision() {
+        if (this.protocol !== Protocols.VLESS) {
+            return false;
+        }
+        return this.stream.security === 'tls' || this.stream.security === 'reality';
+    }
+
+    // 当前是否真的启用了 Vision。TLS 路径下它会把 minVersion 锁死为 1.3。
+    get visionEnabled() {
+        const clients = this.settings && (this.settings.vlesses || this.settings.clients);
+        if (!(clients instanceof Array) || clients.length === 0) {
+            return false;
+        }
+        return clients[0].flow === FLOW_CONTROL.VISION;
+    }
+
+    // 已被当前 Xray 核心移除的配置项。它们仍可能存在于老入站里，
+    // 而对应的下拉选项已经从界面上删掉了——如果不显式标出来，用户编辑
+    // 这类入站时 a-select 只是显示空白，随手一保存就把传输方式静默改成
+    // 别的，这是用户可见行为的静默变更。
+    //
+    // 返回的每一项都要能直接渲染成一句人话，所以带上 fix。
+    get deprecatedFeatures() {
+        const found = [];
+        if (this.stream.security === 'xtls') {
+            found.push({
+                field: '安全层',
+                value: 'xtls',
+                fix: '改用 tls 或 reality。Legacy XTLS 已从核心移除。',
+            });
+        }
+        if (this.stream.network === 'http' || this.stream.network === 'h2') {
+            found.push({
+                field: '传输方式',
+                value: this.stream.network,
+                fix: '改用 ws 或 grpc。HTTP/2 传输已从核心移除。',
+            });
+        }
+        if (this.stream.network === 'quic') {
+            found.push({
+                field: '传输方式',
+                value: 'quic',
+                fix: '改用 ws 或 grpc。QUIC 传输已从核心移除。',
+            });
+        }
+        const clients = this.settings && (this.settings.vlesses || this.settings.clients);
+        if (clients instanceof Array) {
+            for (const c of clients) {
+                if (c && c.flow && c.flow !== FLOW_CONTROL.VISION) {
+                    found.push({
+                        field: 'flow',
+                        value: c.flow,
+                        fix: '改用 xtls-rprx-vision 或留空。',
+                    });
+                    break;
+                }
+            }
+        }
+        return found;
     }
 
     canEnableStream() {
@@ -909,14 +1119,6 @@ class Inbound extends XrayCommonClass {
             if (index >= 0) {
                 host = ws.headers[index].value;
             }
-        } else if (network === 'http') {
-            network = 'h2';
-            path = this.stream.http.path;
-            host = this.stream.http.host.join(',');
-        } else if (network === 'quic') {
-            type = this.stream.quic.type;
-            host = this.stream.quic.security;
-            path = this.stream.quic.key;
         } else if (network === 'grpc') {
             path = this.stream.grpc.serviceName;
         }
@@ -950,11 +1152,7 @@ class Inbound extends XrayCommonClass {
         const type = this.stream.network;
         const params = new Map();
         params.set("type", this.stream.network);
-        if (this.xtls) {
-            params.set("security", "xtls");
-        } else {
-            params.set("security", this.stream.security);
-        }
+        params.set("security", this.stream.security);
         switch (type) {
             case "tcp":
                 const tcp = this.stream.tcp;
@@ -982,17 +1180,6 @@ class Inbound extends XrayCommonClass {
                     params.set("host", host);
                 }
                 break;
-            case "http":
-                const http = this.stream.http;
-                params.set("path", http.path);
-                params.set("host", http.host);
-                break;
-            case "quic":
-                const quic = this.stream.quic;
-                params.set("quicSecurity", quic.security);
-                params.set("key", quic.key);
-                params.set("headerType", quic.type);
-                break;
             case "grpc":
                 const grpc = this.stream.grpc;
                 params.set("serviceName", grpc.serviceName);
@@ -1000,14 +1187,47 @@ class Inbound extends XrayCommonClass {
         }
 
         if (this.stream.security === 'tls') {
-            if (!ObjectUtil.isEmpty(this.stream.tls.server)) {
-                address = this.stream.tls.server;
-                params.set("sni", address);
+            const tls = this.stream.tls;
+            if (!ObjectUtil.isEmpty(tls.server)) {
+                address = tls.server;
+                params.set("sni", tls.server);
+            }
+            if (tls.alpn instanceof Array && tls.alpn.length > 0) {
+                params.set("alpn", tls.alpn.join(','));
+            }
+            if (!ObjectUtil.isEmpty(tls.settings.fingerprint)) {
+                params.set("fp", tls.settings.fingerprint);
+            }
+            // util/link/outbound.go:461 与 :675 把 URI 的 ech 参数映射到
+            // echConfigList，两端必须用同一个名字。
+            if (!ObjectUtil.isEmpty(tls.settings.echConfigList)) {
+                params.set("ech", tls.settings.echConfigList);
+            }
+        } else if (this.stream.security === 'reality') {
+            const re = this.stream.reality;
+            const names = RealityStreamSettings.splitList(re.serverNames);
+            if (names.length > 0) {
+                params.set("sni", names[0]);
+            }
+            params.set("pbk", re.settings.publicKey);
+            const ids = RealityStreamSettings.splitList(re.shortIds);
+            if (ids.length > 0) {
+                params.set("sid", ids[0]);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.fingerprint)) {
+                params.set("fp", re.settings.fingerprint);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.spiderX)) {
+                params.set("spx", re.settings.spiderX);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.mldsa65Verify)) {
+                params.set("pqv", re.settings.mldsa65Verify);
             }
         }
 
-        if (this.xtls) {
-            params.set("flow", this.settings.vlesses[0].flow);
+        const flow = this.settings.vlesses[0].flow;
+        if (!ObjectUtil.isEmpty(flow)) {
+            params.set("flow", flow);
         }
 
         const link = `vless://${uuid}@${address}:${port}`;
@@ -1207,7 +1427,10 @@ Inbound.VLESSSettings = class extends Inbound.Settings {
 };
 Inbound.VLESSSettings.VLESS = class extends XrayCommonClass {
 
-    constructor(id=RandomUtil.randomUUID(), flow=FLOW_CONTROL.DIRECT) {
+    // 旧默认值 FLOW_CONTROL.DIRECT（xtls-rprx-direct）随 Step 2 一并移除；
+    // 默认不带 flow，用户需要 Vision 时通过表单显式选择
+    // （canEnableVision() 还要求外层是 tls/reality，新建入站默认两者都没开）。
+    constructor(id=RandomUtil.randomUUID(), flow='') {
         super();
         this.id = id;
         this.flow = flow;
@@ -1295,7 +1518,8 @@ Inbound.TrojanSettings = class extends Inbound.Settings {
     }
 };
 Inbound.TrojanSettings.Client = class extends XrayCommonClass {
-    constructor(password=RandomUtil.randomSeq(10), flow=FLOW_CONTROL.DIRECT) {
+    // 同上：旧默认值 FLOW_CONTROL.DIRECT 已随 Step 2 移除，默认不带 flow。
+    constructor(password=RandomUtil.randomSeq(10), flow='') {
         super();
         this.password = password;
         this.flow = flow;

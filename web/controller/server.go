@@ -35,6 +35,9 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.POST("/status", a.status)
 	g.POST("/getXrayVersion", a.getXrayVersion)
 	g.POST("/installXray/:version", a.installXray)
+	g.POST("/getNewX25519Cert", a.getNewX25519Cert)
+	g.POST("/getNewMldsa65", a.getNewMldsa65)
+	g.POST("/getNewEchCert", a.getNewEchCert)
 }
 
 func (a *ServerController) refreshStatus() {
@@ -82,4 +85,31 @@ func (a *ServerController) installXray(c *gin.Context) {
 	version := c.Param("version")
 	err := a.serverService.UpdateXray(version)
 	jsonMsg(c, "安装 xray", err)
+}
+
+func (a *ServerController) getNewX25519Cert(c *gin.Context) {
+	cert, err := a.serverService.GetNewX25519Cert()
+	if err != nil {
+		jsonMsg(c, "生成 REALITY 密钥", err)
+		return
+	}
+	jsonObj(c, cert, nil)
+}
+
+func (a *ServerController) getNewMldsa65(c *gin.Context) {
+	keys, err := a.serverService.GetNewMldsa65()
+	if err != nil {
+		jsonMsg(c, "生成 ML-DSA-65 密钥", err)
+		return
+	}
+	jsonObj(c, keys, nil)
+}
+
+func (a *ServerController) getNewEchCert(c *gin.Context) {
+	keys, err := a.serverService.GetNewEchCert(c.PostForm("serverName"))
+	if err != nil {
+		jsonMsg(c, "生成 ECH 密钥", err)
+		return
+	}
+	jsonObj(c, keys, nil)
 }
