@@ -400,10 +400,24 @@ class GrpcStreamSettings extends XrayCommonClass {
 
 class TlsStreamSettings extends XrayCommonClass {
     constructor(serverName='',
-                certificates=[new TlsStreamSettings.Cert()]) {
+                minVersion='1.2',
+                maxVersion='1.3',
+                cipherSuites='',
+                rejectUnknownSni=false,
+                alpn=['h2', 'http/1.1'],
+                echServerKeys='',
+                certificates=[new TlsStreamSettings.Cert()],
+                settings=new TlsStreamSettings.Settings()) {
         super();
         this.server = serverName;
+        this.minVersion = minVersion;
+        this.maxVersion = maxVersion;
+        this.cipherSuites = cipherSuites;
+        this.rejectUnknownSni = rejectUnknownSni;
+        this.alpn = alpn;
+        this.echServerKeys = echServerKeys;
         this.certs = certificates;
+        this.settings = settings;
     }
 
     addCert(cert) {
@@ -421,26 +435,73 @@ class TlsStreamSettings extends XrayCommonClass {
         }
         return new TlsStreamSettings(
             json.serverName,
+            json.minVersion,
+            json.maxVersion,
+            json.cipherSuites,
+            json.rejectUnknownSni,
+            json.alpn,
+            json.echServerKeys,
             certs,
+            TlsStreamSettings.Settings.fromJson(json.settings),
         );
     }
 
     toJson() {
         return {
             serverName: this.server,
+            minVersion: this.minVersion,
+            maxVersion: this.maxVersion,
+            cipherSuites: this.cipherSuites,
+            rejectUnknownSni: this.rejectUnknownSni,
+            alpn: this.alpn,
+            echServerKeys: this.echServerKeys,
             certificates: TlsStreamSettings.toJsonArray(this.certs),
+            settings: this.settings.toJson(),
         };
     }
 }
 
+// settings 是**面板私有**的客户端半边参数，核心的 TLSConfig 里没有这个键。
+// 已实测确认核心忽略它而不是拒绝（web/service/inbound_stream_contract_test.go
+// 的 TestPanelOnlySettingsKeyIsIgnoredByCore）。存在这里是为了让分享链接
+// 能带上 fp / ech 两个参数——它们是客户端要用的，服务端不读。
+TlsStreamSettings.Settings = class extends XrayCommonClass {
+    constructor(fingerprint='chrome', allowInsecure=false, echConfigList='') {
+        super();
+        this.fingerprint = fingerprint;
+        this.allowInsecure = allowInsecure;
+        this.echConfigList = echConfigList;
+    }
+
+    static fromJson(json={}) {
+        if (ObjectUtil.isEmpty(json)) {
+            return new TlsStreamSettings.Settings();
+        }
+        return new TlsStreamSettings.Settings(
+            json.fingerprint,
+            json.allowInsecure,
+            json.echConfigList,
+        );
+    }
+
+    toJson() {
+        return {
+            fingerprint: this.fingerprint,
+            allowInsecure: this.allowInsecure,
+            echConfigList: this.echConfigList,
+        };
+    }
+};
+
 TlsStreamSettings.Cert = class extends XrayCommonClass {
-    constructor(useFile=true, certificateFile='', keyFile='', certificate='', key='') {
+    constructor(useFile=true, certificateFile='', keyFile='', certificate='', key='', ocspStapling=3600) {
         super();
         this.useFile = useFile;
         this.certFile = certificateFile;
         this.keyFile = keyFile;
         this.cert = certificate instanceof Array ? certificate.join('\n') : certificate;
         this.key = key instanceof Array ? key.join('\n') : key;
+        this.ocspStapling = ocspStapling;
     }
 
     static fromJson(json={}) {
@@ -449,12 +510,15 @@ TlsStreamSettings.Cert = class extends XrayCommonClass {
                 true,
                 json.certificateFile,
                 json.keyFile,
+                '', '',
+                json.ocspStapling,
             );
         } else {
             return new TlsStreamSettings.Cert(
                 false, '', '',
                 json.certificate.join('\n'),
                 json.key.join('\n'),
+                json.ocspStapling,
             );
         }
     }
@@ -464,11 +528,13 @@ TlsStreamSettings.Cert = class extends XrayCommonClass {
             return {
                 certificateFile: this.certFile,
                 keyFile: this.keyFile,
+                ocspStapling: this.ocspStapling,
             };
         } else {
             return {
                 certificate: this.cert.split('\n'),
                 key: this.key.split('\n'),
+                ocspStapling: this.ocspStapling,
             };
         }
     }
