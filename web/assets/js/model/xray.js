@@ -795,15 +795,7 @@ class Inbound extends XrayCommonClass {
     }
 
     set tls(isTls) {
-        if (isTls) {
-            this.stream.security = 'tls';
-        } else {
-            if (this.protocol === Protocols.TROJAN) {
-                this.xtls = true;
-            } else {
-                this.stream.security = 'none';
-            }
-        }
+        this.stream.security = isTls ? 'tls' : 'none';
     }
 
     get reality() {
@@ -1117,14 +1109,6 @@ class Inbound extends XrayCommonClass {
             if (index >= 0) {
                 host = ws.headers[index].value;
             }
-        } else if (network === 'http') {
-            network = 'h2';
-            path = this.stream.http.path;
-            host = this.stream.http.host.join(',');
-        } else if (network === 'quic') {
-            type = this.stream.quic.type;
-            host = this.stream.quic.security;
-            path = this.stream.quic.key;
         } else if (network === 'grpc') {
             path = this.stream.grpc.serviceName;
         }
@@ -1158,11 +1142,7 @@ class Inbound extends XrayCommonClass {
         const type = this.stream.network;
         const params = new Map();
         params.set("type", this.stream.network);
-        if (this.xtls) {
-            params.set("security", "xtls");
-        } else {
-            params.set("security", this.stream.security);
-        }
+        params.set("security", this.stream.security);
         switch (type) {
             case "tcp":
                 const tcp = this.stream.tcp;
@@ -1190,17 +1170,6 @@ class Inbound extends XrayCommonClass {
                     params.set("host", host);
                 }
                 break;
-            case "http":
-                const http = this.stream.http;
-                params.set("path", http.path);
-                params.set("host", http.host);
-                break;
-            case "quic":
-                const quic = this.stream.quic;
-                params.set("quicSecurity", quic.security);
-                params.set("key", quic.key);
-                params.set("headerType", quic.type);
-                break;
             case "grpc":
                 const grpc = this.stream.grpc;
                 params.set("serviceName", grpc.serviceName);
@@ -1208,14 +1177,47 @@ class Inbound extends XrayCommonClass {
         }
 
         if (this.stream.security === 'tls') {
-            if (!ObjectUtil.isEmpty(this.stream.tls.server)) {
-                address = this.stream.tls.server;
-                params.set("sni", address);
+            const tls = this.stream.tls;
+            if (!ObjectUtil.isEmpty(tls.server)) {
+                address = tls.server;
+                params.set("sni", tls.server);
+            }
+            if (tls.alpn instanceof Array && tls.alpn.length > 0) {
+                params.set("alpn", tls.alpn.join(','));
+            }
+            if (!ObjectUtil.isEmpty(tls.settings.fingerprint)) {
+                params.set("fp", tls.settings.fingerprint);
+            }
+            // util/link/outbound.go:461 与 :675 把 URI 的 ech 参数映射到
+            // echConfigList，两端必须用同一个名字。
+            if (!ObjectUtil.isEmpty(tls.settings.echConfigList)) {
+                params.set("ech", tls.settings.echConfigList);
+            }
+        } else if (this.stream.security === 'reality') {
+            const re = this.stream.reality;
+            const names = RealityStreamSettings.splitList(re.serverNames);
+            if (names.length > 0) {
+                params.set("sni", names[0]);
+            }
+            params.set("pbk", re.settings.publicKey);
+            const ids = RealityStreamSettings.splitList(re.shortIds);
+            if (ids.length > 0) {
+                params.set("sid", ids[0]);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.fingerprint)) {
+                params.set("fp", re.settings.fingerprint);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.spiderX)) {
+                params.set("spx", re.settings.spiderX);
+            }
+            if (!ObjectUtil.isEmpty(re.settings.mldsa65Verify)) {
+                params.set("pqv", re.settings.mldsa65Verify);
             }
         }
 
-        if (this.xtls) {
-            params.set("flow", this.settings.vlesses[0].flow);
+        const flow = this.settings.vlesses[0].flow;
+        if (!ObjectUtil.isEmpty(flow)) {
+            params.set("flow", flow);
         }
 
         const link = `vless://${uuid}@${address}:${port}`;
