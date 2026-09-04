@@ -821,6 +821,35 @@ EOF
     systemctl start a-ui-cert-sync.service
 }
 
+# Detect whether acme.sh is also managing the domain that was just set up.
+# This is common for users migrating from x-ui + acme.sh: acme.sh's cron
+# keeps renewing the certificate for this domain, and its reloadcmd is very
+# likely pointing at the nginx this wizard just stopped — the renewal
+# request itself (http-01/dns-01) doesn't depend on nginx running and
+# usually still succeeds, but the reloadcmd step will then fail; it also
+# leaves two ACME clients redundantly managing the same domain. This only
+# warns, it never touches the user's crontab or acme.sh config on its own —
+# those are the user's property, and the script has no business deciding
+# this for them.
+check_acme_conflict() {
+    local domain="$1"
+    local acme_dir="${HOME:-/root}/.acme.sh"
+    [[ -d "${acme_dir}" ]] || return 0
+    local domain_conf
+    domain_conf=$(find "${acme_dir}" -maxdepth 2 -type f -name "${domain}.conf" 2>/dev/null | head -1)
+    [[ -z "${domain_conf}" ]] && return 0
+
+    echo -e ""
+    echo -e "${yellow}Detected that acme.sh is also managing the certificate for ${domain} (${domain_conf})${plain}"
+    echo -e "${yellow}The certificate is now requested and renewed automatically by Caddy, so acme.sh renewing${plain}"
+    echo -e "${yellow}the same domain is redundant, and if its reloadcmd points at a service that was just${plain}"
+    echo -e "${yellow}stopped, renewal will error out. Pick one:${plain}"
+    echo -e "${yellow}  1) Stop acme.sh's renewal for this domain: crontab -e and delete the acme.sh line${plain}"
+    echo -e "${yellow}  2) Or keep acme.sh, but change its reloadcmd to reload Caddy instead:${plain}"
+    echo -e "${yellow}     ${acme_dir}/acme.sh --install-cert -d ${domain} --reloadcmd \"systemctl reload caddy\"${plain}"
+    echo -e "${yellow}This wizard will not modify your crontab or acme.sh configuration on its own.${plain}"
+}
+
 domain_flow() {
     local force="$1"
     local domain
@@ -895,6 +924,7 @@ domain_flow() {
         return 1
     fi
     print_result "${out}" "caddy"
+    check_acme_conflict "${domain}"
 
     # Only hint about the firewall, don't auto-change it: UFW/firewalld's
     # presence and rules vary too much, and auto-allowing can easily

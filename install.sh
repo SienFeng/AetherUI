@@ -742,6 +742,30 @@ EOF
     systemctl start a-ui-cert-sync.service
 }
 
+# 检测 acme.sh 是否也在管理刚配置好的这个域名。从 x-ui + acme.sh 迁移过来的
+# 用户很常见：acme.sh 的 cron 会继续为该域名续期，而它的 reloadcmd 十有八九
+# 指向刚被本向导停用的 nginx——续期请求本身（http-01/dns-01）与 nginx 是否在跑
+# 无关，通常仍会成功，但 reloadcmd 那一步必然失败；同时形成两套 ACME 客户端
+# 管理同一域名的冗余状态。只提示，绝不自动改用户的 crontab 或 acme.sh 配置——
+# 那是用户的资产，脚本没有权限替用户做这个决定。
+check_acme_conflict() {
+    local domain="$1"
+    local acme_dir="${HOME:-/root}/.acme.sh"
+    [[ -d "${acme_dir}" ]] || return 0
+    local domain_conf
+    domain_conf=$(find "${acme_dir}" -maxdepth 2 -type f -name "${domain}.conf" 2>/dev/null | head -1)
+    [[ -z "${domain_conf}" ]] && return 0
+
+    echo -e ""
+    echo -e "${yellow}检测到 acme.sh 也在管理 ${domain} 的证书（${domain_conf}）${plain}"
+    echo -e "${yellow}证书现已改由 Caddy 自动申请与续期，acme.sh 继续为同一域名续期已是多余，${plain}"
+    echo -e "${yellow}且它的 reloadcmd 若指向了刚被停用的服务，续期时会报错。任选其一处理：${plain}"
+    echo -e "${yellow}  1) 停掉 acme.sh 对这个域名的续期：crontab -e 删掉含 acme.sh 的那一行${plain}"
+    echo -e "${yellow}  2) 或保留 acme.sh，把它的 reloadcmd 改成重载 Caddy：${plain}"
+    echo -e "${yellow}     ${acme_dir}/acme.sh --install-cert -d ${domain} --reloadcmd \"systemctl reload caddy\"${plain}"
+    echo -e "${yellow}本向导不会自动修改你的 crontab 或 acme.sh 配置。${plain}"
+}
+
 domain_flow() {
     local force="$1"
     local domain
@@ -815,6 +839,7 @@ domain_flow() {
         return 1
     fi
     print_result "${out}" "caddy"
+    check_acme_conflict "${domain}"
 
     # 防火墙只提示不自动改：UFW/firewalld 的存在与规则差异过大，
     # 自动放行容易帮倒忙。
