@@ -86,11 +86,17 @@ elif [[ x"${release}" == x"debian" ]]; then
     fi
 fi
 
+# openssl is not optional: check_reality_target's four criteria all go
+# through openssl s_client, and without it the REALITY branch always
+# concludes "target doesn't meet the requirements" — a reason that is
+# entirely fabricated. Same for jq: print_result parses bootstrap's JSON
+# output with it, and without it the whole "panel address" line silently
+# disappears, right after the user moved the panel to a random path.
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar jq -y
+        yum install wget curl tar jq openssl -y
     else
-        apt install wget curl tar jq -y
+        apt install wget curl tar jq openssl -y
     fi
 }
 
@@ -259,6 +265,36 @@ check_reality_target() {
 
 reality_flow() {
     local force="$1"
+
+    # Port detection moved to the very top: every failure branch below
+    # needs it to build the SSH-tunnel port in the rescue hint on a force
+    # rerun. Omit -port when it can't be determined: better to leave
+    # bootstrap's webPort untouched than to silently change the user's
+    # existing port with a guessed, possibly wrong, value.
+    local port_args=()
+    local detected_port
+    if detected_port=$(current_panel_port); then
+        port_args=(-port "${detected_port}")
+    fi
+
+    # A REALITY inbound always takes port 443, and neither existing guard
+    # can see a port conflict: AddInbound's checkPortExist only looks at
+    # the panel's own inbound table, and ValidateInboundReplacing runs
+    # `xray run -test`, which never binds a port. So the inbound gets
+    # stored anyway, and the next RestartXray fails to bind 443 — the
+    # whole xray process won't come up, every existing inbound on the
+    # machine goes down with it, and the panel's home page still says
+    # running. Catch it here, the same way domain_flow handles 80/443.
+    local occupant443
+    occupant443=$(port_user 443)
+    if [[ -n "${occupant443}" ]]; then
+        echo -e "${red}Port 443 is already in use by ${occupant443}; a REALITY inbound cannot use it${plain}"
+        echo -e "${yellow}Stop whatever is holding it (e.g. systemctl stop ${occupant443}) and run the wizard again${plain}"
+        echo -e "${yellow}Skipping the setup wizard${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
+        return 1
+    fi
+
     echo -e ""
     echo -e "${green}Choose a REALITY masquerade target:${plain}"
     local i=1
@@ -276,28 +312,30 @@ reality_flow() {
         target="${REALITY_TARGETS[$((choice - 1))]}"
     else
         echo -e "${red}Invalid choice, skipping the setup wizard${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
     echo -e "Checking whether ${target} meets REALITY's requirements (TLS1.3 / ALPN h2 / X25519)…"
     if ! check_reality_target "${target}"; then
         echo -e "${red}${target} doesn't meet the requirements, please choose a different target${plain}"
-        echo -e "${yellow}Skipping the setup wizard; the panel keeps its default configuration and can be reconfigured later by running a-ui${plain}"
+        # "The panel keeps its default configuration" only holds for a
+        # first-time setup. force means this is a reconfigure: the panel's
+        # listen address and base path were already changed by an earlier
+        # successful run, so saying "default configuration" here is active
+        # false reassurance.
+        if [[ "${force}" == "force" ]]; then
+            echo -e "${yellow}Skipping the setup wizard; nothing was changed this time (the previous configuration still applies)${plain}"
+        else
+            echo -e "${yellow}Skipping the setup wizard; the panel keeps its default configuration and can be reconfigured later by running a-ui${plain}"
+        fi
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
     echo -e "${green}Check passed${plain}"
 
     local basepath
     basepath="/$(gen_random_path)/"
-
-    # Omit -port when the current panel port can't be determined: better
-    # to leave bootstrap's webPort untouched than to silently change the
-    # user's existing port with a guessed, possibly wrong, value.
-    local port_args=()
-    local detected_port
-    if detected_port=$(current_panel_port); then
-        port_args=(-port "${detected_port}")
-    fi
 
     local force_args=()
     [[ "${force}" == "force" ]] && force_args=(-force)
@@ -341,6 +379,27 @@ print_rescue_hint() {
         echo -e "  SSH tunnel: first use a-ui menu option 7 to check the panel's actual port, then run"
         echo -e "  ssh -L <port>:127.0.0.1:<port> root@<server-IP>"
     fi
+}
+
+# Used by failure branches **before** the bootstrap call point, in place
+# of an unconditional print_rescue_hint.
+#
+# The criterion is "is this a force rerun": force means the wizard already
+# configured this panel successfully once, so webListen is certainly
+# 127.0.0.1 by now and giving up midway does not change it back. Worse, on
+# a rerun handle_existing_web_server may already have stopped Caddy (our
+# own), leaving the panel completely unreachable from outside while the
+# last line on screen may just say "Cancelled". On a fresh install (not
+# force) webListen is still the default and the panel keeps listening on
+# every interface, so printing these two commands is only noise.
+#
+# No attempt is made to tell "did this particular branch actually change
+# anything": on a rerun, the state left behind by the previous run is not
+# visible from here, and two extra lines of output cost far less than an
+# unreachable panel.
+print_rescue_hint_if_force() {
+    [[ "$1" == "force" ]] || return 0
+    print_rescue_hint "$2"
 }
 
 print_result() {
@@ -457,6 +516,28 @@ print_stopped_svc_rollback_hint() {
     [[ -z "${stopped_web_svc}" ]] && return 0
     echo -e "${yellow}${stopped_web_svc} has already been stopped; nothing is currently listening on 80/443${plain}"
     echo -e "${yellow}To restore the old site first: systemctl enable --now ${stopped_web_svc}${plain}"
+}
+
+# If the web server handle_existing_web_server stopped was our own Caddy
+# (on a machine that already ran this wizard, that is exactly what holds
+# port 80), it has to be brought back before the wizard bails out midway:
+# the panel is most likely listening on 127.0.0.1 only by then, so with
+# Caddy down it disappears from the internet entirely — while the last
+# line on screen may just say "Cancelled".
+#
+# Only Caddy is treated this way. nginx/apache are the user's own
+# property, and the user explicitly confirmed stopping them moments ago;
+# restarting them unasked would override that confirmation.
+restart_own_caddy_if_stopped() {
+    [[ "${stopped_web_svc}" != "caddy" ]] && return 0
+    echo -e "${yellow}Restarting the Caddy that was stopped earlier, to restore external access to the panel and the decoy site…${plain}"
+    if systemctl start caddy 2>/dev/null; then
+        echo -e "${green}Caddy restarted${plain}"
+        stopped_web_svc=""
+        return 0
+    fi
+    echo -e "${red}Failed to restart Caddy; please run: systemctl start caddy${plain}"
+    return 1
 }
 
 # The apt branch's commands have been verified on Ubuntu 20.04.6 aarch64
@@ -944,10 +1025,20 @@ check_acme_conflict() {
 
 domain_flow() {
     local force="$1"
+
+    # The panel's current port: on a force rerun, giving up midway can
+    # leave the panel unreachable on 127.0.0.1, and the SSH tunnel in the
+    # rescue hint needs the real port. Leave it empty when detection
+    # fails — print_rescue_hint then degrades to "check the port via menu
+    # option 7" rather than fabricating a number.
+    local detected_port=""
+    detected_port=$(current_panel_port) || detected_port=""
+
     local domain
     read -p "Enter your domain: " domain
     if [[ -z "${domain}" ]]; then
         echo -e "${red}Domain cannot be empty${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
@@ -962,39 +1053,101 @@ domain_flow() {
         echo -e "${yellow}This is fine if you're using a CDN; otherwise certificate issuance will fail${plain}"
         local go_on
         read -p "Continue? [y/n]: " go_on
-        [[ x"${go_on}" != x"y" && x"${go_on}" != x"Y" ]] && return 1
+        if [[ x"${go_on}" != x"y" && x"${go_on}" != x"Y" ]]; then
+            print_rescue_hint_if_force "${force}" "${detected_port}"
+            return 1
+        fi
     fi
 
     local occupant
     occupant=$(port_user 80)
     [[ -z "${occupant}" ]] && occupant=$(port_user 443)
     if [[ -n "${occupant}" ]]; then
-        handle_existing_web_server "${occupant}" || return 1
+        if ! handle_existing_web_server "${occupant}"; then
+            print_rescue_hint_if_force "${force}" "${detected_port}"
+            return 1
+        fi
     fi
 
     if ! install_caddy; then
+        restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
+    # The user changing their mind at the decoy-site prompt (typing q, or
+    # read failing because the SSH session dropped) has to go through the
+    # same full wind-down: handle_existing_web_server may already have
+    # stopped Caddy, and install_caddy only enables — never starts — an
+    # already-installed one, so nothing at all is listening on 80/443.
+    # Returning after a bare "Cancelled" would leave a machine whose panel
+    # is completely unreachable from outside, with the user believing they
+    # did nothing.
     local mask_url
-    mask_url=$(choose_mask_site) || return 1
+    if ! mask_url=$(choose_mask_site); then
+        restart_own_caddy_if_stopped
+        print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
+        return 1
+    fi
 
     local basepath panel_port
     basepath="/$(gen_random_path)/"
     panel_port=54321
 
     if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
+        restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
+    # write_caddyfile's trailing systemctl restart caddy has succeeded, so
+    # something is listening on 80/443 again. If the service stopped
+    # earlier was our own Caddy, this marker must be cleared, or later
+    # failure branches would print "caddy has already been stopped;
+    # nothing is currently listening on 80/443" — the opposite of the truth.
+    [[ "${stopped_web_svc}" == "caddy" ]] && stopped_web_svc=""
+
     wait_for_cert "${domain}" || {
-        echo -e "${yellow}Certificate not ready; to avoid locking you out of the panel, the panel's listen address will not be changed${plain}"
+        if [[ "${force}" == "force" ]]; then
+            # On a rerun, "to avoid locking you out, the listen address
+            # will not be changed" is active false reassurance: webListen
+            # was already set to 127.0.0.1 by an earlier successful run,
+            # so not touching it now does not mean the panel is still
+            # reachable from outside.
+            echo -e "${yellow}Certificate not ready; the panel's listen address was not changed this time${plain}"
+            echo -e "${yellow}Note this is a reconfigure: the panel very likely already listens on 127.0.0.1 only,${plain}"
+            echo -e "${yellow}and Caddy is still running the previous configuration. If the panel is unreachable, recover with the commands below${plain}"
+        else
+            echo -e "${yellow}Certificate not ready; to avoid locking you out of the panel, the panel's listen address will not be changed${plain}"
+        fi
         echo -e "${yellow}Once fixed, run a-ui and choose \"Configure domain and decoy site\" to retry${plain}"
+        echo -e "${yellow}Troubleshoot: journalctl -u caddy -n 50${plain}"
+        print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     }
 
-    install_cert_sync "${domain}"
+    if ! install_cert_sync "${domain}"; then
+        echo -e "${yellow}Warning: syncing the certificate to /root/cert/ did not succeed${plain}"
+        echo -e "${yellow}Troubleshoot: systemctl status a-ui-cert-sync.service${plain}"
+    fi
+
+    # Whether the sync really worked is decided by looking at the files,
+    # not at a return code: once these two paths go into the panel's
+    # "defaults for new inbounds", every TLS inbound the admin creates from
+    # then on gets rejected by ValidateInboundReplacing over a path they
+    # never typed. Better to make them fill it in than to leave behind a
+    # default that is guaranteed to be wrong.
+    local cert_args=()
+    if [[ -s /root/cert/fullchain.cer && -s "/root/cert/${domain}.key" ]]; then
+        cert_args=(-cert-file /root/cert/fullchain.cer -key-file "/root/cert/${domain}.key")
+    else
+        echo -e "${yellow}Warning: no usable certificate files under /root/cert/, so the \"default certificate paths for new inbounds\" will not be written${plain}"
+        echo -e "${yellow}Caddy's own certificate is unaffected; the panel and the decoy site keep working${plain}"
+        echo -e "${yellow}When creating a TLS inbound, fill in the certificate paths yourself in the panel${plain}"
+    fi
 
     local force_args=()
     [[ "${force}" == "force" ]] && force_args=(-force)
@@ -1002,8 +1155,7 @@ domain_flow() {
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode caddy -domain "${domain}" \
             -basepath "${basepath}" -listen 127.0.0.1 -port "${panel_port}" \
-            -cert-file /root/cert/fullchain.cer \
-            -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
+            "${cert_args[@]}" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to write the panel configuration: ${out}${plain}"
         # This particular call most likely didn't manage to set webListen to
@@ -1028,7 +1180,13 @@ domain_flow() {
         print_rescue_hint "${panel_port}"
         return 1
     fi
-    print_result "${out}" "caddy"
+    # The port must be passed: the domain branch is the only one that locks
+    # the panel to 127.0.0.1, and the only one where the port is certain
+    # (it is the panel_port above). Omitting it degrades the rescue hint
+    # into "check the port via menu option 7 first" — the downgraded
+    # version, in exactly the scenario that most needs a copy-pasteable
+    # SSH tunnel command.
+    print_result "${out}" "caddy" "${panel_port}"
     check_acme_conflict "${domain}"
 
     # Only hint about the firewall, don't auto-change it: UFW/firewalld's
@@ -1129,8 +1287,19 @@ install_a-ui() {
 # the user explicitly wants to reconfigure, so it shouldn't be blocked by
 # that check.
 if [[ "$1" == "--wizard-only" ]]; then
+    # This entry point skips install_base(), yet the wizard itself depends
+    # on jq (print_result parses bootstrap's JSON output with it; without
+    # it the whole "panel address" line silently disappears, right after
+    # the user moved the panel to a random path) and on openssl
+    # (check_reality_target's four criteria all go through it; without it
+    # the check always fails, for an entirely fabricated reason).
+    command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || install_base
+    # The exit code must be reported honestly: a-ui's "Configure domain and
+    # decoy site" menu entry uses it to tell whether the wizard actually
+    # finished. Always returning 0 lets "gave up midway + panel already on
+    # 127.0.0.1 + Caddy stopped" travel silently back to the main menu.
     setup_wizard force
-    exit 0
+    exit $?
 fi
 
 echo -e "${green}excuting...${plain}"

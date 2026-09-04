@@ -82,11 +82,15 @@ elif [[ x"${release}" == x"debian" ]]; then
     fi
 fi
 
+# openssl 不是可选项：check_reality_target 的四项判据全靠 openssl s_client，
+# 缺了它 REALITY 分支必然判"目标不满足要求"，而这个理由完全是假的。
+# jq 同理——print_result 靠它解析 bootstrap 的 JSON 输出，缺了它"面板地址"
+# 那一整行会静默消失，用户刚把面板挪到一个随机路径上却拿不到地址。
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar jq -y
+        yum install wget curl tar jq openssl -y
     else
-        apt install wget curl tar jq -y
+        apt install wget curl tar jq openssl -y
     fi
 }
 
@@ -233,6 +237,32 @@ check_reality_target() {
 
 reality_flow() {
     local force="$1"
+
+    # 端口探测提到最前面：下面每一条失败分支在 force 重跑时都要用它拼
+    # 救援命令里的 SSH 隧道端口。拿不到就不传 -port，让 bootstrap 保持
+    # webPort 原样，总比传一个猜错的值把用户已有端口悄悄改掉安全。
+    local port_args=()
+    local detected_port
+    if detected_port=$(current_panel_port); then
+        port_args=(-port "${detected_port}")
+    fi
+
+    # REALITY 入站固定占 443，而落库前的两道防线都发现不了端口冲突：
+    # AddInbound 的 checkPortExist 只查面板自己的 inbound 表；
+    # ValidateInboundReplacing 走的 `xray run -test` 根本不 bind 端口。
+    # 于是入站照常落库，直到下一次 RestartXray 时 xray bind 443 失败、
+    # 整个进程起不来——机器上所有既有入站一起断网，而面板首页照样显示
+    # running。必须在这里拦下，做法与 domain_flow 处理 80/443 一致。
+    local occupant443
+    occupant443=$(port_user 443)
+    if [[ -n "${occupant443}" ]]; then
+        echo -e "${red}443 端口已被 ${occupant443} 占用，REALITY 入站无法使用该端口${plain}"
+        echo -e "${yellow}请先停用占用它的服务（例如 systemctl stop ${occupant443}）后重新运行向导${plain}"
+        echo -e "${yellow}跳过配置向导${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
+        return 1
+    fi
+
     echo -e ""
     echo -e "${green}请选择 REALITY 伪装目标：${plain}"
     local i=1
@@ -250,27 +280,28 @@ reality_flow() {
         target="${REALITY_TARGETS[$((choice - 1))]}"
     else
         echo -e "${red}无效的选择，跳过配置向导${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
     echo -e "正在检查 ${target} 是否满足 REALITY 要求（TLS1.3 / ALPN h2 / X25519）…"
     if ! check_reality_target "${target}"; then
         echo -e "${red}${target} 不满足要求，请换一个目标${plain}"
-        echo -e "${yellow}跳过配置向导，面板保持默认配置，可稍后运行 a-ui 重新配置${plain}"
+        # "面板保持默认配置"只在全新配置时成立。force 是重新配置，面板的
+        # 监听地址/根路径在更早一次成功的配置里就已经被改过了，这里再说
+        # "保持默认配置"是主动的错误安慰。
+        if [[ "${force}" == "force" ]]; then
+            echo -e "${yellow}跳过配置向导，本次没有改动面板配置（沿用上一次配置的结果）${plain}"
+        else
+            echo -e "${yellow}跳过配置向导，面板保持默认配置，可稍后运行 a-ui 重新配置${plain}"
+        fi
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
     echo -e "${green}检查通过${plain}"
 
     local basepath
     basepath="/$(gen_random_path)/"
-
-    # 拿不到当前面板端口就不传 -port：让 bootstrap 保持 webPort 原样，
-    # 总比传一个猜错的值把用户已有端口悄悄改掉安全。
-    local port_args=()
-    local detected_port
-    if detected_port=$(current_panel_port); then
-        port_args=(-port "${detected_port}")
-    fi
 
     local force_args=()
     [[ "${force}" == "force" ]] && force_args=(-force)
@@ -309,6 +340,22 @@ print_rescue_hint() {
         echo -e "  ssh 隧道：先用 a-ui 菜单第 7 项查看面板实际端口，再执行"
         echo -e "  ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>"
     fi
+}
+
+# bootstrap 调用点**之前**的失败分支用这个，而不是无条件的 print_rescue_hint。
+#
+# 判据是"本次是不是 force 重跑"：force 意味着面板此前已经被这个向导成功
+# 配置过一次，webListen 一定已经是 127.0.0.1，而中途放弃并不会把它改回来；
+# 更要命的是重跑路径上 handle_existing_web_server 可能已经把 Caddy（我们
+# 自己那个）停掉，此时面板从外网完全不可达，屏幕上最后一句却可能只是
+# "已取消"。全新安装（非 force）时 webListen 还是默认值、面板照常监听所有
+# IP，打印这两条命令只是噪音。
+#
+# 不去区分"这条分支之前有没有真的动过什么"：重跑时上一次运行留下的状态
+# 从这里根本看不出来，多打两行提示的代价，远低于留下一个够不着的面板。
+print_rescue_hint_if_force() {
+    [[ "$1" == "force" ]] || return 0
+    print_rescue_hint "$2"
 }
 
 print_result() {
@@ -414,6 +461,25 @@ print_stopped_svc_rollback_hint() {
     [[ -z "${stopped_web_svc}" ]] && return 0
     echo -e "${yellow}${stopped_web_svc} 已经被停用，此时 80/443 上没有任何服务在监听${plain}"
     echo -e "${yellow}如需先恢复旧站点：systemctl enable --now ${stopped_web_svc}${plain}"
+}
+
+# handle_existing_web_server 停用的若正是我们自己的 Caddy（重新配置一台
+# 已经跑过本向导的机器时，80 上占着的就是它），向导中途失败退出前必须把
+# 它拉回来：此时面板多半已经只监听 127.0.0.1，Caddy 一停，面板从外网彻底
+# 消失，而屏幕上最后一句可能只是"已取消"。
+#
+# 只对 caddy 做这件事。nginx/apache 是用户自己的资产，用户刚刚才明确确认
+# 过要停用它们，替他们擅自拉回来是在推翻那次确认。
+restart_own_caddy_if_stopped() {
+    [[ "${stopped_web_svc}" != "caddy" ]] && return 0
+    echo -e "${yellow}正在把先前停用的 Caddy 重新启动，以恢复面板与伪装站的外网访问…${plain}"
+    if systemctl start caddy 2>/dev/null; then
+        echo -e "${green}Caddy 已重新启动${plain}"
+        stopped_web_svc=""
+        return 0
+    fi
+    echo -e "${red}Caddy 重新启动失败，请手动执行：systemctl start caddy${plain}"
+    return 1
 }
 
 # apt 分支的命令已在 Ubuntu 20.04.6 aarch64 上实测通过（Caddy 2.11.4）。
@@ -836,10 +902,18 @@ check_acme_conflict() {
 
 domain_flow() {
     local force="$1"
+
+    # 面板当前端口：force 重跑时若中途放弃，面板可能已经在 127.0.0.1 上
+    # 够不着了，救援提示里的 SSH 隧道要带真实端口。探测不到就留空串，
+    # print_rescue_hint 会退化成"先用菜单第 7 项查端口"，不编一个数字。
+    local detected_port=""
+    detected_port=$(current_panel_port) || detected_port=""
+
     local domain
     read -p "请输入你的域名: " domain
     if [[ -z "${domain}" ]]; then
         echo -e "${red}域名不能为空${plain}"
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
@@ -853,39 +927,93 @@ domain_flow() {
         echo -e "${yellow}若使用了 CDN 可忽略；否则证书申请会失败${plain}"
         local go_on
         read -p "继续？[y/n]: " go_on
-        [[ x"${go_on}" != x"y" && x"${go_on}" != x"Y" ]] && return 1
+        if [[ x"${go_on}" != x"y" && x"${go_on}" != x"Y" ]]; then
+            print_rescue_hint_if_force "${force}" "${detected_port}"
+            return 1
+        fi
     fi
 
     local occupant
     occupant=$(port_user 80)
     [[ -z "${occupant}" ]] && occupant=$(port_user 443)
     if [[ -n "${occupant}" ]]; then
-        handle_existing_web_server "${occupant}" || return 1
+        if ! handle_existing_web_server "${occupant}"; then
+            print_rescue_hint_if_force "${force}" "${detected_port}"
+            return 1
+        fi
     fi
 
     if ! install_caddy; then
+        restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
 
+    # 用户在选伪装站时改主意（输入 q、或 SSH 断线导致 read 失败）同样要
+    # 走完整的收尾：此时 handle_existing_web_server 可能已经把 Caddy 停了，
+    # install_caddy 对"已安装"的情形只 enable、不 start，80/443 上是真的
+    # 什么都没有。只打一句"已取消"就返回，会留下一台面板从外网彻底不可达
+    # 的机器，而用户以为自己什么都没做。
     local mask_url
-    mask_url=$(choose_mask_site) || return 1
+    if ! mask_url=$(choose_mask_site); then
+        restart_own_caddy_if_stopped
+        print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
+        return 1
+    fi
 
     local basepath panel_port
     basepath="/$(gen_random_path)/"
     panel_port=54321
 
     if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
+        restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     fi
+    # write_caddyfile 末尾的 systemctl restart caddy 已经成功，80/443 上重新
+    # 有人监听了。先前停用的若正是我们自己的 Caddy，这个标记必须清掉，
+    # 否则后面的失败分支会打印"caddy 已被停用、80/443 上没有任何服务在
+    # 监听"这句与事实相反的提示。
+    [[ "${stopped_web_svc}" == "caddy" ]] && stopped_web_svc=""
+
     wait_for_cert "${domain}" || {
-        echo -e "${yellow}证书未就绪，为避免把你锁在面板外，不修改面板监听地址${plain}"
+        if [[ "${force}" == "force" ]]; then
+            # 重跑场景里"为避免把你锁在面板外，不修改监听地址"是主动的
+            # 错误安慰：webListen 在更早一次成功的配置里就已经是 127.0.0.1，
+            # 这次不动它并不代表面板还能从外网进得去。
+            echo -e "${yellow}证书未就绪，本次没有改动面板监听地址${plain}"
+            echo -e "${yellow}注意这是一次重新配置，面板此前很可能已经只监听 127.0.0.1；${plain}"
+            echo -e "${yellow}Caddy 现在用的还是上一次的配置，若面板打不开请用下面的命令恢复${plain}"
+        else
+            echo -e "${yellow}证书未就绪，为避免把你锁在面板外，不修改面板监听地址${plain}"
+        fi
         echo -e "${yellow}修好之后运行 a-ui 选择「配置域名与伪装站」重试${plain}"
+        echo -e "${yellow}排查：journalctl -u caddy -n 50${plain}"
+        print_stopped_svc_rollback_hint
+        print_rescue_hint_if_force "${force}" "${detected_port}"
         return 1
     }
 
-    install_cert_sync "${domain}"
+    if ! install_cert_sync "${domain}"; then
+        echo -e "${yellow}警告：证书同步到 /root/cert/ 未成功${plain}"
+        echo -e "${yellow}排查：systemctl status a-ui-cert-sync.service${plain}"
+    fi
+
+    # 同步是否真的成功，要看文件而不是看返回码：这两个路径一旦写进面板的
+    # "新建入站默认值"，管理员此后新建任何 TLS 入站都会被
+    # ValidateInboundReplacing 用一个他从没输入过的路径拒掉。宁可让他自己
+    # 填，也不留一个必然是错的默认值。
+    local cert_args=()
+    if [[ -s /root/cert/fullchain.cer && -s "/root/cert/${domain}.key" ]]; then
+        cert_args=(-cert-file /root/cert/fullchain.cer -key-file "/root/cert/${domain}.key")
+    else
+        echo -e "${yellow}警告：/root/cert/ 下没有可用的证书文件，本次不写入「新建入站的默认证书路径」${plain}"
+        echo -e "${yellow}Caddy 自己的证书不受影响，面板与伪装站照常工作；${plain}"
+        echo -e "${yellow}要新建 TLS 入站时请在面板里自行填写证书路径${plain}"
+    fi
 
     local force_args=()
     [[ "${force}" == "force" ]] && force_args=(-force)
@@ -893,8 +1021,7 @@ domain_flow() {
     local out
     out=$(/usr/local/a-ui/a-ui bootstrap -mode caddy -domain "${domain}" \
             -basepath "${basepath}" -listen 127.0.0.1 -port "${panel_port}" \
-            -cert-file /root/cert/fullchain.cer \
-            -key-file "/root/cert/${domain}.key" "${force_args[@]}" -json 2>&1)
+            "${cert_args[@]}" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}写入面板配置失败：${out}${plain}"
         # 这次调用本身多半没能把 webListen 改成 127.0.0.1（bootstrap 按
@@ -917,7 +1044,11 @@ domain_flow() {
         print_rescue_hint "${panel_port}"
         return 1
     fi
-    print_result "${out}" "caddy"
+    # 端口必须传：域名分支是唯一把面板锁到 127.0.0.1 的分支，也是唯一
+    # 端口百分之百确定的（就是上面这个 panel_port）。不传的话救援提示会
+    # 退化成"先用菜单第 7 项查端口"，恰恰在最需要一条可直接复制的 SSH
+    # 隧道命令的场景里给出了降级版本。
+    print_result "${out}" "caddy" "${panel_port}"
     check_acme_conflict "${domain}"
 
     # 防火墙只提示不自动改：UFW/firewalld 的存在与规则差异过大，
@@ -1017,8 +1148,16 @@ install_a-ui() {
 # 探测并覆盖已有配置——从菜单主动触发就是明确要重新配置，不该被幂等
 # 判断挡住。
 if [[ "$1" == "--wizard-only" ]]; then
+    # 这条入口不走 install_base()，但向导本身依赖 jq（print_result 解析
+    # bootstrap 的 JSON 输出，缺了它"面板地址"整行会静默不打印——用户刚把
+    # 面板挪到一个随机路径上却拿不到地址）与 openssl（check_reality_target
+    # 的四项判据全靠它，缺了它必然报"目标不满足要求"，理由完全是假的）。
+    command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || install_base
+    # 退出码必须如实透出：a-ui 菜单的「配置域名与伪装站」据此判断向导是不是
+    # 真的跑完了。恒返回 0 会让"中途放弃 + 面板已在 127.0.0.1 + Caddy 被停用"
+    # 这种状态一路静默回到主菜单。
     setup_wizard force
-    exit 0
+    exit $?
 fi
 
 echo -e "${green}开始安装${plain}"

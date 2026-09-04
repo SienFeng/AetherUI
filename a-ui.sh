@@ -788,6 +788,15 @@ reconfig_domain() {
         return 0
     fi
     bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh) --wizard-only
+    # 退出码必须检查：向导中途放弃（选伪装站时输入 q、证书没等到）会留下
+    # 「面板已在 127.0.0.1 + Caddy 可能已被停用」的状态，不检查的话这一切
+    # 会静默回到主菜单，用户只看到最后一句「已取消」，以为什么都没发生。
+    # 向导自己会打印救援命令，这里只负责把"没跑完"这件事说清楚。
+    local rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        LOGE "配置向导未正常完成（退出码 ${rc}），面板配置可能没有按预期更新"
+        LOGE "请按上面的提示排查；若面板打不开，用向导打印的恢复命令处理"
+    fi
 
     if [[ $# == 0 ]]; then
         before_show_menu

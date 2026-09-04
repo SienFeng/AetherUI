@@ -791,6 +791,18 @@ reconfig_domain() {
         return 0
     fi
     bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh) --wizard-only
+    # The exit code has to be checked: giving up midway (typing q at the
+    # decoy-site prompt, or the certificate never arriving) leaves the
+    # machine with "panel already on 127.0.0.1 + Caddy possibly stopped",
+    # and without this check all of that travels silently back to the main
+    # menu while the user only ever sees a final "Cancelled" and assumes
+    # nothing happened. The wizard prints the rescue commands itself; this
+    # only makes the "it did not finish" part explicit.
+    local rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        LOGE "the setup wizard did not finish successfully (exit code ${rc}); the panel configuration may not have been updated as expected"
+        LOGE "follow the messages above to troubleshoot; if the panel is unreachable, use the recovery commands the wizard printed"
+    fi
 
     if [[ $# == 0 ]]; then
         before_show_menu

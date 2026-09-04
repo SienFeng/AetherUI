@@ -242,7 +242,14 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 `install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——`Type=simple` 无 `Restart=` 意味着「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来）。
 
-两条救援命令由 `print_rescue_hint` 统一打印，`print_result`（成功收尾）内部调用它，`domain_flow`/`reality_flow` 里 `a-ui bootstrap` 调用点**之后**的每一条失败分支也各自调用一次——判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」：`bootstrap` 调用之前的失败（域名为空、Caddy 装失败、伪装站预检不过等）不打印，那时 `webListen` 还没被动过，打印反而是噪音；`bootstrap` 已经跑过之后的失败（写入配置本身失败、写完配置后面板重启探活失败）都打印，因为要么这次调用本身已经把 `webListen` 改成了 `127.0.0.1`，要么这是一次覆盖已有配置的重装、`webListen` 在更早一次成功配置里就已经是 `127.0.0.1` 了——两种情况在脚本里区分不出来，宁可多打印一次不需要的提示，也不能在真正需要救援命令的时候把它吞掉：
+两条救援命令由 `print_rescue_hint` 统一打印。判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」，落成两条：
+
+- **`a-ui bootstrap` 调用点之后**的每一条失败分支无条件打印（`print_result` 成功收尾也打）：要么这次调用本身已经把 `webListen` 改成了 `127.0.0.1`，要么这是一次覆盖已有配置的重装，更早一次成功配置里就已经改过了。
+- **调用点之前**的失败分支走 `print_rescue_hint_if_force`：只有本次是 `force` 重跑（`--wizard-only`，即 `a-ui` 菜单「配置域名与伪装站」）时才打印。`force` 意味着面板此前已经被这个向导成功配置过一次，`webListen` 一定已经是 `127.0.0.1`，中途放弃并不会把它改回来。全新安装时 `webListen` 还是默认值、面板照常监听所有 IP，打印只是噪音。
+
+这条判据一度只写了前半条，代价是一个真实的死角：`--wizard-only` 重跑时 `port_user 80` 返回的是**我们自己上一次装的 Caddy**，`handle_existing_web_server` 把它停用并 disable，`install_caddy` 对「已安装」只 `enable` 不 `start`，接着用户在选伪装站时输入 `q`——屏幕上最后一句是「已取消」，而机器上 Caddy 停着、面板在 `127.0.0.1`，**从外网彻底不可达**。所以 `domain_flow` 失败退出前还要做两件事：`restart_own_caddy_if_stopped`（先前停用的若正是我们自己的 Caddy 就把它拉回来；nginx/apache 不动——用户刚明确确认过要停它们），以及 `write_caddyfile` 成功后清掉 `stopped_web_svc` 标记（否则后续失败分支会打印「80/443 上没有任何服务在监听」这句与事实相反的话）。同理，`wait_for_cert` 失败时那句「为避免把你锁在面板外，不修改面板监听地址」在重跑场景里是**主动的错误安慰**，现在按 `force` 分岔成两套文案。
+
+`--wizard-only` 的退出码必须如实透出（`setup_wizard force; exit $?`），`a-ui.sh`/`a-ui_en.sh` 的 `reconfig_domain` 也必须检查它——恒返回 0 会让上面整个状态一路静默回到主菜单：
 
 ```
 a-ui setting -listen ""                        # 恢复监听所有 IP
