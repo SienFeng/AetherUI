@@ -24,70 +24,18 @@
 
 ---
 
-## Task 0: 外部依赖真机验证（前置，无代码产出）
+## Task 0: 外部依赖真机验证 — ✅ 已完成（2026-09-04）
 
-spec §2 列了 6 项未实测的外部依赖。**它们的结论会改变 Task 6/7 的实现方式**，必须先做完并把结论写回 spec，否则后面的任务只能凭猜测写代码。
+在一台 Ubuntu 20.04.6 aarch64 的真实 VPS（东京机房，域名已解析）上逐项验证完毕。
+**完整结论见 spec §2**，此处只列直接改变后续任务写法的三条：
 
-**Files:**
-- Modify: `docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md`（§2 表格填入结论）
+1. **`cert_obtained` 钩子不可用**——`caddy validate` 报 `getting module named 'events.handlers.exec': module not registered`。标准 Caddy 2.11.4 不带 exec 事件处理器。**Task 7 只走 systemd timer 方案，方案（a）已被证伪、从计划中删除。**
+2. **80→443 是 308 不是 301**——Task 11 的验收清单按 308 核对。
+3. **xray 会重读证书文件**（`transport/internet/tls/config.go:102-107`，间隔 = `ocspStapling`，默认 3600s）——证书同步脚本只复制文件，**不重启 xray**。
 
-**Interfaces:**
-- Consumes: 无
-- Produces: 供 Task 6/7 使用的确定结论——Caddy 最低版本号、`events`/`cert_obtained` 确切语法（或"不可用，改用 systemd timer"）、Caddyfile 中 `bind` 与 ACME 挑战的兼容写法、xray 是否重读证书文件
+Caddy 版本 2.11.4，官方 apt 源在 Ubuntu 20.04 aarch64 可用；证书存储路径 `/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/<域名>/`，属主 `caddy:caddy` 权限 0600；伪装站候选清单已实测产出，见 Task 8 Step 3。
 
-- [ ] **Step 1: 在一台带域名的测试 VPS 上装 Caddy 并记录版本**
-
-```bash
-# 官方源（Debian/Ubuntu），按 https://caddyserver.com/docs/install 的当前文档执行
-caddy version    # 记录实际版本号，写回 spec §2
-```
-
-- [ ] **Step 2: 验证 `events` / `cert_obtained` 钩子**
-
-```bash
-# 查官方文档确认该全局选项的最低版本与语法，然后实测：
-# 写一个最小 Caddyfile，钩子里 touch 一个文件，删掉证书触发重签，
-# 检查文件是否被创建
-ls -la /root/cert/     # 钩子生效则应出现同步过来的证书
-```
-结论写回 spec §2 与 §8。若不可用，把 §8 的退路（systemd timer 同步）确定为实现方案。
-
-- [ ] **Step 3: 验证最简 Caddyfile 下的 ACME 挑战与 301 跳转**
-
-Caddy 直接占 80/443，不改 `https_port`、不用 `bind`。要确认的是：只写一个域名站点块时，证书能否自动签发、80 上的跳转是否开箱可用。
-
-```bash
-curl -I http://<域名>     # 期望 301 到 https://<域名>/，Location 不应带端口
-curl -sI https://<域名>   # 期望 200，且证书由公认 CA 签发
-openssl s_client -connect <域名>:443 </dev/null 2>&1 | grep -E "Verify|subject"
-```
-
-- [ ] **Step 4: 验证 xray 是否重读证书文件**
-
-```bash
-# 读 xray-core 源码确认 ocspStapling 间隔是否触发 certificateFile 重读；
-# 再实测：替换 /root/cert 下的证书文件，等待一个间隔后检查 xray 出示的证书是否更新
-openssl s_client -connect <域名>:2886 </dev/null 2>&1 | openssl x509 -noout -dates
-```
-结论决定 §8 的续期钩子里是否需要 `systemctl restart a-ui`。
-
-- [ ] **Step 5: 逐个实测伪装站候选，产出候选清单**
-
-```bash
-for u in <候选列表>; do
-  printf '%s -> ' "$u"
-  curl -sS -o /dev/null -m 10 -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" \
-       -w '%{http_code} %{redirect_url}\n' "$u"
-done
-```
-**必须从机房 IP 的 VPS 上跑**，本地住宅 IP 的结果不作数。通过的站点写进 spec §6 作为候选清单。
-
-- [ ] **Step 6: 把 6 项结论写回 spec §2 并提交**
-
-```bash
-git add docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md
-git commit -m "docs(spec): 填入 Caddy/xray 外部依赖的真机验证结论"
-```
+未验证项：Caddy 官方源在 CentOS 7 / Debian 8 / Ubuntu 16 上是否可用——在这些系统上跑安装脚本时验证，决定二进制回退分支的必要性。
 
 ---
 
@@ -1723,6 +1671,8 @@ handle_existing_web_server() {
 - [ ] **Step 2: Caddy 安装**
 
 ```bash
+# apt 分支的命令已在 Ubuntu 20.04.6 aarch64 上实测通过（Caddy 2.11.4）。
+# 脚本以 root 运行（开头有 EUID 检查），所以不加 sudo。
 install_caddy() {
     if command -v caddy &>/dev/null; then
         echo -e "${green}检测到已安装 Caddy: $(caddy version | head -1)${plain}"
@@ -1730,14 +1680,21 @@ install_caddy() {
     fi
     echo -e "正在安装 Caddy…"
     if [[ x"${release}" == x"centos" ]]; then
-        # 使用 Task 0 Step 1 验证过的官方 copr 安装命令
-        :
+        dnf install -y "dnf-command(copr)" >/dev/null 2>&1 || yum install -y yum-plugin-copr >/dev/null 2>&1
+        dnf copr enable -y @caddy/caddy >/dev/null 2>&1 || yum copr enable -y @caddy/caddy >/dev/null 2>&1
+        dnf install -y caddy >/dev/null 2>&1 || yum install -y caddy >/dev/null 2>&1
     else
-        # 使用 Task 0 Step 1 验证过的官方 apt 源安装命令
-        :
+        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1
+        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
+            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
+            > /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq caddy >/dev/null 2>&1
     fi
     if ! command -v caddy &>/dev/null; then
         echo -e "${red}Caddy 安装失败${plain}"
+        echo -e "${yellow}请手动安装后重试：https://caddyserver.com/docs/install${plain}"
         return 1
     fi
     echo -e "${green}Caddy 安装完成: $(caddy version | head -1)${plain}"
@@ -1745,7 +1702,7 @@ install_caddy() {
 }
 ```
 
-两个 `:` 占位处填入 Task 0 验证过的实际命令。官方源失败时的二进制回退分支同样按 Task 0 的结论实现。
+apt 分支实测通过。**CentOS 的 copr 分支未经验证**——在 CentOS 机器上首次运行时确认，失败则按错误提示补二进制回退分支（下载 GitHub release 的 `caddy_*_linux_arm64.tar.gz` 并自写 systemd 单元）。
 
 - [ ] **Step 3: 加伪装站桩函数（Task 8 会替换成完整版）**
 
@@ -1777,7 +1734,7 @@ choose_mask_site() {
 #   1. 面板反代路径必须与写进面板的 webBasePath 完全一致，否则静态资源 404
 #   2. 伪装站放在最后的 handle，作为兜底
 # Caddy 直接占 80/443，证书与 80→443 跳转都靠它的自动 HTTPS，
-# 不需要 https_port / bind——这一点由 Task 0 Step 3 验证过。
+# 不需要 https_port / bind——这一点由 Task 0 验证过。
 write_caddyfile() {
     local domain="$1" basepath="$2" panel_port="$3" mask_url="$4"
     local mask_block
@@ -1840,11 +1797,7 @@ wait_for_cert() {
 
 面板与入站用的是固定路径 `/root/cert/`，而 Caddy 自己的证书存储路径含 ACME CA 的目录名，切换签发机构时会变——直接指过去会在某次续期后静默失效。所以要把证书同步到固定路径。
 
-按 **Task 0 Step 2 的验证结论**二选一：
-
-**（a）Caddy 事件钩子可用**——在 `write_caddyfile` 生成的 Caddyfile 里加入全局 `events` 块，`cert_obtained` 时执行同步脚本。确切语法以 Task 0 结论为准。
-
-**（b）钩子不可用**——安装一个 systemd timer：
+**Task 0 已实测确认 Caddy 事件钩子不可用**（`events.handlers.exec` 模块未注册，`caddy validate` 直接报错），所以只有 systemd timer 一条路：
 
 ```bash
 install_cert_sync() {
@@ -1898,7 +1851,11 @@ EOF
 }
 ```
 
-同步脚本里的 `cmp` 比对不是多余的：没有它，每小时都会重写一次文件，若后续按 Task 0 Step 4 的结论需要在证书变化时重启 xray，就会变成每小时无谓重启一次。
+同步脚本里的 `cmp` 比对不是多余的：没有它每小时都会重写一次文件，日志噪音之外，也让"证书到底什么时候换的"无从查证。
+
+**脚本里不要重启 xray**——Task 0 已实测确认 xray 自己会按 `ocspStapling` 间隔（默认 3600 秒）重读 `certificateFile`/`keyFile`（`transport/internet/tls/config.go:102-107`），续期后最多一小时自动生效。
+
+这个 timer 防的是一类真实事故：验证期间在测试机上发现，acme.sh 早在两个月前就成功续期了证书，但从未安装到 nginx 引用的路径，nginx 也从未 reload——nginx 就这样用着一份**过期 66 天**的证书对外服务，浏览器访问直接报证书错误、伪装站完全失效，而真实用户因为客户端开了 `allowInsecure` 毫无察觉。**「证书续期成功」和「服务用上了新证书」是两件事。**
 
 `domain_flow` 对它的调用在下一步的代码里（`wait_for_cert` 成功之后、调 `bootstrap` 之前）。
 
@@ -1975,7 +1932,7 @@ domain_flow() {
 }
 ```
 
-证书路径 `/root/cert/fullchain.cer` 与 `/root/cert/<域名>.key` 依赖 Task 0 Step 2 的证书同步机制。若该机制落地为 systemd timer 而非 Caddy 钩子，在本任务里一并安装该 timer。
+证书路径 `/root/cert/fullchain.cer` 与 `/root/cert/<域名>.key` 由上一步的 systemd timer 从 Caddy 的存储目录同步而来。
 
 - [ ] **Step 8: 语法检查与真机验证**
 
@@ -1998,13 +1955,13 @@ git commit -m "feat(install): 有域名分支——Caddy 伪装站与面板收�
 
 Task 7 里 `choose_mask_site` 与 `ensure_static_site` 是只用本地静态页的桩，本任务用完整实现替换 `choose_mask_site`（`ensure_static_site` 沿用，只是这里给出带样式的完整页面）。
 
-能否反代成功**取决于 VPS 的机房 IP**：同一个站，住宅 IP 访问正常、机房 IP 吃 403 或 Cloudflare 人机验证，非常常见。所以候选清单必须来自 Task 0 Step 5 的真机实测，且安装时还要再预检一次。
+能否反代成功**取决于 VPS 的机房 IP**：同一个站，住宅 IP 访问正常、机房 IP 吃 403 或 Cloudflare 人机验证，非常常见。所以候选清单必须来自 Task 0 的真机实测，且安装时还要再预检一次。
 
 **Files:**
 - Modify: `install.sh`
 
 **Interfaces:**
-- Consumes: Task 0 Step 5 产出的候选清单
+- Consumes: Task 0 产出的候选清单
 - Produces: `choose_mask_site`（stdout 输出选定的 URL，空表示用本地静态页；返回非 0 表示用户放弃）、`check_mask_site`、`ensure_static_site`
 
 - [ ] **Step 1: 预检函数**
@@ -2077,14 +2034,27 @@ HTMLEOF
 
 - [ ] **Step 3: 选择菜单**
 
-`MASK_SITES` 数组的内容**填入 Task 0 Step 5 实测通过的站点**。下面的两个条目仅为占位示例，实现时必须替换：
+`MASK_SITES` 的内容来自 Task 0 的真机实测（2026-09-04，东京机房 IP）：
 
 ```bash
-# 候选来自 Task 0 Step 5 的真机实测（必须从机房 IP 测，住宅 IP 的结果不作数）。
-# 站点的反代策略会变，隔一段时间要重测。
+# 候选来自真机实测（2026-09-04 于东京机房 IP）：状态码 2xx、无跳转、无 CF 拦截。
+# 必须从机房 IP 测，住宅 IP 的结果不作数——同一个站，住宅 IP 正常、
+# 机房 IP 吃 403 或人机验证非常常见。站点策略会变，隔一段时间要重测。
+#
+# 已实测拒绝、不要加回来的：gnu.org（连不上）、tesla.com（403）。
+# 注意 tesla.com 只是不能作为**反代目标**；它作为 REALITY 的 dest 完全可用，
+# 两者判据不同（REALITY 是 TCP 透传，不发 HTTP 请求）。
 MASK_SITES=(
-    "https://<Task 0 实测通过的站点 1>"
-    "https://<Task 0 实测通过的站点 2>"
+    "https://www.wikipedia.org"
+    "https://www.bing.com"
+    "https://www.microsoft.com"
+    "https://www.apple.com"
+    "https://www.amazon.co.jp"
+    "https://www.nicovideo.jp"
+    "https://www.python.org"
+    "https://www.debian.org"
+    "https://www.kernel.org"
+    "https://nginx.org"
 )
 
 # stdout 输出选定的 URL；输出空串表示使用本地静态页；返回非 0 表示用户放弃。
@@ -2141,7 +2111,7 @@ Run: `bash -n install.sh`
 source <(sed -n '/^check_mask_site()/,/^}/p' install.sh)
 check_mask_site https://example.com && echo OK || echo "拒绝原因见上"
 ```
-用一个已知会 403 的站点验证拒绝路径，用一个已知可用的站点验证通过路径。
+用 `https://www.tesla.com` 验证拒绝路径（Task 0 实测该站对机房 IP 返回 403），用 `https://www.wikipedia.org` 验证通过路径。
 
 - [ ] **Step 6: 提交**
 
@@ -2328,7 +2298,7 @@ git commit -m "feat(script): 管理菜单新增域名配置与恢复面板直连
 - [ ] 全新机器安装，向导选 y，证书正常签发
 - [ ] `https://<域名>/` 显示伪装站，证书由浏览器认可
 - [ ] `https://<域名>/<随机路径>/` 能打开面板并登录
-- [ ] `curl -I http://<域名>` 返回 301 到 `https://<域名>/`，Location 不带端口
+- [ ] `curl -I http://<域名>` 返回 **308** 到 `https://<域名>/`，Location 不带端口（Caddy 用 308 而非 301）
 - [ ] `ss -ltn` 确认 54321 只监听在 `127.0.0.1`
 - [ ] 从外网 `curl http://<IP>:54321/` 连不上
 - [ ] 面板里新建一个入站，域名与两个证书路径已自动填好

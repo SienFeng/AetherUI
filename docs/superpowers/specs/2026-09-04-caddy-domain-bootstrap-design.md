@@ -1,7 +1,7 @@
 # 域名 + Caddy 伪装安装向导 设计文档
 
 日期：2026-09-04
-状态：待评审
+状态：待评审（§2 外部依赖已于 2026-09-04 真机验证）
 
 ## 1. 背景与目标
 
@@ -35,19 +35,26 @@
 
 本期**不提升节点自身的抗探测能力**。改造后 2886/2996 这类入站端口照样暴露在公网，用浏览器访问会得到 400 或断连——这个特征与改造前完全一致。443 上的伪装站保护不到它们。提升的是面板侧的暴露面与传输安全。这一点必须在安装完成的提示里如实告知用户，不得暗示节点也变安全了。
 
-## 2. 待验证事项
+## 2. 外部依赖的实测结论
 
-**与本仓库其他 spec 不同，本设计的外部依赖多数尚未实测。**下表每一条都必须在实现前实际验证，不得凭文档记忆写进代码或本文档：
+本设计的外部依赖原本都未实测。以下结论由 2026-09-04 在一台 Ubuntu 20.04.6 aarch64 的真实 VPS（东京机房）上逐项验证得出，**不是推断**：
 
-| 待验证项 | 验证方法 | 影响面 |
-|---|---|---|
-| Caddy `events` / `cert_obtained` 钩子的最低版本与确切语法 | 官方文档 + 真机 | 证书同步到固定路径的实现方式；不可用时退回 systemd timer 同步 |
-| 最简 Caddyfile（只有一个域名站点块）下 ACME 挑战与 80→443 跳转是否开箱可用 | 真机 `curl -I http://域名` | Caddyfile 结构，直接决定证书能否签发 |
-| xray 是否按 `ocspStapling` 间隔（默认 3600s）重读 `certificateFile` | 读 xray-core 源码 + 真机 | 证书续期后是否必须重启 xray |
-| 各候选伪装站在机房 IP 下能否反代 | 安装时预检（§6） | 候选清单内容 |
-| Caddy 官方 apt/yum 源在 CentOS 7 / Debian 8 / Ubuntu 16 等脚本声称支持的最低版本上是否可用 | 真机 | 安装方式与二进制回退分支 |
+| 验证项 | 结论 |
+|---|---|
+| Caddy 版本与安装方式 | **2.11.4**，官方 apt 源（cloudsmith）在 Ubuntu 20.04 aarch64 可用 |
+| `events` / `cert_obtained` 钩子 | **不可用。**`caddy validate` 报 `getting module named 'events.handlers.exec': module not registered`——`events` 全局选项存在，但标准 Caddy 不带 `exec` 事件处理器，执行命令需要第三方插件。证书同步只能走 systemd timer（见 §8） |
+| 最简 Caddyfile 下的 ACME 与跳转 | **开箱可用。**只写一个域名站点块，证书 8 秒内由 Let's Encrypt 生产 CA 签发；80 端口自动跳转 |
+| 80→443 跳转的状态码 | **308** Permanent Redirect（不是 301），`Location` 不带端口 |
+| xray 是否重读证书文件 | **会。**`transport/internet/tls/config.go:102-107` 起一个 goroutine 周期性重读 `certificateFile`/`keyFile`，间隔取 `ocspStapling`（默认 3600 秒）。**因此证书续期后不需要重启 xray**，最多一小时内自动生效 |
+| Caddy 的证书存储路径 | `/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/<域名>/<域名>.crt` 与 `.key`，属主 `caddy:caddy`，权限 0600 |
+| 伪装站候选（东京机房 IP 实测） | 可用：`dbku.tv` `wikipedia.org` `debian.org` `kernel.org` `nginx.org` `python.org` `apache.org` `bing.com` `apple.com` `microsoft.com` `amazon.co.jp` `nicovideo.jp` `lovelive-anime.jp`；拒绝：`gnu.org`（连不上）、`tesla.com`（403） |
 
-无域名分支要新建 REALITY 入站，沿用 `web/assets/js/model/xray.js:84` 的 `REALITY_TARGET_PRESETS`。该处注释写明"域名的 TLS 配置会变，隔一段时间要重测"，实现时按其要求复核四项判据。
+两点需要留意：
+
+- xray 那条热重载的判断条件是 `cert` **与** `key` **都**变化（`config.go:85` 用的是 `&&`）。正常续期两者都会换新，所以没问题；但若将来出现复用私钥只换证书的场景，热重载不会触发。
+- `tesla.com` 作为**反代目标**被拒（403），但作为 **REALITY 的 `dest`** 完全可用——REALITY 是 TCP 透传，不发 HTTP 请求，两者判据不同。无域名分支沿用 `web/assets/js/model/xray.js:84` 的 `REALITY_TARGET_PRESETS`，该处注释写明"域名的 TLS 配置会变，隔一段时间要重测"，实现时按其要求复核四项判据。
+
+仍未验证：Caddy 官方源在 CentOS 7 / Debian 8 / Ubuntu 16 等脚本声称支持的更低版本系统上是否可用——这决定二进制回退分支的必要性，在这些系统上跑安装脚本时验证。
 
 ## 3. 端口拓扑
 
@@ -230,19 +237,21 @@ defaultKeyFile    默认密钥文件路径
 
 ```
 Caddy 自动申请 / 续期
-   └─▶ cert_obtained 钩子 ──▶ /root/cert/fullchain.cer
-                              /root/cert/<域名>.key       固定路径，不随 CA 目录名变化
-                                    │
-                       ┌────────────┴────────────┐
-              settings 里存一份                入站表单新建时带出
-        （defaultDomain/CertFile/KeyFile）    域名、公钥路径、密钥路径
+   └─▶ systemd timer（每小时）──▶ /root/cert/fullchain.cer
+                                  /root/cert/<域名>.key    固定路径，不随 CA 目录名变化
+                                        │
+                           ┌────────────┴────────────┐
+                  settings 里存一份                入站表单新建时带出
+            （defaultDomain/CertFile/KeyFile）    域名、公钥路径、密钥路径
 ```
 
-固定路径是必要的：Caddy 自己的证书存储路径含 ACME CA 的目录名，切换签发机构时会变，直接指过去会在某次续期后静默失效。
+固定路径是必要的：Caddy 自己的证书存储路径含 ACME CA 的目录名（实测为 `.../certificates/acme-v02.api.letsencrypt.org-directory/<域名>/`），切换签发机构时会变，直接指过去会在某次续期后静默失效。
 
-钩子机制的可用性见 §2 待验证表。不可用时的退路：systemd timer 定期同步，或直接指向 Caddy 存储路径并接受其不稳定性（后者需在文档中标注风险）。
+**同步机制用 systemd timer，不用 Caddy 事件钩子**——§2 实测确认标准 Caddy 不带 `events.handlers.exec` 模块，钩子方案根本无法通过 `caddy validate`。timer 每小时比对一次，内容有变才复制（`cmp` 比对不是多余的：没有它每小时都会重写文件）。
 
-续期后是否需要重启 xray 取决于 §2 中 `ocspStapling` 那条的验证结果。若 xray 确实会周期性重读证书文件，则无需重启；否则钩子里追加重启动作。
+**证书续期后不需要重启 xray**：§2 实测确认 xray 自己会按 `ocspStapling` 间隔（默认 3600 秒）重读证书文件。所以同步脚本只复制文件，不碰 xray 进程。
+
+这里有一条来自真实事故的教训。本设计验证期间，在那台测试用的生产机器上发现：nginx 正在使用一份**已过期 66 天**的证书，而 acme.sh 早在两个月前就成功续期了新证书——只是从未安装到 nginx 引用的路径，nginx 也从未 reload。后果是浏览器访问该域名直接报证书错误，伪装站完全失效，而真实用户因为客户端开了 `allowInsecure` 毫无察觉。**"证书续期成功"与"服务用上了新证书"是两件事**，本设计的 timer 必须验证的是后者。
 
 ## 9. 失败处理
 
