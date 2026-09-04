@@ -80,14 +80,14 @@
                             </a-tooltip>
                         </span>
                         <a-select v-model="inbound.stream.tls.minVersion"
-                                  :disabled="inbound.visionEnabled" style="width: 100px;">
+                                  :disabled="inbound.visionEnabled" style="width: 100%;">
                             <a-select-option v-for="v in TLS_VERSION_OPTION" :key="v" :value="v">[[ v ]]</a-select-option>
                         </a-select>
                     </a-form-item>
                 </a-col>
                 <a-col :span="6">
                     <a-form-item label="最高版本">
-                        <a-select v-model="inbound.stream.tls.maxVersion" style="width: 100px;">
+                        <a-select v-model="inbound.stream.tls.maxVersion" style="width: 100%;">
                             <a-select-option v-for="v in TLS_VERSION_OPTION" :key="v" :value="v">[[ v ]]</a-select-option>
                         </a-select>
                     </a-form-item>
@@ -95,7 +95,7 @@
                 <a-col :span="6">
                     <a-form-item label="ocspStapling">
                         <a-input-number v-model="inbound.stream.tls.certs[0].ocspStapling"
-                                        :min="0"></a-input-number>
+                                        :min="0" style="width: 100%;"></a-input-number>
                     </a-form-item>
                 </a-col>
                 <a-col :span="6">
