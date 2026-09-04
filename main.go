@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 	_ "unsafe"
+	"a-ui/bootstrap"
 	"a-ui/config"
 	"a-ui/database"
 	"a-ui/logger"
@@ -201,6 +202,7 @@ func main() {
 		fmt.Println("    v2-ui          migrate form v2-ui")
 		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset）")
 		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
+		fmt.Println("    bootstrap      安装脚本用：写入面板配置并按需创建入站")
 	}
 
 	flag.Parse()
@@ -250,13 +252,50 @@ func main() {
 		} else {
 			updateSetting(f)
 		}
+	case "bootstrap":
+		runBootstrap(os.Args[2:])
 	default:
-		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' subcommands")
+		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' or 'bootstrap' subcommands")
 		fmt.Println()
 		runCmd.Usage()
 		fmt.Println()
 		v2uiCmd.Usage()
 	}
+}
+
+// runBootstrap 是安装脚本的入口：把命令行参数翻译成 bootstrap.Options，
+// 初始化数据库后交给 bootstrap.Run 落地。参数校验、幂等判断、写入顺序
+// 等业务逻辑一律在 bootstrap 包里，这里只做 flag 解析与调用。
+func runBootstrap(args []string) {
+	cmd := flag.NewFlagSet("bootstrap", flag.ExitOnError)
+	var opts bootstrap.Options
+	cmd.StringVar(&opts.Mode, "mode", "", "caddy | reality")
+	cmd.StringVar(&opts.Domain, "domain", "", "域名（mode=caddy 必填）")
+	cmd.StringVar(&opts.BasePath, "basepath", "", "面板 url 根路径")
+	cmd.StringVar(&opts.Listen, "listen", "", "面板监听地址，留空为所有 IP")
+	cmd.IntVar(&opts.Port, "port", 0, "面板监听端口")
+	cmd.StringVar(&opts.CertFile, "cert-file", "", "新建入站默认证书公钥路径")
+	cmd.StringVar(&opts.KeyFile, "key-file", "", "新建入站默认证书密钥路径")
+	cmd.StringVar(&opts.RealityDest, "reality-dest", "", "REALITY 伪装目标（mode=reality 必填）")
+	cmd.BoolVar(&opts.Force, "force", false, "覆盖已有配置")
+	cmd.BoolVar(&opts.Check, "check", false, "只查询是否已初始化，不做任何写入")
+	cmd.BoolVar(&opts.JSON, "json", false, "以 JSON 输出结果")
+	if err := cmd.Parse(args); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	if err := database.InitDB(config.GetDBPath()); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	res, err := bootstrap.Run(opts)
+	if err != nil {
+		fmt.Println("bootstrap 失败:", err)
+		os.Exit(1)
+	}
+	res.Print(opts.JSON)
 }
 
 // clearTrafficShaping 不启动面板、不连数据库，直接把本面板下发的 tc 规则拆掉。
