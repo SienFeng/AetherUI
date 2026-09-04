@@ -1,0 +1,149 @@
+{{define "form/realitySettings"}}
+<a-form v-if="inbound.stream.isReality" layout="inline">
+    <a-form-item>
+        <span slot="label">
+            伪装目标
+            <a-tooltip>
+                <template slot="title">
+                    REALITY 会借用这个真实网站的 TLS 握手。GFW 主动探测你的端口时，<br/>
+                    看到的是这个站点的真实响应。<br/>
+                    <b>不要选 .cn/.ru/.ir 域名，也不要选 apple/icloud/microsoft 相关域名</b>——<br/>
+                    Xray 核心明确警告这几类会提高 IP 被封的概率。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <!-- combobox 模式：既能从预置列表里选，也能直接输入自定义目标。
+             ant-design-vue 1.7.2 用 mode="combobox" 而不是 4.x 的 allowClear+search。 -->
+        <a-select mode="combobox" v-model="inbound.stream.reality.target"
+                  style="width: 280px;" placeholder="域名:443"
+                  :filter-option="false">
+            <a-select-option v-for="t in REALITY_TARGET_PRESETS" :key="t" :value="t + ':443'">[[ t ]]:443</a-select-option>
+        </a-select>
+    </a-form-item>
+
+    <a-form-item v-if="realityTargetRisky">
+        <a-alert type="warning" show-icon
+                 message="这个伪装目标会提高 IP 被封锁的概率"
+                 description="Xray 核心对 .cn / .ru / .ir 后缀，以及含 apple / icloud / microsoft 的域名会发出该警告。核心只把它写进启动日志，面板不展示，所以在这里主动提示。建议换一个预置目标。">
+        </a-alert>
+    </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            serverNames
+            <a-tooltip>
+                <template slot="title">
+                    客户端握手时使用的 SNI，逗号分隔可填多个。<br/>
+                    通常就是伪装目标的域名。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-input v-model.trim="inbound.stream.reality.serverNames" style="width: 280px;"></a-input>
+    </a-form-item>
+
+    <a-form-item v-if="inbound.port !== 443">
+        <a-alert type="warning" show-icon
+                 message="REALITY 建议监听 443 端口"
+                 description="Xray 核心明确警告：监听非 443 端口会提高服务器 IP 被 GFW 封锁的概率。这条警告只出现在核心的启动日志里，面板不展示，所以这里主动提示。">
+        </a-alert>
+    </a-form-item>
+
+    <a-form-item label="密钥">
+        <a-button type="primary" size="small" :loading="realityLoading"
+                  @click="genRealityKeys">重新生成密钥对</a-button>
+    </a-form-item>
+    <a-form-item label="privateKey">
+        <a-input v-model.trim="inbound.stream.reality.privateKey" style="width: 320px;"></a-input>
+    </a-form-item>
+    <a-form-item label="publicKey">
+        <a-input v-model.trim="inbound.stream.reality.settings.publicKey" style="width: 320px;"></a-input>
+    </a-form-item>
+    <a-form-item>
+        <span slot="label">
+            shortIds
+            <a-tooltip>
+                <template slot="title">
+                    十六进制字符，单个不超过 16 位，逗号分隔可填多个。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-input v-model.trim="inbound.stream.reality.shortIds" style="width: 240px;"></a-input>
+    </a-form-item>
+    <a-form-item label=" ">
+        <a-button size="small" @click="genShortId">随机</a-button>
+    </a-form-item>
+    <a-form-item label="客户端指纹">
+        <a-select v-model="inbound.stream.reality.settings.fingerprint" style="width: 150px;">
+            <a-select-option v-for="f in UTLS_FINGERPRINT" :key="f" :value="f">[[ f ]]</a-select-option>
+        </a-select>
+    </a-form-item>
+    <a-form-item label="spiderX">
+        <a-input v-model.trim="inbound.stream.reality.settings.spiderX" style="width: 120px;"></a-input>
+    </a-form-item>
+</a-form>
+
+<a-collapse v-if="inbound.stream.isReality" style="margin-top: 8px;">
+    <a-collapse-panel header="REALITY 高级设置（留空即安全默认）">
+        <a-form layout="inline">
+            <a-form-item>
+                <span slot="label">
+                    minClientVer
+                    <a-tooltip>
+                        <template slot="title">
+                            <b style="color:#cf1322">留空最安全。</b>核心默认只接受 Xray v26.3.27 及以上的客户端。<br/>
+                            核心源码里写明：调低这个值会提高服务器 IP 被 GFW 封锁的概率。<br/>
+                            旧客户端连不上时，正确做法是升级客户端，而不是调低这里。
+                        </template>
+                        <a-icon type="question-circle" theme="filled"></a-icon>
+                    </a-tooltip>
+                </span>
+                <a-input v-model.trim="inbound.stream.reality.minClientVer"
+                         placeholder="留空 = 26.3.27" style="width: 160px;"></a-input>
+            </a-form-item>
+            <a-form-item label="maxClientVer">
+                <a-input v-model.trim="inbound.stream.reality.maxClientVer" style="width: 160px;"></a-input>
+            </a-form-item>
+            <a-form-item label="maxTimeDiff">
+                <a-input-number v-model="inbound.stream.reality.maxTimeDiff" :min="0"></a-input-number>
+            </a-form-item>
+            <a-form-item>
+                <span slot="label">
+                    xver
+                    <a-tooltip>
+                        <template slot="title">PROXY protocol 版本，只接受 0 / 1 / 2。默认 0。</template>
+                        <a-icon type="question-circle" theme="filled"></a-icon>
+                    </a-tooltip>
+                </span>
+                <a-input-number v-model="inbound.stream.reality.xver" :min="0" :max="2"></a-input-number>
+            </a-form-item>
+            <a-form-item label="show">
+                <a-switch v-model="inbound.stream.reality.show"></a-switch>
+            </a-form-item>
+        </a-form>
+
+        <a-form layout="inline" style="margin-top: 8px;">
+            <a-form-item>
+                <span slot="label">
+                    ML-DSA-65
+                    <a-tooltip>
+                        <template slot="title">
+                            REALITY 的后量子签名。留空表示不启用。<br/>
+                            <b>需要客户端支持</b>，旧客户端会连不上。
+                        </template>
+                        <a-icon type="question-circle" theme="filled"></a-icon>
+                    </a-tooltip>
+                </span>
+                <a-button size="small" :loading="mldsaLoading" @click="genMldsa65">生成后量子密钥</a-button>
+            </a-form-item>
+            <a-form-item label="mldsa65Seed">
+                <a-input v-model.trim="inbound.stream.reality.mldsa65Seed" style="width: 320px;"></a-input>
+            </a-form-item>
+            <a-form-item label="mldsa65Verify">
+                <a-input v-model.trim="inbound.stream.reality.settings.mldsa65Verify" style="width: 320px;"></a-input>
+            </a-form-item>
+        </a-form>
+    </a-collapse-panel>
+</a-collapse>
+{{end}}

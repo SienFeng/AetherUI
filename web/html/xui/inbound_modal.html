@@ -98,6 +98,22 @@
                 const raw = this.inbound.stream.tls.cipherSuites;
                 return raw ? raw.split(':').filter(s => s !== '') : [];
             },
+            // 与核心 transport_security.go:164-170 的判定逐条对应：
+            // 后缀 .ru/.ir/.cn，或域名中含 apple/icloud/microsoft。
+            // 核心命中时只在启动日志里 LogWarning，配置照常加载，而面板从不
+            // 展示 xray 日志——不在这里提示，管理员没有任何途径知道。
+            realityTargetRisky() {
+                const target = (this.inbound.stream.reality.target || '').toLowerCase();
+                if (target === '') {
+                    return false;
+                }
+                // target 形如 "www.example.com:443"，判定只看主机名部分。
+                const host = target.split(':')[0];
+                if (host.endsWith('.ru') || host.endsWith('.ir') || host.endsWith('.cn')) {
+                    return true;
+                }
+                return host.includes('apple') || host.includes('icloud') || host.includes('microsoft');
+            },
         },
         methods: {
             streamNetworkChange(oldValue) {
@@ -123,6 +139,42 @@
                     this.inbound.stream.tls.settings.echConfigList = msg.obj.echConfigList;
                 } finally {
                     this.echLoading = false;
+                }
+            },
+            async genRealityKeys() {
+                this.realityLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewX25519Cert');
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.reality.privateKey = msg.obj.privateKey;
+                    this.inbound.stream.reality.settings.publicKey = msg.obj.publicKey;
+                } finally {
+                    this.realityLoading = false;
+                }
+            },
+            genShortId() {
+                // 核心要求 shortId 是十六进制且不超过 16 位
+                // （transport_security.go:140-145 走 hex.Decode）。
+                const hex = '0123456789abcdef';
+                let out = '';
+                for (let i = 0; i < 16; i++) {
+                    out += hex[Math.floor(Math.random() * 16)];
+                }
+                this.inbound.stream.reality.shortIds = out;
+            },
+            async genMldsa65() {
+                this.mldsaLoading = true;
+                try {
+                    const msg = await HttpUtil.post('/server/getNewMldsa65');
+                    if (!msg.success) {
+                        return;
+                    }
+                    this.inbound.stream.reality.mldsa65Seed = msg.obj.seed;
+                    this.inbound.stream.reality.settings.mldsa65Verify = msg.obj.verify;
+                } finally {
+                    this.mldsaLoading = false;
                 }
             },
         }
