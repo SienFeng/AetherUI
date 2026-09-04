@@ -1049,6 +1049,7 @@ git commit -m "feat(cli): 新增 a-ui bootstrap 子命令（mode=caddy）"
 - Create: `bootstrap/reality.go`
 - Create: `bootstrap/reality_test.go`
 - Create: `bootstrap/testdata/reality_inbound.golden.json`
+- Create: `bootstrap/testdata/gen_golden.js`（golden 的可重现来源，Go 测试不调用它）
 
 **Interfaces:**
 - Consumes: `service.ServerService.GetNewX25519Cert() (map[string]any, error)`、`service.InboundService.AddInbound(*model.Inbound) error`
@@ -1058,29 +1059,62 @@ git commit -m "feat(cli): 新增 a-ui bootstrap 子命令（mode=caddy）"
 
 密钥、UUID、shortId 由 `Run` 生成后**作为参数传入** `BuildRealityInbound`，不在其内部生成——否则输出不确定，没法做 golden 比对。
 
-- [ ] **Step 1: 用面板生成 golden 文件（不要手写它）**
+- [ ] **Step 1: 用前端模型代码生成 golden 文件（不要手写它）**
 
 golden 文件必须来自前端真实生成的结果，手写等于用一份猜测去校验另一份猜测。
 
+不用开浏览器手工点：`xray.js` 只依赖 `utils.js` 里的 `ObjectUtil` 与 `RandomUtil`，两个文件在 Node 的 `vm` 里拼起来就能跑（本机 Node v24.1.0 已验证可行）。这样生成的 golden 可重复、可随时重新生成，来源也可追溯——比手工点击更不容易出错。
+
+注意 `class` 与 `const` 是词法声明，不会挂到 vm context 上，所以生成代码必须**拼接进同一段脚本**，不能从 context 里取。
+
+新建 `bootstrap/testdata/gen_golden.js`（签入仓库，作为 golden 的可重现来源）：
+
+```javascript
+// 从前端模型（web/assets/js/model/xray.js）生成 Go 侧 golden 测试的期望 JSON。
+//
+// Go 侧手写的入站 JSON 必须与前端模型逐字段一致：字段名差一个字母 xray 照样能跑，
+// 但管理员用面板打开这个入站时表单会错乱或吞值——xray 的配置校验看不见这类差异。
+// golden 由本脚本生成而非手写，保证它确实是前端的真实输出。
+//
+// 重新生成：node bootstrap/testdata/gen_golden.js > bootstrap/testdata/reality_inbound.golden.json
+const fs = require("fs");
+const vm = require("vm");
+const path = require("path");
+
+const repo = path.resolve(__dirname, "../..");
+const src =
+  fs.readFileSync(path.join(repo, "web/assets/js/util/utils.js"), "utf8") + "\n" +
+  fs.readFileSync(path.join(repo, "web/assets/js/model/xray.js"), "utf8") + `
+const inbound = new Inbound(443, "", Protocols.VLESS);
+inbound.settings.vlesses[0].id = "11111111-2222-3333-4444-555555555555";
+inbound.settings.vlesses[0].flow = "xtls-rprx-vision";
+inbound.stream.network = "tcp";
+inbound.stream.security = "reality";
+inbound.stream.reality.target = "www.tesla.com:443";
+inbound.stream.reality.serverNames = "www.tesla.com";
+inbound.stream.reality.privateKey = "aGVsbG8td29ybGQtdGVzdC1wcml2YXRlLWtleTEyMw";
+inbound.stream.reality.shortIds = "0123456789abcdef";
+inbound.stream.reality.settings.publicKey = "aGVsbG8td29ybGQtdGVzdC1wdWJsaWMta2V5MTIzNDU";
+emit({
+  settings: inbound.settings.toString(false),
+  streamSettings: inbound.stream.toString(false),
+  sniffing: inbound.sniffing.toString(false),
+});
+`;
+
+const ctx = { console, emit: (o) => process.stdout.write(JSON.stringify(o, null, 2) + "\n") };
+vm.createContext(ctx);
+vm.runInContext(src, ctx, { filename: "gen_golden.js" });
+```
+
+生成：
+
 ```bash
-XUI_DEBUG=true go run main.go
+node bootstrap/testdata/gen_golden.js > bootstrap/testdata/reality_inbound.golden.json
+cat bootstrap/testdata/reality_inbound.golden.json
 ```
 
-浏览器建一个入站：协议 vless、端口 `443`、监听留空、流控 `xtls-rprx-vision`、传输 `tcp`、安全层 `reality`、目标 `www.tesla.com:443`、serverNames `www.tesla.com`、指纹 `chrome`、shortIds 填 `0123456789abcdef`、sniffing 保持默认（enabled + http/tls/quic）。保存后导出：
-
-```bash
-sqlite3 /etc/a-ui/a-ui.db \
-  "SELECT json_object('settings', settings, 'streamSettings', stream_settings, 'sniffing', sniffing) FROM inbounds WHERE port=443;" \
-  | python3 -m json.tool > bootstrap/testdata/reality_inbound.golden.json
-```
-
-打开该文件，把 `privateKey`、`publicKey`、客户端 `id` 三个随机值替换成测试里要用的固定值：
-
-```
-privateKey  →  aGVsbG8td29ybGQtdGVzdC1wcml2YXRlLWtleTEyMw
-publicKey   →  aGVsbG8td29ybGQtdGVzdC1wdWJsaWMta2V5MTIzNDU
-id          →  11111111-2222-3333-4444-555555555555
-```
+**Go 测试只读签入的 golden 文件，不调用 node**——CI 环境不一定有 Node，测试不能依赖它。脚本的作用是让 golden 可追溯、可在前端模型变更后重新生成。
 
 - [ ] **Step 2: 写失败测试**
 
@@ -1265,7 +1299,7 @@ func BuildRealityInbound(p RealityParams) (*model.Inbound, error) {
 }
 ```
 
-**若测试失败，以 golden 文件为准修改这里的字段**，不要反过来改 golden——golden 是前端真实输出，它才是契约。特别检查 `tcpSettings` 与 `fallbacks` 这两处，前端在 `network='tcp'` 时会输出 `tcpSettings`（`xray.js:743`），其确切结构以 golden 为准。
+**上面这段 Go 代码的字段是按 `xray.js` 推断写的，未经验证，预期会与 golden 不一致。以 golden 文件为准修改它**，绝不要反过来改 golden——golden 是前端的真实输出，它才是契约。已知需要重点核对的是 `tcpSettings`（前端在 `network='tcp'` 时才输出它，`xray.js:743`）与 `settings.fallbacks`：这段代码里 `tcpSettings` 的字段就是照 `TcpStreamSettings` 的构造函数猜的，很可能多写或少写了字段。
 
 - [ ] **Step 5: 运行确认通过**
 
