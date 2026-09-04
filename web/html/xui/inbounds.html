@@ -17,6 +17,14 @@
     #app .ant-table:not(.ant-table-small) .ant-table-tbody > tr {
         cursor: pointer;
     }
+
+    /* antd 给 .ant-tag 的默认外边距是 `0 8px 0 0`，只有右边。单元格居中时
+       这 8px 也算进内容宽度，于是标签整体被推左 4px，看起来就和表头对不齐。
+       改成左右各 4px：单个标签正好居中，相邻两个标签之间仍是 8px，
+       窄列里换行堆叠的多个标签（如 ws / tls）也各自居中。 */
+    #app .ant-table-tbody > tr > td .ant-tag {
+        margin: 0 4px;
+    }
 </style>
 <body>
 <a-layout id="app" v-cloak>
