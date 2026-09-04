@@ -542,25 +542,33 @@ _mask_site_url_host() {
     echo "${u#www.}"
 }
 
-# Three ways this check fails: a non-2xx status code; a redirect to a
-# different domain; or being blocked by Cloudflare. A prober seeing a
+# Five ways this check fails: the address carries a path; the root path
+# redirects at all; a non-2xx status code; an unknown path redirects
+# cross-domain; or the site is blocked by Cloudflare. A prober seeing a
 # broken mirror site is far more suspicious than seeing a plain static page.
 #
-# On success, stdout outputs the URL that should actually be reverse
-# proxied: with no redirect it's ${url} unchanged; with a same-domain
-# redirect (http→https, bare domain→www, etc.) it's the redirect target,
-# not the original address — the reverse-proxy target itself must never be
-# an address that redirects, or Caddy would forward the upstream's raw
-# Location header straight to real visitors, whose browsers would jump
-# right to the real domain behind the redirect, blowing the disguise on
-# the spot. A cross-domain redirect is still rejected outright, and only
-# this one hop is followed — it does not recursively probe whether the
-# redirect target itself redirects further. On failure, stdout outputs the
-# rejection reason.
+# On success this prints nothing and returns 0 — the caller reverse
+# proxies exactly the URL it passed in. On failure, stdout carries the
+# rejection reason. There is no "follow one hop and return the resolved
+# address" logic any more: Caddy's reverse_proxy upstream only accepts
+# scheme/host/port, while curl's %{redirect_url} almost always yields an
+# absolute URL with at least a "/", so that branch could never have
+# produced a config that passes caddy validate.
 check_mask_site() {
     local url="$1"
     local ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    local resp code redirect target headers
+    local resp code redirect headers after_scheme probe_url probe_resp probe_code probe_redirect
+
+    # Reject an address with a path here rather than letting it fail in
+    # write_caddyfile — by then the old web server may already be stopped
+    # and nothing is listening on 80/443. Verified on Caddy 2.11.4:
+    # reverse_proxy https://www.python.org/ → for now, URLs for proxy
+    # upstreams only support scheme, host, and port components.
+    after_scheme="${url#*://}"
+    if [[ "${after_scheme}" == */?* ]]; then
+        echo "the reverse-proxy target must not carry a path (Caddy upstreams only accept scheme/host/port)"
+        return 1
+    fi
 
     resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
                 -w '%{http_code} %{redirect_url}' "${url}" 2>/dev/null) || {
@@ -569,22 +577,25 @@ check_mask_site() {
     }
     code=$(echo "${resp}" | awk '{print $1}')
     redirect=$(echo "${resp}" | awk '{print $2}')
-    target="${url}"
 
-    # Without -L, curl's redirect response is itself a 3xx, which would be
-    # caught by the "non-2xx status code" check below — so the
-    # cross-domain check must come before the status code check, or this
-    # branch would never be reached.
+    # Any redirect on the root path is rejected, same-domain ones included.
+    # Two independently sufficient reasons:
+    #   1. The redirect target carries a path, which cannot be written into
+    #      a Caddy upstream (see above).
+    #   2. If the reverse-proxy target itself redirects, Caddy forwards the
+    #      upstream's Location header verbatim to visitors, whose browsers
+    #      jump straight to the real decoy source — the address bar turns
+    #      from the user's domain into someone else's, blowing the disguise
+    #      on the spot.
+    # Without -L, a 3xx response's http_code is itself non-2xx, so this
+    # check must come before the status-code check or the rejection reason
+    # would degrade into an uninformative "HTTP 301". Every preset
+    # candidate was verified on 2026-09-04 from a Tokyo datacenter IP to
+    # return 200 directly on the root path with no redirect, so this check
+    # does not reject any of them.
     if [[ -n "${redirect}" ]]; then
-        if [[ "$(_mask_site_url_host "${url}")" != "$(_mask_site_url_host "${redirect}")" ]]; then
-            echo "redirects to ${redirect}"
-            return 1
-        fi
-        target="${redirect}"
-        code=$(curl -sS -o /dev/null -m 10 -A "${ua}" -w '%{http_code}' "${target}" 2>/dev/null) || {
-            echo "unable to connect"
-            return 1
-        }
+        echo "root path redirects to ${redirect}"
+        return 1
     fi
 
     if [[ ! "${code}" =~ ^2 ]]; then
@@ -592,21 +603,54 @@ check_mask_site() {
         return 1
     fi
 
+    # Unknown-path probe. Checking only the root path is nowhere near
+    # enough: a decoy site is visited mostly on non-root paths. Verified:
+    # www.wikipedia.org returns 200 on the root path but answers any
+    # unknown path with a cross-domain 301 (location:
+    # https://en.wikipedia.org/<original path>), which Caddy forwards
+    # verbatim — one response that simultaneously says "this is not that
+    # site's domain" and "it is bare-proxying that site".
+    #
+    # Only **cross-domain** redirects are rejected: same-domain absolute
+    # redirects are covered by the header_down Location rewrite in
+    # write_caddyfile (host swapped for the visitor's domain, path
+    # unchanged, so the upstream still serves that path and nothing loops);
+    # a cross-domain redirect, once rewritten, would come back to our own
+    # domain, get proxied upstream again and redirect again — a redirect
+    # loop — so it has to be rejected right here.
+    #
+    # A failed probe and a passing probe are two different things: warn and
+    # skip the check rather than passing or rejecting, the same way the
+    # Cloudflare check below behaves.
+    probe_url="${url%/}/aui-probe-$(gen_random_path)/"
+    probe_resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
+                     -w '%{http_code} %{redirect_url}' "${probe_url}" 2>/dev/null) || {
+        echo -e "${yellow}Warning: could not complete the unknown-path probe, skipping it${plain}" >&2
+        probe_resp=""
+    }
+    if [[ -n "${probe_resp}" ]]; then
+        probe_code=$(echo "${probe_resp}" | awk '{print $1}')
+        probe_redirect=$(echo "${probe_resp}" | awk '{print $2}')
+        if [[ "${probe_code}" =~ ^3 ]] && [[ -n "${probe_redirect}" ]] && \
+           [[ "$(_mask_site_url_host "${url}")" != "$(_mask_site_url_host "${probe_redirect}")" ]]; then
+            echo "an unknown path returns a cross-domain redirect (${probe_code} → ${probe_redirect}), which would blow the disguise once proxied"
+            return 1
+        fi
+    fi
+
     # A successful first GET probe doesn't guarantee this HEAD request
     # succeeds too (some sites/WAFs treat HEAD differently); a failed
     # probe and a probe result of "not blocked" are two different things
     # and must not both be treated as a pass without distinction — that
     # would silently swallow a genuine probe failure.
-    headers=$(curl -sSI -m 10 -A "${ua}" "${target}" 2>/dev/null) || {
+    headers=$(curl -sSI -m 10 -A "${ua}" "${url}" 2>/dev/null) || {
         echo -e "${yellow}Warning: could not complete the Cloudflare-block check, skipping it${plain}" >&2
-        echo "${target}"
         return 0
     }
     if echo "${headers}" | grep -qi "cf-mitigated"; then
         echo "blocked by Cloudflare"
         return 1
     fi
-    echo "${target}"
     return 0
 }
 
@@ -617,13 +661,20 @@ check_mask_site() {
 # residential IP while a datacenter IP gets a 403 or a CAPTCHA. Site
 # policies change over time, so this needs to be retested periodically.
 #
-# Already tested and rejected — don't add these back: gnu.org (can't
-# connect), tesla.com (403). Note that tesla.com is only unusable as a
-# **reverse-proxy target**; it's perfectly fine as a REALITY dest — the
-# two have different criteria (REALITY is raw TCP passthrough, it never
-# sends an HTTP request).
+# Already tested and rejected — don't add these back:
+#   - gnu.org (can't connect)
+#   - tesla.com (403). Note it is only unusable as a **reverse-proxy
+#     target**; it is perfectly fine as a REALITY dest — the two have
+#     different criteria (REALITY is raw TCP passthrough, it never sends
+#     an HTTP request).
+#   - www.wikipedia.org (verified 2026-09-04): the root path is a clean
+#     200, but any unknown path returns a cross-domain 301 →
+#     https://en.wikipedia.org/<original path>. Caddy forwards that
+#     Location verbatim to visitors — one response that says both "this
+#     is not that site's domain" and "it is bare-proxying that site",
+#     blowing the disguise on the spot, and a decoy site is visited mostly
+#     on non-root paths.
 MASK_SITES=(
-    "https://www.wikipedia.org"
     "https://www.bing.com"
     "https://www.microsoft.com"
     "https://www.apple.com"
@@ -657,7 +708,7 @@ choose_mask_site() {
     echo "  0) No proxy, use the bundled static page" >&2
     echo "  q) Cancel" >&2
 
-    local choice url resolved
+    local choice url reason
     while true; do
         if ! read -p "Enter a number: " choice </dev/tty; then
             echo -e "${red}Input ended, cancelling${plain}" >&2
@@ -683,21 +734,19 @@ choose_mask_site() {
         fi
 
         echo -e "Testing whether ${url} can be proxied from this server…" >&2
-        if resolved=$(check_mask_site "${url}"); then
-            # On success, check_mask_site outputs the address that should
-            # actually be reverse proxied: with no redirect it's ${url}
-            # itself, with a same-domain redirect (e.g. http→https) it's
-            # the redirect target — it must not be overwritten with
-            # ${url}, or the reverse-proxy target itself would redirect,
-            # sending real visitors' browsers to the real domain behind
-            # the redirect and blowing the disguise on the spot.
+        if reason=$(check_mask_site "${url}"); then
+            # check_mask_site prints nothing when it passes: the
+            # reverse-proxy target can only be the address the user picked
+            # (already proven to answer 2xx directly on the root path with
+            # no redirect), and Caddy upstreams only accept
+            # scheme/host/port anyway.
             echo -e "${green}available${plain}" >&2
-            echo "${resolved}"
+            echo "${url}"
             return 0
         fi
         # Don't silently fall back to the static page: that would make the
         # user think they're disguised as some site when they're not.
-        echo -e "${red}${url} unavailable (${resolved}), pick another${plain}" >&2
+        echo -e "${red}${url} unavailable (${reason}), pick another${plain}" >&2
     done
 }
 
@@ -713,8 +762,32 @@ write_caddyfile() {
     local mask_block
 
     if [[ -n "${mask_url}" ]]; then
+        # header_down Location is the disguise's defence in depth.
+        # check_mask_site already rejects sites that redirect on the root
+        # path or on an unknown path, but it only probes those two paths,
+        # and site policies change. The moment an upstream answers some
+        # path with an absolute Location, Caddy forwards it to the visitor
+        # verbatim (caddyserver/caddy#1011, #5141), the browser jumps to
+        # the real decoy source, and the address bar turns from the user's
+        # domain into someone else's — disguise blown on the spot.
+        #
+        # Swap the host of any absolute address for {host} (the domain in
+        # the visitor's own request), leaving the path alone; a relative
+        # address (Location: /foo) carries no domain, so the regex does not
+        # match and it is left untouched. This does not match only the
+        # upstream's own domain: in the real incident www.wikipedia.org
+        # redirected to en.wikipedia.org, which pinning to the upstream
+        # host would never have caught.
+        #
+        # The cost is that if an upstream genuinely wants to send visitors
+        # to a third-party site, the rewrite turns it into a same-path
+        # request on our own domain, proxied upstream again, redirected
+        # again — a redirect loop. That is a deliberate trade: a page that
+        # looks broken beats a single response that proves the whole
+        # disguise is a proxy.
         mask_block="        reverse_proxy ${mask_url} {
             header_up Host {upstream_hostport}
+            header_down Location \"^https?://[^/]+(/.*)?\$\" \"https://{host}\$1\"
         }"
     else
         mask_block="        root * /var/www/html

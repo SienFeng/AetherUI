@@ -220,6 +220,16 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 两个分支都**不对外暴露面板本来的默认端口/路径**，但管理员在面板里创建的入站端口（`:2886` 这类）该开多少还是开多少——见下方「能力边界」。
 
+### 伪装站：反代目标的三条硬判据
+
+`MASK_SITES` 里的候选与用户自填的网址都要过 `check_mask_site`，三条判据都是被真机打出来的，不能放宽：
+
+1. **地址不能带路径。** Caddy 的 `reverse_proxy` upstream 只接受 scheme/host/port（2.11.4 实测：`for now, URLs for proxy upstreams only support scheme, host, and port components`）。带路径的地址不在这里拦下，就会等到 `write_caddyfile` 才炸——那时旧的 web server 可能已经被停用，80/443 上什么都不监听。
+2. **根路径必须直接 2xx，任何跳转（含同域）一律拒绝。** 曾经有过一版"跟随一跳、把解析后的地址拿去反代"的逻辑：它从落地起就跑不通，因为 `%{redirect_url}` 给出的绝对地址几乎必然带 `/`，写进 Caddyfile 直接校验失败；预置候选全在根路径 2xx，所以这条死代码一直没被触发。
+3. **未知路径上不能跨域跳转。** `check_mask_site` 会对 `<候选>/aui-probe-<随机串>/` 单独探一次。只探根路径是不够的——伪装站被访问最多的恰恰是非根路径。`www.wikipedia.org` 就栽在这里：根路径干净的 200，任意未知路径回 `301 → https://en.wikipedia.org/<原路径>`，Caddy 把这个 `Location` 原样转发给访客，**一条响应同时说明"这不是那个站的域名"和"它在裸反代那个站"**。它已从 `MASK_SITES` 移除，不要加回来。
+
+`write_caddyfile` 生成的伪装块还有一层防御纵深：`header_down Location "^https?://[^/]+(/.*)?$" "https://{host}$1"`，把上游任何绝对 `Location` 的 host 换成访客请求里的域名。预检只探两个路径、站点策略也会变，这层兜底覆盖剩下的路径。代价是上游若真要把访客送去第三方站点，重写后会形成重定向回环——刻意接受的取舍：一个看起来坏掉的页面，远好过一条把整套伪装当场证伪的响应。
+
 ### `a-ui bootstrap` 是脚本写库的唯一入口
 
 安装脚本不直接碰 SQLite。所有落库动作（`webListen`/`webPort`/`webBasePath`/三个 `defaultXxx`、REALITY 模式下的入站）都经 `bootstrap.Run`（`bootstrap/bootstrap.go`），理由和「域名分流管理」里入站必须走 `ValidateInboundReplacing` 是同一个：脚本手拼的 JSON 没有任何校验，写错只会在下次重启 xray 时静默失效，而 `bootstrap` 建 REALITY 入站时走的是 `InboundService.AddInbound`，能拿到真实 xray 的校验与「域名分流管理」同一套 fail-open 策略。**不打印节点分享链接**——链接生成逻辑只存在于前端 `xray.js` 的 `genVLESSLink`，Go 侧重新实现一份必然与之漂移，节点由管理员在面板里创建后随时可复制。

@@ -492,19 +492,29 @@ _mask_site_url_host() {
     echo "${u#www.}"
 }
 
-# 判定不通过的三种情况：状态码非 2xx；跳转到别的域名；被 Cloudflare 拦截。
-# 探测者看到一个坏掉的镜像站，比看到一个朴素的静态页可疑得多。
+# 判定不通过的五种情况：地址带路径；根路径上有任何跳转；状态码非 2xx；
+# 未知路径上跨域跳转；被 Cloudflare 拦截。探测者看到一个坏掉的镜像站，
+# 比看到一个朴素的静态页可疑得多。
 #
-# 成功时 stdout 输出实际应该拿去反代的 URL：无跳转就是原样的 ${url}；
-# 同域跳转（http→https、裸域名→www 之类）时是跳转后的目标，不是原地址——
-# 反代目标本身绝不能是个会跳转的地址，否则 Caddy 会把上游原样返回的
-# Location 转发给真实访客，访客的浏览器直接跳到跳转后的真实域名，
-# 伪装等于当场败露。跨域跳转仍然直接拒绝，且只跟随这一跳，不递归探测
-# 跳转后的地址是否又跳转到别处。失败时 stdout 输出拒绝原因。
+# 成功时不输出任何东西、返回 0，调用方直接拿传进来的那个 URL 去反代；
+# 失败时 stdout 输出拒绝原因。不再有"跟随一跳后返回解析地址"那套逻辑：
+# Caddy 的 reverse_proxy upstream 只接受 scheme/host/port，而 curl 的
+# %{redirect_url} 输出的绝对地址几乎总是至少带一个 "/"，那条分支从落地
+# 起就写不出一份能通过 caddy validate 的配置。
 check_mask_site() {
     local url="$1"
     local ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    local resp code redirect target headers
+    local resp code redirect headers after_scheme probe_url probe_resp probe_code probe_redirect
+
+    # 带路径的地址在这里就拦下，不留到 write_caddyfile 才失败——那时旧的
+    # web server 可能已经被停用，80/443 上什么都不监听了。Caddy 2.11.4 实测：
+    # reverse_proxy https://www.python.org/ → for now, URLs for proxy upstreams
+    # only support scheme, host, and port components。
+    after_scheme="${url#*://}"
+    if [[ "${after_scheme}" == */?* ]]; then
+        echo "反代目标不能带路径（Caddy 的 upstream 只接受 scheme/host/port）"
+        return 1
+    fi
 
     resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
                 -w '%{http_code} %{redirect_url}' "${url}" 2>/dev/null) || {
@@ -513,20 +523,19 @@ check_mask_site() {
     }
     code=$(echo "${resp}" | awk '{print $1}')
     redirect=$(echo "${resp}" | awk '{print $2}')
-    target="${url}"
 
-    # curl 不带 -L 时，重定向响应本身是 3xx，会被下面"状态码非 2xx"的判断
-    # 挡住——所以跨域判断必须放在状态码判断之前，否则这条分支永远走不到。
+    # 根路径上任何跳转一律拒绝，同域跳转也不放过。两条理由各自都充分：
+    #   1. 跳转后的地址带路径，写不进 Caddy 的 upstream（见上）。
+    #   2. 反代目标本身会跳转的话，Caddy 默认把上游的 Location 原样转发给
+    #      访客，访客浏览器直接跳到真实的伪装源，地址栏从用户的域名变成
+    #      别人的域名，伪装当场败露。
+    # curl 不带 -L 时 3xx 响应的 http_code 本身就非 2xx，所以这条判断必须
+    # 排在状态码判断之前，否则拒绝原因会退化成一个没信息量的 "HTTP 301"。
+    # 全部预置候选 2026-09-04 于东京机房 IP 实测都是根路径直接 200 且无
+    # 跳转，这条判据不会误伤它们。
     if [[ -n "${redirect}" ]]; then
-        if [[ "$(_mask_site_url_host "${url}")" != "$(_mask_site_url_host "${redirect}")" ]]; then
-            echo "跳转到 ${redirect}"
-            return 1
-        fi
-        target="${redirect}"
-        code=$(curl -sS -o /dev/null -m 10 -A "${ua}" -w '%{http_code}' "${target}" 2>/dev/null) || {
-            echo "无法连接"
-            return 1
-        }
+        echo "根路径跳转到 ${redirect}"
+        return 1
     fi
 
     if [[ ! "${code}" =~ ^2 ]]; then
@@ -534,19 +543,45 @@ check_mask_site() {
         return 1
     fi
 
+    # 未知路径探测。只看根路径远远不够：伪装站被访问最多的恰恰是非根路径。
+    # 实测 www.wikipedia.org 根路径 200、任意未知路径却回跨域 301
+    # （location: https://en.wikipedia.org/<原路径>），Caddy 把它原样转发给
+    # 访客，一条响应同时说明"这不是那个站的域名"和"它在裸反代那个站"。
+    #
+    # 只拒**跨域**跳转：同域的绝对跳转由 write_caddyfile 里的
+    # header_down Location 重写兜住（host 换成访客请求的域名、路径不变，
+    # 上游照样能提供该路径，不会回环）；跨域跳转被重写后会打回本域、再次
+    # 被反代到上游、再次跳转，变成重定向死循环，所以必须在这里直接拒掉。
+    #
+    # 探测本身失败（网络抖动）与"探测通过"是两回事，只警告不放行也不拒绝，
+    # 与下面的 Cloudflare 检测保持同一种处理方式。
+    probe_url="${url%/}/aui-probe-$(gen_random_path)/"
+    probe_resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
+                     -w '%{http_code} %{redirect_url}' "${probe_url}" 2>/dev/null) || {
+        echo -e "${yellow}警告：无法完成未知路径探测，已跳过该项${plain}" >&2
+        probe_resp=""
+    }
+    if [[ -n "${probe_resp}" ]]; then
+        probe_code=$(echo "${probe_resp}" | awk '{print $1}')
+        probe_redirect=$(echo "${probe_resp}" | awk '{print $2}')
+        if [[ "${probe_code}" =~ ^3 ]] && [[ -n "${probe_redirect}" ]] && \
+           [[ "$(_mask_site_url_host "${url}")" != "$(_mask_site_url_host "${probe_redirect}")" ]]; then
+            echo "未知路径回了跨域跳转（${probe_code} → ${probe_redirect}），反代后会当场暴露伪装"
+            return 1
+        fi
+    fi
+
     # 第一次 GET 探测成功不保证这次 HEAD 也成功（部分站点/WAF 对 HEAD 方法
     # 策略不同）；探测失败与探测结果为"无拦截"是两回事，不能不做区分地
     # 都当成通过——那样会把真正的探测故障悄悄吞掉。
-    headers=$(curl -sSI -m 10 -A "${ua}" "${target}" 2>/dev/null) || {
+    headers=$(curl -sSI -m 10 -A "${ua}" "${url}" 2>/dev/null) || {
         echo -e "${yellow}警告：无法完成 Cloudflare 拦截检测，已跳过该项${plain}" >&2
-        echo "${target}"
         return 0
     }
     if echo "${headers}" | grep -qi "cf-mitigated"; then
         echo "被 Cloudflare 拦截"
         return 1
     fi
-    echo "${target}"
     return 0
 }
 
@@ -554,11 +589,15 @@ check_mask_site() {
 # 必须从机房 IP 测，住宅 IP 的结果不作数——同一个站，住宅 IP 正常、
 # 机房 IP 吃 403 或人机验证非常常见。站点策略会变，隔一段时间要重测。
 #
-# 已实测拒绝、不要加回来的：gnu.org（连不上）、tesla.com（403）。
-# 注意 tesla.com 只是不能作为**反代目标**；它作为 REALITY 的 dest 完全可用，
-# 两者判据不同（REALITY 是 TCP 透传，不发 HTTP 请求）。
+# 已实测拒绝、不要加回来的：
+#   - gnu.org（连不上）
+#   - tesla.com（403）。注意它只是不能作为**反代目标**；作为 REALITY 的 dest
+#     完全可用，两者判据不同（REALITY 是 TCP 透传，不发 HTTP 请求）。
+#   - www.wikipedia.org（2026-09-04 实测）：根路径 200 没问题，但任意未知
+#     路径回一个跨域 301 → https://en.wikipedia.org/<原路径>。Caddy 把这个
+#     Location 原样转发给访客，一条响应同时说明"这不是那个站的域名"和
+#     "它在裸反代那个站"——伪装当场败露，而伪装站被访问最多的恰恰是非根路径。
 MASK_SITES=(
-    "https://www.wikipedia.org"
     "https://www.bing.com"
     "https://www.microsoft.com"
     "https://www.apple.com"
@@ -588,7 +627,7 @@ choose_mask_site() {
     echo "  0) 不反代，使用自带静态页" >&2
     echo "  q) 放弃配置" >&2
 
-    local choice url resolved
+    local choice url reason
     while true; do
         if ! read -p "请输入序号: " choice </dev/tty; then
             echo -e "${red}输入已结束，放弃配置${plain}" >&2
@@ -614,17 +653,16 @@ choose_mask_site() {
         fi
 
         echo -e "正在从本机测试 ${url} 是否可反代…" >&2
-        if resolved=$(check_mask_site "${url}"); then
-            # check_mask_site 成功时输出的是实际应该拿去反代的地址：
-            # 无跳转就是 ${url} 本身，同域跳转（如 http→https）则是跳转后的
-            # 目标——不能用 ${url} 覆盖它，否则反代目标本身会跳转，真实
-            # 访客的浏览器会被带到跳转后的真实域名，伪装等于当场败露。
+        if reason=$(check_mask_site "${url}"); then
+            # check_mask_site 通过时不输出任何东西：反代目标只能是用户选中
+            # 的这个地址本身（它已经被证实在根路径上直接 2xx、不跳转），
+            # Caddy 的 upstream 也只接受 scheme/host/port。
             echo -e "${green}可用${plain}" >&2
-            echo "${resolved}"
+            echo "${url}"
             return 0
         fi
         # 不静默回退到静态页：那会让用户以为伪装成了某站，实际不是。
-        echo -e "${red}${url} 不可用（${resolved}），请另选${plain}" >&2
+        echo -e "${red}${url} 不可用（${reason}），请另选${plain}" >&2
     done
 }
 
@@ -638,8 +676,23 @@ write_caddyfile() {
     local mask_block
 
     if [[ -n "${mask_url}" ]]; then
+        # header_down Location 是伪装的防御纵深。check_mask_site 已经拒掉了
+        # 根路径与未知路径上会跳转的站，但它只探这两个路径，站点策略还会变。
+        # 上游一旦在某个路径上回了带绝对地址的 Location，Caddy 默认原样转发
+        # 给访客（caddyserver/caddy#1011、#5141），访客浏览器就跳到真实的
+        # 伪装源，地址栏从用户的域名变成别人的域名——伪装当场败露。
+        #
+        # 把任何绝对地址的 host 一律换成 {host}（访客请求里的域名），路径
+        # 保持不变；相对地址（Location: /foo）本来就不带域名，正则不匹配、
+        # 不动它。不只匹配上游那一个域名：真实事故里 www.wikipedia.org 跳的
+        # 是 en.wikipedia.org，只盯上游域名根本拦不住。
+        #
+        # 代价是上游若真想把访客送去第三方站点，重写后会变成本域的同路径
+        # 请求、再次被反代、再次跳转，形成重定向回环。这是刻意接受的取舍：
+        # 一个看起来坏掉的页面，远好过一条把整套伪装当场证伪的响应。
         mask_block="        reverse_proxy ${mask_url} {
             header_up Host {upstream_hostport}
+            header_down Location \"^https?://[^/]+(/.*)?\$\" \"https://{host}\$1\"
         }"
     else
         mask_block="        root * /var/www/html
