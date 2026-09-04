@@ -454,12 +454,30 @@ p { color: #57606a; }
 HTMLEOF
 }
 
+# 从 URL 取出 host（不含端口，也不区分裸域名与 www 子域名），处理
+# https://host/path 与 https://host:port/path 两种形态，供 check_mask_site
+# 判断跳转是否真的跨域——host → www.host 这类规范化不算换了域名。
+_mask_site_url_host() {
+    local u="${1#*://}"
+    u="${u%%/*}"
+    u="${u%%:*}"
+    u="${u,,}"
+    echo "${u#www.}"
+}
+
 # 判定不通过的三种情况：状态码非 2xx；跳转到别的域名；被 Cloudflare 拦截。
 # 探测者看到一个坏掉的镜像站，比看到一个朴素的静态页可疑得多。
+#
+# 成功时 stdout 输出实际应该拿去反代的 URL：无跳转就是原样的 ${url}；
+# 同域跳转（http→https、裸域名→www 之类）时是跳转后的目标，不是原地址——
+# 反代目标本身绝不能是个会跳转的地址，否则 Caddy 会把上游原样返回的
+# Location 转发给真实访客，访客的浏览器直接跳到跳转后的真实域名，
+# 伪装等于当场败露。跨域跳转仍然直接拒绝，且只跟随这一跳，不递归探测
+# 跳转后的地址是否又跳转到别处。失败时 stdout 输出拒绝原因。
 check_mask_site() {
     local url="$1"
     local ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    local resp code redirect headers
+    local resp code redirect target headers
 
     resp=$(curl -sS -o /dev/null -m 10 -A "${ua}" \
                 -w '%{http_code} %{redirect_url}' "${url}" 2>/dev/null) || {
@@ -468,21 +486,40 @@ check_mask_site() {
     }
     code=$(echo "${resp}" | awk '{print $1}')
     redirect=$(echo "${resp}" | awk '{print $2}')
+    target="${url}"
+
+    # curl 不带 -L 时，重定向响应本身是 3xx，会被下面"状态码非 2xx"的判断
+    # 挡住——所以跨域判断必须放在状态码判断之前，否则这条分支永远走不到。
+    if [[ -n "${redirect}" ]]; then
+        if [[ "$(_mask_site_url_host "${url}")" != "$(_mask_site_url_host "${redirect}")" ]]; then
+            echo "跳转到 ${redirect}"
+            return 1
+        fi
+        target="${redirect}"
+        code=$(curl -sS -o /dev/null -m 10 -A "${ua}" -w '%{http_code}' "${target}" 2>/dev/null) || {
+            echo "无法连接"
+            return 1
+        }
+    fi
 
     if [[ ! "${code}" =~ ^2 ]]; then
         echo "HTTP ${code}"
         return 1
     fi
-    if [[ -n "${redirect}" ]]; then
-        echo "跳转到 ${redirect}"
-        return 1
-    fi
 
-    headers=$(curl -sSI -m 10 -A "${ua}" "${url}" 2>/dev/null)
+    # 第一次 GET 探测成功不保证这次 HEAD 也成功（部分站点/WAF 对 HEAD 方法
+    # 策略不同）；探测失败与探测结果为"无拦截"是两回事，不能不做区分地
+    # 都当成通过——那样会把真正的探测故障悄悄吞掉。
+    headers=$(curl -sSI -m 10 -A "${ua}" "${target}" 2>/dev/null) || {
+        echo -e "${yellow}警告：无法完成 Cloudflare 拦截检测，已跳过该项${plain}" >&2
+        echo "${target}"
+        return 0
+    }
     if echo "${headers}" | grep -qi "cf-mitigated"; then
         echo "被 Cloudflare 拦截"
         return 1
     fi
+    echo "${target}"
     return 0
 }
 
@@ -506,7 +543,10 @@ MASK_SITES=(
     "https://nginx.org"
 )
 
-# stdout 输出选定的 URL；输出空串表示使用本地静态页；返回非 0 表示用户放弃。
+# stdout 输出选定的 URL；输出空串表示使用本地静态页；返回非 0 表示用户放弃
+# （显式输入 q，或 read 在 /dev/tty 上失败——没有控制终端、SSH 中途断线都会
+# 走到这里；两处 read 都必须检查返回码并 return，否则 choice 保持不变、
+# 下一轮循环立刻再次触发同样的失败，会在没有任何 I/O 等待的情况下死循环）。
 # 提示全部写到 stderr——调用方用 $(...) 捕获 stdout 作为 URL。
 # read 显式从 /dev/tty 读：本函数跑在命令替换的子 shell 里，不这样写读不到终端输入。
 choose_mask_site() {
@@ -519,16 +559,26 @@ choose_mask_site() {
     done
     echo "  ${i}) 自己填一个网址" >&2
     echo "  0) 不反代，使用自带静态页" >&2
+    echo "  q) 放弃配置" >&2
 
-    local choice url reason
+    local choice url resolved
     while true; do
-        read -p "请输入序号: " choice </dev/tty
-        if [[ "${choice}" == "0" ]]; then
+        if ! read -p "请输入序号: " choice </dev/tty; then
+            echo -e "${red}输入已结束，放弃配置${plain}" >&2
+            return 1
+        fi
+        if [[ "${choice}" == "q" || "${choice}" == "Q" ]]; then
+            echo -e "${yellow}已取消${plain}" >&2
+            return 1
+        elif [[ "${choice}" == "0" ]]; then
             ensure_static_site
             echo ""
             return 0
         elif [[ "${choice}" == "${i}" ]]; then
-            read -p "请输入网址（含 https://）: " url </dev/tty
+            if ! read -p "请输入网址（含 https://）: " url </dev/tty; then
+                echo -e "${red}输入已结束，放弃配置${plain}" >&2
+                return 1
+            fi
         elif [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -lt "${i}" ]]; then
             url="${MASK_SITES[$((choice - 1))]}"
         else
@@ -537,13 +587,17 @@ choose_mask_site() {
         fi
 
         echo -e "正在从本机测试 ${url} 是否可反代…" >&2
-        if reason=$(check_mask_site "${url}"); then
+        if resolved=$(check_mask_site "${url}"); then
+            # check_mask_site 成功时输出的是实际应该拿去反代的地址：
+            # 无跳转就是 ${url} 本身，同域跳转（如 http→https）则是跳转后的
+            # 目标——不能用 ${url} 覆盖它，否则反代目标本身会跳转，真实
+            # 访客的浏览器会被带到跳转后的真实域名，伪装等于当场败露。
             echo -e "${green}可用${plain}" >&2
-            echo "${url}"
+            echo "${resolved}"
             return 0
         fi
         # 不静默回退到静态页：那会让用户以为伪装成了某站，实际不是。
-        echo -e "${red}${url} 不可用（${reason}），请另选${plain}" >&2
+        echo -e "${red}${url} 不可用（${resolved}），请另选${plain}" >&2
     done
 }
 
