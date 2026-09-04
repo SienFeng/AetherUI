@@ -113,12 +113,14 @@ func (a *SettingController) updateIPDB(c *gin.Context) {
 		jsonMsg(c, "更新 IP 库", err)
 		return
 	}
-	updated, err := a.ipdbService.UpdateNow(form.Key)
+	// upToDate 单独回传：管理员点了更新，界面得说清楚是真的换了新库，
+	// 还是上游本来就没变。
+	updated, upToDate, err := a.ipdbService.UpdateNow(form.Key)
 	if err != nil {
 		jsonMsg(c, "更新 IP 库", err)
 		return
 	}
-	jsonObj(c, gin.H{"updated": updated}, nil)
+	jsonObj(c, gin.H{"updated": updated, "upToDate": upToDate}, nil)
 }
 
 func (a *SettingController) shapingStatus(c *gin.Context) {

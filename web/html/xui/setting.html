@@ -256,7 +256,18 @@
                 const msg = await HttpUtil.post("/xui/setting/updateIPDB", { key: key || '' });
                 this.ipdbUpdating = null;
                 if (msg.success) {
-                    this.$message.success(`已更新 ${msg.obj.updated} 个数据源`);
+                    const { updated, upToDate } = msg.obj;
+                    // 「上游没变，不必重下」与「更新了 0 个」是两回事，
+                    // 混成一句话会让管理员以为更新失败了。
+                    let text;
+                    if (updated > 0 && upToDate > 0) {
+                        text = `已更新 ${updated} 个数据源，${upToDate} 个已是最新`;
+                    } else if (updated === 0 && upToDate > 0) {
+                        text = `已是最新版本，无需更新`;
+                    } else {
+                        text = `已更新 ${updated} 个数据源`;
+                    }
+                    this.$message.success(text);
                     await this.getIPDBStatus();
                 }
             },

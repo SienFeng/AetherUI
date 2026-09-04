@@ -340,11 +340,21 @@ func geoEntriesFor(t *testing.T, m map[string][]string) []geodatEntry {
 
 // requireIPDB 加载仓库里那份真实的归属地库。注入路径必须用真库测：
 // 假的 CIDR 源测不出「省份名对不上」「库没加载」这类真实故障。
+//
+// 这里显式指向仓库里的 bin/ipdb.dat，而不是生产的落盘位置
+// （/etc/<name>/ipdb.dat）：后者在开发机上不存在，直接用会让下面这批
+// 真实数据用例整体静默跳过，等于把覆盖悄悄删掉。
 func requireIPDB(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat(GetIPDBPath()); err != nil {
+	if _, err := os.Stat(legacyIP2RegionPath); err != nil {
 		t.Skipf("IP 归属地库不存在: %v", err)
 	}
+	useTestSources(t, []ipdbSource{{
+		Key: ip2regionKey, Name: "ip2region", Path: legacyIP2RegionPath,
+		MinSegments: minValidSegments,
+		URL:         func(*SettingService) (string, error) { return "", nil },
+		Build:       ipdb.Build,
+	}})
 	if err := (&IPDBService{}).Load(); err != nil {
 		t.Fatalf("加载 IP 库: %v", err)
 	}

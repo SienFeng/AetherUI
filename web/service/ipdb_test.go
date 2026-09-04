@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -453,7 +454,7 @@ func TestUpdateNowCanTargetASingleSource(t *testing.T) {
 	useTestSources(t, []ipdbSource{urlSource("a", pathA, urlA), urlSource("b", pathB, urlB)})
 
 	s := IPDBService{}
-	updated, err := s.UpdateNow("b")
+	updated, _, err := s.UpdateNow("b")
 	if err != nil {
 		t.Fatalf("UpdateNow: %v", err)
 	}
@@ -476,7 +477,7 @@ func TestUpdateNowRejectsUnknownSourceKey(t *testing.T) {
 	url, hits := countingSource(t, ipdbSampleSource)
 	useTestSources(t, []ipdbSource{urlSource("a", filepath.Join(dir, "a.dat"), url)})
 
-	if _, err := (&IPDBService{}).UpdateNow("不存在的源"); err == nil {
+	if _, _, err := (&IPDBService{}).UpdateNow("不存在的源"); err == nil {
 		t.Error("未知的数据源标识应当报错，而不是静默什么都不做")
 	}
 	if n := atomic.LoadInt32(hits); n != 0 {
@@ -494,7 +495,7 @@ func TestUpdateNowWithEmptyKeyUpdatesEverySource(t *testing.T) {
 		urlSource("b", filepath.Join(dir, "b.dat"), urlB),
 	})
 
-	updated, err := (&IPDBService{}).UpdateNow("")
+	updated, _, err := (&IPDBService{}).UpdateNow("")
 	if err != nil {
 		t.Fatalf("UpdateNow: %v", err)
 	}
@@ -504,5 +505,199 @@ func TestUpdateNowWithEmptyKeyUpdatesEverySource(t *testing.T) {
 	if atomic.LoadInt32(hitsA) != 1 || atomic.LoadInt32(hitsB) != 1 {
 		t.Errorf("两个源各应被请求 1 次，实际 %d / %d",
 			atomic.LoadInt32(hitsA), atomic.LoadInt32(hitsB))
+	}
+}
+
+// ---- 落盘位置迁移与条件请求 ----
+
+// etagRecorder 记录服务端每次收到的 If-None-Match。用锁而不是裸切片：
+// 处理器跑在另一个 goroutine 上，-race 下裸切片会报数据竞争。
+type etagRecorder struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (r *etagRecorder) add(v string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, v)
+}
+
+func (r *etagRecorder) values() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.seen...)
+}
+
+// etagSource 起一个带 ETag 的源：If-None-Match 匹配时返回 304，否则返回内容。
+func etagSource(t *testing.T, body, etag string) (string, *etagRecorder) {
+	t.Helper()
+	rec := &etagRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inm := r.Header.Get("If-None-Match")
+		rec.add(inm)
+		w.Header().Set("ETag", etag)
+		if inm == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, rec
+}
+
+func readFileOrFail(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %v: %v", path, err)
+	}
+	return b
+}
+
+// 新位置没有、旧位置有时，把旧位置那份搬过来。
+//
+// 旧位置的文件必须保留：发版包里带着它，全新安装靠它开箱可用。
+func TestMigrateSeedsNewPathFromLegacy(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "legacy.dat")
+	newPath := filepath.Join(dir, "new.dat")
+	seedDatabaseAt(t, legacy, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+
+	src := testSource(newPath, 1)
+	src.LegacyPath = legacy
+	useTestSources(t, []ipdbSource{src})
+
+	(&IPDBService{}).MigrateLegacyFiles()
+
+	if !bytes.Equal(readFileOrFail(t, legacy), readFileOrFail(t, newPath)) {
+		t.Error("新位置的内容应当与旧位置一致")
+	}
+}
+
+// 新位置已有时绝不能被旧位置覆盖。
+//
+// 这正是本次事故的形态：管理员刚更新出来的库被发版包里那份旧构建换掉，
+// 界面还显示「已加载」，看不出数据已经退回去了。
+func TestMigrateDoesNotOverwriteExistingDatabase(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "legacy.dat")
+	newPath := filepath.Join(dir, "new.dat")
+	seedDatabaseAt(t, legacy, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	seedDatabaseAt(t, newPath, time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
+	want := readFileOrFail(t, newPath)
+
+	src := testSource(newPath, 1)
+	src.LegacyPath = legacy
+	useTestSources(t, []ipdbSource{src})
+
+	(&IPDBService{}).MigrateLegacyFiles()
+
+	if !bytes.Equal(want, readFileOrFail(t, newPath)) {
+		t.Error("新位置已有库时不得被旧位置覆盖")
+	}
+}
+
+// 本地已有库时带上 If-None-Match，上游返回 304 就跳过，一个字节都不重写。
+func TestUpdateSendsConditionalRequestAndSkipsOn304(t *testing.T) {
+	setupDB(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	url, rec := etagSource(t, ipdbSampleSource, `"v1"`)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+
+	// 首次：本地什么都没有，必须无条件下载。
+	updated, upToDate, err := svc.UpdateNow("")
+	if err != nil || updated != 1 || upToDate != 0 {
+		t.Fatalf("首次更新 = (%d, %d, %v)，期望 (1, 0, nil)", updated, upToDate, err)
+	}
+	before := readFileOrFail(t, path)
+
+	// 再次：ETag 已记下，应当带上条件头并被 304 挡回。
+	updated, upToDate, err = svc.UpdateNow("")
+	if err != nil || updated != 0 || upToDate != 1 {
+		t.Fatalf("再次更新 = (%d, %d, %v)，期望 (0, 1, nil)", updated, upToDate, err)
+	}
+	if got := rec.values(); len(got) != 2 || got[0] != "" || got[1] != `"v1"` {
+		t.Errorf("If-None-Match 序列 = %q，期望首次为空、二次带上 ETag", got)
+	}
+	if !bytes.Equal(before, readFileOrFail(t, path)) {
+		t.Error("上游未变更时不应重写库文件")
+	}
+}
+
+// 库文件不在时绝不能发条件请求：一旦被 304 挡回就什么都拿不到，
+// 库永远补不回来。更新面板清空安装目录之后，处境正是这个。
+func TestUpdateSkipsConditionalRequestWhenDatabaseMissing(t *testing.T) {
+	setupDB(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	url, rec := etagSource(t, ipdbSampleSource, `"v1"`)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+	if _, _, err := svc.UpdateNow(""); err != nil {
+		t.Fatalf("首次更新: %v", err)
+	}
+
+	// 模拟库文件随安装目录一起被删掉
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("删除库文件: %v", err)
+	}
+	ipdbLock.Lock()
+	delete(ipdbDBs, "test")
+	ipdbLock.Unlock()
+
+	updated, upToDate, err := svc.UpdateNow("")
+	if err != nil || updated != 1 || upToDate != 0 {
+		t.Fatalf("库缺失时 = (%d, %d, %v)，期望无条件重下 (1, 0, nil)", updated, upToDate, err)
+	}
+	got := rec.values()
+	if last := got[len(got)-1]; last != "" {
+		t.Errorf("库缺失时仍带了 If-None-Match %q；被 304 挡回的话库就永远补不回来", last)
+	}
+}
+
+// 304 之后当天不得反复重问。
+//
+// ShouldUpdateNow 的判据是库的生成时间，而 304 不会更新它。不单独记下
+// 「已向上游确认过」的话，这个每 10 分钟跑一次的任务会整天不停地问。
+func TestScheduledUpdateStopsRecheckingAfterNotModified(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "04:00")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	db := seedDatabaseAt(t, path, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	url, rec := etagSource(t, ipdbSampleSource, `"v1"`)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+	svc.setDB("test", db)
+	ss := SettingService{}
+	if err := ss.setString("testEtag", `"v1"`); err != nil {
+		t.Fatalf("写入 ETag: %v", err)
+	}
+
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	for i, at := range []time.Time{now, now.Add(10 * time.Minute), now.Add(20 * time.Minute)} {
+		updated, err := svc.RunScheduledUpdate(at)
+		if err != nil || updated != 0 {
+			t.Fatalf("第 %d 轮 = (%d, %v)，上游未变更时不应计入更新", i+1, updated, err)
+		}
+	}
+	if n := len(rec.values()); n != 1 {
+		t.Errorf("向上游发起了 %d 次请求，期望 1 次：304 之后当天不该反复重问", n)
 	}
 }

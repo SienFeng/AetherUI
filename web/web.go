@@ -394,6 +394,9 @@ func (s *Server) Start() (err error) {
 
 	// IP 归属地库缺失或损坏不阻断面板启动：只是归属地显示与地区限制不可用，
 	// 管理员可以在设置页点「更新 IP 库」补上。
+	// 先把旧位置（安装目录 bin/ 下）的库搬到 /etc/<name>/：更新面板会 rm -rf
+	// 整个安装目录，运行期数据留在那里每更新一次就丢一次。
+	s.ipdbService.MigrateLegacyFiles()
 	if err := s.ipdbService.Load(); err != nil {
 		logger.Warning("load ip database failed, 归属地与地区限制将不可用:", err)
 	}

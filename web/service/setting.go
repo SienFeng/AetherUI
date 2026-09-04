@@ -166,6 +166,22 @@ func (s *SettingService) setString(key string, value string) error {
 	return s.saveSetting(key, value)
 }
 
+// getOptionalString 读一个可能从未写过的 key，未写过时返回空串。
+//
+// 与 getString 的区别是不要求 key 出现在 defaultValueMap 里：上游 ETag、
+// 上次向上游确认的时间这类纯运行期状态没有「默认值」可言，把它们塞进
+// defaultValueMap 只会让那张表看起来像是有语义的配置项。
+func (s *SettingService) getOptionalString(key string) (string, error) {
+	setting, err := s.getSetting(key)
+	if database.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return setting.Value, nil
+}
+
 func (s *SettingService) getInt(key string) (int, error) {
 	str, err := s.getString(key)
 	if err != nil {
