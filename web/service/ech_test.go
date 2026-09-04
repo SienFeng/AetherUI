@@ -117,6 +117,42 @@ func TestGetNewEchCertHonoursServerName(t *testing.T) {
 	}
 }
 
+// TestGetNewEchCertServerKeysLayout 锁住 echServerKeys 的二进制布局
+// (uint16 privLen, priv[32], uint16 configLen, config[...])。config 与
+// priv 是两个对称的 uint16 长度前缀字段，顺序写反后 xray 的
+// ConvertToGoECHKeys 仍能"合法"解出、run -test 也不会报错，只有握手时才
+// 会失败——因此不能靠 run -test 或"能不能解出来"守住顺序，只能靠布局本身
+// 的不对称性：X25519 私钥固定 32 字节，而 ECHConfig（含 KEM/HPKE 套件/
+// publicName 等字段）明显更长。第一段恰好 32、第二段明显更大，就说明
+// priv 在前、config 在后没有被写反。
+func TestGetNewEchCertServerKeysLayout(t *testing.T) {
+	s := ServerService{}
+	keys, err := s.GetNewEchCert("")
+	if err != nil {
+		t.Fatalf("GetNewEchCert: %v", err)
+	}
+	// 注意：ECH 用 base64.StdEncoding，REALITY 用 RawURLEncoding，两者不能混用。
+	raw, err := base64.StdEncoding.DecodeString(keys["echServerKeys"].(string))
+	if err != nil {
+		t.Fatalf("echServerKeys 不是合法 base64.StdEncoding: %v", err)
+	}
+	if len(raw) < 2 {
+		t.Fatalf("echServerKeys 太短，读不出第一段长度前缀: %d bytes", len(raw))
+	}
+	privLen := int(raw[0])<<8 | int(raw[1])
+	if privLen != 32 {
+		t.Fatalf("第一段长度 = %d，期望 32（X25519 私钥固定长度）；priv/config 顺序是否被写反？", privLen)
+	}
+	configLenOffset := 2 + privLen
+	if len(raw) < configLenOffset+2 {
+		t.Fatalf("echServerKeys 太短，读不出第二段长度前缀: %d bytes", len(raw))
+	}
+	configLen := int(raw[configLenOffset])<<8 | int(raw[configLenOffset+1])
+	if configLen <= 32 {
+		t.Fatalf("第二段长度 = %d，期望明显大于 32（ECHConfig 比 X25519 私钥长）；priv/config 顺序是否被写反？", configLen)
+	}
+}
+
 func bytesContains(haystack, needle []byte) bool {
 outer:
 	for i := 0; i+len(needle) <= len(haystack); i++ {

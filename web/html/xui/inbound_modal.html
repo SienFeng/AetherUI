@@ -129,6 +129,18 @@
                 if (oldValue === 'kcp') {
                     this.inModal.inbound.tls = false;
                 }
+                // REALITY 仅在 tcp/grpc 下受核心支持（canEnableReality()，
+                // infra/conf/transport_internet.go:100）。表单只把安全层单
+                // 选按钮置灰（:disabled），没有联动重置——已经选中 reality
+                // 后再把传输切到 ws/kcp，security 会停在 'reality' 不再合
+                // 法，核心对此不是忽略而是拒绝整份配置（实测原文：
+                // "REALITY only supports RAW, XHTTP and gRPC for now."）。
+                // 按本项目"xray 加载配置是全有或全无"的性质，这意味着机器
+                // 上所有用户一起断网，且 ValidateInboundReplacing 是
+                // fail open 的，挡不住。
+                if (!this.inbound.canEnableReality() && this.inbound.stream.security === 'reality') {
+                    this.inbound.stream.security = 'none';
+                }
             },
             onTlsCipherChange(list) {
                 // 核心按 ":" 切分（transport/internet/tls/config.go:459），

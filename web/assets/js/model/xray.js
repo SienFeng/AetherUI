@@ -710,7 +710,17 @@ class StreamSettings extends XrayCommonClass {
     }
 
     static fromJson(json={}) {
-        let tls = TlsStreamSettings.fromJson(json.tlsSettings);
+        // 遗留 security=xtls 的入站把证书配置存在 xtlsSettings 而不是
+        // tlsSettings。写入侧（toJson）不再输出 xtlsSettings——那是产生非
+        // 法配置的源头，已经被 deprecatedFeatures 挡住；但读取侧仍要兼容，
+        // 否则打开这类存量入站时 serverName 与证书会显示为空，看不出原来
+        // 配了什么。
+        let tls;
+        if (json.security === 'xtls') {
+            tls = TlsStreamSettings.fromJson(json.xtlsSettings);
+        } else {
+            tls = TlsStreamSettings.fromJson(json.tlsSettings);
+        }
         return new StreamSettings(
             json.network,
             json.security,
