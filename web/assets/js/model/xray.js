@@ -540,6 +540,134 @@ TlsStreamSettings.Cert = class extends XrayCommonClass {
     }
 };
 
+class RealityStreamSettings extends XrayCommonClass {
+    // serverNames 与 shortIds 在这里存成逗号分隔的字符串（表单好填），
+    // toJson 时再拆成数组。核心要求两者都非空
+    // （infra/conf/transport_security.go:95 与 :136）。
+    constructor(show=false,
+                xver=0,
+                target='',
+                serverNames='',
+                privateKey='',
+                mldsa65Seed='',
+                minClientVer='',
+                maxClientVer='',
+                maxTimeDiff=0,
+                shortIds='',
+                settings=new RealityStreamSettings.Settings()) {
+        super();
+        this.show = show;
+        this.xver = xver;
+        this.target = target;
+        this.serverNames = serverNames;
+        this.privateKey = privateKey;
+        this.mldsa65Seed = mldsa65Seed;
+        this.minClientVer = minClientVer;
+        this.maxClientVer = maxClientVer;
+        this.maxTimeDiff = maxTimeDiff;
+        this.shortIds = shortIds;
+        this.settings = settings;
+    }
+
+    // 拆分逗号分隔串：去空白、去空项、去重且保持首次出现的顺序。
+    // 保持顺序而不是排序，是因为项目要求生成逐字节确定——只要规则确定即可，
+    // 但绝不能依赖遍历 map 的顺序（见路线图 §4.2）。
+    static splitList(value) {
+        if (ObjectUtil.isEmpty(value)) {
+            return [];
+        }
+        const seen = new Set();
+        const out = [];
+        for (const raw of String(value).split(',')) {
+            const item = raw.trim();
+            if (item === '' || seen.has(item)) {
+                continue;
+            }
+            seen.add(item);
+            out.push(item);
+        }
+        return out;
+    }
+
+    static joinList(value) {
+        return value instanceof Array ? value.join(',') : (value || '');
+    }
+
+    static fromJson(json={}) {
+        // dest 与 target 在核心里是别名（transport_security.go:59-61）。
+        // 老配置、外部工具和面板早期版本写的都是 dest。不做这个映射的话，
+        // 面板读进来 target 为空，用户编辑后一保存就把工作正常的 dest 抹掉，
+        // 而且要到下一次重启才暴露。
+        const target = ObjectUtil.isEmpty(json.target) ? json.dest : json.target;
+        return new RealityStreamSettings(
+            json.show,
+            json.xver,
+            target,
+            RealityStreamSettings.joinList(json.serverNames),
+            json.privateKey,
+            json.mldsa65Seed,
+            json.minClientVer,
+            json.maxClientVer,
+            json.maxTimediff === undefined ? json.maxTimeDiff : json.maxTimediff,
+            RealityStreamSettings.joinList(json.shortIds),
+            RealityStreamSettings.Settings.fromJson(json.settings),
+        );
+    }
+
+    toJson() {
+        return {
+            show: this.show,
+            xver: this.xver,
+            target: this.target,
+            serverNames: RealityStreamSettings.splitList(this.serverNames),
+            privateKey: this.privateKey,
+            mldsa65Seed: this.mldsa65Seed,
+            minClientVer: this.minClientVer,
+            maxClientVer: this.maxClientVer,
+            maxTimeDiff: this.maxTimeDiff,
+            shortIds: RealityStreamSettings.splitList(this.shortIds),
+            settings: this.settings.toJson(),
+        };
+    }
+}
+
+// 与 TlsStreamSettings.Settings 同理：面板私有的客户端半边，核心忽略它。
+// publicKey 是 x25519 密钥对的公钥，mldsa65Verify 是 ML-DSA-65 的验证公钥，
+// 两者都只出现在分享链接里（分别是 pbk 与 pqv 参数）。
+RealityStreamSettings.Settings = class extends XrayCommonClass {
+    constructor(publicKey='', fingerprint='chrome', serverName='', spiderX='/', mldsa65Verify='') {
+        super();
+        this.publicKey = publicKey;
+        this.fingerprint = fingerprint;
+        this.serverName = serverName;
+        this.spiderX = spiderX;
+        this.mldsa65Verify = mldsa65Verify;
+    }
+
+    static fromJson(json={}) {
+        if (ObjectUtil.isEmpty(json)) {
+            return new RealityStreamSettings.Settings();
+        }
+        return new RealityStreamSettings.Settings(
+            json.publicKey,
+            json.fingerprint,
+            json.serverName,
+            json.spiderX,
+            json.mldsa65Verify,
+        );
+    }
+
+    toJson() {
+        return {
+            publicKey: this.publicKey,
+            fingerprint: this.fingerprint,
+            serverName: this.serverName,
+            spiderX: this.spiderX,
+            mldsa65Verify: this.mldsa65Verify,
+        };
+    }
+};
+
 class StreamSettings extends XrayCommonClass {
     constructor(network='tcp',
                 security='none',
@@ -548,6 +676,7 @@ class StreamSettings extends XrayCommonClass {
                 kcpSettings=new KcpStreamSettings(),
                 wsSettings=new WsStreamSettings(),
                 grpcSettings=new GrpcStreamSettings(),
+                realitySettings=new RealityStreamSettings(),
                 ) {
         super();
         this.network = network;
@@ -557,6 +686,7 @@ class StreamSettings extends XrayCommonClass {
         this.kcp = kcpSettings;
         this.ws = wsSettings;
         this.grpc = grpcSettings;
+        this.reality = realitySettings;
     }
 
     get isTls() {
@@ -569,6 +699,14 @@ class StreamSettings extends XrayCommonClass {
         } else {
             this.security = 'none';
         }
+    }
+
+    get isReality() {
+        return this.security === 'reality';
+    }
+
+    set isReality(isReality) {
+        this.security = isReality ? 'reality' : 'none';
     }
 
     get isXTls() {
@@ -593,6 +731,7 @@ class StreamSettings extends XrayCommonClass {
             KcpStreamSettings.fromJson(json.kcpSettings),
             WsStreamSettings.fromJson(json.wsSettings),
             GrpcStreamSettings.fromJson(json.grpcSettings),
+            RealityStreamSettings.fromJson(json.realitySettings),
         );
     }
 
@@ -602,6 +741,7 @@ class StreamSettings extends XrayCommonClass {
             network: network,
             security: this.security,
             tlsSettings: this.isTls ? this.tls.toJson() : undefined,
+            realitySettings: this.isReality ? this.reality.toJson() : undefined,
             tcpSettings: network === 'tcp' ? this.tcp.toJson() : undefined,
             kcpSettings: network === 'kcp' ? this.kcp.toJson() : undefined,
             wsSettings: network === 'ws' ? this.ws.toJson() : undefined,
@@ -676,6 +816,14 @@ class Inbound extends XrayCommonClass {
                 this.stream.security = 'none';
             }
         }
+    }
+
+    get reality() {
+        return this.stream.security === 'reality';
+    }
+
+    set reality(isReality) {
+        this.stream.security = isReality ? 'reality' : 'none';
     }
 
     get xtls() {
@@ -793,8 +941,12 @@ class Inbound extends XrayCommonClass {
     }
 
     get serverName() {
-        if (this.stream.isTls || this.stream.isXTls) {
+        if (this.stream.isTls) {
             return this.stream.tls.server;
+        }
+        if (this.stream.isReality) {
+            const names = RealityStreamSettings.splitList(this.stream.reality.serverNames);
+            return names.length > 0 ? names[0] : "";
         }
         return "";
     }
