@@ -6,27 +6,38 @@
 </a-col>
 <a-col :span="24">
     <a-form-item label="请求头">
-        <!-- + 按钮与名称/值输入组都设为 inline-block，让新增的输入组显示在
-             按钮右侧、同一行内，而不是各自单独占一行。addHeader/removeHeader
-             调用与 header.name/header.value 绑定未改动，只是外层排列方式。 -->
-        <a-button size="small" style="display: inline-block; vertical-align: middle; margin-right: 8px;"
-                  @click="inbound.stream.ws.addHeader('Host', '')">
-            +
-        </a-button>
-        <a-input-group v-for="(header, index) in inbound.stream.ws.headers"
-                        style="display: inline-block; width: 300px; vertical-align: middle; margin-right: 8px; margin-bottom: 8px;">
-            <a-input style="width: 50%" v-model.trim="header.name"
-                     addon-before="名称"></a-input>
-            <a-input style="width: 50%" v-model.trim="header.value"
-                     addon-before="值">
-                <template slot="addonAfter">
-                    <a-button size="small"
-                              @click="inbound.stream.ws.removeHeader(index)">
-                        -
-                    </a-button>
-                </template>
-            </a-input>
-        </a-input-group>
+        <!-- + 按钮与输入组列表用 flex 并排：按钮居左并 align-items:center 垂直
+             居中于整块请求头（与「请求头：」标签同一水平线——该标签的居中来自
+             custom.css 里 #inbound-modal .ant-form-horizontal .ant-form-item
+             的 display:flex + align-items:center），不论有几行都保持居中。
+             所有名称/值输入组装进右侧同一个容器内竖排（各组 display:block），
+             这样多行时它们的左边缘互相对齐。容器的 margin-bottom:-8px 用来抵消
+             最后一组的 margin-bottom，否则居中会被那 8px 带偏 4px。
+             名称多为 Host 这类短词，值多为域名，所以组内宽度按 36/64 倾斜给
+             「值」。addHeader/removeHeader 调用与 header.name/header.value
+             绑定未改动，只是外层排列方式。 -->
+        <div style="display: flex; align-items: center;">
+            <a-button size="small" style="flex: none; margin-right: 8px;"
+                      @click="inbound.stream.ws.addHeader('Host', '')">
+                +
+            </a-button>
+            <div style="flex: none; margin-bottom: -8px;">
+                <a-input-group v-for="(header, index) in inbound.stream.ws.headers"
+                                style="display: block; width: 480px; margin-bottom: 8px;">
+                    <a-input style="width: 36%" v-model.trim="header.name"
+                             addon-before="名称"></a-input>
+                    <a-input style="width: 64%" v-model.trim="header.value"
+                             addon-before="值">
+                        <template slot="addonAfter">
+                            <a-button size="small"
+                                      @click="inbound.stream.ws.removeHeader(index)">
+                                -
+                            </a-button>
+                        </template>
+                    </a-input>
+                </a-input-group>
+            </div>
+        </div>
     </a-form-item>
 </a-col>
 {{end}}
