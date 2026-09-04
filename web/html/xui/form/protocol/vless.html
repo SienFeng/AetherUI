@@ -1,26 +1,32 @@
 {{define "form/vless"}}
-<a-form layout="inline">
-    <a-form-item label="id">
-        <a-input v-model.trim="inbound.settings.vlesses[0].id"></a-input>
-    </a-form-item>
-    <a-form-item v-if="inbound.canEnableVision()">
-        <span slot="label">
-            flow
-            <a-tooltip>
-                <template slot="title">
-                    xtls-rprx-vision 能显著削弱流量特征，是当前核心唯一支持的 flow。<br/>
-                    使用它时外层 TLS 必须是 1.3，选中后最低版本会自动锁定。<br/>
-                    注意它不支持 UDP 请求。
-                </template>
-                <a-icon type="question-circle" theme="filled"></a-icon>
-            </a-tooltip>
-        </span>
-        <a-select :value="inbound.settings.vlesses[0].flow"
-                  @change="onFlowChange" style="width: 200px">
-            <a-select-option value="">（不使用）</a-select-option>
-            <a-select-option :value="FLOW_CONTROL.VISION">[[ FLOW_CONTROL.VISION ]]</a-select-option>
-        </a-select>
-    </a-form-item>
+<a-form layout="horizontal" :label-col="{ span: 7 }" :wrapper-col="{ span: 16 }">
+    <a-row :gutter="16">
+        <a-col :span="12">
+            <a-form-item label="id">
+                <a-input v-model.trim="inbound.settings.vlesses[0].id"></a-input>
+            </a-form-item>
+        </a-col>
+        <a-col :span="12" v-if="inbound.canEnableVision()">
+            <a-form-item>
+                <span slot="label">
+                    flow
+                    <a-tooltip>
+                        <template slot="title">
+                            xtls-rprx-vision 能显著削弱流量特征，是当前核心唯一支持的 flow。<br/>
+                            使用它时外层 TLS 必须是 1.3，选中后最低版本会自动锁定。<br/>
+                            注意它不支持 UDP 请求。
+                        </template>
+                        <a-icon type="question-circle" theme="filled"></a-icon>
+                    </a-tooltip>
+                </span>
+                <a-select :value="inbound.settings.vlesses[0].flow"
+                          @change="onFlowChange" style="width: 200px">
+                    <a-select-option value="">（不使用）</a-select-option>
+                    <a-select-option :value="FLOW_CONTROL.VISION">[[ FLOW_CONTROL.VISION ]]</a-select-option>
+                </a-select>
+            </a-form-item>
+        </a-col>
+    </a-row>
 </a-form>
 
 <a-form layout="inline">

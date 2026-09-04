@@ -222,3 +222,11 @@ html, body {
 #inbound-modal .ant-form-item {
     margin-bottom: 10px;
 }
+
+/* antd 表单标签默认右对齐（text-align: right）。弹窗里 label-col 取值本来就
+ * 五花八门，右对齐会让每行标签的起始 x 位置各不相同，看起来像是随机错位。
+ * 左对齐后标签统一从所在列的左边缘起排，配合下面统一到三档的 label-col，
+ * 组与组之间的间距才是真的一致而不是巧合。同样限定到这个弹窗的 id。 */
+#inbound-modal .ant-form-item-label {
+    text-align: left;
+}

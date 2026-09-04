@@ -27,12 +27,12 @@
     </a-form-item>
 </a-col>
 <a-col :span="12">
-    <a-form-item label="uplink capacity (MB/S)" :label-col="{ span: 12 }" :wrapper-col="{ span: 12 }">
+    <a-form-item label="uplink capacity (MB/S)">
         <a-input type="number" v-model.number="inbound.stream.kcp.upCap"></a-input>
     </a-form-item>
 </a-col>
 <a-col :span="12">
-    <a-form-item label="downlink capacity (MB/S)" :label-col="{ span: 12 }" :wrapper-col="{ span: 12 }">
+    <a-form-item label="downlink capacity (MB/S)">
         <a-input type="number" v-model.number="inbound.stream.kcp.downCap"></a-input>
     </a-form-item>
 </a-col>
@@ -42,12 +42,12 @@
     </a-form-item>
 </a-col>
 <a-col :span="12">
-    <a-form-item label="read buffer size (MB)" :label-col="{ span: 12 }" :wrapper-col="{ span: 12 }">
+    <a-form-item label="read buffer size (MB)">
         <a-input type="number" v-model.number="inbound.stream.kcp.readBuffer"></a-input>
     </a-form-item>
 </a-col>
 <a-col :span="12">
-    <a-form-item label="write buffer size (MB)" :label-col="{ span: 12 }" :wrapper-col="{ span: 12 }">
+    <a-form-item label="write buffer size (MB)">
         <a-input type="number" v-model.number="inbound.stream.kcp.writeBuffer"></a-input>
     </a-form-item>
 </a-col>
