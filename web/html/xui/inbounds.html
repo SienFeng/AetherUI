@@ -55,7 +55,7 @@
 <!--                        <a-input v-model="searchKey" placeholder="搜索" autofocus style="max-width: 300px"></a-input>-->
                         <a-table :columns="columns" :row-key="dbInbound => dbInbound.id"
                                  :data-source="dbInbounds"
-                                 :loading="spinning" :scroll="{ x: 1500 }"
+                                 :loading="spinning" :scroll="{ x: 1240 }"
                                  :pagination="false"
                                  :expanded-row-keys="expandedKeys"
                                  :expand-row-by-click="true"
@@ -238,18 +238,18 @@
     const columns = [{
         title: "操作",
         align: 'center',
-        width: 30,
+        width: 70,
         scopedSlots: { customRender: 'action' },
     }, {
         title: "启用",
         align: 'center',
-        width: 40,
+        width: 80,
         scopedSlots: { customRender: 'enable' },
     }, {
         title: "id",
         align: 'center',
         dataIndex: "id",
-        width: 30,
+        width: 50,
     }, {
         title: "备注",
         align: 'center',
@@ -258,47 +258,47 @@
     }, {
         title: "协议",
         align: 'center',
-        width: 60,
+        width: 90,
         scopedSlots: { customRender: 'protocol' },
     }, {
         title: "端口",
         align: 'center',
         dataIndex: "port",
-        width: 60,
+        width: 80,
     }, {
         title: "流量↑|↓",
         align: 'center',
         width: 150,
         scopedSlots: { customRender: 'traffic' },
     }, {
-        title: "详细信息",
+        title: "详情",
         align: 'center',
-        width: 40,
+        width: 70,
         scopedSlots: { customRender: 'settings' },
     }, {
-        title: "传输配置",
+        title: "传输",
         align: 'center',
-        width: 60,
+        width: 70,
         scopedSlots: { customRender: 'stream' },
     }, {
-        title: "到期时间",
+        title: "到期",
         align: 'center',
-        width: 80,
+        width: 100,
         scopedSlots: { customRender: 'expiryTime' },
     }, {
-        title: "地区限制",
+        title: "地区",
         align: 'center',
-        width: 120,
+        width: 110,
         scopedSlots: { customRender: 'regions' },
     }, {
-        title: "在线设备",
+        title: "在线",
         align: 'center',
         width: 80,
         scopedSlots: { customRender: 'online' },
     }, {
-        title: "并发限制",
+        title: "并发",
         align: 'center',
-        width: 60,
+        width: 80,
         scopedSlots: { customRender: 'concurrency' },
     }, {
         title: "限速↑|↓",
