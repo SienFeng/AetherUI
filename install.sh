@@ -7,6 +7,11 @@ plain='\033[0m'
 
 cur_dir=$(pwd)
 
+# 面板当前实际生效的端口，供安全配置向导拼面板 URL 用。config_after_install
+# 在能确定这个值的分支里会填它；确定不了（比如版本升级且保留原端口）就
+# 留空，向导据此决定要不要把 -port 传给 bootstrap，宁可不传也不去猜。
+panel_port=""
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -81,28 +86,34 @@ install_base() {
 
 #This function will be called when user installed a-ui out of sercurity
 config_after_install() {
-    echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改端口与账户密码${plain}"
-    read -p "确认是否继续,如选择n则跳过本次端口与账户密码设定[y/n]": config_confirm
+    # 新拓扑下面板端口是内部实现细节，不再问用户（见下方安全配置向导），
+    # 但向导拼面板 URL 需要知道本次实际生效的端口：全新安装时下面两条
+    # 分支都能确定；版本升级且用户选择保留原设置时，端口本来就没被
+    # 这里改过，不确定实际值，不写入全局的 panel_port（留给调用方
+    # 自行探测或干脆不在 URL 里带端口）。
+    local is_fresh_install=1
+    [[ -f "/etc/a-ui/a-ui.db" ]] && is_fresh_install=0
+
+    echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改账户密码${plain}"
+    read -p "确认是否继续,如选择n则跳过本次账户密码设定[y/n]": config_confirm
     if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
         read -p "请设置您的账户名:" config_account
         echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
         read -p "请设置您的账户密码:" config_password
         echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
-        read -p "请设置面板访问端口:" config_port
-        echo -e "${yellow}您的面板访问端口将设定为:${config_port}${plain}"
         echo -e "${yellow}确认设定,设定中${plain}"
         /usr/local/a-ui/a-ui setting -username ${config_account} -password ${config_password}
         echo -e "${yellow}账户密码设定完成${plain}"
-        /usr/local/a-ui/a-ui setting -port ${config_port}
-        echo -e "${yellow}面板端口设定完成${plain}"
+        [[ ${is_fresh_install} -eq 1 ]] && panel_port=54321
     else
         echo -e "${red}已取消设定...${plain}"
-        if [[ ! -f "/etc/a-ui/a-ui.db" ]]; then
+        if [[ ${is_fresh_install} -eq 1 ]]; then
             local usernameTemp=$(head -c 6 /dev/urandom | base64)
             local passwordTemp=$(head -c 6 /dev/urandom | base64)
             local portTemp=$(echo $RANDOM)
             /usr/local/a-ui/a-ui setting -username ${usernameTemp} -password ${passwordTemp}
             /usr/local/a-ui/a-ui setting -port ${portTemp}
+            panel_port=${portTemp}
             echo -e "检测到您属于全新安装,出于安全考虑已自动为您生成随机用户与端口:"
             echo -e "###############################################"
             echo -e "${green}面板登录用户名:${usernameTemp}${plain}"
@@ -114,6 +125,179 @@ config_after_install() {
             echo -e "${red}当前属于版本升级,保留之前设置项,登录方式保持不变,可输入a-ui后键入数字7查看面板登录信息${plain}"
         fi
     fi
+}
+
+# 生成面板 url 根路径用的随机串。防的是全网扫描器按 /xui/ 这个 x-ui 系
+# 默认路径批量定位面板——这是本次改造要解决的核心问题之一。
+gen_random_path() {
+    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 12
+}
+
+# 返回占用指定端口的进程名，空表示没人占用。
+port_user() {
+    ss -ltnH "sport = :$1" 2>/dev/null | awk '{print $NF}' | head -1
+}
+
+# 本机公网 IP。取不到返回空串，调用方必须容忍这种情况——机器可能在
+# NAT 后面，或者到探测服务的出站被墙，都不该因此让安装失败。
+public_ip() {
+    curl -fsS -m 10 https://api.ipify.org 2>/dev/null || \
+    curl -fsS -m 10 https://ifconfig.me 2>/dev/null || true
+}
+
+# 面板当前实际监听的端口，用于给向导打印的 URL 拼端口号。优先用
+# config_after_install 在本次运行里已经确定的值；确定不了时（比如
+# --wizard-only 单独触发向导，面板服务本来就在跑）改为探测正在运行的
+# a-ui 进程实际监听的端口；两者都拿不到就返回失败，调用方不传
+# -port，让 bootstrap 保持 webPort 原样，不去猜一个可能是错的值。
+current_panel_port() {
+    if [[ -n "${panel_port}" ]]; then
+        echo "${panel_port}"
+        return 0
+    fi
+    local pid port
+    pid=$(systemctl show -p MainPID --value a-ui 2>/dev/null)
+    [[ -z "${pid}" || "${pid}" == "0" ]] && return 1
+    port=$(ss -ltnp 2>/dev/null | grep -F "pid=${pid}," | awk '{print $4}' | awk -F: '{print $NF}' | head -1)
+    [[ -z "${port}" ]] && return 1
+    echo "${port}"
+}
+
+# 面板配置向导。任何一步失败都必须保证用户还能进面板：失败路径一律
+# 不修改 webListen，面板保持监听所有 IP。把面板锁死在一个连不上的
+# 127.0.0.1 上，比这个功能不存在糟糕得多。
+setup_wizard() {
+    if /usr/local/a-ui/a-ui bootstrap -check -json 2>/dev/null | grep -q '"skipped": true'; then
+        echo -e "${yellow}检测到面板已配置过，保留现有设置，跳过配置向导${plain}"
+        echo -e "${yellow}如需重新配置，安装完成后运行 a-ui 并选择「配置域名与伪装站」${plain}"
+        return 0
+    fi
+
+    echo -e ""
+    echo -e "${green}=== 面板安全配置向导 ===${plain}"
+    echo -e "有域名的话，将自动申请证书、配置 Caddy 伪装站，并把面板隐藏在 443 后面。"
+    echo -e "没有域名的话，将配置 VLESS+Vision+REALITY，借用大站证书伪装。"
+    echo -e ""
+
+    local has_domain
+    read -p "你有已经解析到本机的域名吗？[y/n]: " has_domain
+    if [[ x"${has_domain}" == x"y" || x"${has_domain}" == x"Y" ]]; then
+        domain_flow
+    else
+        reality_flow
+    fi
+}
+
+# REALITY 伪装目标候选。四项判据（TLS1.3 / ALPN h2 / X25519 系密钥交换 /
+# 证书有效）见 web/assets/js/model/xray.js:78 的注释，那里的列表是 2026-09-03
+# 实测确认过的。域名的 TLS 配置会变，隔一段时间要重测。
+REALITY_TARGETS=(
+    "www.lovelive-anime.jp"
+    "www.amazon.co.jp"
+    "www.tesla.com"
+    "www.cloudflare.com"
+    "www.nicovideo.jp"
+)
+
+# 检查候选目标是否满足 REALITY 的要求。任一不满足就返回非 0。
+check_reality_target() {
+    local host="$1"
+    local out
+    out=$(timeout 15 openssl s_client -connect "${host}:443" -servername "${host}" \
+            -alpn h2 -tls1_3 </dev/null 2>&1) || return 1
+    echo "${out}" | grep -q "TLSv1.3" || return 1
+    echo "${out}" | grep -q "ALPN protocol: h2" || return 1
+    echo "${out}" | grep -qE "X25519" || return 1
+    return 0
+}
+
+reality_flow() {
+    echo -e ""
+    echo -e "${green}请选择 REALITY 伪装目标：${plain}"
+    local i=1
+    for t in "${REALITY_TARGETS[@]}"; do
+        echo "  ${i}) ${t}"
+        i=$((i + 1))
+    done
+    echo "  ${i}) 自己填一个域名"
+
+    local choice target
+    read -p "请输入序号: " choice
+    if [[ "${choice}" == "${i}" ]]; then
+        read -p "请输入伪装目标域名（不带端口）: " target
+    elif [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 ]] && [[ "${choice}" -lt "${i}" ]]; then
+        target="${REALITY_TARGETS[$((choice - 1))]}"
+    else
+        echo -e "${red}无效的选择，跳过配置向导${plain}"
+        return 1
+    fi
+
+    echo -e "正在检查 ${target} 是否满足 REALITY 要求（TLS1.3 / ALPN h2 / X25519）…"
+    if ! check_reality_target "${target}"; then
+        echo -e "${red}${target} 不满足要求，请换一个目标${plain}"
+        echo -e "${yellow}跳过配置向导，面板保持默认配置，可稍后运行 a-ui 重新配置${plain}"
+        return 1
+    fi
+    echo -e "${green}检查通过${plain}"
+
+    local basepath
+    basepath="/$(gen_random_path)/"
+
+    # 拿不到当前面板端口就不传 -port：让 bootstrap 保持 webPort 原样，
+    # 总比传一个猜错的值把用户已有端口悄悄改掉安全。
+    local port_args=()
+    local detected_port
+    if detected_port=$(current_panel_port); then
+        port_args=(-port "${detected_port}")
+    fi
+
+    local out
+    out=$(/usr/local/a-ui/a-ui bootstrap -mode reality \
+            -reality-dest "${target}:443" -basepath "${basepath}" "${port_args[@]}" -json 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}配置失败：${out}${plain}"
+        echo -e "${yellow}面板保持默认配置，仍可正常访问${plain}"
+        return 1
+    fi
+    print_result "${out}" "reality"
+}
+
+print_result() {
+    local json="$1"
+    local mode="$2"
+    local url
+    url=$(echo "${json}" | jq -r '.panelUrl // empty' 2>/dev/null)
+
+    # panelUrl 里的 "<服务器IP>" 是 bootstrap 留给脚本填的占位符（面板
+    # 进程不知道自己的公网 IP）；探测不到就保留占位符并额外提示，
+    # 不能默默打印一个看起来正常、实际打不开的地址。
+    if [[ "${url}" == *"<服务器IP>"* ]]; then
+        local ip
+        ip=$(public_ip)
+        [[ -n "${ip}" ]] && url="${url//<服务器IP>/${ip}}"
+    fi
+
+    echo -e ""
+    echo -e "${green}=== 配置完成 ===${plain}"
+    if [[ -n "${url}" ]]; then
+        echo -e "${green}面板地址: ${url}${plain}"
+    fi
+    if [[ "${url}" == *"<服务器IP>"* ]]; then
+        echo -e "${yellow}（未能自动探测服务器公网 IP，请把地址中的 <服务器IP> 换成你的服务器公网 IP）${plain}"
+    fi
+    if [[ "${url}" == *":0/"* ]]; then
+        echo -e "${yellow}（未能确定面板当前监听的端口，请用 a-ui 菜单选项 7 查看实际端口）${plain}"
+    fi
+    if [[ "${mode}" == "reality" ]]; then
+        echo -e "${green}已创建 VLESS+Vision+REALITY 入站（443 端口），登录面板即可查看分享链接与二维码${plain}"
+    fi
+    echo -e ""
+    echo -e "${yellow}如果面板打不开，用以下任一方式恢复：${plain}"
+    echo -e "  a-ui setting -listen \"\"                       # 恢复监听所有 IP"
+    echo -e "  ssh -L 54321:127.0.0.1:54321 root@<本机IP>     # 或走 SSH 隧道"
+    echo -e ""
+    echo -e "${yellow}注意：本次配置隐藏的是面板。你在面板里创建的入站端口仍然对外暴露，${plain}"
+    echo -e "${yellow}其抗探测能力与配置前相同。${plain}"
 }
 
 install_a-ui() {
@@ -162,6 +346,7 @@ install_a-ui() {
     #echo -e ""
     #echo -e "如果是更新面板，则按你之前的方式访问面板"
     #echo -e ""
+    setup_wizard
     systemctl daemon-reload
     systemctl enable a-ui
     systemctl start a-ui
@@ -184,6 +369,14 @@ install_a-ui() {
     echo -e "a-ui geo          - 更新 geo  数据"
     echo -e "----------------------------------------------"
 }
+
+# 单独触发安全配置向导，不做下载/解压/装 systemd 服务那一整套安装流程。
+# 用于面板已经装好之后重新配置（a-ui 菜单的「配置域名与伪装站」走这里），
+# 也是本地开发时验证向导本身的入口。
+if [[ "$1" == "--wizard-only" ]]; then
+    setup_wizard
+    exit 0
+fi
 
 echo -e "${green}开始安装${plain}"
 install_base
