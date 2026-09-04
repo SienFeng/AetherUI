@@ -1,8 +1,11 @@
 package bootstrap
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +75,46 @@ func TestBuildRealityInboundMatchesFrontendModel(t *testing.T) {
 	}
 	if !got.Enable {
 		t.Error("新建入站应为启用状态")
+	}
+}
+
+// golden 机制原本只单向保护：改 Go 侧会让上面那个测试变红，而改
+// web/assets/js/model/xray.js 时 golden 与 Go 代码会一起变陈旧、测试照样绿
+// ——恰恰是 spec §4 担心的那个方向（前端模型演进，Go 侧手写的入站悄悄
+// 与它脱节，管理员打开这个入站时才看到表单错乱）。
+//
+// 这里重跑一次生成脚本，把它的输出与签入的 golden 比对：前端模型一改，
+// 这条就会红，并指出重新生成的命令。
+//
+// node 不在机器上时跳过而不是失败，与 web/service 的 requireXrayBinary /
+// requireXrayRoutingService 是同一条惯例——「环境缺件」必须与「真实缺陷」
+// 区分开，否则跳过的理由会被当成 bug 报出来。CI 的 ubuntu-latest 自带
+// node，这道保护在 CI 上是真的在跑。
+func TestGoldenMatchesFrontendModelRegeneration(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node 不可用，无法重跑 testdata/gen_golden.js 复算 golden，跳过")
+	}
+
+	cmd := exec.Command("node", "testdata/gen_golden.js")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("跑 testdata/gen_golden.js 失败: %v\n%s", err, stderr.String())
+	}
+
+	want, err := os.ReadFile("testdata/reality_inbound.golden.json")
+	if err != nil {
+		t.Fatalf("读 golden: %v", err)
+	}
+
+	// 逐字节比对（只忽略首尾空白）：golden 是脚本生成的产物，不该被手工
+	// 编辑，所以任何差异都值得报出来，不必做 JSON 语义归一化。
+	if strings.TrimSpace(string(out)) != strings.TrimSpace(string(want)) {
+		t.Errorf("签入的 golden 与前端模型当前的输出不一致——"+
+			"web/assets/js/model/xray.js 改动了而 golden 没跟着重新生成。\n"+
+			"重新生成：node bootstrap/testdata/gen_golden.js > bootstrap/testdata/reality_inbound.golden.json\n"+
+			"重新生成之后，TestBuildRealityInboundMatchesFrontendModel 会告诉你 Go 侧要跟着改哪里。\n"+
+			"脚本输出:\n%s\n签入的 golden:\n%s", out, want)
 	}
 }

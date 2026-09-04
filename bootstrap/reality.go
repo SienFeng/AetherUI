@@ -26,9 +26,13 @@ type RealityParams struct {
 // 配置文档为准——两者大部分重合，但本项目的模型有自己的约定：
 // REALITY 的伪装目标叫 target（xray.js:558），serverNames/shortIds 在
 // 数据库里是数组而在表单模型里是逗号分隔串（xray.js:544）。
-// 字段与顺序均由 bootstrap/testdata/gen_golden.js 生成的 golden 文件核对，
-// 不是照 xray-core 文档手写——tcpSettings 只有 header 一个字段，没有
+// 字段名与字段的增删由 bootstrap/testdata/gen_golden.js 生成的 golden 文件
+// 核对，不是照 xray-core 文档手写——tcpSettings 只有 header 一个字段，没有
 // acceptProxyProtocol（TcpStreamSettings.toJson，xray.js:185-193）。
+// 注意 golden 断言的**不包括字段顺序**：测试两侧都先解成 map[string]any
+// 再重新 Marshal，而 encoding/json 对 map key 排序，顺序差异在比较之前就
+// 被抹平了。要锁顺序得改成逐字节比较原始字符串，那会把无意义的格式差异
+// 也一起锁死，代价大于收益。
 func BuildRealityInbound(p RealityParams) (*model.Inbound, error) {
 	settings := map[string]any{
 		"clients": []map[string]any{{
