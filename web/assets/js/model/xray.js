@@ -749,7 +749,7 @@ class StreamSettings extends XrayCommonClass {
 }
 
 class Sniffing extends XrayCommonClass {
-    constructor(enabled=true, destOverride=['http', 'tls']) {
+    constructor(enabled=true, destOverride=['http', 'tls', 'quic']) {
         super();
         this.enabled = enabled;
         this.destOverride = destOverride;

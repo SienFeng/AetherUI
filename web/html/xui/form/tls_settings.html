@@ -85,7 +85,7 @@
                         </a-select>
                     </a-form-item>
                 </a-col>
-                <a-col :span="6">
+                <a-col :span="5">
                     <a-form-item label="最高版本">
                         <a-select v-model="inbound.stream.tls.maxVersion" style="width: 90px;">
                             <a-select-option v-for="v in TLS_VERSION_OPTION" :key="v" :value="v">[[ v ]]</a-select-option>
