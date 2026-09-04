@@ -259,12 +259,13 @@ reality_flow() {
         echo -e "${yellow}面板保持默认配置，仍可正常访问${plain}"
         return 1
     fi
-    print_result "${out}" "reality"
+    print_result "${out}" "reality" "${detected_port}"
 }
 
 print_result() {
     local json="$1"
     local mode="$2"
+    local port="$3"
     local url
     url=$(echo "${json}" | jq -r '.panelUrl // empty' 2>/dev/null)
 
@@ -294,13 +295,29 @@ print_result() {
     echo -e ""
     echo -e "${yellow}如果面板打不开，用以下任一方式恢复：${plain}"
     echo -e "  a-ui setting -listen \"\"                       # 恢复监听所有 IP"
-    echo -e "  ssh -L 54321:127.0.0.1:54321 root@<本机IP>     # 或走 SSH 隧道"
+    if [[ -n "${port}" ]]; then
+        echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<本机IP>     # 或走 SSH 隧道"
+    else
+        # 端口没探测到就不能编出一个具体数字——猜错了这条救命通道就是废的。
+        echo -e "  ssh 隧道：先用 a-ui 菜单第 7 项查看面板实际端口，再执行"
+        echo -e "  ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>"
+    fi
     echo -e ""
     echo -e "${yellow}注意：本次配置隐藏的是面板。你在面板里创建的入站端口仍然对外暴露，${plain}"
     echo -e "${yellow}其抗探测能力与配置前相同。${plain}"
 }
 
 install_a-ui() {
+    # 端口探测必须在 stop 之前做：current_panel_port() 的探测分支靠
+    # systemctl show -p MainPID 找正在跑的 a-ui 进程，服务一旦被下面这行
+    # stop 掉就永远拿不到 PID 了。探测成功说明是给已有部署做更新，直接
+    # 记下来；探测失败就是机器上本来没装过，交给 config_after_install
+    # 在全新安装的分支里另行确定，这里不用去区分"为什么失败"。
+    local pre_stop_port
+    if pre_stop_port=$(current_panel_port); then
+        panel_port="${pre_stop_port}"
+    fi
+
     systemctl stop a-ui
     cd /usr/local/
 
