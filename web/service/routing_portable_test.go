@@ -974,19 +974,19 @@ func TestExportRulesScopeStillRejectsDuplicateGroupRemarks(t *testing.T) {
 	}
 }
 
-// Task 3 让所有测试夹具同时写 DomainGroupId 与 DomainGroupIds，这掩盖了一整类
-// 缺陷：真实写入路径（ruleFromForm / importRules）此后只写 DomainGroupIds，
-// DomainGroupId 恒为 0，而双写夹具永远造不出这个形态。本用例刻意只写新字段，
-// 复现真实写入路径的产出，守住「导出不会静默漏掉这类规则」。
+// 真实写入路径（ruleFromForm / importRules）只写 DomainGroupIds，DomainGroupId
+// 恒为 0。本仓库另有一批同时写两个字段的测试夹具，那种形态现实中已不存在，
+// 会掩盖一整类只在「新字段有值、旧字段为 0」时才暴露的缺陷。本用例刻意只写
+// 新字段，复现真实写入路径的产出，守住「导出不会静默漏掉这类规则」。
 //
-// 症状之所以必须测：toPortableRule 读不到域名组时只 logger.Warning 后 continue，
-// 规则从导出文件里静默消失，界面上没有任何信号。
+// 症状之所以必须测：toPortableRule 拒绝整条时 Export 只 logger.Warning 后
+// continue，规则从导出文件里静默消失，界面上没有任何信号。
 func TestExportRuleWithOnlyDomainGroupIds(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "Claude")
 	in := newTestInbound(t, 10001)
 	// RoutingRuleService.Add 原样落库，不补旧字段，所以这条规则的
-	// DomainGroupId 会是 0——正是 Task 6 之后 ruleFromForm 产出的形态。
+	// DomainGroupId 会是 0——正是面板里新建一条规则之后的真实形态。
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "只有新字段", InboundIds: mustEncodeIds(t, []int{in.Id}),
 		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
@@ -1084,13 +1084,26 @@ func TestImportRejectsRuleWithoutAnyGroupRef(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	refs := []PortableInboundRef{{Remark: in.Remark, Port: in.Port}}
 	empty := []string{}
-	for name, rule := range map[string]PortableRule{
-		"两个字段都缺": {Remark: "A", InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
-		"显式空数组":  {Remark: "B", DomainGroupRefs: &empty, InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
+	// 两种情形都拒绝，但报告文案必须不同——这正是 DomainGroupRefs 用指针
+	// 类型换来的东西。「显式提交了空数组」管理员得去改文件里那一行；
+	// 「字段根本不在」说明文件被截断或压根不是本工具导出的。混成同一句话，
+	// 指针类型就白用了，而结构体上的注释也就成了一句不成立的声称。
+	for name, tc := range map[string]struct {
+		rule    PortableRule
+		wantMsg string
+	}{
+		"两个字段都缺": {
+			rule:    PortableRule{Remark: "A", InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
+			wantMsg: "缺少 domainGroupRefs 字段",
+		},
+		"显式空数组": {
+			rule:    PortableRule{Remark: "B", DomainGroupRefs: &empty, InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
+			wantMsg: "是一个空数组",
+		},
 	} {
 		f := &ExportFile{
 			Kind: ExportKind, Version: ExportVersion, Scope: []string{"rules"},
-			Rules: []PortableRule{rule},
+			Rules: []PortableRule{tc.rule},
 		}
 		report, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
 		if err != nil {
@@ -1099,6 +1112,10 @@ func TestImportRejectsRuleWithoutAnyGroupRef(t *testing.T) {
 		if report.Rules.Created != 0 {
 			t.Errorf("%s：一个域名组都没有的规则必须整条拒绝，got created=%d",
 				name, report.Rules.Created)
+		}
+		joined := strings.Join(report.Messages, "\n")
+		if !strings.Contains(joined, tc.wantMsg) {
+			t.Errorf("%s：报告应含 %q，实际为 %v", name, tc.wantMsg, report.Messages)
 		}
 	}
 }
@@ -1151,5 +1168,143 @@ func TestImportDropsRuleWhenNoGroupMatches(t *testing.T) {
 	}
 	if report.Rules.Created != 0 {
 		t.Errorf("一个组都认不出必须整条丢弃，got created=%d", report.Rules.Created)
+	}
+}
+
+// spec §10 的「新格式往返」：多组规则导出、再导入到另一台机器，规则引用的
+// 域名组必须【恰好】还原成那两个组，且升序。
+//
+// 只断言 report.Rules.Created 或 len(domainGroupRefs) 挡不住 importRules 里的
+// 部分映射缺陷（2 个 ref 进、1 个 id 出）：截断后的集合在 ruleService.Add →
+// validate 眼里完全合法（validate 只拒绝不存在的 id），规则表渲染正常、
+// 生成的配置也合法，唯一的症状是流量走错节点。
+func TestRoundTripMultiGroupRuleRestoresExactGroupSet(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	srcInbound := newPortableTestInbound(t, "甲", 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "两组封禁", InboundIds: mustEncodeIds(t, []int{srcInbound.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id, chatgpt.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := (&RoutingPortableService{}).Export(ExportScopeRules)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	raw := exportJSON(t, f)
+
+	// 换一台机器：setupDB 重建一个全新的库。故意先建一个无关的组、再按【相反】
+	// 的顺序建那两个组，好让目标机器上的 id 与源机器完全不同——两边 id 恰好
+	// 相同的话，一个「把源 id 原样照抄过来」的实现也能通过，用例就白写了。
+	setupDB(t)
+	newTestGroup(t, "无关组")
+	dstChatGPT := newTestGroup(t, "ChatGPT")
+	dstClaude := newTestGroup(t, "Claude")
+	newPortableTestInbound(t, "甲", 10001)
+
+	report, err := (&RoutingPortableService{}).Import(raw)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rules.Created != 1 {
+		t.Fatalf("规则没有导入成功: %+v", report)
+	}
+
+	rules, err := (&RoutingRuleService{}).GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("规则条数 = %d, want 1", len(rules))
+	}
+	if !rules[0].Enable {
+		t.Errorf("组与入站全部命中时不该被降级成禁用: %v", report.Messages)
+	}
+	got, err := DecodeDomainGroupIds(rules[0].DomainGroupIds)
+	if err != nil {
+		t.Fatalf("DecodeDomainGroupIds: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("DomainGroupIds = %v, want 恰好两个组（本机 Claude=%d, ChatGPT=%d）",
+			got, dstClaude.Id, dstChatGPT.Id)
+	}
+	if got[0] >= got[1] {
+		t.Errorf("DomainGroupIds = %v, 必须升序去重（生成逐字节确定的前提）", got)
+	}
+	inSet := map[int]bool{got[0]: true, got[1]: true}
+	if !inSet[dstClaude.Id] || !inSet[dstChatGPT.Id] {
+		t.Errorf("DomainGroupIds = %v, want 恰好 {Claude=%d, ChatGPT=%d}",
+			got, dstClaude.Id, dstChatGPT.Id)
+	}
+}
+
+// 导出与 buildRule 对齐：一条规则引用的组里有一个已经悬空时，buildRule 只剔掉
+// 那一个、规则照常写进配置，所以这条规则在本机【正在生效】。导出必须照样导出
+// 它，否则一条正在生效的封禁规则会从导出文件里静默消失——Export 对跳过只记
+// logger.Warning，导入报告和导出结果里一个字都没有。
+func TestExportDropsDanglingGroupButKeepsRule(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	ghost := newTestGroup(t, "马上要被删的组")
+	in := newPortableTestInbound(t, "甲", 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "两组封禁", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id, ghost.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 绕过 DomainGroupService.Del 的引用守卫直接删行。守卫有洞时（直接改库、
+	// 并发写入、迁移前留下的残骸）库里留下的正是这个形态。
+	if err := database.GetDB().Exec("DELETE FROM domain_groups WHERE id = ?", ghost.Id).Error; err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+
+	f, err := (&RoutingPortableService{}).Export(ExportScopeRules)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.Rules) != 1 {
+		t.Fatalf("导出了 %d 条规则，want 1（一个组悬空不该让整条规则消失）", len(f.Rules))
+	}
+	if f.Rules[0].DomainGroupRefs == nil {
+		t.Fatal("domainGroupRefs 不能是 nil 指针")
+	}
+	refs := *f.Rules[0].DomainGroupRefs
+	if len(refs) != 1 || refs[0] != "Claude" {
+		t.Errorf("domainGroupRefs = %v, want [Claude]（悬空的组剔除，其余保留）", refs)
+	}
+	// 剔到只剩一个组之后，兼容旧面板的单值字段照常填。
+	if f.Rules[0].DomainGroupRef != "Claude" {
+		t.Errorf("domainGroupRef = %q, want Claude", f.Rules[0].DomainGroupRef)
+	}
+}
+
+// 剔到一个组都不剩时才拒绝整条：那时导出的 domainGroupRefs 会是空数组，
+// 等于 domain 条件为空——导入端见到它必须拒绝，导出端不该先把这颗雷埋进去。
+func TestExportSkipsRuleWhenEveryGroupIsDangling(t *testing.T) {
+	setupDB(t)
+	ghost := newTestGroup(t, "马上要被删的组")
+	in := newPortableTestInbound(t, "甲", 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "只引用了一个组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{ghost.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := database.GetDB().Exec("DELETE FROM domain_groups WHERE id = ?", ghost.Id).Error; err != nil {
+		t.Fatalf("delete group: %v", err)
+	}
+
+	f, err := (&RoutingPortableService{}).Export(ExportScopeRules)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.Rules) != 0 {
+		t.Errorf("一个组都不剩的规则必须整条跳过，实际导出 %+v", f.Rules)
 	}
 }

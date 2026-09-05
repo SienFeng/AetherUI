@@ -215,8 +215,12 @@ func (s *RoutingPortableService) Export(scope string) (*ExportFile, error) {
 		for _, r := range rules {
 			pr, skip := s.toPortableRule(r, groupById, nodeById, inboundById)
 			if skip != nil {
-				// 引用已经悬空的规则本来就不会写进配置，导出它只会在对面
-				// 产生同样一条不生效的规则，还占着 checkConflict 的位置。
+				// 走到这里的规则在本机就【已经】无法写进配置：域名组一个不剩、
+				// 出站或入站悬空、字段本身损坏。导出它只会在对面产生同样一条
+				// 不生效的规则，还占着 checkConflict 的位置。
+				//
+				// 注意这不包括「部分组悬空」——那种规则在本机正常生效，
+				// toPortableRule 会剔掉悬空的组并保留规则，见那里的注释。
 				logger.Warning("导出跳过规则「", ruleLabel(r), "」：", skip)
 				continue
 			}
@@ -259,15 +263,32 @@ func (s *RoutingPortableService) toPortableRule(
 	if len(groupIds) == 0 {
 		return PortableRule{}, common.NewError("规则没有引用任何域名组")
 	}
+	// 悬空的组剔除而不是整条拒绝——与 buildRule 对齐。buildRule 只剔掉失效的
+	// 组、规则照常生成，所以一条引用了 3 个组、其中 1 个已悬空的规则在本机
+	// 【正在生效】。整条拒绝会让它从导出文件里静默消失（Export 只 logger.Warning
+	// 后 continue，导出报告里一个字都没有），管理员在对面机器上根本不知道少了
+	// 一条封禁规则。
+	//
+	// 剔到一个不剩时才拒绝整条：那时编码结果会落回 []，等于 domain 条件为空。
 	groupRefs := make([]string, 0, len(groupIds))
+	droppedGroups := make([]string, 0)
 	for _, gid := range groupIds {
 		g, ok := groupById[gid]
 		if !ok {
-			// 悬空引用，本机上这条规则的这一部分已经不生效了。整条跳过，
-			// 不能只剔掉这一个——剔到最后变成空数组就是「domain 条件为空」。
-			return PortableRule{}, common.NewErrorf("域名组 #%d 不存在", gid)
+			droppedGroups = append(droppedGroups, fmt.Sprintf("#%d", gid))
+			continue
 		}
 		groupRefs = append(groupRefs, g.Remark)
+	}
+	if len(groupRefs) == 0 {
+		return PortableRule{}, common.NewErrorf("规则引用的域名组一个都不存在（%s）",
+			strings.Join(droppedGroups, "、"))
+	}
+	if len(droppedGroups) > 0 {
+		// 跳过必须带原因，否则这道剔除对用户是隐形的：导出文件里的规则看着
+		// 完整，覆盖的域名却比源机器少一截。
+		logger.Warning("导出规则「", ruleLabel(r), "」时剔除了不存在的域名组：",
+			strings.Join(droppedGroups, "、"))
 	}
 	legacyRef := ""
 	if len(groupRefs) == 1 {
@@ -682,16 +703,27 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 
 		// 优先新字段；nil 指针（null 或键缺失）时回落旧字段，兼容
 		// v1.7.0 及更早导出的文件。
+		//
+		// explicitEmptyGroups 把「显式提交了一个空数组」与「字段根本不在」
+		// 分开，这正是 DomainGroupRefs 用指针类型换来的东西——两者都拒绝，
+		// 但报告要说得准：前者管理员得去改文件里那一行，后者说明文件被截断
+		// 或压根不是本工具导出的。混成同一句话，指针类型就白用了。
 		var groupRefs []string
+		explicitEmptyGroups := false
 		switch {
 		case item.DomainGroupRefs != nil:
 			groupRefs = *item.DomainGroupRefs
+			explicitEmptyGroups = len(groupRefs) == 0
 		case item.DomainGroupRef != "":
 			groupRefs = []string{item.DomainGroupRef}
 		}
 		if len(groupRefs) == 0 {
 			report.Rules.Failed++
-			report.fail("规则「%s」没有指定域名组，整条跳过（域名条件为空会让它劫持该用户的全部流量）", label)
+			if explicitEmptyGroups {
+				report.fail("规则「%s」的 domainGroupRefs 是一个空数组，整条跳过（域名条件为空会让它劫持该用户的全部流量）", label)
+			} else {
+				report.fail("规则「%s」缺少 domainGroupRefs 字段（为 null 或键不存在），也没有可回落的 domainGroupRef，整条跳过（域名条件为空会让它劫持该用户的全部流量）", label)
+			}
 			continue
 		}
 
