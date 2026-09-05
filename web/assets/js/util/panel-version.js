@@ -31,6 +31,10 @@ const panelVersionMixin = {
             // 一旦观察到过一次「连不上 = 正在重启」，就不再退回 starting——
             // 见 pollUpgrade 里的说明。
             upgradeSawRestart: false,
+            // 目标版本没有 /server/panelVersion 时置真：面板确实起来了，
+            // 但版本号无从核对，'done' 的文案必须跟着改口，不能报一个
+            // 其实没读到的版本号。见 pollUpgrade 的 404 分支。
+            upgradeVersionUnverified: false,
             upgradeLogVisible: false,
             upgradeLogLines: [],
         };
@@ -70,7 +74,13 @@ const panelVersionMixin = {
             const content = goingBack
                 ? ('确定要回退到 ' + tag + ' 吗？\n\n'
                     + '回退会一并把 xray 核心换成该版本携带的构建，新版新增的功能会失效。'
-                    + '数据库和已有配置不会丢失。')
+                    + '数据库和已有配置不会丢失。\n\n'
+                    // 「新版新增的功能会失效」里最要紧的一项是这个入口自己，
+                    // 值得单独点名：回退到早于版本管理上线的版本后，界面上
+                    // 再也找不到切换版本的地方，只能 SSH 上去。前端无从判断
+                    // 目标版本有没有这个功能，所以措辞留有余地。
+                    + '注意：版本管理入口本身也是新版功能，回退到更早的版本后它会消失，'
+                    + '届时只能在服务器上执行 a-ui update 才能回到新版。')
                 : ('确定要更新到 ' + tag + ' 吗？\n\n面板会在更新过程中短暂不可用。');
             this.$confirm({
                 title: goingBack ? '回退到旧版本' : '更新面板',
@@ -83,6 +93,7 @@ const panelVersionMixin = {
         async startUpgrade(tag) {
             this.upgradeTarget = tag;
             this.upgradeSawRestart = false;
+            this.upgradeVersionUnverified = false;
             this.upgradeState = 'starting';
             const msg = await HttpUtil.post('/server/upgradePanel', { version: tag });
             if (!msg.success) {
@@ -129,6 +140,23 @@ const panelVersionMixin = {
                 // 到过重启，就保持 'restarting' 直到达标或超时。
                 if (!reached && !this.upgradeSawRestart) this.upgradeState = 'starting';
             } catch (e) {
+                // 404 与「连不上」必须分开处理，虽然 axios 把两者都抛成异常。
+                //
+                // 面板 stop 期间根本不会有 404：装了 Caddy 的拓扑下 upstream
+                // 拒绝连接是 502，没装 Caddy 的 REALITY 拓扑下连接直接被拒、
+                // axios 连 response 都拿不到。所以能收到 404，只说明一件事——
+                // 有进程正在这个地址上服务，只是它没有这条路由。
+                //
+                // 那就是回退到旧版的必然结果：面板版本管理是 v1.6.0 才加的，
+                // 回退列表里更早的版本都没有 /server/panelVersion。继续轮询
+                // 永远等不到结果（旧版不会凭空长出这条路由），只会白转满 3
+                // 分钟再报一句「更新可能失败」——而更新其实早就成功了。
+                const status = e.response && e.response.status;
+                if (status === 404) {
+                    this.upgradeVersionUnverified = true;
+                    this.upgradeState = 'done';
+                    return;
+                }
                 // 连不上 = 面板正在重启，这是预期内的
                 this.upgradeSawRestart = true;
                 this.upgradeState = 'restarting';
