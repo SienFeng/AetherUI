@@ -10,6 +10,7 @@ import (
 	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/common"
+	"a-ui/web/entity"
 	"a-ui/xray"
 )
 
@@ -299,4 +300,132 @@ func ValidateInboundReplacing(ib map[string]any, replacedTag string) error {
 		removeInboundByTag(cfg, replacedTag)
 		appendInbound(cfg, ib)
 	}, minimalInboundConfig(ib))
+}
+
+// ValidateSettings 校验「按这份设置保存下去之后」的完整配置，真实 xray 说了算。
+//
+// 设计 §8.6 要求这一步，它不是装饰。一个实例：dnsServers 写成 1.1.1.1:53
+// 语法上无懈可击，xray 却直接拒绝启动（exit 23）；而 dns 在 xray/hot_diff.go
+// 的 static 名单里，保存必然触发整进程重启，Process.Start() 又把 cmd.Run()
+// 丢进 goroutine、从不回传启动失败——没有这一步，管理员看到的是「保存成功」、
+// 面板首页 running、errorMsg 为空，而机器上所有用户已经断网。有了这一步，
+// 同一个错误在保存那一刻就被顶回来，还带着 xray 自己的报错原文。
+//
+// 只对真正会进入生成配置的设置项做这一步：dnsServers 与 ipRuleResolveDomain。
+// 端口、时区、保留天数这些压根不进 xray 配置，为它们 exec 一次真实 xray 只是
+// 给每一次保存平白加上一秒延迟和一个临时文件。
+//
+// xrayTemplateConfig 刻意不在此列。换模板意味着整条生成链（模板 + 全部启用
+// 入站 + RoutingInjector + DNSInjector）都要按新模板重跑一遍，而 GetXrayConfig
+// 是从库里读设置的；要让它按候选值跑，就得再造一条与它平行的生成链。那条链
+// 一旦与 GetXrayConfig 漂移，「校验通过的配置」与「真正下发的配置」就不是同一
+// 份——比不校验更危险，因为它会给出一个假的安全感。模板的语法错误仍由
+// entity.CheckValid 的 json.Unmarshal 挡住。
+//
+// 沿用 validateWithFullConfig 的三条 fail open 边界，一条都不收紧。
+func ValidateSettings(candidate *entity.AllSetting) error {
+	if !settingsAffectXrayConfig(candidate) {
+		return nil
+	}
+	return validateWithFullConfig(func(cfg map[string]any) {
+		applyCandidateDNS(cfg, candidate)
+		applyCandidateDomainStrategy(cfg, candidate)
+	}, minimalSettingsConfig(candidate))
+}
+
+// minimalSettingsConfig 是取不到完整配置时的退路：只带候选 dns 段和一个
+// freedom 出站。它发现不了组合层面的冲突，但至少还能抓出 dns 段自身的错误，
+// 而不是干脆放弃校验。绝不能传 nil——那会被 json.Marshal 成 "null"，xray
+// 必然拒绝，一条 fail open 的退路就变成了无条件拒绝保存。
+func minimalSettingsConfig(candidate *entity.AllSetting) map[string]any {
+	cfg := map[string]any{
+		"outbounds": []any{
+			map[string]any{"protocol": "freedom", "settings": map[string]any{}},
+		},
+	}
+	if servers := buildDNSServers(candidate.DNSServers); len(servers) > 0 {
+		cfg["dns"] = map[string]any{"servers": servers}
+	}
+	return cfg
+}
+
+// settingsAffectXrayConfig 报告这次保存是否动了会进入 xray 配置的设置项。
+//
+// 读旧值本身出错时返回 true（照常校验）：那说明库有问题，而漏掉一次校验的
+// 后果远比多跑一次 xray 严重。
+func settingsAffectXrayConfig(candidate *entity.AllSetting) bool {
+	settingService := SettingService{}
+	oldServers, err := settingService.GetDNSServers()
+	if err != nil {
+		return true
+	}
+	oldResolve, err := settingService.GetIPRuleResolveDomain()
+	if err != nil {
+		return true
+	}
+	return candidate.DNSServers != oldServers ||
+		(candidate.IPRuleResolveDomain == 1) != oldResolve
+}
+
+// templateSection 取候选模板里某个顶层键的原值。第二个返回值为 false 表示
+// 模板里根本没有这个键（与「值为 null」要分开）。
+func templateSection(templateConfig, key string) (any, bool) {
+	var tmpl map[string]any
+	if err := json.Unmarshal([]byte(templateConfig), &tmpl); err != nil {
+		// entity.CheckValid 已经确认它能反序列化成 xray.Config，走到这里
+		// 说明是别的形状问题。保持配置原样即可，不能因此把保存卡住。
+		return nil, false
+	}
+	v, ok := tmpl[key]
+	return v, ok
+}
+
+// applyCandidateDNS 把 DNSInjector 在这份候选设置下会写出的 dns 段应用到
+// 完整配置上。
+//
+// 必须自己应用，不能指望 GetXrayConfig：它读的是库里的旧值，基线里那段 dns
+// 是旧 dnsServers 注入的结果。尤其是「把 dnsServers 清空」这一次保存——不换
+// 回模板里的原文，校验的就是一份根本不会下发的配置。
+//
+// 只处理 dns 段，不动 freedom 出站 settings 里的 domainStrategy：那一项
+// （UseIP）恒定合法，加不加都不改变 xray 接不接受这份配置，而要正确地加/删
+// 它得把 DNSInjector 的整套出站遍历再走一遍。
+func applyCandidateDNS(cfg map[string]any, candidate *entity.AllSetting) {
+	servers := buildDNSServers(candidate.DNSServers)
+	if len(servers) > 0 {
+		cfg["dns"] = map[string]any{"servers": servers}
+		return
+	}
+	if v, ok := templateSection(candidate.XrayTemplateConfig, "dns"); ok {
+		cfg["dns"] = v
+	} else {
+		delete(cfg, "dns")
+	}
+}
+
+// applyCandidateDomainStrategy 镜像 RoutingInjector 对 routing.domainStrategy
+// 的处理：开关为 1 时写 IPIfNonMatch，为 0 时【不碰】——模板里的原值才是最终值。
+func applyCandidateDomainStrategy(cfg map[string]any, candidate *entity.AllSetting) {
+	routing, _ := cfg["routing"].(map[string]any)
+	if candidate.IPRuleResolveDomain == 1 {
+		if routing == nil {
+			routing = map[string]any{}
+			cfg["routing"] = routing
+		}
+		routing["domainStrategy"] = "IPIfNonMatch"
+		return
+	}
+	if routing == nil {
+		// 没有 routing 段就没有 domainStrategy 可言，凭空造一个空对象
+		// 只会让校验的那份配置与真正生成的那份多出一处差异。
+		return
+	}
+	tmplRouting, _ := templateSection(candidate.XrayTemplateConfig, "routing")
+	if m, ok := tmplRouting.(map[string]any); ok {
+		if v, ok := m["domainStrategy"]; ok {
+			routing["domainStrategy"] = v
+			return
+		}
+	}
+	delete(routing, "domainStrategy")
 }

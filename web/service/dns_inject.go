@@ -43,22 +43,20 @@ func (s *DNSInjector) Inject(cfg *xray.Config) error {
 	if err != nil {
 		return err
 	}
-	servers := ParseDNSServers(raw)
+	servers := buildDNSServers(raw)
 	if len(servers) == 0 {
-		return nil
-	}
-
-	// 保证列表里有系统解析器兜底。管理员自己写了就不再补——他把它放在
-	// 第一位是有意为之（优先系统解析），补第二个只会让界面与配置对不上。
-	hasFallback := false
-	for _, item := range servers {
-		if item == dnsFallbackServer {
-			hasFallback = true
-			break
+		// 列表为空 = 模板完全不动，这是「升级后行为零变化」那条不变量，
+		// 这里一个字节都不能改。但沉默是不行的：模板里手写着 dns 段而设置
+		// 项为空，正是本功能存在的理由所描述的那个状态——freedom 停在 AsIs，
+		// 那段 dns 对直连流量根本不起作用（见 applyFreedomStrategy 的注释），
+		// 而 run -test 照样 Configuration OK、面板照样 running。唯独这个
+		// 组合下管理员最可能以为自己已经换掉了解析器。日志不是修改。
+		if len(cfg.DNSConfig) > 0 {
+			logger.Warning("the template has a dns section but no dns servers are configured in the panel; " +
+				"the default freedom outbound stays on domainStrategy AsIs, so that dns section " +
+				"does not govern direct traffic — fill in the panel's dns servers setting to make it effective")
 		}
-	}
-	if !hasFallback {
-		servers = append(servers, dnsFallbackServer)
+		return nil
 	}
 
 	// 模板里手写的 dns 段（hosts/queryStrategy/clientIp/disableCache/tag
@@ -152,6 +150,29 @@ func (s *DNSInjector) applyFreedomStrategy(cfg *xray.Config) error {
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encoded)
 	return nil
+}
+
+// buildDNSServers 把设置项原文变成最终写进 dns.servers 的那份列表。
+// 返回空表示「未启用」，此时 dns 段一个字节都不能改。
+//
+// 单独成函数是因为设置页保存时的真实 xray 校验要生成同一份列表
+// （ValidateSettings）。在那边再抄一遍「去重 + 补 localhost」的规则，两处
+// 迟早会分叉，而分叉的表现是「校验通过的那份配置与真正下发的不是同一份」——
+// 本子系统最怕的那类故障。
+//
+// 保证列表里有系统解析器兜底。管理员自己写了就不再补——他把它放在第一位
+// 是有意为之（优先系统解析），补第二个只会让界面与配置对不上。
+func buildDNSServers(raw string) []string {
+	servers := ParseDNSServers(raw)
+	if len(servers) == 0 {
+		return nil
+	}
+	for _, item := range servers {
+		if item == dnsFallbackServer {
+			return servers
+		}
+	}
+	return append(servers, dnsFallbackServer)
 }
 
 // ParseDNSServers 把 textarea 原文切成有序、去重的服务器列表。

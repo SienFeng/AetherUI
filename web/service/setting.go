@@ -516,6 +516,13 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 	if err := allSetting.CheckValid(); err != nil {
 		return err
 	}
+	// CheckValid 只查得了语法。会进入 xray 配置的设置项还要过一遍真实 xray：
+	// 语法合法而 xray 拒绝启动的值确实存在（dnsServers 写成 IP:端口 就是），
+	// 而那种错误在保存这一刻是唯一看得见的时刻——之后只剩一次静默的重启失败。
+	// 与出站/入站/域名的校验同一套 fail open 边界，见 ValidateSettings。
+	if err := ValidateSettings(allSetting); err != nil {
+		return err
+	}
 
 	v := reflect.ValueOf(allSetting).Elem()
 	t := reflect.TypeOf(allSetting).Elem()

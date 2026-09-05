@@ -1,6 +1,7 @@
 package service
 
 import (
+	"os"
 	"testing"
 )
 
@@ -168,5 +169,68 @@ func TestCheckValidAcceptsEmptyDNSServers(t *testing.T) {
 	all.DNSServers = ""
 	if err := all.CheckValid(); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// 设计 §8.6 要求保存设置时也过一遍真实 xray。这里用 tcp://8.8.8.8:99999：
+// 语法上无懈可击（CheckValid 只认前缀与主机名非空），实测 xray 拒绝启动
+// （exit 23，"invalid port range: 99999"）。没有这一步，管理员看到的是
+// 「保存成功」+ 面板首页 running + 全员断网——dns 在 hot_diff 的 static
+// 名单里，保存必然触发整进程重启，而 Process.Start() 从不回传启动失败。
+func TestUpdateAllSettingRejectsDNSServerXrayWontAccept(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	s := SettingService{}
+	all := validBaseSetting()
+	all.DNSServers = "tcp://8.8.8.8:99999"
+	if err := s.UpdateAllSetting(all); err == nil {
+		t.Fatal("xray 拒绝的 dns 服务器地址应当在保存时就被顶回来")
+	}
+	// 校验在落库之前，被拒的值一个字节都不该写进去。
+	if v, err := s.GetDNSServers(); err != nil || v != "" {
+		t.Errorf("被拒绝的值不该落库，实际 %q err=%v", v, err)
+	}
+}
+
+// fail open 的边界一条都不能收紧：xray 二进制不存在时照常放行。
+// 校验器自身的故障绝不能变成「管理员改不了设置」。
+//
+// 用切换工作目录来制造「二进制不存在」：xray.GetBinaryPath() 是相对路径，
+// 没有别的注入点。这是进程级副作用，本包测试串行执行，用 t.Cleanup 切回。
+func TestUpdateAllSettingFailsOpenWithoutXrayBinary(t *testing.T) {
+	setupDB(t)
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	s := SettingService{}
+	all := validBaseSetting()
+	all.DNSServers = "tcp://8.8.8.8:99999"
+	if err := s.UpdateAllSetting(all); err != nil {
+		t.Fatalf("没有 xray 二进制时应当放行，实际被拒: %v", err)
+	}
+}
+
+// 无关设置项的保存不该 exec 一次真实 xray：那是每次保存平白多出的一秒延迟。
+func TestSettingsAffectXrayConfigOnlyForRelevantKeys(t *testing.T) {
+	setupDB(t)
+	all := validBaseSetting()
+	all.WebPort = 12345
+	if settingsAffectXrayConfig(all) {
+		t.Error("只改了端口，不该触发 xray 校验")
+	}
+	all.DNSServers = "8.8.8.8"
+	if !settingsAffectXrayConfig(all) {
+		t.Error("改了 dnsServers 必须触发 xray 校验")
+	}
+	all.DNSServers = ""
+	all.IPRuleResolveDomain = 1
+	if !settingsAffectXrayConfig(all) {
+		t.Error("改了 ipRuleResolveDomain 必须触发 xray 校验")
 	}
 }
