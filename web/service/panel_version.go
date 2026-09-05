@@ -205,7 +205,7 @@ type PanelVersionService struct{}
 func fetchReleases() ([]ReleaseBrief, error) {
 	resp, err := panelVersionHTTPClient.Get(panelReleasesURL)
 	if err != nil {
-		return nil, err
+		return nil, common.NewError("拉取 GitHub 发布列表失败:", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -215,7 +215,7 @@ func fetchReleases() ([]ReleaseBrief, error) {
 	// 直接 Unmarshal 进切片会报错——这正是我们要的，不能静默当成空列表。
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, common.NewError("拉取 GitHub 发布列表失败:", err)
 	}
 	var raw []githubRelease
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -242,7 +242,7 @@ func (s *PanelVersionService) Refresh() error {
 	latest, hasUpdate, known := computeVersionState(current, all)
 	rollback := all
 	if len(rollback) > rollbackListSize {
-		rollback = rollback[:rollbackListSize]
+		rollback = rollback[:rollbackListSize:rollbackListSize]
 	}
 	updatable, reason := checkUpdatable()
 

@@ -266,6 +266,27 @@ func TestRefreshTruncatesRollbackList(t *testing.T) {
 	}
 }
 
+// 截断时必须同时截断容量，防止底层数组被 append 污染。
+// all 的容量是 10（toBriefs 用 make([]ReleaseBrief, 0, len(raw))），
+// 只截长度会留下 cap=10 的 rollback 别名，any append 都会写进 panelVersionCache.all
+// 的第 6+ 个槽位——这在完全无锁的情况下发生，绕过了 RWMutex 保护。
+func TestRefreshTruncatesRollbackCapacity(t *testing.T) {
+	resetPanelVersionCache(t)
+	raw := make([]githubRelease, 0, 10)
+	for i := 0; i < 10; i++ {
+		raw = append(raw, githubRelease{TagName: "v1." + string(rune('0'+i)) + ".0"})
+	}
+	stubReleasesServer(t, raw)
+	s := PanelVersionService{}
+	if err := s.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	releases := s.Get().Releases
+	if cap(releases) != rollbackListSize {
+		t.Errorf("Releases cap = %d, want %d (长度截断未同步容量)", cap(releases), rollbackListSize)
+	}
+}
+
 // KnownCurrent 用全部拉回来的 release 判定，而不是被截断的回退列表：
 // 落后 6~10 个版本的人恰恰最需要看到红点。
 func TestKnownCurrentUsesFullListNotTruncated(t *testing.T) {
