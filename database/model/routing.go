@@ -77,6 +77,23 @@ type RoutingRule struct {
 	// 「生成逐字节确定」是 Config.Equals 能正确判断配置是否变化的前提；
 	// 顺序一抖动，那个 10 秒的重启 cron 就会不停重启 xray。
 	InboundIds    string `json:"inboundIds" form:"inboundIds"`
+	// DomainGroupIds 是这条规则引用的域名组 id，JSON 整数数组，升序去重存储。
+	//
+	// 升序去重与 InboundIds 同理，是「生成逐字节确定」的一部分：buildRule
+	// 按这个顺序逐组取域名再合并，顺序一抖动，Config.Equals 恒为 false，
+	// 那个 10 秒的重启 cron 会不停重启 xray。
+	//
+	// 与 InboundIds 的空数组语义【相反】：这里的 [] 非法，绝不表示「所有
+	// 域名组」。域名条件为空会让 xray 把规则当作「不限制」，从「这批域名走
+	// B」退化成「该用户全部流量走 B」，且 Configuration OK、面板显示 running。
+	DomainGroupIds string `json:"domainGroupIds" form:"domainGroupIds"`
+	// DomainGroupId 是多域名组改造前的单值字段，新代码一律不再读写它。
+	//
+	// 有意保留不删（GORM 的 sqlite AutoMigrate 本来也不删列）：万一管理员
+	// 回滚到旧版本二进制，旧代码读到的还是原值，单组规则行为完全正常；
+	// 删掉列则每条规则都读成 0，buildRule 全部丢弃——分流静默全灭，而面板
+	// 首页仍显示 running。改造后新建的多组规则该值为 0，旧代码会整条丢弃，
+	// 即分流范围缩小而非放大，安全侧正确。
 	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
 	Action        string `json:"action" form:"action"`
 	// OutboundId 仅在 Action 为 ActionProxy 时有意义。

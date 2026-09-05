@@ -115,3 +115,63 @@ func TestMigrateRoutingRuleInboundIdsSkipsFreshDatabase(t *testing.T) {
 		t.Errorf("migration must be a no-op on a fresh database, got %v", err)
 	}
 }
+
+// 旧库里的规则只有 domain_group_id。迁移必须把它搬到 domain_group_ids，
+// 且绝不改变任何一条规则的实际生效范围。
+//
+// domain_group_id <= 0 是 validate 挡不住的脏数据（直接改库可以造出来），
+// 回填成 [] 后 buildRule 会因「合并后域名为空」整条丢弃——与迁移前
+// domainGroupService.Get(0) 失败后跳过整条的行为完全一致。
+func TestMigrateRoutingRuleDomainGroupIds(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	if err := InitDB(dbPath); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	db := GetDB()
+
+	insert := func(remark string, groupId int, groupIds string) {
+		t.Helper()
+		err := db.Exec(`INSERT INTO routing_rules
+			(remark, inbound_ids, domain_group_id, domain_group_ids, action, outbound_id, priority, enable)
+			VALUES (?, '[]', ?, ?, 'block', 0, 0, 1)`, remark, groupId, groupIds).Error
+		if err != nil {
+			t.Fatalf("insert %s: %v", remark, err)
+		}
+	}
+	insert("普通规则", 7, "")
+	insert("脏数据", 0, "")
+	insert("已迁移过的", 3, "[3,9]")
+
+	if err := migrateRoutingRuleDomainGroupIds(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	read := func(remark string) string {
+		t.Helper()
+		var got string
+		err := db.Raw("SELECT domain_group_ids FROM routing_rules WHERE remark = ?", remark).
+			Scan(&got).Error
+		if err != nil {
+			t.Fatalf("read %s: %v", remark, err)
+		}
+		return got
+	}
+	if got := read("普通规则"); got != "[7]" {
+		t.Errorf("普通规则 = %q, want [7]", got)
+	}
+	if got := read("脏数据"); got != "[]" {
+		t.Errorf("脏数据 = %q, want []", got)
+	}
+	// 已经有值的行绝不能被覆盖，否则多组规则会在每次重启时被压回单组。
+	if got := read("已迁移过的"); got != "[3,9]" {
+		t.Errorf("已迁移过的 = %q, want [3,9]（不得被覆盖）", got)
+	}
+
+	// 幂等：面板每次启动都会跑，重启多少次都必须安全。
+	if err := migrateRoutingRuleDomainGroupIds(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if got := read("普通规则"); got != "[7]" {
+		t.Errorf("第二次迁移后 普通规则 = %q, want [7]", got)
+	}
+}
