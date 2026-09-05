@@ -227,6 +227,19 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	old.Remark = rule.Remark
 	old.InboundIds = rule.InboundIds
 	old.DomainGroupIds = rule.DomainGroupIds
+	// 显式置 0，不是笔误，也不是「取首个组的 id」。
+	//
+	// DomainGroupId 是回退到旧版本二进制时唯一被读到的字段。若在这里保留
+	// 它原来的值，一条从「组 3」改成「组 9」的规则会留下 domain_group_ids=[9]
+	// 而 domain_group_id=3：回退后旧代码按【管理员已经删掉的】组 3 分流，
+	// 既不是丢弃也不是范围缩小，而是一条谁都没要求过的规则，且 xray 返回
+	// Configuration OK、面板显示 running，没有任何一层会报错。
+	//
+	// 写「首个组的 id」同样不行：多组规则回退后会静默退化成只按其中一个组
+	// 分流，同样是无人要求的行为。置 0 让回退契约收敛成一句话——只有升级前
+	// 就存在、且升级后未被编辑过的规则，回退后仍按原样生效；其余一律被旧代码
+	// 整条丢弃（范围缩小，安全侧正确）。
+	old.DomainGroupId = 0
 	old.Action = rule.Action
 	old.OutboundId = rule.OutboundId
 	old.Priority = rule.Priority

@@ -749,3 +749,73 @@ func TestUpdatePersistsDomainGroupIds(t *testing.T) {
 		t.Fatalf("DomainGroupIds = %v, want [%d]", groupIds, chatgpt.Id)
 	}
 }
+
+// 回退契约的金丝雀：Add 只写 DomainGroupIds，落库的 DomainGroupId 必须是 0。
+//
+// 这条断言钉住的是「回退到旧版本二进制后会发生什么」。旧代码只读
+// domain_group_id，所以本次改造后新建的规则——不论单组还是多组——回退后
+// 都会被旧代码整条丢弃（范围缩小，安全侧正确）。若哪天有人「顺手」在 Add
+// 里把它补上，回退行为就会从「整条丢弃」变成「按一个可能已经不在规则里的
+// 组分流」，而 xray 返回 Configuration OK、面板首页显示 running，
+// 没有任何一层会报错。
+func TestAddLeavesLegacyDomainGroupIdZero(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "单组新规则", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DomainGroupId != 0 {
+		t.Errorf("DomainGroupId = %d, want 0（Add 不写旧字段，回退契约据此成立）", got.DomainGroupId)
+	}
+}
+
+// Update 必须把 DomainGroupId 显式置 0，不能让它停在编辑前的旧值。
+//
+// 反例（改动前的行为）：一条升级前就存在的老规则，domain_group_id 被迁移
+// 保留成 3；管理员在面板里把它改成组 9，domain_group_ids 变成 [9] 而
+// domain_group_id 停在 3。回退后旧代码按【管理员已经从规则里删掉的】组 3
+// 分流——既不是整条丢弃，也不是范围缩小，而是一条谁都没要求过的规则。
+func TestUpdateClearsLegacyDomainGroupId(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "老规则", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 造出「升级前就存在、被迁移回填过」的形态：domain_group_id 有原值。
+	err := database.GetDB().Exec(
+		"UPDATE routing_rules SET domain_group_id = ? WHERE id = ?", claude.Id, r.Id).Error
+	if err != nil {
+		t.Fatalf("simulate migrated row: %v", err)
+	}
+
+	r.DomainGroupIds = mustEncodeGroupIds(t, []int{chatgpt.Id})
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DomainGroupId != 0 {
+		t.Errorf("编辑后 DomainGroupId = %d, want 0（停在旧值会让回退按一个已被删掉的组分流）",
+			got.DomainGroupId)
+	}
+}

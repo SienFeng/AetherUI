@@ -87,13 +87,17 @@ type RoutingRule struct {
 	// 域名组」。域名条件为空会让 xray 把规则当作「不限制」，从「这批域名走
 	// B」退化成「该用户全部流量走 B」，且 Configuration OK、面板显示 running。
 	DomainGroupIds string `json:"domainGroupIds" form:"domainGroupIds"`
-	// DomainGroupId 是多域名组改造前的单值字段，新代码一律不再读写它。
+	// DomainGroupId 是多域名组改造前的单值字段，生成期与校验期一律不再读它。
 	//
 	// 有意保留不删（GORM 的 sqlite AutoMigrate 本来也不删列）：万一管理员
-	// 回滚到旧版本二进制，旧代码读到的还是原值，单组规则行为完全正常；
+	// 回滚到旧版本二进制，迁移过的老规则读到的还是原值，行为完全正常；
 	// 删掉列则每条规则都读成 0，buildRule 全部丢弃——分流静默全灭，而面板
-	// 首页仍显示 running。改造后新建的多组规则该值为 0，旧代码会整条丢弃，
-	// 即分流范围缩小而非放大，安全侧正确。
+	// 首页仍显示 running。
+	//
+	// 唯一还在写它的是 RoutingRuleService.Update：显式置 0。Add 根本不写，
+	// 所以改造后新建的规则不论单组多组该值都是 0。于是回退契约只有两种结局：
+	// 升级前就存在且此后未被编辑过的规则原样生效，其余被旧代码整条丢弃
+	// （范围缩小而非放大，安全侧正确）。理由见 Update 处的注释。
 	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
 	Action        string `json:"action" form:"action"`
 	// OutboundId 仅在 Action 为 ActionProxy 时有意义。

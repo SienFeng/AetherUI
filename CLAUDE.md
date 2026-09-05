@@ -152,7 +152,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 **`DomainGroupIds` 的空数组 `[]` 与 `InboundIds` 的空数组语义相反。** 入站的 `[]` 是合法的「所有用户」；域名组的 `[]` 是非法值——`domain` 条件为空会让 xray 把规则当作「不限制」，规则从「这批域名走 B」退化成「该用户全部流量走 B」，且返回 `Configuration OK`、面板首页显示 `running`。写入路径用 `EncodeDomainGroupIdsStrict`（对空结果一律报错，无论原始列表是否为空），`intersectGroups` 也**不能**复用 `intersectInbounds`（后者把空切片当全集）。这是本子系统里唯一一处「照抄隔壁的实现就会开洞」的地方。
 
-**回退到旧版本二进制**：`domain_group_id` 列保留，单组规则行为完全正常；多组规则该值为 0，旧代码会整条丢弃——分流范围缩小而非放大，安全侧正确。设计文档在 `docs/superpowers/specs/2026-09-05-rule-multi-domain-group-design.md`。
+**回退到旧版本二进制**：`domain_group_id` 列保留不删，契约是一句话——**只有升级前就存在、且升级后未被编辑过的规则，回退后仍按原样生效；其余一律被旧代码整条丢弃**（`buildRule` 记 Warning，分流范围缩小而非放大，安全侧正确）。迁移只把 `domain_group_id` 回填进 `domain_group_ids`，不动原值，所以老规则回退后照常生效；`RoutingRuleService.Add` 只写 `DomainGroupIds`，因此升级后**新建**的规则不论单组多组，该值都是 0；`Update` **显式把它置 0**——既不保留旧值也不取首个组的 id：保留旧值会让一条从组 3 改到组 9 的规则在回退后按管理员已经删掉的组 3 分流，那既不是丢弃也不是范围缩小，而是一条谁都没要求过的规则，且 xray 返回 `Configuration OK`、面板显示 `running`，没有任何一层会报错。设计文档在 `docs/superpowers/specs/2026-09-05-rule-multi-domain-group-design.md`。
 
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
