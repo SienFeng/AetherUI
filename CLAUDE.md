@@ -130,7 +130,7 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 ```
 DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + 订阅五件套（见下）
 OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
-RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupId → Action(proxy|block) + OutboundId + Priority + Enable
+RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数组) → Action(proxy|block) + OutboundId + Priority + Enable
 ```
 
 **「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
@@ -146,9 +146,13 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupId → Action
 
 - **规则存 `InboundIds`（入站 id 的 JSON 数组）而不是 tag 字符串。** 入站 tag 由端口算出（`UpdateInbound` 里 `Tag = fmt.Sprintf("inbound-%v", Port)`），用户改端口 tag 就变，存字符串会让规则静默失效。数组**升序去重**存储，这是「生成逐字节确定」的一部分。
 - **`InboundIds` 为空数组 `[]` 表示对所有入站生效**（全局规则），生成时不输出 `inboundTag`。**注意空数组与「一个都没选」在提交体里无法区分**：写入路径用 `EncodeInboundIdsStrict` 挡住「非空输入被过滤成空」，前端 `saveRule` 也拦一道——否则一条本该覆盖某个人的规则会被静默放大到全体。
-- **同一个域名组下，任何一个入站至多被一条规则覆盖**（`RoutingRuleService.checkConflict`，把空数组当全集做集合相交判定）。禁用的规则同样占位。只在写入路径校验，生成期不干预：迁移前留下的冲突数据照常生成两条规则，由界面标黄交给管理员处理。
+- **同一个域名组下，任何一个入站至多被一条规则覆盖**（`RoutingRuleService.checkConflict`，把空数组当全集做集合相交判定）。规则改为可引用多个域名组后，判定推广为「**域名组集合相交**且入站集合相交」，判定单位仍是「域名组 × 入站」的组合——同一个域名组可以被多条规则引用，只要覆盖的入站不重叠。禁用的规则同样占位。只在写入路径校验，生成期不干预：迁移前留下的冲突数据照常生成两条规则，由界面标黄交给管理员处理。
 - **出站 `Tag` 一经分配即不可变**，且不能由自增 Id 拼出（unique 约束要求 INSERT 前就确定，那时 Id 尚未分配）。用 `link.SuggestTag("a-ui", remark, idx)` 生成，重名由调用方追加序号——注意 `SuggestTag` 只在 remark 为空时才用 `idx`，remark 非空时对任何 idx 都返回同一个值。
 - **`a-ui-block` 是保留 tag，任何用户可控的 tag 分配都必须排除它。** 数据库唯一约束管不到它——注入器发出的 tag 不在 `outbound_nodes` 表里。备注写「block」（含 `Block`/`BLOCK`/`block!`/` block ` 等，`SlugRemark` 会把它们归一到同一个 slug）就会生成 `a-ui-block`，与注入器的黑洞出站撞名，xray 报 `existing tag found: a-ui-block` 并拒绝启动。判定收敛在 `model.IsReservedTag()` 一处，分配端（`allocTag`）、生成端（`buildOutbounds`）与校验端（`removeOutboundByTag`）都只认它，**新增保留 tag 只改这一个函数**。生成端也要排除，是因为修复前分配出去的脏数据仍可能躺在库里。
+
+**`DomainGroupIds` 的空数组 `[]` 与 `InboundIds` 的空数组语义相反。** 入站的 `[]` 是合法的「所有用户」；域名组的 `[]` 是非法值——`domain` 条件为空会让 xray 把规则当作「不限制」，规则从「这批域名走 B」退化成「该用户全部流量走 B」，且返回 `Configuration OK`、面板首页显示 `running`。写入路径用 `EncodeDomainGroupIdsStrict`（对空结果一律报错，无论原始列表是否为空），`intersectGroups` 也**不能**复用 `intersectInbounds`（后者把空切片当全集）。这是本子系统里唯一一处「照抄隔壁的实现就会开洞」的地方。
+
+**回退到旧版本二进制**：`domain_group_id` 列保留不删，契约是一句话——**只有升级前就存在、且升级后未被编辑过的规则，回退后仍按原样生效；其余一律被旧代码整条丢弃**（`buildRule` 记 Warning，分流范围缩小而非放大，安全侧正确）。迁移只把 `domain_group_id` 回填进 `domain_group_ids`，不动原值，所以老规则回退后照常生效；`RoutingRuleService.Add` 只写 `DomainGroupIds`，因此升级后**新建**的规则不论单组多组，该值都是 0；`Update` **显式把它置 0**——既不保留旧值也不取首个组的 id：保留旧值会让一条从组 3 改到组 9 的规则在回退后按管理员已经删掉的组 3 分流，那既不是丢弃也不是范围缩小，而是一条谁都没要求过的规则，且 xray 返回 `Configuration OK`、面板显示 `running`，没有任何一层会报错。设计文档在 `docs/superpowers/specs/2026-09-05-rule-multi-domain-group-design.md`。
 
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
@@ -221,6 +225,8 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 **分项导出不隐式扩大范围**：`scope=rules` 就只导规则，不带上它引用的域名组和出站节点——隐式扩大会让 `all` 和 `rules` 的区别消失。
 
 **导入接口有 10MB 请求体上限。** 导入的每个出站节点都会触发一次 `ValidateOutbound`（一次 `GetXrayConfig()` + 1~2 次 exec 真实 xray），开销随条目数线性放大，而这是个同步 HTTP 请求；controller 是不可信输入的边界，与「用量历史与图表」一节 `getTrafficOverview` 对 `top` 的钳制同源。真实导出文件是几十 KB，10MB 极其宽松。
+
+**规则的域名组引用是数组 `domainGroupRefs`，`domainGroupRef` 保留作单组时的兼容字段。** 导出侧单组时两个都写、多组时只写数组——这样新面板导出的文件放进旧面板，单组规则照常可用，多组规则被旧面板明确拒绝（「domainGroupRef 为空 → 整条跳过」），而不是静默产生一条指向错误组的规则。导入侧优先数组字段，为 nil 时回落单值字段；组认不出的策略与入站对称：部分认不出导入成禁用并点名，一个都认不出整条丢弃（编码结果会落回 `[]`，是上面那条非法值）。
 
 ### `util/link` 包
 

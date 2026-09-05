@@ -71,6 +71,29 @@ SET inbound_ids = CASE WHEN inbound_id > 0 THEN '[' || inbound_id || ']' ELSE '[
 WHERE inbound_ids IS NULL OR inbound_ids = ''`).Error
 }
 
+// migrateRoutingRuleDomainGroupIds 把旧的单域名组字段 domain_group_id
+// 搬到 domain_group_ids。
+//
+// 幂等：只回填 domain_group_ids 为空的行，面板每次启动都会跑，重启多少次
+// 都安全。已有值的行绝不覆盖，否则多组规则每次重启都会被压回单组。
+//
+// domain_group_id <= 0 是 validate 挡不住的脏数据（直接改库可以造出来），
+// 回填成 [] 后 buildRule 会因「合并后域名为空」整条丢弃并记 Warning——
+// 与迁移前 domainGroupService.Get(0) 失败后跳过整条的行为完全一致。
+// 迁移不改变任何一条规则的实际生效范围。
+//
+// domain_group_id 列有意保留不删，理由见 model.RoutingRule 的字段注释。
+func migrateRoutingRuleDomainGroupIds() error {
+	if !db.Migrator().HasColumn(&model.RoutingRule{}, "domain_group_id") {
+		return nil
+	}
+	return db.Exec(`
+UPDATE routing_rules
+SET domain_group_ids = CASE WHEN domain_group_id > 0
+                            THEN '[' || domain_group_id || ']' ELSE '[]' END
+WHERE domain_group_ids IS NULL OR domain_group_ids = ''`).Error
+}
+
 func initRouting() error {
 	if err := db.AutoMigrate(&model.DomainGroup{}); err != nil {
 		return err
@@ -84,7 +107,10 @@ func initRouting() error {
 	if err := db.AutoMigrate(&model.IPBan{}); err != nil {
 		return err
 	}
-	return migrateRoutingRuleInboundIds()
+	if err := migrateRoutingRuleInboundIds(); err != nil {
+		return err
+	}
+	return migrateRoutingRuleDomainGroupIds()
 }
 
 func InitDB(dbPath string) error {

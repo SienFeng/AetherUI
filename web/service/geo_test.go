@@ -387,13 +387,13 @@ func TestInjectPutsGeoRulesBeforeBlockAndProxyRules(t *testing.T) {
 	chatgpt := newTestGroup(t, "ChatGPT")
 	rs := RoutingRuleService{}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: chatgpt.Id, Action: model.ActionProxy, OutboundId: node.Id,
+		DomainGroupId: chatgpt.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{chatgpt.Id}), Action: model.ActionProxy, OutboundId: node.Id,
 		Priority: 1, Enable: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: banned.Id, Action: model.ActionBlock, Priority: 99, Enable: true,
+		DomainGroupId: banned.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{banned.Id}), Action: model.ActionBlock, Priority: 99, Enable: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

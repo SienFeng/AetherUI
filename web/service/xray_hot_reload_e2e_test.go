@@ -298,7 +298,7 @@ func TestHotReloadEndToEndAgainstRealXray(t *testing.T) {
 	// 启动时就挡住 localhost，好留出一个"加规则前请求成功"的基线。
 	rule := &model.RoutingRule{
 		Remark: "block localhost for hot-reload e2e", InboundIds: mustEncodeIds(t, []int{in.Id}),
-		DomainGroupId: group.Id, Action: model.ActionBlock, Enable: false,
+		DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionBlock, Enable: false,
 	}
 	if err := (&RoutingRuleService{}).Add(rule); err != nil {
 		t.Fatalf("add rule: %v", err)

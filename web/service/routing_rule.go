@@ -51,8 +51,19 @@ func (s *RoutingRuleService) Get(id int) (*model.RoutingRule, error) {
 
 // validate 在写库前挡住会生成残缺规则的输入。
 func (s *RoutingRuleService) validate(rule *model.RoutingRule) error {
-	if _, err := s.domainGroupService.Get(rule.DomainGroupId); err != nil {
-		return common.NewError("域名组不存在:", rule.DomainGroupId)
+	groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds)
+	if err != nil {
+		return common.NewError("域名组数据损坏:", err)
+	}
+	// 空集合绝不放行：domain 条件为空会让规则劫持该用户的全部流量，
+	// 而 xray 返回 Configuration OK，没有任何一层会报错。
+	if len(groupIds) == 0 {
+		return common.NewError("必须至少指定一个域名组")
+	}
+	for _, id := range groupIds {
+		if _, err := s.domainGroupService.Get(id); err != nil {
+			return common.NewError("域名组不存在:", id)
+		}
 	}
 	switch rule.Action {
 	case model.ActionBlock:
@@ -127,9 +138,9 @@ func (s *RoutingRuleService) groupLabel(id int) string {
 // checkConflict 保证「同一个域名组下，任何一个入站至多被一条规则覆盖」。
 //
 // 把每条规则看作它覆盖的入站集合：InboundIds 为空数组表示全集（含以后新建
-// 的入站），否则就是那些 id 的集合。两条规则冲突，当且仅当域名组相同且集合
-// 相交——全集与任何集合相交，也与另一个全集相交，「所有用户」与「指定用户」
-// 的严格互斥就是这条判定的自然结果，不需要额外分支。
+// 的入站），否则就是那些 id 的集合。两条规则冲突，当且仅当**域名组集合相交**
+// 且入站集合相交——全集与任何集合相交，也与另一个全集相交，「所有用户」与
+// 「指定用户」的严格互斥就是这条判定的自然结果，不需要额外分支。
 //
 // 不过滤 Enable：禁用的规则同样占位，否则会出现「保存时没问题、一启用才
 // 发现撞车」。想腾位置就得先改掉或删掉旧规则。
@@ -142,21 +153,35 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 	if err != nil {
 		return common.NewError("入站数据损坏:", err)
 	}
+	groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds)
+	if err != nil {
+		return common.NewError("域名组数据损坏:", err)
+	}
 
-	db := database.GetDB()
-	others := make([]*model.RoutingRule, 0)
-	err = db.Model(model.RoutingRule{}).
-		Where("domain_group_id = ? and id <> ?", rule.DomainGroupId, rule.Id).
-		Order("id asc").Find(&others).Error
+	// 域名组是 JSON 数组列，没法再用 WHERE domain_group_id = ? 交给 SQL 过滤，
+	// 只能读出全部规则逐条解码。规则是几十条量级，这点开销换掉一张关联表是
+	// 划算的——与 CheckInboundRefs 同一个取舍。
+	others, err := s.GetAll()
 	if err != nil {
 		return err
 	}
 
 	for _, other := range others {
+		if other.Id == rule.Id {
+			continue
+		}
+		otherGroupIds, decodeErr := DecodeDomainGroupIds(other.DomainGroupIds)
+		if decodeErr != nil {
+			// 无从判断它覆盖了哪些组。不拦——它自己已经会被 buildRule 整条
+			// 丢弃，再拿它去挡别人只会让管理员既修不了旧规则也建不了新规则。
+			continue
+		}
+		sharedGroup, whichGroup := intersectGroups(groupIds, otherGroupIds)
+		if !sharedGroup {
+			continue
+		}
 		otherIds, decodeErr := DecodeInboundIds(other.InboundIds)
 		if decodeErr != nil {
-			// 无从判断它覆盖了谁。不拦——它自己已经会被 buildRule 整条丢弃，
-			// 再拿它去挡别人只会让管理员既修不了旧规则也建不了新规则。
 			continue
 		}
 		overlap, who := intersectInbounds(ids, otherIds)
@@ -172,7 +197,7 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 		// 改这句文案（尤其是去掉「冲突」二字）前，先去同步看那一处。
 		return common.NewErrorf(
 			"与分流规则「%s」冲突：%s在域名组「%s」下已被它覆盖。同一个用户在同一个域名组下只能有一条规则。",
-			ruleLabel(other), inboundLabel(who), s.groupLabel(rule.DomainGroupId))
+			ruleLabel(other), inboundLabel(who), s.groupLabel(whichGroup))
 	}
 	return nil
 }
@@ -201,7 +226,20 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	}
 	old.Remark = rule.Remark
 	old.InboundIds = rule.InboundIds
-	old.DomainGroupId = rule.DomainGroupId
+	old.DomainGroupIds = rule.DomainGroupIds
+	// 显式置 0，不是笔误，也不是「取首个组的 id」。
+	//
+	// DomainGroupId 是回退到旧版本二进制时唯一被读到的字段。若在这里保留
+	// 它原来的值，一条从「组 3」改成「组 9」的规则会留下 domain_group_ids=[9]
+	// 而 domain_group_id=3：回退后旧代码按【管理员已经删掉的】组 3 分流，
+	// 既不是丢弃也不是范围缩小，而是一条谁都没要求过的规则，且 xray 返回
+	// Configuration OK、面板显示 running，没有任何一层会报错。
+	//
+	// 写「首个组的 id」同样不行：多组规则回退后会静默退化成只按其中一个组
+	// 分流，同样是无人要求的行为。置 0 让回退契约收敛成一句话——只有升级前
+	// 就存在、且升级后未被编辑过的规则，回退后仍按原样生效；其余一律被旧代码
+	// 整条丢弃（范围缩小，安全侧正确）。
+	old.DomainGroupId = 0
 	old.Action = rule.Action
 	old.OutboundId = rule.OutboundId
 	old.Priority = rule.Priority
@@ -215,15 +253,41 @@ func (s *RoutingRuleService) Del(id int) error {
 	return db.Delete(model.RoutingRule{}, id).Error
 }
 
-// CheckDomainGroupRefs 在删除域名组前调用。域名组一旦消失，引用它的规则
-// domain 会变成空列表——而 xray 把空条件当作「无限制」，规则会从
-// 「访问这批域名走某节点」退化成「该入站全部流量走某节点」，且不报错。
+// CheckDomainGroupRefs 在删除域名组前调用。
+//
+// 域名组一旦消失，引用它的规则会少掉这一组的域名；若它是规则引用的唯一
+// 一组，合并结果为空，buildRule 会整条丢弃——本该走指定节点或被封禁的
+// 流量静默退回直连。
+//
+// 更危险的是 SQLite 会复用自增主键 id：删掉 Claude 组再新建 ChatGPT 组
+// 可能拿到同一个 id，孤儿规则会静默变成「ChatGPT 的域名走 Claude 的节点」。
+// 那时引用不再悬空，生成期的跳过防线拦不住，规则列表还会渲染得完全正常。
+//
+// DomainGroupIds 是 JSON 数组列，没法交给 SQL 去数，只能读出来逐条解码，
+// 与 CheckInboundRefs 同形。
 func (s *RoutingRuleService) CheckDomainGroupRefs(groupId int) error {
-	db := database.GetDB()
-	var count int64
-	err := db.Model(model.RoutingRule{}).Where("domain_group_id = ?", groupId).Count(&count).Error
+	if groupId <= 0 {
+		return nil
+	}
+	rules, err := s.GetAll()
 	if err != nil {
 		return err
+	}
+	count := 0
+	for _, rule := range rules {
+		ids, decodeErr := DecodeDomainGroupIds(rule.DomainGroupIds)
+		if decodeErr != nil {
+			// 数据损坏时无从判断这条规则引用了哪些组。宁可拦住删除：放行
+			// 的话，SQLite 复用 id 后这条规则可能静默绑到新建的域名组上。
+			return common.NewError("分流规则", rule.Id,
+				"的域名组数据已损坏，无法确认引用关系，请先修复或删除该规则")
+		}
+		for _, id := range ids {
+			if id == groupId {
+				count++
+				break
+			}
+		}
 	}
 	if count > 0 {
 		return common.NewError("该域名组仍被", count, "条分流规则引用，请先删除这些规则")
@@ -346,4 +410,94 @@ func DecodeInboundIds(encoded string) ([]int, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// EncodeDomainGroupIds 把域名组 id 列表编成入库格式：丢弃非正数、去重、升序。
+//
+// 升序去重是「生成逐字节确定」的一部分：buildRule 按这个顺序逐组取域名再
+// 合并，顺序一抖动，Config.Equals 恒为 false，那个 10 秒的重启 cron 会不停
+// 重启 xray。
+//
+// 注意本函数会丢弃非正数，因此 [0] 这类输入会得到 "[]"——而空的域名组集合
+// 会让规则的 domain 条件为空。写入路径一律用 EncodeDomainGroupIdsStrict。
+func EncodeDomainGroupIds(ids []int) (string, error) {
+	seen := make(map[int]bool, len(ids))
+	cleaned := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		cleaned = append(cleaned, id)
+	}
+	sort.Ints(cleaned)
+	b, err := json.Marshal(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// EncodeDomainGroupIdsStrict 是写入路径该用的版本。
+//
+// 与 EncodeInboundIdsStrict 的关键分歧：那边只在「原始非空却编出 []」时报错，
+// 因为入站的空列表是用户通过「所有用户」复选框显式表达的合法语义。域名组
+// 没有对应的概念——空的域名组集合意味着 domain 条件为空，xray 会把它当作
+// 「不限制」，规则从「这批域名走 B」退化成「该用户全部流量走 B」，且返回
+// Configuration OK、面板首页显示 running。所以这里对空结果一律报错，
+// 无论原始列表是否为空。
+func EncodeDomainGroupIdsStrict(ids []int) (string, error) {
+	encoded, err := EncodeDomainGroupIds(ids)
+	if err != nil {
+		return "", err
+	}
+	if encoded == "[]" {
+		if len(ids) == 0 {
+			return "", common.NewError("必须至少指定一个域名组")
+		}
+		return "", common.NewError("域名组选择非法：提交了", len(ids),
+			"个域名组，但没有一个是有效的域名组 id")
+	}
+	return encoded, nil
+}
+
+// DecodeDomainGroupIds 是 EncodeDomainGroupIds 的逆操作。
+//
+// 空字符串与 "null" 当作空切片且不报错：迁移会回填，但直接改库、并发写入
+// 等路径仍可能留下空值，在这里报错会让整份配置生成失败。空切片本身是非法
+// 状态，由 validate（拒绝写入）与 buildRule（整条丢弃）各自处理。
+// 真正的语法错误仍返回 error，交给调用方整条丢弃该规则。
+func DecodeDomainGroupIds(encoded string) ([]int, error) {
+	trimmed := strings.TrimSpace(encoded)
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var ids []int
+	if err := json.Unmarshal([]byte(trimmed), &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// intersectGroups 判断两个域名组集合是否相交。
+//
+// 与 intersectInbounds 的关键分歧：那边把空切片当全集（「所有用户」），
+// 这里的空集合是非法值而不是全集，绝不能复用——复用会让两条各自损坏的
+// 规则被判成互相冲突，管理员既修不了旧规则也建不了新规则。
+//
+// 第二个返回值是相交的最小 id（b 已升序），保证错误信息稳定可测。
+func intersectGroups(a, b []int) (bool, int) {
+	if len(a) == 0 || len(b) == 0 {
+		return false, 0
+	}
+	set := make(map[int]bool, len(a))
+	for _, id := range a {
+		set[id] = true
+	}
+	for _, id := range b {
+		if set[id] {
+			return true, id
+		}
+	}
+	return false, 0
 }

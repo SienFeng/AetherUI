@@ -33,9 +33,9 @@ func TestEnsureRoutingServiceInTemplate(t *testing.T) {
 			wantChanged: false,
 		},
 		{
-			name:        "非法 JSON 报错而不是静默放行",
-			in:          `{"api":`,
-			wantErr:     true,
+			name:    "非法 JSON 报错而不是静默放行",
+			in:      `{"api":`,
+			wantErr: true,
 		},
 	}
 

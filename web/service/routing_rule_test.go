@@ -25,7 +25,7 @@ func newTestGroup(t *testing.T, remark string) *model.DomainGroup {
 func TestAddRuleRejectsMissingDomainGroup(t *testing.T) {
 	setupDB(t)
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock, Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock, Enable: true})
 	if err == nil {
 		t.Error("expected error when domain group does not exist")
 	}
@@ -35,7 +35,7 @@ func TestAddRuleRejectsProxyWithoutOutbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: 0, Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: 0, Enable: true})
 	if err == nil {
 		t.Error("expected error when proxy rule has no outbound")
 	}
@@ -45,7 +45,7 @@ func TestAddRuleRejectsUnknownAction(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: "drop", Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: "drop", Enable: true})
 	if err == nil {
 		t.Error("expected error for unknown action")
 	}
@@ -55,7 +55,7 @@ func TestAddBlockRuleWithGlobalInbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	s := RoutingRuleService{}
-	r := &model.RoutingRule{Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}
+	r := &model.RoutingRule{Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true}
 	if err := s.Add(r); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCheckDomainGroupRefsBlocksDeletion(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	if err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}); err != nil {
+	if err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := s.CheckDomainGroupRefs(g.Id); err == nil {
@@ -88,7 +88,7 @@ func TestCheckOutboundRefsBlocksDeletion(t *testing.T) {
 	}
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestGetEnabledRulesSortedByPriorityThenId(t *testing.T) {
 	for i, p := range []int{20, 10, 10} {
 		g := newTestGroup(t, "组 "+strconv.Itoa(i))
 		if err := s.Add(&model.RoutingRule{
-			DomainGroupId: g.Id, Action: model.ActionBlock, Priority: p, Enable: true,
+			DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Priority: p, Enable: true,
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestDelDomainGroupRejectsWhenReferenced(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	rs := RoutingRuleService{}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestDelOutboundNodeRejectsWhenReferenced(t *testing.T) {
 	}
 	rs := RoutingRuleService{}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	g := newTestGroup(t, "ChatGPT")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id,
+		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -233,7 +233,7 @@ func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
 	in := newTestInbound(t, 10002)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "全员封禁", InboundIds: "[]", DomainGroupId: g.Id,
+		Remark: "全员封禁", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -301,7 +301,7 @@ func TestCheckInboundRefsSeesIdInTheMiddleOfAMultiInboundRule(t *testing.T) {
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
 		InboundIds:    mustEncodeIds(t, []int{a.Id, b.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestCheckInboundRefsIgnoresAllUsersRule(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
-		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -342,7 +342,7 @@ func addRuleWith(t *testing.T, groupId int, ids []int, remark string) *model.Rou
 	t.Helper()
 	r := &model.RoutingRule{
 		Remark: remark, InboundIds: mustEncodeIds(t, ids),
-		DomainGroupId: groupId, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: groupId, DomainGroupIds: mustEncodeGroupIds(t, []int{groupId}), Action: model.ActionBlock, Enable: true,
 	}
 	if err := (&RoutingRuleService{}).Add(r); err != nil {
 		t.Fatalf("Add %s: %v", remark, err)
@@ -356,7 +356,7 @@ func TestConflictRejectsOverlappingInbounds(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "乙丙走 C", InboundIds: mustEncodeIds(t, []int{b.Id, c.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: inbound b is already covered in this domain group")
@@ -369,7 +369,7 @@ func TestConflictAllowsDisjointInbounds(t *testing.T) {
 
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "乙", InboundIds: mustEncodeIds(t, []int{b.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("disjoint inbounds must be accepted: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestConflictAllUsersBlocksSpecificUser(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: an all-users rule already covers this domain group")
@@ -396,7 +396,7 @@ func TestConflictSpecificUserBlocksAllUsers(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "所有用户", InboundIds: "[]",
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: a specific-user rule already exists in this domain group")
@@ -409,7 +409,7 @@ func TestConflictAllUsersBlocksAnotherAllUsers(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "所有用户 2", InboundIds: "[]",
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: two all-users rules in the same domain group")
@@ -425,7 +425,7 @@ func TestConflictIgnoresOtherDomainGroups(t *testing.T) {
 
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲在另一个组", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: other.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: other.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{other.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("different domain groups must never conflict: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestConflictCountsDisabledRules(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲走别处", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: a disabled rule still holds its slot")
@@ -472,7 +472,7 @@ func TestConflictErrorNamesTheUserAndTheRule(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲的 ChatGPT 走 C", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected a conflict")
@@ -487,5 +487,335 @@ func TestConflictErrorNamesTheUserAndTheRule(t *testing.T) {
 	// 空隙的句子。这条断言把消息钉在 NewErrorf 的一次成型上。
 	if strings.Contains(msg, "「 ") || strings.Contains(msg, " 」") {
 		t.Errorf("conflict error has stray spaces inside the quotes: %s", msg)
+	}
+}
+
+// mustEncodeGroupIds 是测试夹具共用的域名组编码器。用非 Strict 版本，
+// 因为部分用例要故意造出「空集合」这种非法状态来验证下游会拒绝它。
+func mustEncodeGroupIds(t *testing.T, ids []int) string {
+	t.Helper()
+	encoded, err := EncodeDomainGroupIds(ids)
+	if err != nil {
+		t.Fatalf("EncodeDomainGroupIds: %v", err)
+	}
+	return encoded
+}
+
+func TestEncodeDomainGroupIdsSortsAndDedupes(t *testing.T) {
+	got, err := EncodeDomainGroupIds([]int{3, 1, 3, 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "[1,2,3]" {
+		t.Errorf("got %q, want [1,2,3]", got)
+	}
+}
+
+// 与 EncodeInboundIdsStrict 的关键分歧：入站那边「原始列表本来就空」是
+// 合法的（= 所有用户），域名组这边必须报错——空的 domain 条件会让规则
+// 劫持该用户的全部流量。
+func TestEncodeDomainGroupIdsStrictRejectsEmptyInput(t *testing.T) {
+	if _, err := EncodeDomainGroupIdsStrict(nil); err == nil {
+		t.Error("empty input must be rejected: [] would make the domain condition empty")
+	}
+	if _, err := EncodeDomainGroupIdsStrict([]int{}); err == nil {
+		t.Error("empty slice must be rejected")
+	}
+}
+
+func TestEncodeDomainGroupIdsStrictRejectsAllInvalid(t *testing.T) {
+	if _, err := EncodeDomainGroupIdsStrict([]int{0, -1}); err == nil {
+		t.Error("all-invalid input must be rejected, not silently collapse to []")
+	}
+}
+
+func TestEncodeDomainGroupIdsStrictAcceptsValid(t *testing.T) {
+	got, err := EncodeDomainGroupIdsStrict([]int{2, 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "[1,2]" {
+		t.Errorf("got %q, want [1,2]", got)
+	}
+}
+
+// 空串/null 不报错：迁移回填前、直接改库、并发写入都可能留下空值，
+// 在解码这一层报错会让整份配置生成失败。交给 validate / buildRule
+// 各自按空集合处理（都会拒绝）。
+func TestDecodeDomainGroupIdsTreatsBlankAsEmpty(t *testing.T) {
+	for _, raw := range []string{"", "   ", "null"} {
+		got, err := DecodeDomainGroupIds(raw)
+		if err != nil {
+			t.Errorf("DecodeDomainGroupIds(%q) returned error: %v", raw, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("DecodeDomainGroupIds(%q) = %v, want empty", raw, got)
+		}
+	}
+}
+
+func TestDecodeDomainGroupIdsRejectsCorruptData(t *testing.T) {
+	if _, err := DecodeDomainGroupIds("{oops"); err == nil {
+		t.Error("corrupt JSON must return an error so the rule is dropped whole")
+	}
+}
+
+// intersectGroups 绝不能复用 intersectInbounds：后者把空切片当全集，
+// 而域名组的空集合是非法值。复用会让两条各自损坏的规则被判成互相冲突，
+// 把管理员锁在门外——既修不了旧规则，也建不了新规则。
+func TestIntersectGroupsTreatsEmptyAsEmptyNotUniversal(t *testing.T) {
+	if ok, _ := intersectGroups(nil, []int{1}); ok {
+		t.Error("empty set must not intersect anything")
+	}
+	if ok, _ := intersectGroups([]int{1}, nil); ok {
+		t.Error("empty set must not intersect anything")
+	}
+	if ok, _ := intersectGroups(nil, nil); ok {
+		t.Error("two empty sets must not intersect")
+	}
+}
+
+func TestIntersectGroupsReportsSmallestSharedId(t *testing.T) {
+	ok, who := intersectGroups([]int{2, 5, 9}, []int{5, 9})
+	if !ok {
+		t.Fatal("expected intersection")
+	}
+	// b 已升序，取到的是最小的相交 id，保证错误信息稳定可测。
+	if who != 5 {
+		t.Errorf("who = %d, want 5", who)
+	}
+}
+
+func TestIntersectGroupsDisjoint(t *testing.T) {
+	if ok, _ := intersectGroups([]int{1, 2}, []int{3, 4}); ok {
+		t.Error("disjoint sets must not intersect")
+	}
+}
+
+// addMultiGroupRule 建一条引用多个域名组的规则。
+func addMultiGroupRule(t *testing.T, groupIds []int, inboundIds []int, remark string) error {
+	t.Helper()
+	return (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark:         remark,
+		InboundIds:     mustEncodeIds(t, inboundIds),
+		DomainGroupIds: mustEncodeGroupIds(t, groupIds),
+		Action:         model.ActionBlock,
+		Enable:         true,
+	})
+}
+
+func TestAddRuleRejectsEmptyDomainGroups(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "没选域名组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: "[]", Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("空域名组集合必须被拒绝：domain 条件为空会劫持该用户的全部流量")
+	}
+}
+
+func TestAddRuleRejectsAnyMissingDomainGroup(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	err := addMultiGroupRule(t, []int{g.Id, 999}, []int{in.Id}, "一个存在一个不存在")
+	if err == nil {
+		t.Fatal("引用了不存在的域名组必须被拒绝")
+	}
+}
+
+func TestAddRuleAcceptsMultipleDomainGroups(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id}, []int{in.Id}, "两组"); err != nil {
+		t.Fatalf("多域名组规则必须被接受: %v", err)
+	}
+}
+
+// spec §2.3 的表格逐行落成用例。冲突判定的单位是「域名组 × 用户」的组合。
+func TestConflictGroupSetsPartiallyOverlapSameUser(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id}, []int{in.Id}, "两组走 A"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	err := addMultiGroupRule(t, []int{chatgpt.Id}, []int{in.Id}, "ChatGPT 走 B")
+	if err == nil {
+		t.Fatal("组集合在 ChatGPT 上相交且用户相同，必须拒绝")
+	}
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Errorf("错误信息必须含「冲突」二字（importRules 靠它归类）: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ChatGPT") {
+		t.Errorf("错误信息必须点名相交的那个域名组: %v", err)
+	}
+}
+
+func TestConflictAllowsDisjointGroupSetsSameUser(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{in.Id}, "Claude 走 A"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := addMultiGroupRule(t, []int{chatgpt.Id}, []int{in.Id}, "ChatGPT 走 B"); err != nil {
+		t.Fatalf("组集合不相交必须被接受: %v", err)
+	}
+}
+
+func TestConflictAllowsSameGroupSetDifferentUsers(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	a := newTestInbound(t, 10001)
+	b := newTestInbound(t, 10002)
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{a.Id}, "甲"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{b.Id}, "乙"); err != nil {
+		t.Fatalf("同组不同人必须被接受: %v", err)
+	}
+}
+
+// 引用守卫：解码失败时必须拦住删除。SQLite 复用自增 id，孤儿规则会静默
+// 绑到新建的域名组上，那时引用不再悬空，生成期的跳过防线也拦不住。
+func TestCheckDomainGroupRefsSeesIdInTheMiddleOfAMultiGroupRule(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	banned := newTestGroup(t, "违规")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id, banned.Id}, []int{in.Id}, "三组"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := (&RoutingRuleService{}).CheckDomainGroupRefs(chatgpt.Id); err == nil {
+		t.Error("被引用的域名组（位于数组中间）必须拦住删除")
+	}
+}
+
+func TestCheckDomainGroupRefsBlocksDeletionOnCorruptData(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{g.Id}, []int{in.Id}, "好规则"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 绕过 service 直接写坏数据，模拟直接改库 / 并发写入留下的残骸。
+	err := database.GetDB().Exec(
+		"UPDATE routing_rules SET domain_group_ids = '{oops' WHERE remark = ?", "好规则").Error
+	if err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if err := (&RoutingRuleService{}).CheckDomainGroupRefs(g.Id); err == nil {
+		t.Error("解码失败时必须拦住删除，不能放行")
+	}
+}
+
+// Update 必须让持久化的 DomainGroupIds 跟上传入的新值——这是分流规则编辑
+// 域名组最基本的路径，回归测试防止 Update 漏赋值导致改动静默不生效。
+func TestUpdatePersistsDomainGroupIds(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "改域名组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}), Action: model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	r.DomainGroupIds = mustEncodeGroupIds(t, []int{chatgpt.Id})
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	groupIds, err := DecodeDomainGroupIds(got.DomainGroupIds)
+	if err != nil {
+		t.Fatalf("DecodeDomainGroupIds: %v", err)
+	}
+	if len(groupIds) != 1 || groupIds[0] != chatgpt.Id {
+		t.Fatalf("DomainGroupIds = %v, want [%d]", groupIds, chatgpt.Id)
+	}
+}
+
+// 回退契约的金丝雀：Add 只写 DomainGroupIds，落库的 DomainGroupId 必须是 0。
+//
+// 这条断言钉住的是「回退到旧版本二进制后会发生什么」。旧代码只读
+// domain_group_id，所以本次改造后新建的规则——不论单组还是多组——回退后
+// 都会被旧代码整条丢弃（范围缩小，安全侧正确）。若哪天有人「顺手」在 Add
+// 里把它补上，回退行为就会从「整条丢弃」变成「按一个可能已经不在规则里的
+// 组分流」，而 xray 返回 Configuration OK、面板首页显示 running，
+// 没有任何一层会报错。
+func TestAddLeavesLegacyDomainGroupIdZero(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "单组新规则", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DomainGroupId != 0 {
+		t.Errorf("DomainGroupId = %d, want 0（Add 不写旧字段，回退契约据此成立）", got.DomainGroupId)
+	}
+}
+
+// Update 必须把 DomainGroupId 显式置 0，不能让它停在编辑前的旧值。
+//
+// 反例（改动前的行为）：一条升级前就存在的老规则，domain_group_id 被迁移
+// 保留成 3；管理员在面板里把它改成组 9，domain_group_ids 变成 [9] 而
+// domain_group_id 停在 3。回退后旧代码按【管理员已经从规则里删掉的】组 3
+// 分流——既不是整条丢弃，也不是范围缩小，而是一条谁都没要求过的规则。
+func TestUpdateClearsLegacyDomainGroupId(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "老规则", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 造出「升级前就存在、被迁移回填过」的形态：domain_group_id 有原值。
+	err := database.GetDB().Exec(
+		"UPDATE routing_rules SET domain_group_id = ? WHERE id = ?", claude.Id, r.Id).Error
+	if err != nil {
+		t.Fatalf("simulate migrated row: %v", err)
+	}
+
+	r.DomainGroupIds = mustEncodeGroupIds(t, []int{chatgpt.Id})
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DomainGroupId != 0 {
+		t.Errorf("编辑后 DomainGroupId = %d, want 0（停在旧值会让回退按一个已被删掉的组分流）",
+			got.DomainGroupId)
 	}
 }

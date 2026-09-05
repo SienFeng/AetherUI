@@ -202,9 +202,15 @@
                                         </template>
                                     </template>
                                     <template slot="group" slot-scope="text, rule">
-                                        <a-tag :color="groupMissing(rule.domainGroupId) ? 'red' : ''">
-                                            [[ groupName(rule.domainGroupId) ]]
-                                        </a-tag>
+                                        <template v-if="rule.groupsBroken">
+                                            <a-tag color="red">域名组数据损坏</a-tag>
+                                        </template>
+                                        <template v-else>
+                                            <a-tag v-for="gid in rule.domainGroupIds" :key="gid"
+                                                   :color="groupMissing(gid) ? 'red' : ''">
+                                                [[ groupName(gid) ]]
+                                            </a-tag>
+                                        </template>
                                     </template>
                                     <template slot="target" slot-scope="text, rule">
                                         <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
@@ -364,12 +370,34 @@
                 </template>
             </a-form-item>
             <a-form-item label="域名组">
-                <a-select v-model="ruleModal.rule.domainGroupId" style="width: 100%;"
-                          @change="onDomainGroupChange">
-                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id">
-                        [[ g.remark ]]
-                    </a-select-option>
-                </a-select>
+                <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                    <!-- 域名组少的时候搜索框纯属噪音，超过 5 个才出现 -->
+                    <a-input v-if="groups.length > 5" v-model="ruleModal.groupFilter"
+                             placeholder="搜索域名组" size="small" allow-clear
+                             style="width: 160px;">
+                        <a-icon slot="prefix" type="search"></a-icon>
+                    </a-input>
+                    <span style="margin-left: auto; font-size: 12px; color: #999;">
+                        已选 [[ ruleModal.rule.domainGroupIds.length ]] 组
+                        <a @click="selectAllVisibleGroups" style="margin-left: 8px;">[[ selectAllGroupsLabel ]]</a>
+                        <a @click="clearGroupSelection" style="margin-left: 8px;">清空</a>
+                    </span>
+                </div>
+                <!-- 固定高度内部滚动：域名组再多，弹窗总高也不变，
+                     「保存」按钮永远留在视口里。 -->
+                <div style="max-height: 156px; overflow-y: auto; padding-right: 4px;">
+                    <div v-for="g in visibleGroups" :key="g.id" style="margin-bottom: 4px;">
+                        <!-- 域名组复选框永不禁用：能不能选取决于当前选了哪些用户，
+                             两边互相依赖。被禁用的是「用户」那一侧。 -->
+                        <a-checkbox :checked="ruleModal.rule.domainGroupIds.includes(g.id)"
+                                    @change="e => toggleDomainGroup(g.id, e.target.checked)">
+                            [[ g.remark ]]
+                        </a-checkbox>
+                    </div>
+                    <div v-if="!visibleGroups.length" style="color: #999; font-size: 12px;">
+                        没有匹配的域名组
+                    </div>
+                </div>
             </a-form-item>
             <a-form-item label="动作">
                 <a-radio-group v-model="ruleModal.rule.action">
@@ -464,7 +492,7 @@
                 subscribedPreview: [], subscribedCount: 0, lastError: '', lastSkipped: 0, lastUpdatedAt: 0,
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
-            ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '' },
+            ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '', groupFilter: '' },
             importReportVisible: false,
             importReport: {
                 domainGroups: { created: 0, skipped: 0, failed: 0 },
@@ -495,11 +523,13 @@
             // key 0 是特殊项：存在「所有用户」规则时用它记录，它占住所有人。
             occupiedInbounds() {
                 const map = {};
-                const gid = this.ruleModal.rule.domainGroupId;
-                if (!gid) return map;
+                const gids = this.ruleModal.rule.domainGroupIds;
+                if (!gids.length) return map;
                 for (const r of this.rules) {
                     if (r.id === this.ruleModal.rule.id) continue;
-                    if (r.domainGroupId !== gid) continue;
+                    // 冲突判定的单位是「域名组 × 用户」的组合：组集合不相交
+                    // 就不冲突，同一个域名组可以被多条规则引用。
+                    if (!r.domainGroupIds.some(id => gids.includes(id))) continue;
                     const label = r.remark || ('规则 #' + r.id);
                     if (!r.inboundIds.length) {
                         if (map[0] === undefined) map[0] = label;
@@ -532,6 +562,15 @@
                     return '全选这 ' + this.selectableVisible.length + ' 项';
                 }
                 return '全选可选';
+            },
+            visibleGroups() {
+                const kw = (this.ruleModal.groupFilter || '').trim().toLowerCase();
+                if (!kw) return this.groups;
+                return this.groups.filter(g => (g.remark || '').toLowerCase().includes(kw));
+            },
+            selectAllGroupsLabel() {
+                const ids = this.ruleModal.rule.domainGroupIds;
+                return this.visibleGroups.every(g => ids.includes(g.id)) ? '取消全选' : '全选';
             },
             allUsersDisabledReason() {
                 const map = this.occupiedInbounds;
@@ -686,6 +725,7 @@
                 // 搜索词不跨弹窗保留，否则下次打开会看到一个被过滤过的列表
                 // 却想不起来为什么少了人。
                 this.ruleModal.filter = '';
+                this.ruleModal.groupFilter = '';
                 this.ruleModal.visible = true;
             },
             inboundOccupiedBy(id) {
@@ -721,15 +761,39 @@
                 // 升序提交，和后端 EncodeInboundIds 的存储顺序对齐
                 this.ruleModal.rule.inboundIds = ids.sort((a, b) => a - b);
             },
-            // 换了域名组，占用集合跟着变。已勾选但在新组下不可用的项必须剔除，
-            // 否则会带着一个必被后端拒绝的选择去点保存。
+            // 勾选/取消一个域名组后，占用集合跟着变。已勾选但在新集合下不可用
+            // 的用户必须剔除，否则会带着一个必被后端拒绝的选择去点保存。
             //
-            // 用 select 自己的 @change 而不是 watch：Vue 的 watcher 在 nextTick
+            // 用复选框自己的 @change 而不是 watch：Vue 的 watcher 在 nextTick
             // 异步触发，openRule 先换 rule 再把 visible 置真，等 watcher 跑起来
             // visible 已经是 true，守卫拦不住它——打开编辑弹窗会顺手把已勾选的
             // 项过滤一遍。这里显式赋值再读 computed，时序完全可控。
-            onDomainGroupChange(groupId) {
-                this.ruleModal.rule.domainGroupId = groupId;
+            toggleDomainGroup(groupId, checked) {
+                const ids = [...this.ruleModal.rule.domainGroupIds];
+                const idx = ids.indexOf(groupId);
+                if (checked && idx < 0) ids.push(groupId);
+                if (!checked && idx >= 0) ids.splice(idx, 1);
+                // 升序提交，和后端 EncodeDomainGroupIds 的存储顺序对齐
+                this.ruleModal.rule.domainGroupIds = ids.sort((a, b) => a - b);
+                this.reconcileInboundSelection();
+            },
+            selectAllVisibleGroups() {
+                const ids = [...this.ruleModal.rule.domainGroupIds];
+                const all = this.visibleGroups.every(g => ids.includes(g.id));
+                for (const g of this.visibleGroups) {
+                    const idx = ids.indexOf(g.id);
+                    if (all && idx >= 0) ids.splice(idx, 1);
+                    if (!all && idx < 0) ids.push(g.id);
+                }
+                this.ruleModal.rule.domainGroupIds = ids.sort((a, b) => a - b);
+                this.reconcileInboundSelection();
+            },
+            clearGroupSelection() {
+                this.ruleModal.rule.domainGroupIds = [];
+                this.reconcileInboundSelection();
+            },
+            // 按当前域名组集合重算占用，剔除已不可用的用户选择。
+            reconcileInboundSelection() {
                 const map = this.occupiedInbounds;
                 if (map[0]) {
                     this.ruleModal.allUsers = false;
@@ -744,6 +808,12 @@
             },
             async saveRule() {
                 const r = this.ruleModal.rule;
+                if (!r.domainGroupIds.length) {
+                    // 空的域名组集合是非法状态而不是「所有域名组」，没有理由
+                    // 把它发出去。见 model.RoutingRule 的字段注释。
+                    this.$message.error('请至少选择一个域名组');
+                    return;
+                }
                 const inboundIds = this.ruleModal.allUsers ? [] : r.inboundIds;
                 if (!this.ruleModal.allUsers && !inboundIds.length) {
                     // 空数组的语义是「所有用户」。静默提交等于把这条规则的作用域
@@ -807,16 +877,35 @@
 
             // ruleIssue 返回空串表示这条规则会正常生效，否则返回失效原因。
             //
-            // 前四种与后端 RoutingInjector.buildRule 的跳过条件一一对应：条件残缺的
-            // 规则整条不输出，配置里根本没有它，而规则表照常渲染——用户察觉不到。
-            // 第五种（sniffing）规则会生成，但 xray 在路由阶段拿不到域名，永不命中。
-            // 两类都是静默失效，所以必须在界面上说出来。
+            // 两类原因都要说出来，因为两类都是静默失效：
+            // ① 整条不生效——与后端 RoutingInjector.buildRule 的跳过条件一一对应，
+            //   条件残缺的规则整条不输出，配置里根本没有它，而规则表照常渲染。
+            // ② 部分不生效——后端只把剔除记进 logger.Warning，管理员看不到；
+            //   sniffing 那一条更隐蔽：规则照常生成，但 xray 在路由阶段拿不到
+            //   域名，对这些入站永不命中。
             ruleIssue(rule) {
                 if (!rule.enable) return '';
                 if (rule.broken) return '规则的入站数据损坏，这条规则不会写进配置';
-                const group = this.groups.find(x => x.id === rule.domainGroupId);
-                if (!group) return '域名组已删除，这条规则不会写进配置';
-                if (!group.effectiveCount) return '域名组为空，这条规则不会写进配置';
+                if (rule.groupsBroken) return '规则的域名组数据损坏，这条规则不会写进配置';
+                if (!rule.domainGroupIds.length) return '规则没有指定域名组，这条规则不会写进配置';
+                // 部分组失效不再是失效原因——后端只剔除失效的组，剩下的照常
+                // 生效。只有【全部】组都没有可用域名时整条规则才会被丢弃。
+                const deadGroups = rule.domainGroupIds.filter(id => {
+                    const g = this.groups.find(x => x.id === id);
+                    return !g || !g.effectiveCount;
+                });
+                if (deadGroups.length === rule.domainGroupIds.length) {
+                    return '引用的域名组已全部删除或为空，这条规则不会写进配置';
+                }
+                // 部分组失效虽然不影响规则生成，但必须说出来：后端 buildRule
+                // 只把剔除记进 logger.Warning，管理员看不到，而界面上「存在但
+                // 域名为空」的组渲染成一个普通的 tag（groupMissing 只看存在性），
+                // 规则行还打绿色对勾——一个订阅从未拉取成功的空组因此完全隐形。
+                // 入站那一侧本来就有同形的提示，两边不该不对称。
+                if (deadGroups.length) {
+                    return '有 ' + deadGroups.length + ' 个域名组已删除或没有任何域名（' +
+                        deadGroups.map(this.groupName).join('、') + '），这些组的域名不受本规则约束';
+                }
 
                 if (rule.inboundIds.length) {
                     const dead = rule.inboundIds.filter(id => {
@@ -921,14 +1010,17 @@
             ruleConflict(rule) {
                 for (const other of this.rules) {
                     if (other.id === rule.id) continue;
-                    if (other.domainGroupId !== rule.domainGroupId) continue;
+                    const sharedGroups = rule.domainGroupIds
+                        .filter(id => other.domainGroupIds.includes(id));
+                    if (!sharedGroups.length) continue;
+                    const groupLabel = sharedGroups.map(this.groupName).join('、');
                     const label = other.remark || ('规则 #' + other.id);
                     if (!rule.inboundIds.length || !other.inboundIds.length) {
-                        return '与规则「' + label + '」在同一域名组下重叠，实际生效的只有优先级靠前的那条';
+                        return '与规则「' + label + '」在域名组 ' + groupLabel + ' 下重叠，实际生效的只有优先级靠前的那条';
                     }
                     const both = rule.inboundIds.filter(id => other.inboundIds.includes(id));
                     if (both.length) {
-                        return '与规则「' + label + '」在用户 ' + both.map(this.inboundName).join('、') +
+                        return '与规则「' + label + '」在域名组 ' + groupLabel + ' 下的用户 ' + both.map(this.inboundName).join('、') +
                             ' 上重叠，实际生效的只有优先级靠前的那条';
                     }
                 }

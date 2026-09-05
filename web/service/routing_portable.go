@@ -60,8 +60,18 @@ type PortableInboundRef struct {
 }
 
 type PortableRule struct {
-	Remark         string `json:"remark"`
-	DomainGroupRef string `json:"domainGroupRef"`
+	Remark string `json:"remark"`
+	// DomainGroupRefs 是指针，理由与 InboundRefs 同构但【结论相反】：
+	// null / 键缺失 / 显式 [] 三者全部整条拒绝——域名组一个都没有等于
+	// domain 条件为空，xray 会把规则当作「不限制」。用指针不是为了区分
+	// 放行与拒绝（都拒绝），而是为了让报错说得准：是「字段缺失」还是
+	// 「显式空数组」。
+	DomainGroupRefs *[]string `json:"domainGroupRefs"`
+	// DomainGroupRef 兼容 v1.7.0 及更早导出的文件，只读，不再作为主字段。
+	// 导出侧仍在【单组时】填它：这样新面板导出的文件放进旧面板，单组规则
+	// 照常可用，多组规则会被旧面板的「domainGroupRef 为空 → 整条跳过」
+	// 明确拒绝——明确报错远好过静默产生一条指向错误组的规则。
+	DomainGroupRef string `json:"domainGroupRef,omitempty"`
 	// OutboundRef 在 action=block 时为空。
 	OutboundRef string `json:"outboundRef"`
 	// InboundRefs 是指针而不是值类型切片：显式的空数组 [] 表示「对所有入站
@@ -205,8 +215,12 @@ func (s *RoutingPortableService) Export(scope string) (*ExportFile, error) {
 		for _, r := range rules {
 			pr, skip := s.toPortableRule(r, groupById, nodeById, inboundById)
 			if skip != nil {
-				// 引用已经悬空的规则本来就不会写进配置，导出它只会在对面
-				// 产生同样一条不生效的规则，还占着 checkConflict 的位置。
+				// 走到这里的规则在本机就【已经】无法写进配置：域名组一个不剩、
+				// 出站或入站悬空、字段本身损坏。导出它只会在对面产生同样一条
+				// 不生效的规则，还占着 checkConflict 的位置。
+				//
+				// 注意这不包括「部分组悬空」——那种规则在本机正常生效，
+				// toPortableRule 会剔掉悬空的组并保留规则，见那里的注释。
 				logger.Warning("导出跳过规则「", ruleLabel(r), "」：", skip)
 				continue
 			}
@@ -242,9 +256,43 @@ func (s *RoutingPortableService) toPortableRule(
 	nodeById map[int]*model.OutboundNode,
 	inboundById map[int]*model.Inbound,
 ) (PortableRule, error) {
-	g, ok := groupById[r.DomainGroupId]
-	if !ok {
-		return PortableRule{}, common.NewErrorf("域名组 #%d 不存在", r.DomainGroupId)
+	groupIds, err := DecodeDomainGroupIds(r.DomainGroupIds)
+	if err != nil {
+		return PortableRule{}, common.NewError("域名组数据损坏:", err)
+	}
+	if len(groupIds) == 0 {
+		return PortableRule{}, common.NewError("规则没有引用任何域名组")
+	}
+	// 悬空的组剔除而不是整条拒绝——与 buildRule 对齐。buildRule 只剔掉失效的
+	// 组、规则照常生成，所以一条引用了 3 个组、其中 1 个已悬空的规则在本机
+	// 【正在生效】。整条拒绝会让它从导出文件里静默消失（Export 只 logger.Warning
+	// 后 continue，导出报告里一个字都没有），管理员在对面机器上根本不知道少了
+	// 一条封禁规则。
+	//
+	// 剔到一个不剩时才拒绝整条：那时编码结果会落回 []，等于 domain 条件为空。
+	groupRefs := make([]string, 0, len(groupIds))
+	droppedGroups := make([]string, 0)
+	for _, gid := range groupIds {
+		g, ok := groupById[gid]
+		if !ok {
+			droppedGroups = append(droppedGroups, fmt.Sprintf("#%d", gid))
+			continue
+		}
+		groupRefs = append(groupRefs, g.Remark)
+	}
+	if len(groupRefs) == 0 {
+		return PortableRule{}, common.NewErrorf("规则引用的域名组一个都不存在（%s）",
+			strings.Join(droppedGroups, "、"))
+	}
+	if len(droppedGroups) > 0 {
+		// 跳过必须带原因，否则这道剔除对用户是隐形的：导出文件里的规则看着
+		// 完整，覆盖的域名却比源机器少一截。
+		logger.Warning("导出规则「", ruleLabel(r), "」时剔除了不存在的域名组：",
+			strings.Join(droppedGroups, "、"))
+	}
+	legacyRef := ""
+	if len(groupRefs) == 1 {
+		legacyRef = groupRefs[0]
 	}
 	outboundRef := ""
 	if r.Action == model.ActionProxy {
@@ -271,13 +319,14 @@ func (s *RoutingPortableService) toPortableRule(
 		refs = append(refs, PortableInboundRef{Remark: in.Remark, Port: in.Port})
 	}
 	return PortableRule{
-		Remark:         r.Remark,
-		DomainGroupRef: g.Remark,
-		OutboundRef:    outboundRef,
-		InboundRefs:    &refs,
-		Action:         r.Action,
-		Priority:       r.Priority,
-		Enable:         r.Enable,
+		Remark:          r.Remark,
+		DomainGroupRefs: &groupRefs,
+		DomainGroupRef:  legacyRef,
+		OutboundRef:     outboundRef,
+		InboundRefs:     &refs,
+		Action:          r.Action,
+		Priority:        r.Priority,
+		Enable:          r.Enable,
 	}, nil
 }
 
@@ -652,27 +701,76 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		}
 		refs := *item.InboundRefs
 
-		// 空字符串不参与域名组匹配，理由与 resolveInboundRefs 里空 remark
-		// 不参与入站匹配完全同构：DomainGroupRef 为空时本该是「引用的域名组
-		// 缺失/损坏」，但 groupByRemark[""] 会在本机恰好存在一个备注为空的
-		// 域名组时静默命中它，产生一条指向错误域名组的规则——与 §3.2 判定
-		// 的域名组重名歧义同一形状，必须在查表之前拒绝，不能让空串冒充业务键。
-		if item.DomainGroupRef == "" {
+		// 优先新字段；nil 指针（null 或键缺失）时回落旧字段，兼容
+		// v1.7.0 及更早导出的文件。
+		//
+		// explicitEmptyGroups 把「显式提交了一个空数组」与「字段根本不在」
+		// 分开，这正是 DomainGroupRefs 用指针类型换来的东西——两者都拒绝，
+		// 但报告要说得准：前者管理员得去改文件里那一行，后者说明文件被截断
+		// 或压根不是本工具导出的。混成同一句话，指针类型就白用了。
+		var groupRefs []string
+		explicitEmptyGroups := false
+		switch {
+		case item.DomainGroupRefs != nil:
+			groupRefs = *item.DomainGroupRefs
+			explicitEmptyGroups = len(groupRefs) == 0
+		case item.DomainGroupRef != "":
+			groupRefs = []string{item.DomainGroupRef}
+		}
+		if len(groupRefs) == 0 {
 			report.Rules.Failed++
-			report.fail("规则「%s」没有指定域名组（domainGroupRef 为空），整条跳过", label)
+			if explicitEmptyGroups {
+				report.fail("规则「%s」的 domainGroupRefs 是一个空数组，整条跳过（域名条件为空会让它劫持该用户的全部流量）", label)
+			} else {
+				report.fail("规则「%s」缺少 domainGroupRefs 字段（为 null 或键不存在），也没有可回落的 domainGroupRef，整条跳过（域名条件为空会让它劫持该用户的全部流量）", label)
+			}
 			continue
 		}
 
-		if ambiguousGroupRemark[item.DomainGroupRef] {
-			report.Rules.Failed++
-			report.fail("规则「%s」引用的域名组「%s」在本机有多个同名组，无法确定指向哪一个，整条跳过（请先在域名组页面改名）",
-				label, item.DomainGroupRef)
+		groupIds := make([]int, 0, len(groupRefs))
+		missingGroups := make([]string, 0)
+		rejected := false
+		for _, ref := range groupRefs {
+			// 空字符串不参与域名组匹配，理由与 resolveInboundRefs 里空
+			// remark 不参与入站匹配完全同构：groupByRemark[""] 会在本机恰好
+			// 存在一个备注为空的域名组时静默命中它，产生一条指向错误域名组
+			// 的规则，而规则表和生成的配置都渲染得完全正常。
+			if ref == "" {
+				report.Rules.Failed++
+				report.fail("规则「%s」的域名组引用里有空值，整条跳过", label)
+				rejected = true
+				break
+			}
+			if ambiguousGroupRemark[ref] {
+				report.Rules.Failed++
+				report.fail("规则「%s」引用的域名组「%s」在本机有多个同名组，无法确定指向哪一个，整条跳过（请先在域名组页面改名）",
+					label, ref)
+				rejected = true
+				break
+			}
+			g, ok := groupByRemark[ref]
+			if !ok {
+				missingGroups = append(missingGroups, ref)
+				continue
+			}
+			groupIds = append(groupIds, g.Id)
+		}
+		if rejected {
 			continue
 		}
-		g, ok := groupByRemark[item.DomainGroupRef]
-		if !ok {
+		// 一个都没认出来必须整条丢弃：编码结果会落回 []，而空的域名组集合
+		// 意味着 domain 条件为空。导入成禁用状态也不行——管理员一旦手滑
+		// 启用，这条规则立刻变成劫持该用户的全部流量。
+		if len(groupIds) == 0 {
 			report.Rules.Failed++
-			report.fail("规则「%s」引用的域名组「%s」不存在，整条跳过", label, item.DomainGroupRef)
+			report.fail("规则「%s」引用的域名组在本机一个都没找到（%s），整条跳过",
+				label, strings.Join(missingGroups, "、"))
+			continue
+		}
+		encodedGroups, err := EncodeDomainGroupIdsStrict(groupIds)
+		if err != nil {
+			report.Rules.Failed++
+			report.fail("规则「%s」的域名组编码失败：%v", label, err)
 			continue
 		}
 
@@ -708,6 +806,13 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		}
 
 		enable := item.Enable
+		if len(missingGroups) > 0 {
+			// 与入站的「部分命中」同策略：规则的其余部分都是好的，导入成
+			// 禁用状态并把缺失的组点名，管理员打开编辑弹窗勾一下就行。
+			enable = false
+			report.say("规则「%s」的域名组 %s 在本机未找到，已导入但保持禁用，请手工确认后启用",
+				label, strings.Join(missingGroups, "、"))
+		}
 		if len(missing) > 0 {
 			// 绝不把认不出的入站剔掉后当作完整覆盖集——剔到空就是上面
 			// 已经处理的「对所有入站生效」。部分命中时导入成禁用状态，
@@ -741,7 +846,7 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		}
 
 		rule := &model.RoutingRule{
-			Remark: item.Remark, InboundIds: encoded, DomainGroupId: g.Id,
+			Remark: item.Remark, InboundIds: encoded, DomainGroupIds: encodedGroups,
 			Action: item.Action, OutboundId: outboundId,
 			Priority: item.Priority, Enable: enable,
 		}
