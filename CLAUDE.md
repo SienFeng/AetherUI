@@ -62,7 +62,7 @@ go mod tidy && go vet ./...
 
 - `web/controller/` — 只做参数绑定、鉴权（`BaseController.checkLogin`）和 `jsonMsg/jsonObj` 响应包装（`web/controller/util.go`）。
 - `web/service/` — 业务逻辑，所有 service 都是**无状态空结构体**，按值嵌入使用；跨请求状态（xray 进程 `p`、`isNeedXrayRestart`）是包级变量。
-- `database/model/model.go` — 仅 3 张表。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
+- `database/model/` — 主库早已不止 3 张表：`model.go` 的 User/Inbound/Setting 之外，还有 `routing.go` 的 DomainGroup/OutboundNode/RoutingRule 与 `ipban.go` 的 IPBan，共 7 张表。另有两张表各自落在**独立库**里——访问日志 `AccessLog`（`accesslog.go`，`database.InitAccessLogDB`）与用量历史 `TrafficBucket`（`traffic.go`，`database.InitTrafficDB`）——理由见「用量历史与图表」一节：高频写入不该和面板的普通操作抢主库那把 SQLite 写锁。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
 
 路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/aui/*`（需登录，下挂 `/aui/inbound/*` 与 `/aui/setting/*`）。
 
@@ -200,6 +200,26 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
 
+## 用量历史与图表
+
+入站列表的展开行、系统状态页底部各有一张分时用量图。设计文档在 `docs/superpowers/specs/2026-09-04-traffic-history-design.md`。
+
+**采集**复用 `XrayTrafficJob` 每 10 秒已经拿到的增量（`reset=true`，取完 xray 侧清零），在 `InboundService.AddTraffic` 累加进 `inbounds.up/down` 之前先记一份（`TrafficHistoryService.Record`）。不走「读累计值做差分」那条路：差分方案里，一次正常的「重置流量」和一次数据损坏长得一模一样。这也意味着**历史桶不受重置流量影响**——重置清的是累计计数器，历史记的是「某小时用了多少」，两者语义无关。
+
+**数据**落在独立的 `/etc/<name>/<name>-traffic.db`（`config.GetTrafficDBPath()`，`database.InitTrafficDB`），与访问日志同样的分库理由：高频写入不该和面板的普通操作抢主库那把 SQLite 写锁。一张表（`model.TrafficBucket`）两级粒度（`Granularity` 字段，`GranularityHour`/`GranularityDay`）：小时桶与日桶**各自独立累加**，日桶不由小时桶汇总而来——汇总方案要处理「小时桶已被清理但日桶还没算」的补算逻辑。零增量不写行，图上的 0 由服务端补零。10 个入站跑满保留期约 1~2 MB。
+
+**桶按面板设置的时区对齐**（`SettingService.GetTimeLocation()`，`model.AlignHour`/`AlignDay`），不是 UTC。UTC+8 下按 UTC 切日，看到的「某天用量」会整体错位 8 小时，且不报任何错。时区改变后旧桶边界不变，交界处会有一天错位，刻意不做补偿。
+
+三条不能弱化的约束：
+
+- **删除入站必须连带删除它的桶**（`TrafficHistoryService.DeleteByInbound`，接在 `InboundService.DelInbound` 里），另有 `TrafficCleanupJob`（每小时一次）里的 `PruneOrphans` 兜底。SQLite 会复用自增 id，残留的桶会绑到下一个建出来的入站上，那时引用不再悬空，图会渲染得非常合理，只是画的是别人的数据。
+- **清理条件必须带 `granularity`**。两级各有各的保留天数设置项（`trafficHourRetentionDays` 默认 30、`trafficDayRetentionDays` 默认 365），不带的话一次「清理小时桶」会把日桶一起删掉，长期趋势图静默变空。
+- **写用量历史失败只告警、不阻断 `AddTraffic`**。`inbounds.up/down` 是限额与到期判定的输入，它停止累加的后果（用户超额不被停用）比图上少一段曲线严重得多。
+
+**前端**用 Chart.js v4.5.0 UMD（`web/assets/chart.js/`，MIT），只在 `inbounds.html` 与 `index.html` 单独引入，**不在 `common/js.html`**——那是所有页面共用的，登录页不该白下载这一份体积不小的库。两个页面共用 `web/assets/js/util/chart-util.js` 里的 `trafficChartOptions(maxTicksLimit)`：两张图除了 x 轴刻度上限（入站页传 12、系统状态页传 14）之外配置完全一致，不各自定义一份——分开定义迟早会分叉，而分叉后两张图的观感差异不会有任何东西提醒你。展开行里的 canvas 必须在 `$nextTick` 里取（`expandedRowRender` 是动态渲染的，指令执行时元素还不存在），折叠时必须 `chart.destroy()`（Chart 实例持有 canvas 引用与 resize 监听，不销毁的话反复展开折叠会一直累积，页面开几小时就会明显吃内存）。系统状态页的图**不挂进那个 2 秒的状态轮询循环**（`index.html` 的 `mounted`）：数据一小时才变一次。
+
+服务端负责补零、对齐刻度、格式化 x 轴标签、排序 Top N，前端只管画；`top` 的上界钳制在 controller（`InboundController.getTrafficOverview`，1~50，越界回落 12）——controller 是不可信输入的边界，请求体里一个失控的数字不该让 service 拉出远超所需的系列。**标签在服务端格式化**是因为时区也在服务端：让浏览器自己格式化，访问者所在时区一变，图上的时间就和面板设置的时区对不上了。
+
 ## 安装向导与 Caddy 拓扑
 
 `install.sh` 的向导（`setup_wizard`）在装好面板后问一次「有没有已解析到本机的域名」，答案决定面板此后的暴露方式；改这条链路前先读 `docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md`，本节只讲落地后的约束和踩过的坑。
@@ -297,4 +317,4 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
 - **面板报告的 xray 状态可能是假的，`bin/config.json` 现在也可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 为准，不要相信面板首页**。此前这里还建议「对 `bin/config.json` 跑一次 `xray run -test`」，热更新上线后这条不再可靠：`tryHotApply` 成功时只通过 gRPC 控制面把改动下发进正在跑的核心，**不会重写 `bin/config.json`**——该文件仍是上一次整进程重启（或面板启动）时写的那份，只有下一次真正触发重启才会被重新生成，中间这段时间它不反映核心的真实配置。确认核心当前真实状态，只能靠它的 gRPC 控制面（本项目目前没有现成的查询工具，`RoutingService.TestRoute` 落地前只能靠重启换回一份准确的 `bin/config.json`，或读面板日志里 `热应用：` 开头的 Debug 行辅助判断）。
 - **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。分流子系统靠三个 `Check*Refs` 守卫堵住了这条路，**新增任何存 id 外键的表都要照做**。
-- **cron 任务没有 panic 恢复。** `Server.Start()` 里 `cron.New(...)` 未配 `cron.WithChain(cron.Recover(...))`，`robfig/cron/v3` 自身也不 recover。定时任务（含每 10 秒的 xray 重启消费任务）里的任何 panic 都会**杀掉整个面板进程**。在这些路径上写代码要格外注意 nil map、越界等运行时 panic。
+- **cron 任务的 panic 现在会被截住，但不是所有 job 都有第二层。** `web/web.go` 的 `cron.New(...)` 已配 `cron.WithChain(cron.Recover(cronLogger{}))`：任何挂在这个 cron 实例上的任务（含每 10 秒的 xray 重启消费任务）发生 panic，都会被这层截住、由 `cronLogger` 带完整堆栈记进面板日志，不再杀掉整个面板进程。部分较新的 job（`access_log_job.go` 的两个任务、`concurrency_job.go`、`shaping_job.go`、`traffic_cleanup_job.go`）还在各自 `Run` 的首行加了 `defer common.Recover("<任务名>")`（`util/common/err.go`）作为更早的一层——它抢在 cron 那层之前拿到 panic，日志里能带上具体任务名，而不是只知道「某个 job 挂了」。较早的几个 job（`check_inbound_job.go`、`check_xray_running_job.go`、`ipdb_update_job.go`、`subscription_job.go`、`xray_traffic_job.go`）还没有加这层，完全依赖 cron 那层通用兜底。**新增 job 请照新的写法办理**：`Run` 首行 `defer common.Recover("<任务名>")`。在这些路径上写代码仍要格外注意 nil map、越界等运行时 panic——多一层 recover 挡住的是「杀死整个进程」，挡不住「这一轮任务后续逻辑没跑完」。
