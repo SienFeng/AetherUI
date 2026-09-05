@@ -2,86 +2,873 @@
 <html lang="en">
 {{template "head" .}}
 <style>
+    /* 登录页样式全部内联在这里，不进 custom.css——那份是四个内页共用的，
+     * 把只有登录页用得到的变量、地图、分栏塞进去，等于让每个内页都白下载
+     * 一遍，还要额外提防选择器外溢污染内页。
+     *
+     * 不引 Google Fonts、不引任何 CDN 图片：这是代理管理面板，管理员十有
+     * 八九在网络受限的环境下打开登录页。外链样式表是渲染阻塞的，外链图片
+     * 会变成破图，两者都要等到超时才收场。字体用系统栈，左侧那张世界地图
+     * 是内联的点阵数据（1.3 KB）现画的，整页零外部请求。 */
 
-    #app {
-        padding-top: 100px;
+    .login-page {
+        /* 浅色色板，与登录后的内页（#f0f2f5 底 + 白卡片 + antd 蓝）同一套
+         * 语言。每个灰阶都按 WCAG AA 核算过，不是凭感觉挑的：
+         *   #0F172A 正文  17.85:1   #475569 次要 7.58:1
+         *   #64748B 占位符 4.76:1（在 #F8FAFC 输入框底上 4.55:1）
+         * 常见的 slate-400 #94A3B8 在白底上只有 2.56:1，占位符用它是不合格的。
+         *
+         * 按钮底色用 #1266D6 而不是 antd 原本的 #1890FF：白字配 #1890FF
+         * 只有 3.24:1，够不上正文要求的 4.5:1，压暗后是 5.39:1。 */
+        --bg-visual: #F1F5FB;
+        --bg-panel: #FFFFFF;
+        --surface: #F8FAFC;
+        --line: #E2E8F0;
+        --line-hi: #CBD5E1;
+        --txt: #0F172A;
+        --txt-dim: #475569;
+        /* 比常规的 slate-500 深两档。玻璃越透，背后压到地图点最密处时合成
+         * 底色越暗，这一档字就越吃紧：slate-500 #64748B 在 .66 的玻璃上
+         * 只有 4.0:1，#5B6980 撑到 .60 就跌破 4.5。现在玻璃是 .52，
+         * #526078 在最差位置仍有 4.9:1。调玻璃透明度时必须连这个值一起重算。 */
+        --txt-faint: #526078;
+        --accent: #1266D6;
+        --btn: #1266D6;
+        --btn-hi: #0F58BC;
+        --ring: rgba(18, 102, 214, .14);
+        --danger: #B91C1C;
+
+        --r: 10px;
+        --ease: cubic-bezier(.22, .61, .36, 1);
     }
 
-    h1 {
-        text-align: center;
+    /* custom.css 给全站铺的是 #f0f2f5，这里的底色是浅蓝渐变，
+     * 不盖掉的话挂载间隙会闪一帧灰。 */
+    html, body {
+        background-color: #F1F5FB;
+    }
+
+    body { margin: 0; }
+
+    .login-page {
+        position: relative;
+        display: flex;
+        min-height: 100vh;
+        min-height: 100dvh;
+        overflow: hidden;
+        background: linear-gradient(150deg, #F6F9FD 0%, var(--bg-visual) 42%, #DFE8F6 100%);
+        color: var(--txt);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                     "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ══════════ 左侧视觉区 ══════════
+     *
+     * 窄屏下整块不渲染。表单在小屏上是唯一要紧的东西，把地图压成一条
+     * 装饰带既占掉首屏又什么都读不出来。 */
+    /* 品牌与文案层。铺满整页而不是占一半：卡片要落在页面正中，两者就不能
+     * 再是并排的兄弟，只能一个铺底一个浮在上面。
+     *
+     * pointer-events:none 是这里唯一不能漏的一条——这层盖在卡片上方，不放行
+     * 点击的话输入框和按钮全都点不动，而且不会报任何错，只是「点了没反应」。 */
+    .login-visual {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        pointer-events: none;
+        padding: 48px 56px;
+        box-sizing: border-box;
+        flex-direction: column;
+        justify-content: space-between;
+    }
+
+    /* 断点从 1024 提到 1280：卡片居中之后，左边留给文案的净宽是
+     * (视口 - 卡片) / 2 - 边距，1024px 时只剩两百出头，标题会碎成四五行。
+     * 窄于这个宽度就只留卡片，干净得多。 */
+    @media (min-width: 1280px) {
+        .login-visual { display: flex; }
+    }
+
+    /* 浅色底本身没有质感，一层极淡的等距网格能把「工程工具」这层意思
+     * 补回来，同时不产生任何要被读取的内容。 */
+    .page-grid {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background-image:
+            linear-gradient(rgba(15, 23, 42, .035) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(15, 23, 42, .035) 1px, transparent 1px);
+        background-size: 56px 56px;
+        -webkit-mask-image: radial-gradient(ellipse 92% 78% at 50% 44%, #000 28%, transparent 100%);
+        mask-image: radial-gradient(ellipse 92% 78% at 50% 44%, #000 28%, transparent 100%);
+    }
+
+    .page-glow {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background:
+            radial-gradient(860px 520px at 40% 44%, rgba(24, 118, 255, .14), transparent 68%),
+            radial-gradient(620px 420px at 88% 82%, rgba(14, 165, 233, .1), transparent 70%);
+    }
+
+    /* 地图铺满整块并略微放大溢出，边缘由 mask 化开——留出硬边会立刻
+     * 暴露它是一张贴上去的图，化开之后才像是从背景里透出来的。 */
+    /* 地图铺满整页并溢出裁切，主体落在左半边，右半边那部分正好落到
+     * 玻璃后面——磨砂要有东西可糊，糊一片纯白是看不出效果的。 */
+    .page-map {
+        position: absolute;
+        top: 50%;
+        left: 45%;
+        z-index: 0;
+        width: 112%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+        -webkit-mask-image: radial-gradient(ellipse 78% 74% at 50% 50%, #000 34%, transparent 100%);
+        mask-image: radial-gradient(ellipse 78% 74% at 50% 50%, #000 34%, transparent 100%);
+    }
+
+    .map-dots {
+        stroke: rgba(71, 105, 160, .38);
+        stroke-width: 2.15;
+        stroke-linecap: round;
+        fill: none;
+    }
+
+    /* 弧线分两层：一条常驻的极淡底线交代连接关系，一段流光在上面跑。
+     * 只有流光的话，它划过之外的大半时间画面上什么都没有，
+     * 静止状态下就是三条凭空出现又消失的短线。 */
+    .map-arc-base {
+        stroke: rgba(18, 102, 214, .22);
+        stroke-width: 1;
+        fill: none;
+    }
+
+    .map-arc {
+        stroke: var(--accent);
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        fill: none;
+        stroke-dasharray: 46 340;
+        animation: map-arc-run 5s linear infinite;
+    }
+
+    @keyframes map-arc-run {
+        from { stroke-dashoffset: 386; }
+        to   { stroke-dashoffset: 0; }
+    }
+
+    .map-node { fill: var(--accent); }
+
+    .map-pulse {
+        fill: var(--accent);
+        /* fill-box 让 transform-origin:center 认的是圆自己的中心而不是
+         * 整个 SVG 的原点，否则每个脉冲都会从画面左上角炸开。 */
+        transform-box: fill-box;
+        transform-origin: center;
+        animation: map-pulse 3.6s cubic-bezier(.4, 0, .6, 1) infinite;
+    }
+
+    @keyframes map-pulse {
+        0%        { transform: scale(.5); opacity: .45; }
+        70%, 100% { transform: scale(4);  opacity: 0; }
+    }
+
+    /* 文案直接压在地图点阵上，密集处会把小字啃得很碎。由下而上压一层
+     * 底色，让文案所在的那段地图退到背景里去，正文才读得清。
+     *
+     * 必须挂在整页而不是左栏：只铺左栏的话，右栏没有这层压暗，两栏交界
+     * 处会出现一条贯穿下半屏的竖直硬边——分栏本身是没有边框的，那条线
+     * 完全来自这层遮罩的边缘。 */
+    .page-scrim {
+        position: absolute;
+        left: 0; right: 0; bottom: 0;
+        z-index: 0;
+        height: 52%;
+        pointer-events: none;
+        background: linear-gradient(to top,
+            rgba(240, 244, 251, .97) 16%, rgba(240, 244, 251, .82) 52%, transparent 100%);
+    }
+
+    .visual-top,
+    .visual-bottom { position: relative; z-index: 1; }
+
+    .visual-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .visual-name {
+        font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -.005em;
+        color: var(--txt);
+    }
+
+    /* 宽度得跟着视口算：卡片居中后，左侧可用净宽是 (100vw - 卡片) / 2 - 边距。
+     * 写死 520px 的话，1440px 屏幕上文案右缘会伸到卡片底下去。 */
+    .visual-copy {
+        position: relative;
+        max-width: min(420px, calc((100vw - 480px) / 2 - 64px));
+    }
+
+    /* color 必须显式写：antd 的 base reset 里有
+     * h1,h2,...,h6 { color: rgba(0,0,0,.85) }，那个灰在浅色底上虽然能看见，
+     * 却和这里定的 #0F172A 差了一档，标题会比正文还灰。
+     *
+     * 字号跟着视口走：固定 30px 在 2000px 宽的屏幕上明显偏小，
+     * 而这是左半边唯一的信息焦点。 */
+    .visual-copy h2 {
+        margin: 0;
+        font-size: clamp(26px, 2vw, 34px);
+        line-height: 1.45;
+        font-weight: 600;
+        letter-spacing: -.01em;
+        color: var(--txt);
+    }
+
+    .visual-copy p {
+        margin: 14px 0 0;
+        font-size: 14px;
+        line-height: 1.75;
+        color: var(--txt-dim);
+    }
+
+    .visual-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 26px;
+    }
+
+    .visual-tag {
+        padding: 5px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .8);
+        font-size: 12px;
+        color: var(--txt-dim);
+    }
+
+    /* ══════════ 右侧表单区 ══════════ */
+    /* 右栏本身只是个留边距的容器，玻璃在里面那张卡片上。
+     *
+     * 先前是整条贴边的全高玻璃柱，问题有两个：卡片高度被拉到满屏，
+     * 两行输入框上下各吊着三百多像素的空白；而且玻璃紧贴视口右缘，
+     * 四周没有一处清晰的背景可作对照——磨砂是靠「周围清楚、中间糊」
+     * 对比出来的，贴边等于把参照物切掉了。 */
+    /* 卡片的居中容器，铺满整页。z-index 要压过文案层，否则卡片会被那层盖住
+     * （那层是 pointer-events:none，看不出被盖，只是点不动）。 */
+    .login-panel {
+        position: relative;
+        z-index: 2;
+        flex: 1 1 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 20px;
+        box-sizing: border-box;
+        background: transparent;
+    }
+
+    /* 卡片。background 是不支持 backdrop-filter 时的兜底——那种情况下退回
+     * 接近不透明的白，宁可没有磨砂也不能让表单浮在一片半透明里看不清。
+     * 真正的玻璃在下面的 @supports 里。 */
+    .login-form-wrap {
+        width: 100%;
+        max-width: 420px;
+        box-sizing: border-box;
+        padding: 38px 32px;
+        border-radius: 20px;
+        border: 1px solid rgba(255, 255, 255, .9);
+        background: rgba(255, 255, 255, .96);
+        /* 玻璃越透，边界越容易糊进背景里。高光和投影要同步加一点，
+         * 卡片才立得住。 */
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, .85),
+            0 24px 60px -26px rgba(15, 23, 42, .34),
+            0 2px 10px -4px rgba(15, 23, 42, .1);
+        animation: form-in .5s var(--ease) both;
+    }
+
+    @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+        .login-form-wrap {
+            /* 浅色玻璃的不透明度不能照搬深色那套 white/10：底下是浅蓝背景，
+             * 太透会让 #0F172A 的正文压在忽明忽暗的地图点上，对比度随位置
+             * 漂移。.66 配 saturate 既留得住磨砂感，合成后正文仍在 14:1 以上。 */
+            background: rgba(255, 255, 255, .52);
+            /* blur 半径不是越大越好：超过 30px 背后的地图会被糊成一片均匀的
+             * 浅色，「透」这件事本身就看不出来了。22px 刚好保留可辨认的形状。 */
+            -webkit-backdrop-filter: blur(22px) saturate(175%);
+            backdrop-filter: blur(22px) saturate(175%);
+        }
+    }
+
+    /* 小屏卡片收窄内边距，390px 宽的机器上留给输入框的净宽才够 */
+    @media (max-width: 480px) {
+        .login-form-wrap {
+            padding: 30px 22px;
+            border-radius: 18px;
+        }
+    }
+
+    @keyframes form-in {
+        from { opacity: 0; transform: translateY(10px); }
+        to   { opacity: 1; transform: none; }
+    }
+
+    /* 小屏没有左侧视觉区，品牌标识改由表单顶部承担，
+     * 否则整页找不到自己打开的是什么。 */
+    .panel-brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        margin-bottom: 30px;
+    }
+
+    /* 与 .login-visual 的断点严格配对：那层显示时这里隐藏，反之亦然。
+     * 两个断点写不一致的话，某段宽度里 logo 会同时出现两次或一次都不出现。 */
+    @media (min-width: 1280px) {
+        .panel-brand { display: none; }
+    }
+
+    .login-mark {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+        width: 38px;
+        height: 38px;
+        border-radius: 11px;
+        background: linear-gradient(155deg, rgba(18, 102, 214, .14), rgba(18, 102, 214, .05));
+        border: 1px solid rgba(18, 102, 214, .22);
+        box-shadow: 0 4px 12px -4px rgba(18, 102, 214, .3);
+        color: var(--accent);
+    }
+
+    /* 同上，antd 的 h1 reset 也要盖掉 */
+    .login-title {
+        margin: 0;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -.01em;
+        color: var(--txt);
+    }
+
+    .login-sub {
+        margin: 8px 0 28px;
+        font-size: 13.5px;
+        color: var(--txt-faint);
+        line-height: 1.6;
+    }
+
+    .login-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+
+    /* 视觉上不显示，但留给读屏软件。占位符不能当标签用：一旦开始输入它就
+     * 消失了，读屏软件也不会把它当字段名念出来。 */
+    .sr-only {
+        position: absolute;
+        width: 1px; height: 1px;
+        margin: -1px; padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+
+    .field {
+        position: relative;
+        display: flex;
+        align-items: center;
+    }
+
+    .field-icon {
+        position: absolute;
+        left: 14px;
+        display: flex;
+        color: var(--txt-faint);
+        transition: color .18s var(--ease);
+        pointer-events: none;
+    }
+
+    .field input {
+        width: 100%;
+        height: 46px;
+        box-sizing: border-box;
+        padding: 0 14px 0 42px;
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        /* 玻璃上的控件跟着半透明，不然像几块贴片按在磨砂表面上。
+         * 但要比卡片本身实一档（.7 vs 卡片 .52），否则输入框的边界
+         * 会和卡片糊成一片；hover/focus 再转成实白，正在操作的那个
+         * 字段永远是最清楚的。 */
+        background: rgba(255, 255, 255, .7);
+        color: var(--txt);
+        /* 16px 是 iOS Safari 不自动放大页面的下限，低于它每次聚焦
+         * 整个页面都会被顶上去缩放一次。 */
+        font-size: 16px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color .18s var(--ease), background-color .18s var(--ease),
+                    box-shadow .18s var(--ease);
+    }
+
+    .field input::placeholder { color: var(--txt-faint); }
+
+    .field input:hover:not(:focus) {
+        border-color: var(--line-hi);
+        background: #FFFFFF;
+    }
+
+    .field input:focus {
+        border-color: var(--accent);
+        background: #FFFFFF;
+        box-shadow: 0 0 0 3px var(--ring);
+    }
+
+    .field:focus-within .field-icon { color: var(--accent); }
+
+    .field.has-action input { padding-right: 44px; }
+
+    /* 浏览器自动填充会铺一层刺眼的浅黄底，和这里的 #F8FAFC 完全对不上。
+     * -webkit-box-shadow 用不透明色盖掉是唯一可行的办法（background 会被
+     * 用户代理样式覆盖）；超长 transition 用来拖住 Chrome 在聚焦瞬间
+     * 重新刷回填充色的那一下。 */
+    .field input:-webkit-autofill,
+    .field input:-webkit-autofill:hover,
+    .field input:-webkit-autofill:focus {
+        -webkit-text-fill-color: var(--txt);
+        -webkit-box-shadow: 0 0 0 1000px #FFFFFF inset;
+        caret-color: var(--txt);
+        transition: background-color 100000s ease-in-out 0s;
+    }
+
+    .field-action {
+        position: absolute;
+        right: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        /* 38px 是这个高度下能给的最大命中区，略小于 44px 的理想触控尺寸，
+         * 但输入框本身只有 46px 高，再大就会溢出边框。 */
+        width: 38px; height: 38px;
+        padding: 0;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--txt-faint);
+        cursor: pointer;
+        transition: color .18s var(--ease), background-color .18s var(--ease);
+    }
+
+    .field-action:hover {
+        color: var(--txt-dim);
+        background: #F1F5F9;
+    }
+
+    .field-action:focus-visible {
+        outline: none;
+        color: var(--accent);
+        box-shadow: 0 0 0 2px var(--ring);
+    }
+
+    .login-hint {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: -4px 0 0;
+        font-size: 12px;
+        color: var(--txt-dim);
+    }
+
+    /* margin 必须显式清零：这是个 <p>，浏览器默认给 1em 上下外边距，
+     * 在 flex+gap 的表单里会多顶出一截，按钮跟着掉下去。 */
+    .login-error {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: 0;
+        padding: 10px 12px;
+        border: 1px solid #FECACA;
+        border-radius: var(--r);
+        background: #FEF2F2;
+        color: var(--danger);
+        font-size: 13px;
+        line-height: 1.5;
+        animation: error-in .22s var(--ease) both;
+    }
+
+    .login-error svg { flex: 0 0 auto; margin-top: 1px; }
+
+    @keyframes error-in {
+        from { opacity: 0; transform: translateY(-4px); }
+        to   { opacity: 1; transform: none; }
+    }
+
+    .login-submit {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        width: 100%;
+        height: 46px;
+        margin-top: 6px;
+        border: 0;
+        border-radius: var(--r);
+        background: var(--btn);
         color: #fff;
-        margin: 20px 0 50px 0;
+        font-size: 15px;
+        font-weight: 500;
+        font-family: inherit;
+        letter-spacing: .02em;
+        cursor: pointer;
+        box-shadow: 0 4px 12px -4px rgba(18, 102, 214, .4);
+        transition: background-color .18s var(--ease), box-shadow .18s var(--ease),
+                    transform .12s var(--ease);
     }
 
-    .ant-btn, .ant-input {
-        height: 50px;
-        border-radius: 30px;
+    .login-submit:hover:not(:disabled) {
+        background: var(--btn-hi);
+        box-shadow: 0 6px 16px -4px rgba(18, 102, 214, .45);
     }
 
-    .ant-input-affix-wrapper .ant-input-prefix {
-        left: 23px;
+    /* 按下时下沉 1px。位移只做 transform，不动 height/margin——
+     * 后者会触发重排，在低端机上按起来是黏的。 */
+    .login-submit:active:not(:disabled) {
+        transform: translateY(1px);
+        box-shadow: 0 2px 8px -4px rgba(18, 102, 214, .4);
     }
 
-    .ant-input-affix-wrapper .ant-input:not(:first-child) {
-        padding-left: 50px;
+    .login-submit:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 3px var(--ring), 0 4px 12px -4px rgba(18, 102, 214, .4);
     }
 
+    .login-submit:disabled { cursor: default; opacity: .7; }
+
+    .login-spinner {
+        width: 15px; height: 15px;
+        border: 2px solid rgba(255, 255, 255, .4);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin .7s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .login-foot {
+        margin: 26px 0 0;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+        line-height: 1.7;
+        color: var(--txt-faint);
+    }
+
+    .login-foot code {
+        padding: 1px 6px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: rgba(241, 245, 249, .8);
+        color: var(--txt-dim);
+        font-size: 11.5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    /* 「减少动态效果」通常是前庭功能需求而不是审美选择：入场、脉冲、
+     * 弧线一律停掉。但按钮上那个转圈保留——它是加载状态的唯一指示，
+     * 去掉之后按下登录就没有任何反馈了，属于功能而非装饰。 */
+    @media (prefers-reduced-motion: reduce) {
+        .login-form-wrap,
+        .login-error { animation: none; }
+
+        .map-pulse,
+        .map-arc { animation: none; }
+
+        .map-pulse { opacity: .2; }
+
+        .field input,
+        .field-icon,
+        .field-action,
+        .login-submit { transition: none; }
+    }
 </style>
 <body>
-<a-layout id="app" v-cloak>
-    <transition name="list" appear>
-        <a-layout-content>
-            <a-row type="flex" justify="center">
-                <a-col :xs="22" :sm="20" :md="16" :lg="12" :xl="8">
-                    <h1>{{ .title }}</h1>
-                </a-col>
-            </a-row>
-            <a-row type="flex" justify="center">
-                <a-col :xs="22" :sm="20" :md="16" :lg="12" :xl="8">
-                    <a-form>
-                        <a-form-item>
-                            <a-input v-model.trim="user.username" placeholder='{{ i18n "username" }}'
-                                     @keydown.enter.native="login" autofocus>
-                                <a-icon slot="prefix" type="user" style="color: rgba(0,0,0,.25)"/>
-                            </a-input>
-                        </a-form-item>
-                        <a-form-item>
-                            <a-input type="password" v-model.trim="user.password"
-                                     placeholder='{{ i18n "password" }}' @keydown.enter.native="login">
-                                <a-icon slot="prefix" type="lock" style="color: rgba(0,0,0,.25)"/>
-                            </a-input>
-                        </a-form-item>
-                        <a-form-item>
-                            <a-button block @click="login" :loading="loading">{{ i18n "login" }}</a-button>
-                        </a-form-item>
-                    </a-form>
-                </a-col>
-            </a-row>
-        </a-layout-content>
-    </transition>
-</a-layout>
+<div id="app" class="login-page" v-cloak>
+
+    <!-- 背景层挂在整页而不是左栏：右侧表单是磨砂玻璃，玻璃背后必须真的有
+         东西可透。挂在左栏里的话玻璃后面是一片纯白，backdrop-filter 模糊
+         出来的还是纯白，等于白加了这个效果。 -->
+    <div class="page-grid" aria-hidden="true"></div>
+    <div class="page-glow" aria-hidden="true"></div>
+
+    <!-- 世界地图点阵。数据是 Natural Earth 的 110m 陆地轮廓（公有领域）
+         按 2.5° 网格采样出的位图，base64 后 1.3 KB，由下面的 buildMapPath
+         现画成一条 path。相比直接内联 2451 个点的 path（48 KB）省掉一个
+         数量级，而这是一张登录页上纯装饰的图。 -->
+    <svg class="page-map" viewBox="0 0 1008 371" fill="none" aria-hidden="true">
+        <path class="map-dots" :d="mapPath"></path>
+        <path v-for="(arc, i) in mapArcs" :key="'b' + i" class="map-arc-base"
+              :d="arc.d"></path>
+        <path v-for="(arc, i) in mapArcs" :key="'a' + i" class="map-arc"
+              :d="arc.d" :style="{ animationDelay: arc.delay }"></path>
+        <template v-for="(n, i) in mapNodes">
+            <circle :key="'p' + i" class="map-pulse" :cx="n.x" :cy="n.y" r="3.4"
+                    :style="{ animationDelay: n.delay }"></circle>
+            <circle :key="'n' + i" class="map-node" :cx="n.x" :cy="n.y" r="2.6"></circle>
+        </template>
+    </svg>
+
+    <div class="page-scrim" aria-hidden="true"></div>
+
+    <!-- ══════════ 左侧：品牌与视觉 ══════════ -->
+    <section class="login-visual">
+        <div class="visual-top">
+            <div class="visual-brand">
+                <span class="login-mark" aria-hidden="true">
+                    <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
+                        <path d="M8.3 14.2h7.4"/>
+                    </svg>
+                </span>
+                <span class="visual-name">AetherUI</span>
+            </div>
+        </div>
+
+        <div class="visual-bottom">
+            <div class="visual-copy">
+                <h2>统一管理 Xray 的<br>节点、分流与用量</h2>
+                <!-- 手动分行：容器宽度固定在 520px（左栏只在 ≥1024px 出现，文案宽度
+                         不随屏幕变化），交给浏览器自动断的话末行只剩「跑的连接。」
+                         五个字吊在那里。两行按句子切，长度也接近。 -->
+                    <p>入站配置、域名分流与流量统计集中在一处，<br>改动经真实 Xray 校验后热更新下发，不中断连接。</p>
+                <div class="visual-tags">
+                    <span class="visual-tag">入站管理</span>
+                    <span class="visual-tag">域名分流</span>
+                    <span class="visual-tag">用量历史</span>
+                    <span class="visual-tag">配置热更新</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ══════════ 右侧：登录表单 ══════════ -->
+    <section class="login-panel">
+        <div class="login-form-wrap">
+            <div class="panel-brand">
+                <span class="login-mark" aria-hidden="true">
+                    <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="2"
+                         stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
+                        <path d="M8.3 14.2h7.4"/>
+                    </svg>
+                </span>
+                <span class="visual-name">AetherUI</span>
+            </div>
+
+            <h1 class="login-title">{{ .title }}</h1>
+            <p class="login-sub">输入管理员账号以进入面板</p>
+
+            <form class="login-form" @submit.prevent="login" novalidate>
+                <div class="field">
+                    <label class="sr-only" for="login-username">{{ i18n "username" }}</label>
+                    <span class="field-icon" aria-hidden="true">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="1.7"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0Z"/>
+                            <path d="M4.5 20.1a7.5 7.5 0 0 1 15 0"/>
+                        </svg>
+                    </span>
+                    <input id="login-username" type="text" name="username"
+                           autocomplete="username" autocapitalize="off" spellcheck="false"
+                           placeholder='{{ i18n "username" }}'
+                           v-model.trim="user.username" @input="errorMsg = ''" autofocus>
+                </div>
+
+                <div class="field has-action">
+                    <label class="sr-only" for="login-password">{{ i18n "password" }}</label>
+                    <span class="field-icon" aria-hidden="true">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                             stroke="currentColor" stroke-width="1.7"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75"/>
+                            <rect x="4.5" y="10.5" width="15" height="11.25" rx="2.25"/>
+                        </svg>
+                    </span>
+                    <input id="login-password" name="password"
+                           :type="passwordVisible ? 'text' : 'password'"
+                           autocomplete="current-password" spellcheck="false"
+                           placeholder='{{ i18n "password" }}'
+                           v-model.trim="user.password"
+                           @input="errorMsg = ''" @keyup="checkCapsLock" @keydown="checkCapsLock">
+                    <button type="button" class="field-action"
+                            :aria-label="passwordVisible ? '隐藏密码' : '显示密码'"
+                            :aria-pressed="String(passwordVisible)"
+                            @click="passwordVisible = !passwordVisible">
+                        <svg v-if="passwordVisible" width="18" height="18" viewBox="0 0 24 24"
+                             fill="none" stroke="currentColor" stroke-width="1.7"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 4l16 16"/>
+                            <path d="M9.9 5.1A9.6 9.6 0 0 1 12 4.9c4.6 0 8.1 3.1 9.4 7.1a12 12 0 0 1-3.3 4.8"/>
+                            <path d="M6.5 6.7A12 12 0 0 0 2.6 12c1.3 4 4.8 7.1 9.4 7.1 1.4 0 2.7-.3 3.9-.8"/>
+                            <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+                        </svg>
+                        <svg v-else width="18" height="18" viewBox="0 0 24 24"
+                             fill="none" stroke="currentColor" stroke-width="1.7"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M2.6 12C3.9 8 7.4 4.9 12 4.9S20.1 8 21.4 12c-1.3 4-4.8 7.1-9.4 7.1S3.9 16 2.6 12Z"/>
+                            <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- 大写锁定是登录失败最常见又最难自己看出来的原因，密码还是掩码显示的。
+                     只在真的开着时才占位，平时不产生任何视觉噪音。 -->
+                <p v-if="capsLock" class="login-hint">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.8"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 4.6 5.2 11.4h3.4v3.9h6.8v-3.9h3.4L12 4.6Z"/>
+                        <path d="M8.6 19.4h6.8"/>
+                    </svg>
+                    大写锁定已开启
+                </p>
+
+                <!-- role=alert 让读屏软件在错误出现时立刻播报，而不是等用户自己
+                     Tab 回来才发现。错误就放在字段下方、按钮上方，视线不用离开操作区。 -->
+                <p v-if="errorMsg" class="login-error" role="alert">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                         stroke="currentColor" stroke-width="1.8"
+                         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"/>
+                        <path d="M12 8v4.5"/>
+                        <path d="M12 15.6h.01"/>
+                    </svg>
+                    <span>[[ errorMsg ]]</span>
+                </p>
+
+                <button type="submit" class="login-submit" :disabled="loading">
+                    <span v-if="loading" class="login-spinner" aria-hidden="true"></span>
+                    <span>{{ i18n "login" }}</span>
+                </button>
+            </form>
+
+            <p class="login-foot">
+                <!-- 菜单项整体不断行：390px 宽的机器上它会被拆成
+                     「重置账号密 / 码」，一个操作名被从中间劈开最难读。 -->
+                忘记密码？在服务器上执行 <code>a-ui</code>
+                并选择<span style="white-space:nowrap">「重置账号密码」</span>
+            </p>
+        </div>
+    </section>
+</div>
 {{template "js" .}}
 <script>
-    const leftColor = RandomUtil.randomIntRange(0x222222, 0xFFFFFF / 2).toString(16);
-    const rightColor = RandomUtil.randomIntRange(0xFFFFFF / 2, 0xDDDDDD).toString(16);
-    const deg = RandomUtil.randomIntRange(0, 360);
-    const background = `linear-gradient(${deg}deg, #${leftColor} 10%, #${rightColor} 100%)`;
-    document.querySelector('#app').style.background = background;
+    // 世界地图点阵：Natural Earth 110m 陆地（公有领域）按 2.5° 网格采样成
+    // 145×54 的位图，行优先、每格 1 bit。解码后拼成一条 path，用
+    // stroke-linecap:round 把零长度线段画成圆点——2451 个 <circle> 元素
+    // 会让这张纯装饰的图在 DOM 里的重量超过整个表单。
+    const MAP_B64 = 'AAAAGMPf//+AA0AAAACAAAAAAAAAHl+AP//AAAAA4Af+APAAAAAAaS3wD/+AAAAAgh//7AAAAB8AA8b/A/+AAAcAA//////gDD///Gexwf8AAB/6f///////97/////g0PwPADzn////////+Af////AKDwAAH3//////////Af3///A8AQAAD7////////88ABgH//gPwAAAgY///////+AgACAB//+P4AAAII///////8AwAAAAf//3/AAAW/////////wQAAAAP////gAAE/////////4AAAAAA///8YAAB/////////0AAAAAA////gAAAf/n//////wAAAAAAf//8AAAB8Xwf/////hAAAAAAP//8AAAA8Hn//////hAAAAAAH//8AAAAcCX/////8wgAAAAAB//+AAAAF8AP////+JwAAAAAAP/+AAAAH+AH/////jAAAAAAAH/+AAAAD////////wAAAAAAAA/BAAAAH//99////4AAAAAAAAPgAAAAD//+/H///4AAAAAAAALgQAAAD///v8P//4AAAAAAAAB5hAAAB///3+B8fQAAAAAAAAAfhAAAA///9+A8PgAAAAAAAAAA8AAAAf//+cAcB4QAAAAAAAAAGAAAAP///4AOA8AAAAAAAAAABHgAAD////ACAEBAAAAAAAAAAH+AAB////gAgIBgAAAAAAAAAD/wAAOP//gAACCAAAAAAAAAAB/8AAAD//gAAFGAAAAAAAAAAB/+AAAB//gAABnoAAAAAAAAAA//4AAA//gAAARoUAAAAAAAAAf//AAAP/gAAAEGDwAAAAAAAAH//4AAD/wAAABwA4AAAAAAAAD//4AAB/4AAAABACEAAAAAAAA//4AAA/+AAAAAAEAAAAAAAAAf/8AAA//EAAAADyAAAAAAAAAD/+AAAf/MAAAAD9gAAAAAAAAB//AAAH/GAAAAD/wAAAAAAAAA//AAAD/jAAAAP/8AAAAAAAAAf+AAAB/hAAAAH//AAAAAAAAAP+AAAAfwAAAAD//wAAAAAAAAH/AAAAPwAAAAA//4AAAAAAAAD/AAAADwAAAAAfP8AAAAAAAAB9AAAABAAAAAAID8AAAAAAAAB/AAAAAAAAAAAAA8AIAAAAAAA+AAAAAAAAAAAAAAAEAAAAAAAeAAAAAAAAAAAAABAEAAAAAAAOAAAAAAAAAAAAAAAEAAAAAAAHAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAAAQAAAAAAAAAAAAADgAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAA==';
+    const MAP_COLS = 145, MAP_ROWS = 54, MAP_CELL = 7;
+
+    function buildMapPath() {
+        const bin = atob(MAP_B64);
+        const out = [];
+        for (let r = 0; r < MAP_ROWS; r++) {
+            for (let c = 0; c < MAP_COLS; c++) {
+                const i = r * MAP_COLS + c;
+                if ((bin.charCodeAt(i >> 3) >> (7 - (i & 7))) & 1) {
+                    out.push('M' + c * MAP_CELL + ' ' + r * MAP_CELL + 'h0');
+                }
+            }
+        }
+        return out.join('');
+    }
+
     const app = new Vue({
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
             loading: false,
+            passwordVisible: false,
+            capsLock: false,
+            errorMsg: '',
             user: new User(),
+            mapPath: buildMapPath(),
+            // 几个常见落地区域的位置，坐标已按上面的网格换算好。
+            // 纯装饰，不代表这台面板上真实存在的节点。
+            mapNodes: [
+                { x: 895.2, y: 118.4, delay: '0s'   },
+                { x: 794.6, y: 214.6, delay: '.9s'  },
+                { x: 528.3, y: 78.1,  delay: '1.7s' },
+                { x: 173.0, y: 123.1, delay: '2.5s' },
+                { x: 373.5, y: 284.2, delay: '3.3s' }
+            ],
+            mapArcs: [
+                { d: 'M895.2 118.4 Q735 6 528.3 78.1',    delay: '0s'   },
+                { d: 'M173 123.1 Q360 20 528.3 78.1',     delay: '1.8s' },
+                { d: 'M794.6 214.6 Q900 200 895.2 118.4', delay: '3.4s' }
+            ]
         },
         methods: {
-            async login() {
-                this.loading = true;
-                const msg = await HttpUtil.post('/login', this.user);
-                this.loading = false;
-                if (msg.success) {
-                    location.href = basePath + 'aui/';
+            checkCapsLock(e) {
+                // getModifierState 在部分环境下拿不到（合成事件、老浏览器），
+                // 拿不到就当没开——这只是个提示，不该因为它自己报错打断输入。
+                if (e.getModifierState) {
+                    this.capsLock = e.getModifierState('CapsLock');
                 }
+            },
+            async login() {
+                if (this.loading) return;
+                this.errorMsg = '';
+
+                // 先在本地拦一道空值，省掉一次必然失败的往返。文案与后端
+                // index.go 里 pureJsonMsg 用的完全一致，避免同一种错误
+                // 在两条路径上说法不同。
+                if (!this.user.username) {
+                    this.errorMsg = '请输入用户名';
+                    document.getElementById('login-username').focus();
+                    return;
+                }
+                if (!this.user.password) {
+                    this.errorMsg = '请输入密码';
+                    document.getElementById('login-password').focus();
+                    return;
+                }
+
+                this.loading = true;
+                // 刻意不用 HttpUtil.post：它对失败会额外弹一个红色 $message.error，
+                // 与表单里这条 role=alert 的错误重复，同一个错误被说两遍。这里
+                // 自己解析响应，错误只留在表单内、离出错的字段最近。
+                try {
+                    const resp = await axios.post('/login', this.user);
+                    const body = resp && resp.data;
+                    if (body && body.success) {
+                        // 跳转期间保持 loading：按钮若在此刻弹回可点状态，
+                        // 会让人以为没登上去而再点一次。
+                        location.href = basePath + 'aui/';
+                        return;
+                    }
+                    this.errorMsg = (body && body.msg) || '登录失败，请重试';
+                } catch (e) {
+                    this.errorMsg = '无法连接到面板，请检查网络后重试';
+                }
+                this.loading = false;
+                this.$nextTick(() => document.getElementById('login-password').focus());
             }
         }
     });
