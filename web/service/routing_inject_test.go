@@ -1008,7 +1008,13 @@ func TestBuildRuleNeverCombinesDomainAndIP(t *testing.T) {
 	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}
-	for i, r := range decodeRules(t, cfg) {
+	// 先确认真的生成了东西：不加这一条，生成若退化成「整条规则被跳过」，
+	// 下面的循环只会遍历模板自带的那条 api 规则，测试照样绿。
+	rules := decodeRules(t, cfg)
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want 3（模板 1 条 + 生成 2 条）: %v", len(rules), rules)
+	}
+	for i, r := range rules {
 		_, hasDomain := r["domain"]
 		_, hasIP := r["ip"]
 		if hasDomain && hasIP {
@@ -1046,14 +1052,24 @@ func TestBuildRuleNeverEmitsEmptyConditionArray(t *testing.T) {
 			if err := (&RoutingInjector{}).Inject(cfg); err != nil {
 				t.Fatalf("Inject: %v", err)
 			}
-			for i, r := range decodeRules(t, cfg) {
+			// 同上：没有这条计数，整条规则被跳过时循环无事可做，测试也绿。
+			rules := decodeRules(t, cfg)
+			if len(rules) != 2 {
+				t.Fatalf("got %d rules, want 2（模板 1 条 + 生成 1 条）: %v", len(rules), rules)
+			}
+			for i, r := range rules {
 				for _, key := range []string{"domain", "ip", "inboundTag"} {
 					v, ok := r[key]
 					if !ok {
 						continue
 					}
+					// 必须是 !isList：nil 切片会被 json.Marshal 成 null，
+					// 类型断言不成立，写成 isList && ... 时这条检查会被
+					// 静默跳过——而 inboundTag 恰恰是可能为 nil 的那一个
+					// （全局规则下 var inboundTags []string 从未被赋值）。
+					// 这个测试本身就是 N2 的绊线，绝不能靠「没看」通过。
 					list, isList := v.([]any)
-					if isList && len(list) == 0 {
+					if !isList || len(list) == 0 {
 						t.Errorf("rules[%d][%q] 是空数组: %v", i, key, r)
 					}
 				}
