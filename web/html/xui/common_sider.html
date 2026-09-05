@@ -42,6 +42,75 @@
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
+    <div class="sider-version">
+        <a-popover v-model="versionPopoverVisible" trigger="click" placement="topRight"
+                   overlay-class-name="version-popover">
+            <template slot="content">
+                <div class="version-panel">
+                    <div class="version-panel-head">
+                        <span>当前版本</span>
+                        <a-icon type="sync" :spin="versionRefreshing"
+                                @click="refreshPanelVersion()"></a-icon>
+                    </div>
+                    <div class="version-panel-body">
+                        <div class="version-current">
+                            [[ panelVersion.current ]]
+                            <a-icon v-if="panelVersion.knownCurrent && !panelVersion.hasUpdate"
+                                    type="check-circle" theme="filled" style="color:#52c41a"></a-icon>
+                        </div>
+                        <div class="version-state">[[ versionStateText() ]]</div>
+                        <div v-if="panelVersion.lastError" class="version-error">
+                            [[ panelVersion.lastError ]]
+                        </div>
+                        <a-button v-if="panelVersion.hasUpdate && panelVersion.updatable"
+                                  type="primary" size="small" style="margin-top:8px"
+                                  @click="confirmUpgrade(panelVersion.latest, false)">
+                            更新到 [[ panelVersion.latest ]]
+                        </a-button>
+                        <div v-if="!panelVersion.updatable && panelVersion.unsupportedReason"
+                             class="version-unsupported">
+                            [[ panelVersion.unsupportedReason ]]
+                        </div>
+                        <div style="margin-top:8px">
+                            <a :href="'https://github.com/SienFeng/AetherUI/releases'"
+                               target="_blank" rel="noopener">
+                                <a-icon type="github"></a-icon> 查看发布
+                            </a>
+                        </div>
+                    </div>
+                    <div v-if="panelVersion.updatable && panelVersion.releases.length"
+                         class="version-rollback">
+                        <div class="version-rollback-head" @click="rollbackOpen = !rollbackOpen">
+                            <span><a-icon type="clock-circle"></a-icon> 版本回退</span>
+                            <a-icon :type="rollbackOpen ? 'up' : 'down'"></a-icon>
+                        </div>
+                        <div v-if="rollbackOpen">
+                            <div class="version-rollback-tip">
+                                选择要回退到的版本（近 [[ panelVersion.releases.length ]] 个版本）
+                            </div>
+                            <a-radio-group v-model="rollbackTag" style="width:100%">
+                                <div v-for="r in panelVersion.releases" :key="r.tagName"
+                                     class="version-rollback-item">
+                                    <a-radio :value="r.tagName">[[ r.tagName ]]</a-radio>
+                                    <span class="version-rollback-date">
+                                        [[ formatReleaseDate(r.publishedAt) ]]
+                                    </span>
+                                </div>
+                            </a-radio-group>
+                            <a-button size="small" :disabled="!rollbackTag"
+                                      style="margin-top:8px;width:100%"
+                                      @click="confirmUpgrade(rollbackTag, true)">
+                                回退到选中版本
+                            </a-button>
+                        </div>
+                    </div>
+                </div>
+            </template>
+            <a-badge :dot="panelVersion.hasUpdate">
+                <span class="sider-version-tag">[[ panelVersion.current || '—' ]]</span>
+            </a-badge>
+        </a-popover>
+    </div>
 </a-layout-sider>
 <a-drawer id="sider-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"

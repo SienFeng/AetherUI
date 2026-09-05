@@ -263,3 +263,115 @@ html, body {
     flex: 1 1 auto;      /* 控件填满剩余空间 */
     min-width: 0;        /* 允许收缩，避免溢出列宽 */
 }
+
+/* 侧栏底部的版本区。ant-design-vue 1.x 的 sider 内部包一层
+   .ant-layout-sider-children，把它变成纵向 flex 才能让版本区贴底。 */
+#sider .ant-layout-sider-children {
+    display: flex;
+    flex-direction: column;
+}
+
+#sider .ant-layout-sider-children > .ant-menu {
+    flex: 1 1 auto;
+}
+
+.sider-version {
+    flex: 0 0 auto;
+    padding: 12px 16px;
+    text-align: center;
+}
+
+.sider-version-tag {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, .65);
+    background: rgba(255, 255, 255, .08);
+    cursor: pointer;
+    user-select: none;
+}
+
+.sider-version-tag:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, .16);
+}
+
+.version-panel {
+    width: 260px;
+}
+
+.version-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.version-panel-head .anticon {
+    cursor: pointer;
+    color: #8c8c8c;
+}
+
+.version-panel-body {
+    padding: 12px 0;
+    text-align: center;
+}
+
+.version-current {
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.version-state {
+    color: #8c8c8c;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.version-error,
+.version-unsupported {
+    color: #ff4d4f;
+    font-size: 12px;
+    margin-top: 6px;
+    word-break: break-all;
+}
+
+.version-unsupported {
+    color: #8c8c8c;
+}
+
+.version-rollback {
+    border-top: 1px solid #f0f0f0;
+    padding-top: 8px;
+}
+
+.version-rollback-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    color: #595959;
+}
+
+.version-rollback-tip {
+    font-size: 12px;
+    color: #8c8c8c;
+    margin: 6px 0;
+}
+
+.version-rollback-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    border: 1px solid #f0f0f0;
+    border-radius: 6px;
+    margin-bottom: 6px;
+}
+
+.version-rollback-date {
+    font-size: 12px;
+    color: #8c8c8c;
+}

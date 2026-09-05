@@ -366,6 +366,7 @@
 <script src="{{ .base_path }}assets/js/model/routing.js?{{ .cur_ver }}"></script>
 <script>
     const app = new Vue({
+        mixins: [panelVersionMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
