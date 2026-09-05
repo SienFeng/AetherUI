@@ -276,7 +276,16 @@ func (a *InboundController) getTrafficHistory(c *gin.Context) {
 		jsonMsg(c, "获取用量历史", err)
 		return
 	}
-	// 同其它接口：前端发的是 urlencoded，绑定标签必须是 form。
+	// 这里实际收到的是 JSON，不是字面意义上的 urlencoded：追踪本项目自带的
+	// axios v0.18.0 可知 dispatchRequest 在扁平化 headers 之前先跑
+	// transformRequest，那时 headers['Content-Type'] 还是 undefined，于是
+	// setContentTypeIfUnset 打上 application/json;charset=utf-8，随后的
+	// merge 里胜过 axios-init.js 给 post 设的 urlencoded。Gin 因此走的是
+	// JSON 绑定，range 能绑上是因为 struct 字段没写 json tag 时
+	// encoding/json 按大小写不敏感匹配字段名——这不是缺陷，与 getAccessLogs
+	// 等既有接口完全一致。form tag 留着是为了与既有接口保持一致，且在真的
+	// urlencoded 场景下同样能绑定；不改成 json tag（会改变绑定行为，不在
+	// 发版前做）。
 	form := struct {
 		Range string `form:"range"`
 	}{}

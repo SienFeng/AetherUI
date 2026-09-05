@@ -33,6 +33,24 @@ func (s *TrafficHistoryService) Record(traffics []*xray.Traffic, now time.Time) 
 	if db == nil || len(traffics) == 0 {
 		return nil
 	}
+	// xray 的 QueryStats 对每个已注册的计数器都会返回一行，包括值为 0 的——
+	// 只要 xray 在跑，traffics 每轮都非空，一个完全空闲的面板同样每 10 秒
+	// 收到一整份全零的增量。提前扫一遍，一条非零的入站增量都没有就直接
+	// 返回，省掉下面这两步：GetTimeLocation（一次 settings 表查询 + 一次
+	// time.LoadLocation——Go 不缓存后者，每次都要重新读 tzdata 文件）与
+	// inboundTagToId（SELECT * FROM inbounds，取的是完整行，包含
+	// settings/streamSettings/sniffing 这些 JSON 大字段）。一个空闲面板
+	// 每天约 8640 轮（86400s / 10s），这两步不做的话就是白跑一次全表查询。
+	hasInboundTraffic := false
+	for _, t := range traffics {
+		if t.IsInbound && (t.Up != 0 || t.Down != 0) {
+			hasInboundTraffic = true
+			break
+		}
+	}
+	if !hasInboundTraffic {
+		return nil
+	}
 	loc, err := s.settingService.GetTimeLocation()
 	if err != nil {
 		return err
@@ -76,18 +94,28 @@ func (s *TrafficHistoryService) Record(traffics []*xray.Traffic, now time.Time) 
 
 	hour := model.AlignHour(now, loc)
 	day := model.AlignDay(now, loc)
-	for id, d := range deltas {
-		if err := upsertBucket(db, model.GranularityHour, id, hour, d.up, d.down); err != nil {
-			return err
+	// 整个循环包进一个事务：GORM 的 SkipDefaultTransaction 默认是 false
+	// （本项目从没设过它），意味着每一次 Create 都自带一个独立的
+	// BEGIN...COMMIT。不包事务的话，N 个活跃入站每 10 秒就是 2N 次独立
+	// 提交——SQLite 默认回滚日志下每次提交约 2 次 fsync，且与主库、访问
+	// 日志库共享同一块盘，N=15 时约每轮 60 次、持续约 6 次/秒。成本在于
+	// 提交次数而非语句数（设计文档 §4.3 只算了语句数）。包成一个事务后
+	// 2N 次提交变 1 次，副作用是这一轮采集变成原子的：磁盘中途出错是
+	// 整轮不写，而不是写了一半。
+	return db.Transaction(func(tx *gorm.DB) error {
+		for id, d := range deltas {
+			if err := upsertBucket(tx, model.GranularityHour, id, hour, d.up, d.down); err != nil {
+				return err
+			}
+			// 日桶独立累加，不由小时桶汇总而来：汇总方案要处理「小时桶已被
+			// 清理但日桶还没算」的补算逻辑，独立累加天生免疫。日桶一年才
+			// 365 行，多一次 UPSERT 的代价可以忽略。
+			if err := upsertBucket(tx, model.GranularityDay, id, day, d.up, d.down); err != nil {
+				return err
+			}
 		}
-		// 日桶独立累加，不由小时桶汇总而来：汇总方案要处理「小时桶已被
-		// 清理但日桶还没算」的补算逻辑，独立累加天生免疫。日桶一年才
-		// 365 行，多一次 UPSERT 的代价可以忽略。
-		if err := upsertBucket(db, model.GranularityDay, id, day, d.up, d.down); err != nil {
-			return err
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // upsertBucket 把增量累加进目标桶，桶不存在时创建。
