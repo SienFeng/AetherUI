@@ -272,7 +272,9 @@ cidrs   非空 → 发一条带 ip   的规则
 
 ### 8.6 校验
 
-`entity.CheckValid` 逐行检查语法：`localhost`、裸 IP、`IP:port`、或 `udp://` `tcp://` `tls://` `https://` `h2c://` `quic://` 开头的地址。**只查语法，不测可达性。**
+`entity.CheckValid` 逐行检查语法：`localhost`、裸 IP、或 `https://` `h2c://` `https+local://` `h2c+local://` `quic+local://` `tcp://` `tcp+local://` 开头的地址。**只查语法，不测可达性。**
+
+名单必须与核心的分派表 `app/dns/nameserver.go:53-76` 一一对应，本节初稿抄错了：`udp://` `tls://` `quic://`（非 local）根本不在表里，落进末尾的 UDP 分支后把整个字符串当主机名，`Configuration OK` 而 DNS 设置完全空转；`IP:port` 是域名族地址，`url.Parse` 直接失败，实测 xray **拒绝启动**（exit 23）——而 `dns` 在 `hot_diff` 的 static 名单里必然触发整进程重启，`Process.Start()` 从不回传启动失败，面板会继续显示 `running`。两侧都必须拒绝。
 
 域名型 DoH 端点（`https://dns.google/dns-query`）**警告但不拒绝**：它需要 bootstrap 解析自己的域名，配错会很难排查，但拒绝会挡住合法用法。IP 型端点（`https://8.8.8.8/dns-query`）零 bootstrap 依赖，UI 里推荐它。
 

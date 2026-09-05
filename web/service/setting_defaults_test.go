@@ -98,14 +98,51 @@ func TestDNSServersDefaultsToEmpty(t *testing.T) {
 	}
 }
 
+// 这份名单与 app/dns/nameserver.go:53-76 的分派表一一对应，都在真实 xray
+// （bin/xray-darwin-arm64，26.7.28）上 run -test 过。
+// 每个 +local 形式单列一行：它们与不带 +local 的兄弟共享前缀的前几个字符，
+// 用例在这里守住「前缀匹配没有互相遮蔽」。
 func TestCheckValidAcceptsSupportedDNSForms(t *testing.T) {
-	all := validBaseSetting()
-	all.DNSServers = "8.8.8.8\n1.1.1.1:53\nlocalhost\n" +
-		"udp://223.5.5.5\ntcp://223.5.5.5\ntls://8.8.8.8\n" +
-		"https://8.8.8.8/dns-query\nh2c://223.5.5.5/dns-query\nquic://8.8.8.8\n" +
-		"2001:4860:4860::8888"
-	if err := all.CheckValid(); err != nil {
-		t.Errorf("unexpected error: %v", err)
+	for _, form := range []string{
+		"8.8.8.8",
+		"2001:4860:4860::8888",
+		"localhost",
+		"https://8.8.8.8/dns-query",
+		"h2c://223.5.5.5/dns-query",
+		"https+local://8.8.8.8/dns-query",
+		"h2c+local://223.5.5.5/dns-query",
+		"quic+local://8.8.8.8",
+		"tcp://223.5.5.5",
+		"tcp+local://223.5.5.5",
+	} {
+		t.Run(form, func(t *testing.T) {
+			all := validBaseSetting()
+			all.DNSServers = form
+			if err := all.CheckValid(); err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// 这些写法 xray 全都不认识，而两种失败在面板上都看不见——见
+// entity.dnsServerSchemes 的注释。IP:端口 会让 xray 直接拒绝启动
+// （实测 exit 23），其余三个静默退化成连不上的 UDP 解析器。
+func TestCheckValidRejectsFormsXrayDoesNotSupport(t *testing.T) {
+	for _, form := range []string{
+		"1.1.1.1:53",
+		"[2001:4860:4860::8888]:53",
+		"udp://223.5.5.5",
+		"tls://8.8.8.8",
+		"quic://8.8.8.8",
+	} {
+		t.Run(form, func(t *testing.T) {
+			all := validBaseSetting()
+			all.DNSServers = form
+			if err := all.CheckValid(); err == nil {
+				t.Errorf("%q 应被拒绝：xray 的 dns.servers 不认识这种写法", form)
+			}
+		})
 	}
 }
 

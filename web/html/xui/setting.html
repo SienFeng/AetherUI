@@ -171,7 +171,7 @@
                                                    desc="关闭时，IP 分流规则只对客户端直接连 IP 的连接生效。打开后 xray 会在所有域名规则都没命中时，于本机解析域名再匹配一次 IP 规则；代价是每条未命中的连接多一次解析，且模板里「私网 IP → 拦截」那条规则会开始对域名生效。会覆盖模板中的 routing.domainStrategy，开关变化需重启 xray（约 10 秒后自动完成）"
                                                    v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
                                 <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
-                                                   desc="留空表示不启用，由系统的 /etc/resolv.conf 解析。填写后，本机上 xray 的域名解析改走这里配置的服务器，云服务商的解析器不再看得到用户访问的域名；这改善的是服务端那一次解析，客户端自己的 DNS 不经过本机，不受影响。推荐 IP 型端点（例如 https://8.8.8.8/dns-query），不需要先解析任何域名。域名型端点（例如 https://dns.google/dns-query）允许填写但不推荐：xray 要先解析这个域名本身才能把它当解析器用，而那一刻未必有解析器可用。不带协议头的裸域名（例如 dns.google）会被直接拒绝——这种写法 xray 完全用不了。列表末尾会自动补一个 localhost 兜底：配置的解析器全部不可用时退回系统解析，不会断网。改动需重启 xray（约 10 秒后自动完成）"
+                                                   desc="留空表示不启用，由系统的 /etc/resolv.conf 解析。填写后，本机上 xray 的域名解析改走这里配置的服务器，云服务商的解析器不再看得到用户访问的域名；这改善的是服务端那一次解析，客户端自己的 DNS 不经过本机，不受影响。可用写法只有裸 IP（8.8.8.8 / 2001:4860:4860::8888）、localhost，以及 https:// h2c:// https+local:// h2c+local:// quic+local:// tcp:// tcp+local:// 开头的地址；udp:// tls:// quic:// 与「IP:端口」会被拒绝——xray 的 dns.servers 并不认识这几种写法，写进去要么让 xray 拒绝启动，要么静默失效。推荐 IP 型端点（例如 https://8.8.8.8/dns-query），不需要先解析任何域名。域名型端点（例如 https://dns.google/dns-query）允许填写但不推荐：xray 要先解析这个域名本身才能把它当解析器用，而那一刻未必有解析器可用。不带协议头的裸域名（例如 dns.google）会被直接拒绝——这种写法 xray 完全用不了。列表末尾会自动补一个 localhost 兜底：配置的解析器全部不可用时退回系统解析，不会断网。改动需重启 xray（约 10 秒后自动完成）"
                                                    v-model="allSetting.dnsServers"></setting-list-item>
                             </a-list>
                         </a-tab-pane>

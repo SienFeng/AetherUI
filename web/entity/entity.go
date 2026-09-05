@@ -73,9 +73,30 @@ func checkIPDBSourceUrl(label, raw string) error {
 	return nil
 }
 
-// dnsServerSchemes 是 xray 的 dns.servers 支持的地址前缀。
+// dnsServerSchemes 是 xray 的 dns.servers 真正认识的地址前缀，一个不多一个不少。
+//
+// 名单直接抄自核心的分派表 app/dns/nameserver.go:53-76（NewServer）：只有
+// localhost（整串精确匹配）、下面这七个 scheme、fakedns 与裸 IP 目标会各自
+// 走到专门的解析器实现，**其余一律落进函数末尾那个 UDP 分支**，把整个字符串
+// 当成主机名去连。
+//
+// 所以这份名单两侧的错误都必须挡住，而且两种失败在面板上都完全看不见：
+//   - udp:// tls:// quic://（注意 quic 只有 quic+local:// 这一种形式）看着
+//     天经地义，实测（bin/xray-darwin-arm64，26.7.28）全部 Configuration OK，
+//     运行时却变成一个指向 "udp://223.5.5.5" 这种不可解析主机名的 UDP 客户端。
+//     DNS 设置从此完全空转，不报任何错，管理员以为解析已经换掉了。
+//   - IP:端口（1.1.1.1:53）更糟。它是域名族地址，进 url.Parse 直接失败，
+//     实测 xray **拒绝启动**（exit 23，"first path segment in URL cannot
+//     contain colon"）。而 dns 在 xray/hot_diff.go 的 static 名单里，保存必然
+//     触发整进程重启；Process.Start() 把 cmd.Run() 丢进 goroutine，从不回传
+//     启动失败，于是 /server/status 继续返回 running、errorMsg 为空，而机器上
+//     所有用户已经断网。改动前的校验器不但放行它，报错文案还在推荐这种写法。
+//
+// 前缀匹配不会互相遮蔽：https+local:// 的第 6 个字符是 '+'，https:// 是 ':'，
+// HasPrefix 不成立；h2c / tcp 同理。每个 +local 形式都有单独的用例守着。
 var dnsServerSchemes = []string{
-	"udp://", "tcp://", "tls://", "https://", "h2c://", "quic://",
+	"https://", "h2c://", "https+local://", "h2c+local://",
+	"quic+local://", "tcp://", "tcp+local://",
 }
 
 // checkDNSServer 只查语法，不测可达性。
@@ -102,15 +123,15 @@ func checkDNSServer(item string) error {
 		}
 		return nil
 	}
-	host := item
-	if h, _, err := net.SplitHostPort(item); err == nil {
-		host = h
-	}
-	if net.ParseIP(host) == nil {
+	// 刻意不做 net.SplitHostPort：IP:端口 是 xray 唯一会拒绝启动的写法
+	// （见 dnsServerSchemes 的注释），必须在这里挡下。
+	if net.ParseIP(item) == nil {
 		return common.NewError("DNS 服务器地址不支持:", item,
-			"——应为 IP（8.8.8.8）、IP:端口、localhost，或 "+
+			"——应为裸 IP（8.8.8.8 / 2001:4860:4860::8888）、localhost，或 "+
 				strings.Join(dnsServerSchemes, " ")+"开头的地址。"+
-				"域名型端点（dns.google）不支持：xray 要先解析它本身才能用它")
+				"IP:端口 会让 xray 拒绝启动；udp:// tls:// quic:// 这三种写法 xray 并不认识，"+
+				"会静默退化成一个连不上的 UDP 解析器。"+
+				"不带协议头的裸域名（dns.google）也不支持：xray 要先解析它本身才能用它")
 	}
 	return nil
 }
