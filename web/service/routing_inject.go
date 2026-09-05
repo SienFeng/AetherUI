@@ -20,6 +20,7 @@ type RoutingInjector struct {
 	ruleService        RoutingRuleService
 	inboundService     InboundService
 	ipdbService        IPDBService
+	settingService     SettingService
 }
 
 func (s *RoutingInjector) Inject(cfg *xray.Config) error {
@@ -60,6 +61,16 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	rules = append(rules, blockRules...)
 	rules = append(rules, proxyRules...)
 	routing["rules"] = rules
+
+	// 开关为 0 时【不碰】domainStrategy：模板里管理员可能手写过它，
+	// 覆盖成默认值是在他不知情时改变分流行为。升级后行为零变化也靠这一条。
+	resolveDomain, err := s.settingService.GetIPRuleResolveDomain()
+	if err != nil {
+		return err
+	}
+	if resolveDomain {
+		routing["domainStrategy"] = "IPIfNonMatch"
+	}
 
 	encodedRouting, err := json.Marshal(routing)
 	if err != nil {

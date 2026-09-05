@@ -67,3 +67,22 @@ func TestCheckValidRejectsRelativeDefaultKeyPath(t *testing.T) {
 		t.Fatal("相对路径应被拒绝")
 	}
 }
+
+func TestIPRuleResolveDomainDefaultsToOff(t *testing.T) {
+	setupDB(t)
+	all, err := (&SettingService{}).GetAllSetting()
+	if err != nil {
+		t.Fatalf("GetAllSetting: %v", err)
+	}
+	if all.IPRuleResolveDomain != 0 {
+		t.Errorf("IPRuleResolveDomain = %d, want 0", all.IPRuleResolveDomain)
+	}
+}
+
+func TestCheckValidRejectsOutOfRangeIPRuleResolveDomain(t *testing.T) {
+	all := validBaseSetting()
+	all.IPRuleResolveDomain = 2
+	if err := all.CheckValid(); err == nil {
+		t.Error("expected error for a value other than 0/1")
+	}
+}

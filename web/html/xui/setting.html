@@ -167,6 +167,9 @@
                                 <setting-list-item type="text" title="订阅更新时间"
                                                    desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，最多 10 分钟内生效，无需重启面板"
                                                    v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
+                                <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
+                                                   desc="关闭时，IP 分流规则只对客户端直接连 IP 的连接生效。打开后 xray 会在所有域名规则都没命中时，于本机解析域名再匹配一次 IP 规则；代价是每条未命中的连接多一次解析，且模板里「私网 IP → 拦截」那条规则会开始对域名生效。会覆盖模板中的 routing.domainStrategy，开关变化需重启 xray（约 10 秒后自动完成）"
+                                                   v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                     </a-tabs>

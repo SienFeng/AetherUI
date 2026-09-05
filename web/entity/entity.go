@@ -50,6 +50,8 @@ type AllSetting struct {
 	TrafficDayRetentionDays  int `json:"trafficDayRetentionDays" form:"trafficDayRetentionDays"`
 	ConcurrencyIdleTimeout   int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
+	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
+
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
 
 	DefaultDomain   string `json:"defaultDomain" form:"defaultDomain"`
@@ -200,6 +202,13 @@ func (s *AllSetting) CheckValid() error {
 
 	if s.AccessLogEnable != 0 && s.AccessLogEnable != 1 {
 		return common.NewError("访问日志开关只能是 0 或 1:", s.AccessLogEnable)
+	}
+
+	// 只接受 0/1：反射只支持 int，前端的 switch 也只会送这两个值。
+	// 放行其他值会让生成期写出一个 xray 不认识的 domainStrategy，
+	// 而那会让整份配置加载失败——全员断网。
+	if s.IPRuleResolveDomain != 0 && s.IPRuleResolveDomain != 1 {
+		return common.NewError("「IP 规则匹配域名目标」只能是 0 或 1:", s.IPRuleResolveDomain)
 	}
 
 	// 不允许 0：0 在这里最容易被理解成「永不清除」，而实现上会变成

@@ -1141,3 +1141,37 @@ func TestBuildRuleSkipsWhenNeitherDomainsNorCidrs(t *testing.T) {
 		t.Errorf("模板里那条 api 规则之外不应有别的: %v", rules)
 	}
 }
+
+// 默认关：升级后行为零变化，模板里没有 domainStrategy 就保持没有。
+func TestInjectLeavesDomainStrategyAloneByDefault(t *testing.T) {
+	setupDB(t)
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	var routing map[string]any
+	if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+		t.Fatalf("unmarshal routing: %v", err)
+	}
+	if _, ok := routing["domainStrategy"]; ok {
+		t.Errorf("domainStrategy must not be written when the switch is off: %v", routing)
+	}
+}
+
+func TestInjectWritesDomainStrategyWhenEnabled(t *testing.T) {
+	setupDB(t)
+	if err := (&SettingService{}).setInt("ipRuleResolveDomain", 1); err != nil {
+		t.Fatalf("setInt: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	var routing map[string]any
+	if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+		t.Fatalf("unmarshal routing: %v", err)
+	}
+	if routing["domainStrategy"] != "IPIfNonMatch" {
+		t.Errorf("domainStrategy = %v, want IPIfNonMatch", routing["domainStrategy"])
+	}
+}

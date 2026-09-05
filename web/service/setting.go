@@ -40,6 +40,7 @@ var defaultValueMap = map[string]string{
 	"trafficHourRetentionDays": "30",
 	"trafficDayRetentionDays":  "365",
 	"concurrencyIdleTimeout":   "120",
+	"ipRuleResolveDomain":      "0",
 	"tcInterface":              "",
 	"defaultDomain":            "",
 	"defaultCertFile":          "",
@@ -465,6 +466,18 @@ func (s *SettingService) GetAccessLogEnable() (bool, error) {
 // GetConcurrencyIdleTimeout 返回并发判定的闲置阈值（秒）。0 表示关闭闲置判定。
 func (s *SettingService) GetConcurrencyIdleTimeout() (int, error) {
 	return s.getInt("concurrencyIdleTimeout")
+}
+
+// GetIPRuleResolveDomain 报告是否允许 IP 分流规则匹配域名目标。
+//
+// 为真时生成期写 routing.domainStrategy = IPIfNonMatch，xray 会在第一遍
+// 全部规则都没命中时，把域名解析成 IP 再跑第二遍（app/router/router.go:261）。
+func (s *SettingService) GetIPRuleResolveDomain() (bool, error) {
+	v, err := s.getInt("ipRuleResolveDomain")
+	if err != nil {
+		return false, err
+	}
+	return v != 0, nil
 }
 
 // GetAccessLogRetentionDays 返回访问日志保留天数。

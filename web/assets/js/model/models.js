@@ -196,6 +196,7 @@ class AllSetting {
         this.trafficHourRetentionDays = 30;
         this.trafficDayRetentionDays = 365;
         this.concurrencyIdleTimeout = 120;
+        this.ipRuleResolveDomain = 0;
         this.tcInterface = "";
 
         this.defaultDomain = "";
