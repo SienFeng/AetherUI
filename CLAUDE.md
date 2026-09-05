@@ -240,6 +240,8 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 `bootstrap.Run` 里 `SetListen` **必须是最后一步**——改成 `127.0.0.1` 之后面板就只能经由 Caddy 访问，前面任何一步（Caddy 装失败、证书 60 秒未签发、伪装站预检全部不过、`a-ui bootstrap` 本身返回非零）失败都必须保持 `webListen` 原样，让面板继续监听所有 IP。真实吃过的亏：`mode=caddy` 分支一度没有清空面板自己的 `webCertFile`/`webKeyFile`——机器上若有历史遗留的证书路径，轻则 `AutoHttpsConn` 把 Caddy 转发来的明文连接误判成非 TLS、对每个请求回 307 造成死循环，重则证书文件已不存在导致 `tls.LoadX509KeyPair` 失败、`Server.Start()` 报错、`main.go` 只 `log` 一行就 `return`——进程以退出码 0 静默退出，而 `a-ui.service` 是 `Type=simple` 且没配 `Restart=`，面板从此彻底不再监听任何地址，且**当时唯一打印过的救援命令救不回来**（它只改 `webListen`，不碰这两个证书字段）。现在 `mode=caddy` 会在写 `webListen` 之前先清空这两项。
 
+清空只堵住了安装向导这一条路径——管理员事后在设置页把证书路径填回去，一样会掉进同一个 307 死循环，而且掉进去之后没有退路（面板打不开改不回来；重装因 `alreadyInitialized` 整体跳过 `bootstrap`，不会重新清空）。所以 `entity.CheckValid` 里还有一道硬校验：**`webListen` 是回环地址且 `webCertFile`/`webKeyFile` 任一非空时，直接拒绝保存**。这条必须排在 `tls.LoadX509KeyPair` **之前**——只填了公钥或只填了密钥时加载必定失败，报出来的 `open : no such file or directory` 指向一个空路径，完全看不出真正的问题是「这个拓扑下根本不该填」。判据只认回环地址（`isLoopbackListen`，空串不算——空串是「监听所有 IP」）：无域名安装的 REALITY 分支不装任何反代（`install.sh` 的 `reality_flow` 里 `caddy` 出现 0 次，`bootstrap` 也不传 `-listen`），面板是公网明文 HTTP，这两项是管理员给它加 HTTPS 的唯一手段，**扩大到全部就是砍掉那条分支唯一的补救途径**。回归测试在 `web/service/setting_panel_tls_test.go`，正反两面都守着。
+
 `install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——`Type=simple` 无 `Restart=` 意味着「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来）。
 
 两条救援命令由 `print_rescue_hint` 统一打印。判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」，落成两条：
