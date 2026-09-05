@@ -89,14 +89,19 @@ func convertSubscriptionLine(item string) (string, bool) {
 		case "DOMAIN":
 			return domainRule("full:", value)
 		case "DOMAIN-KEYWORD":
-			// xray 的裸域名就是子串匹配，与 DOMAIN-KEYWORD 语义一致。
-			// 会误伤（ads 命中 downloads.example.com），但那是这个规则类型
-			// 在 Shadowrocket/Clash 里的固有行为，不是本实现引入的偏差。
-			// 必须归一大小写：域名匹配大小写不敏感，未归一可能在 xray 里永不命中。
+			// xray 的 keyword: 就是子串匹配，与 DOMAIN-KEYWORD 语义一致。
+			// 会误伤（ads 命中 downloads.example.com），但那是这个规则类型在
+			// Shadowrocket/Clash 里的固有行为，不是本实现引入的偏差。
+			//
+			// 必须归一大小写：xray 只把目标域名转小写、不归一化配置里的模式
+			// （app/router/condition.go:59），大写关键词永不命中。
+			//
+			// 必须带显式前缀：手工录入路径（ParseDomains）存的是 keyword:xxx，
+			// 两条路径形态不一致的话 MergeDomains 按字符串去重，去不掉重复。
 			if !isValidKeyword(value) {
 				return "", false
 			}
-			return strings.ToLower(value), true
+			return "keyword:" + strings.ToLower(value), true
 		default:
 			// 已知的非域名规则类型一律跳过，不认识的类型也一律跳过，绝不猜测
 			return "", false

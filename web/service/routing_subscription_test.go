@@ -25,7 +25,9 @@ PROCESS-NAME,Telegram
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{"domain:qq.com", "full:exact.example.com", "baidu"}
+	// 关键词存显式的 keyword: 前缀，与手工录入路径（ParseDomains）的存储形态
+	// 一致。两条路径形态不一致时 MergeDomains 去不掉重复。
+	want := []string{"domain:qq.com", "full:exact.example.com", "keyword:baidu"}
 	if len(domains) != len(want) {
 		t.Fatalf("len = %d, want %d: %v", len(domains), len(want), domains)
 	}
@@ -180,8 +182,8 @@ func TestParseSubscriptionLowercasesKeyword(t *testing.T) {
 	}
 	// 大小写变体必须归一后去重：域名匹配大小写不敏感，
 	// 未归一的关键词在 xray 里可能永不命中。
-	if len(domains) != 1 || domains[0] != "baidu" {
-		t.Errorf("got = %v, want [baidu]", domains)
+	if len(domains) != 1 || domains[0] != "keyword:baidu" {
+		t.Errorf("got = %v, want [keyword:baidu]", domains)
 	}
 }
 
@@ -644,5 +646,20 @@ func TestRefreshDiscardsResultWhenUrlChangedDuringFetch(t *testing.T) {
 	}
 	if got.LastUpdatedAt != 0 {
 		t.Errorf("LastUpdatedAt = %d, 不得标记为已成功更新", got.LastUpdatedAt)
+	}
+}
+
+// 手工录入与订阅拉取必须产出同一个字符串，否则 MergeDomains 去不掉重复。
+func TestSubscriptionKeywordMatchesManualForm(t *testing.T) {
+	fromSub, _, err := ParseSubscription("DOMAIN-KEYWORD,openai\n")
+	if err != nil {
+		t.Fatalf("ParseSubscription: %v", err)
+	}
+	fromManual, err := ParseDomains("openai")
+	if err != nil {
+		t.Fatalf("ParseDomains: %v", err)
+	}
+	if fromSub[0] != fromManual[0] {
+		t.Errorf("subscription produced %q but manual produced %q", fromSub[0], fromManual[0])
 	}
 }
