@@ -183,7 +183,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
-以下均由真实 xray 26.7.28 实测确认，不是推断：
+以下多数由真实 xray 26.7.28 实测确认；标注「源码」的两行由 xray-core 锁定版本的源码推导，
+不是运行实测。两类都不是猜测，但证据等级不同，改动时按各自的方式复核：
 
 | 情形 | xray 的反应 | 实际后果 |
 |---|---|---|
@@ -192,8 +193,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 | 规则的 `inboundTag` 为**空数组** | `Configuration OK` | 与上一行同构：规则从「只覆盖甲」**放大成覆盖所有入站**。Xray 26.7.28 实测：两个入站访问目标域名都被命中，对照域名正常放行 |
 | 规则引用已删除的**入站** | `Configuration OK` | 规则永不命中（无害） |
 | tag 含中文 | `Configuration OK` | 合法，无需转写 |
-| 规则同时含 `domain` 与 `ip` | `Configuration OK` | 条件是 **AND**（`app/router/config.go:33` 逐个 `conds.Add`，`condition.go:35` 全真才算命中）。「访问这批域名**或**这批 IP」写成一条就变成「域名和 IP 同时满足」，几乎永不命中 |
-| 规则的 `ip` 为**空数组** | `Configuration OK` | 与 `domain: []` / `inboundTag: []` 两行同构：条件整个消失，规则的覆盖范围被静默放大 |
+| 规则同时含 `domain` 与 `ip` | `Configuration OK`（源码）| 条件是 **AND**（`app/router/config.go:33` 逐个 `conds.Add`，`condition.go:35` 全真才算命中）。「访问这批域名**或**这批 IP」写成一条就变成「域名和 IP 同时满足」，几乎永不命中 |
+| 规则的 `ip` 为**空数组** | `Configuration OK`（源码）| 与 `domain: []` / `inboundTag: []` 两行同构：条件整个消失，规则的覆盖范围被静默放大 |
 | `dns.servers` 里的 `tls://` / `quic://` / `udp://` | `Configuration OK` | 都不在 `app/dns/nameserver.go:53-76` 的分派表里，落进末尾的 UDP 分支，把整个字符串当主机名——DNS 设置完全空转，面板毫无表示 |
 | `dns.servers` 里的 `IP:端口` | **拒绝启动**（exit 23） | 唯一一个 xray 不肯放行的，可惜面板同样看不见：`dns` 在 `hot_diff` 的 static 名单里必然触发整进程重启，而 `Process.Start()` 从不回传启动失败，`/server/status` 继续返回 `running`、`errorMsg` 为空 |
 
@@ -202,7 +203,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 1. **删除时拒绝**——三条引用边都有守卫：`DomainGroupService.Del` / `OutboundNodeService.Del` / `InboundService.DelInbound` 分别调 `RoutingRuleService` 的 `CheckDomainGroupRefs` / `CheckOutboundRefs` / `CheckInboundRefs`。入站这条边**不能只靠第二道防线**：SQLite 会复用被删除的自增 id（见「已知偏差」），孤儿规则会绑到新入站上，那时引用不再悬空，跳过防线拦不住，规则列表还会渲染得很合理。`CheckInboundRefs` 不把 `InboundIds` 为空数组的全局规则算作引用；它读出全部规则逐条解码判断，不能再用 `WHERE inbound_id = ?` 交给 SQL 去数。
 2. **生成期跳过**——`buildRule` 第三个返回值非 nil 即整条规则丢弃。域名组不存在或域名为空、出站不存在或已禁用、规则指定的入站**全部**不存在或已禁用，一律跳过。**宁可规则不生效让用户察觉，也绝不输出条件残缺的规则。**跳过必须带原因并由 `buildRules` 记进 `logger.Warning`——否则这道防线对用户是隐形的：规则表照常渲染，配置里却没有它。
 
-### 配置注入的五条不变量（`web/service/routing_inject.go`）
+### 配置注入的四条不变量（`web/service/routing_inject.go`）
 
 1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
 2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。**数组顺序仍然成立，但它不再等于「block 一定先命中」**：开了 `ipRuleResolveDomain` 之后 xray 走两遍规则（`app/router/router.go:245-273`）——第一遍不带 DNS 客户端，域名条件能命中、IP 条件对域名目标必然不命中；只有整个第一遍都没命中才解析域名再走第二遍。于是一条用域名表达的 proxy 规则会在**第一遍**命中并短路掉一条只能在第二遍才可能命中的、用 CIDR 表达的 block 规则。**一条写成 IP 段的封禁，是可以被一条写成域名的分流规则绕过的。**代码里没有任何办法修正它（要修正就得让注入器知道哪条域名规则可能解析到哪个 IP），所以只能写下来。
