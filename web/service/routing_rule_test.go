@@ -717,13 +717,9 @@ func TestCheckDomainGroupRefsBlocksDeletionOnCorruptData(t *testing.T) {
 	}
 }
 
-// Update 必须让 DomainGroupId 跟上 DomainGroupIds 的变化。buildRule
-// （routing_inject.go）、listRules（controller/routing.go）、toPortableRule
-// （routing_portable.go）三个消费者眼下仍只读 DomainGroupId（过渡桥接，见
-// routing_rule.go 的 Update）；编辑一条规则的域名组若不同步这个字段，生成
-// 的 xray 配置、规则列表、导出文件会静默停在改动前的域名组上，且不报任何
-// 错——这条路径此前零测试覆盖，正是这个缺陷能溜过去的原因。
-func TestUpdateSyncsLegacyDomainGroupIdToFirstGroup(t *testing.T) {
+// Update 必须让持久化的 DomainGroupIds 跟上传入的新值——这是分流规则编辑
+// 域名组最基本的路径，回归测试防止 Update 漏赋值导致改动静默不生效。
+func TestUpdatePersistsDomainGroupIds(t *testing.T) {
 	setupDB(t)
 	claude := newTestGroup(t, "Claude")
 	chatgpt := newTestGroup(t, "ChatGPT")
@@ -749,11 +745,7 @@ func TestUpdateSyncsLegacyDomainGroupIdToFirstGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeDomainGroupIds: %v", err)
 	}
-	if len(groupIds) == 0 || groupIds[0] != chatgpt.Id {
-		t.Fatalf("DomainGroupIds = %v, want first id %d", groupIds, chatgpt.Id)
-	}
-	if got.DomainGroupId != groupIds[0] {
-		t.Errorf("DomainGroupId = %d, want %d（等于 DomainGroupIds 的首个 id）——"+
-			"过渡桥接的三个消费者会静默用错域名组", got.DomainGroupId, groupIds[0])
+	if len(groupIds) != 1 || groupIds[0] != chatgpt.Id {
+		t.Fatalf("DomainGroupIds = %v, want [%d]", groupIds, chatgpt.Id)
 	}
 }

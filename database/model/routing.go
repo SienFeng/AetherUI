@@ -76,7 +76,7 @@ type RoutingRule struct {
 	// 升序去重不是洁癖：buildRule 直接按这个顺序生成 inboundTag 数组，而
 	// 「生成逐字节确定」是 Config.Equals 能正确判断配置是否变化的前提；
 	// 顺序一抖动，那个 10 秒的重启 cron 就会不停重启 xray。
-	InboundIds    string `json:"inboundIds" form:"inboundIds"`
+	InboundIds string `json:"inboundIds" form:"inboundIds"`
 	// DomainGroupIds 是这条规则引用的域名组 id，JSON 整数数组，升序去重存储。
 	//
 	// 升序去重与 InboundIds 同理，是「生成逐字节确定」的一部分：buildRule
