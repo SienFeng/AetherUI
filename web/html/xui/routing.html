@@ -877,10 +877,12 @@
 
             // ruleIssue 返回空串表示这条规则会正常生效，否则返回失效原因。
             //
-            // 前四种与后端 RoutingInjector.buildRule 的跳过条件一一对应：条件残缺的
-            // 规则整条不输出，配置里根本没有它，而规则表照常渲染——用户察觉不到。
-            // 第五种（sniffing）规则会生成，但 xray 在路由阶段拿不到域名，永不命中。
-            // 两类都是静默失效，所以必须在界面上说出来。
+            // 两类原因都要说出来，因为两类都是静默失效：
+            // ① 整条不生效——与后端 RoutingInjector.buildRule 的跳过条件一一对应，
+            //   条件残缺的规则整条不输出，配置里根本没有它，而规则表照常渲染。
+            // ② 部分不生效——后端只把剔除记进 logger.Warning，管理员看不到；
+            //   sniffing 那一条更隐蔽：规则照常生成，但 xray 在路由阶段拿不到
+            //   域名，对这些入站永不命中。
             ruleIssue(rule) {
                 if (!rule.enable) return '';
                 if (rule.broken) return '规则的入站数据损坏，这条规则不会写进配置';
@@ -888,11 +890,21 @@
                 if (!rule.domainGroupIds.length) return '规则没有指定域名组，这条规则不会写进配置';
                 // 部分组失效不再是失效原因——后端只剔除失效的组，剩下的照常
                 // 生效。只有【全部】组都没有可用域名时整条规则才会被丢弃。
-                const liveGroups = rule.domainGroupIds
-                    .map(id => this.groups.find(x => x.id === id))
-                    .filter(g => g && g.effectiveCount);
-                if (!liveGroups.length) {
+                const deadGroups = rule.domainGroupIds.filter(id => {
+                    const g = this.groups.find(x => x.id === id);
+                    return !g || !g.effectiveCount;
+                });
+                if (deadGroups.length === rule.domainGroupIds.length) {
                     return '引用的域名组已全部删除或为空，这条规则不会写进配置';
+                }
+                // 部分组失效虽然不影响规则生成，但必须说出来：后端 buildRule
+                // 只把剔除记进 logger.Warning，管理员看不到，而界面上「存在但
+                // 域名为空」的组渲染成一个普通的 tag（groupMissing 只看存在性），
+                // 规则行还打绿色对勾——一个订阅从未拉取成功的空组因此完全隐形。
+                // 入站那一侧本来就有同形的提示，两边不该不对称。
+                if (deadGroups.length) {
+                    return '有 ' + deadGroups.length + ' 个域名组已删除或没有任何域名（' +
+                        deadGroups.map(this.groupName).join('、') + '），这些组的域名不受本规则约束';
                 }
 
                 if (rule.inboundIds.length) {
