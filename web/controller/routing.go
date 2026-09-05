@@ -102,15 +102,26 @@ func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 过渡桥接：Task 4 把 validate 切到读 DomainGroupIds，而本 controller 的
+	// 多域名组表单改造在后续 Task。这里先用表单的单个组编出集合，保持
+	// 添加/编辑分流规则可用；后续改造会把它替换成真正的多组解析。
+	//
+	// 用 Strict 版本而非普通版本：表单传 0 或负数时必须报错，不能静默编成
+	// []——那正是「域名条件为空、劫持该用户全部流量」那个洞。
+	groupIds, err := service.EncodeDomainGroupIdsStrict([]int{form.DomainGroupId})
+	if err != nil {
+		return nil, err
+	}
 	return &model.RoutingRule{
-		Id:            id,
-		Remark:        form.Remark,
-		InboundIds:    encoded,
-		DomainGroupId: form.DomainGroupId,
-		Action:        form.Action,
-		OutboundId:    form.OutboundId,
-		Priority:      form.Priority,
-		Enable:        form.Enable,
+		Id:             id,
+		Remark:         form.Remark,
+		InboundIds:     encoded,
+		DomainGroupId:  form.DomainGroupId,
+		DomainGroupIds: groupIds,
+		Action:         form.Action,
+		OutboundId:     form.OutboundId,
+		Priority:       form.Priority,
+		Enable:         form.Enable,
 	}, nil
 }
 

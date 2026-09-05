@@ -740,8 +740,18 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 			continue
 		}
 
+		// 过渡桥接：Task 4 把 validate 切到读 DomainGroupIds，而本函数的多域名组
+		// 改造在后续 Task。这里先用单个组编出集合，保持导入可用；后续改造会把
+		// 它替换成真正的多组解析。
+		groupIds, err := EncodeDomainGroupIdsStrict([]int{g.Id})
+		if err != nil {
+			report.Rules.Failed++
+			report.fail("规则「%s」的域名组编码失败：%v", label, err)
+			continue
+		}
+
 		rule := &model.RoutingRule{
-			Remark: item.Remark, InboundIds: encoded, DomainGroupId: g.Id,
+			Remark: item.Remark, InboundIds: encoded, DomainGroupId: g.Id, DomainGroupIds: groupIds,
 			Action: item.Action, OutboundId: outboundId,
 			Priority: item.Priority, Enable: enable,
 		}
