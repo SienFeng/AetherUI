@@ -202,12 +202,14 @@ func ValidateOutboundReplacing(ob map[string]any, replacedTag string) error {
 	}, minimalOutboundConfig(ob))
 }
 
-// ValidateDomains 校验域名列表，能抓出不存在的 geosite 类别与非法正则。
-// 候选域名挂在一条追加到末尾的规则上，出站指向注入器始终会注入的黑洞，
-// 因此这条探针规则不会引入悬空引用。
-func ValidateDomains(domains []string) error {
+// validateRuleCondition 把一条只带单个条件的探针规则追加到完整配置末尾，
+// 交给真实 xray 判定。field 是 xray 路由规则里的条件键（"domain" / "ip"）。
+//
+// 出站指向注入器始终会注入的黑洞，因此这条探针不会引入悬空引用——
+// xray 对悬空 outboundTag 不报错，只会静默回落直连，所以这一点是承重的。
+func validateRuleCondition(field string, values []string) error {
 	probe := map[string]any{
-		"type": "field", "domain": domains, "outboundTag": model.BlockOutboundTag,
+		"type": "field", field: values, "outboundTag": model.BlockOutboundTag,
 	}
 	minimal := map[string]any{
 		"outbounds": []any{
@@ -215,7 +217,7 @@ func ValidateDomains(domains []string) error {
 		},
 		"routing": map[string]any{
 			"rules": []any{
-				map[string]any{"type": "field", "domain": domains, "outboundTag": "direct"},
+				map[string]any{"type": "field", field: values, "outboundTag": "direct"},
 			},
 		},
 	}
@@ -230,10 +232,13 @@ func ValidateDomains(domains []string) error {
 	}, minimal)
 }
 
-// ValidateCidrs 校验 IP 段列表，能抓出不存在的 geoip 类别（checkFile 会打开
-// dat 找 code，见 common/geodata/geodat_loader.go:16）与非法的 CIDR。
-// 候选值挂在一条追加到末尾的探针规则上，出站指向注入器始终会注入的黑洞，
-// 因此这条探针不会引入悬空引用。
+// ValidateDomains 校验域名列表，能抓出不存在的 geosite 类别（checkFile 会打开
+// dat 找 code，见 common/geodata/geodat_loader.go:16）与非法正则。
+func ValidateDomains(domains []string) error {
+	return validateRuleCondition("domain", domains)
+}
+
+// ValidateCidrs 校验 IP 段列表，能抓出不存在的 geoip 类别与非法的 CIDR。
 //
 // 空列表直接放行：ip 为空数组时探针只剩 outboundTag 一个非条件字段，
 // xray 会报 "this rule has no effective fields" 而整份配置被判非法——
@@ -242,28 +247,7 @@ func ValidateCidrs(cidrs []string) error {
 	if len(cidrs) == 0 {
 		return nil
 	}
-	probe := map[string]any{
-		"type": "field", "ip": cidrs, "outboundTag": model.BlockOutboundTag,
-	}
-	minimal := map[string]any{
-		"outbounds": []any{
-			map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}},
-		},
-		"routing": map[string]any{
-			"rules": []any{
-				map[string]any{"type": "field", "ip": cidrs, "outboundTag": "direct"},
-			},
-		},
-	}
-	return validateWithFullConfig(func(cfg map[string]any) {
-		routing, _ := cfg["routing"].(map[string]any)
-		if routing == nil {
-			routing = map[string]any{}
-			cfg["routing"] = routing
-		}
-		rules, _ := routing["rules"].([]any)
-		routing["rules"] = append(rules, probe)
-	}, minimal)
+	return validateRuleCondition("ip", cidrs)
 }
 
 // removeInboundByTag 摘掉完整配置里同 tag 的那份旧入站。

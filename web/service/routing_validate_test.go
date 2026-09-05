@@ -163,6 +163,7 @@ func TestValidateCidrsAllowsEmpty(t *testing.T) {
 }
 
 func TestValidateCidrsAcceptsValidList(t *testing.T) {
+	requireXrayBinary(t)
 	setupDB(t)
 	if err := ValidateCidrs([]string{"1.2.3.0/24", "geoip:private"}); err != nil {
 		t.Errorf("unexpected error: %v", err)
