@@ -227,6 +227,18 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	old.Remark = rule.Remark
 	old.InboundIds = rule.InboundIds
 	old.DomainGroupIds = rule.DomainGroupIds
+	// 过渡桥接：buildRule（routing_inject.go）、listRules（controller/routing.go）、
+	// toPortableRule（routing_portable.go）三个消费者眼下仍只读 DomainGroupId，
+	// 而 Update 不会再有任何后续动作去重新同步它——编辑一条规则的域名组会让
+	// 这三处永远停在改动前的值，且不报任何错。用解码后 DomainGroupIds 的首个
+	// id 同步 DomainGroupId，保持这三个消费者在过渡期内跟上编辑；Task 9 收尾时
+	// 三个消费者切到 DomainGroupIds 后删除这行。
+	//
+	// 解码失败或为空时保持原值不动：validate 已经在上面拒绝过这两种情况，
+	// 这里走不到，但不能让这行代码自己成为一个 panic 点。
+	if groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds); err == nil && len(groupIds) > 0 {
+		old.DomainGroupId = groupIds[0]
+	}
 	old.Action = rule.Action
 	old.OutboundId = rule.OutboundId
 	old.Priority = rule.Priority

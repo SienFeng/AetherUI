@@ -716,3 +716,44 @@ func TestCheckDomainGroupRefsBlocksDeletionOnCorruptData(t *testing.T) {
 		t.Error("解码失败时必须拦住删除，不能放行")
 	}
 }
+
+// Update 必须让 DomainGroupId 跟上 DomainGroupIds 的变化。buildRule
+// （routing_inject.go）、listRules（controller/routing.go）、toPortableRule
+// （routing_portable.go）三个消费者眼下仍只读 DomainGroupId（过渡桥接，见
+// routing_rule.go 的 Update）；编辑一条规则的域名组若不同步这个字段，生成
+// 的 xray 配置、规则列表、导出文件会静默停在改动前的域名组上，且不报任何
+// 错——这条路径此前零测试覆盖，正是这个缺陷能溜过去的原因。
+func TestUpdateSyncsLegacyDomainGroupIdToFirstGroup(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	r := &model.RoutingRule{
+		Remark: "改域名组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}), Action: model.ActionBlock, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	r.DomainGroupIds = mustEncodeGroupIds(t, []int{chatgpt.Id})
+	if err := (&RoutingRuleService{}).Update(r); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := (&RoutingRuleService{}).Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	groupIds, err := DecodeDomainGroupIds(got.DomainGroupIds)
+	if err != nil {
+		t.Fatalf("DecodeDomainGroupIds: %v", err)
+	}
+	if len(groupIds) == 0 || groupIds[0] != chatgpt.Id {
+		t.Fatalf("DomainGroupIds = %v, want first id %d", groupIds, chatgpt.Id)
+	}
+	if got.DomainGroupId != groupIds[0] {
+		t.Errorf("DomainGroupId = %d, want %d（等于 DomainGroupIds 的首个 id）——"+
+			"过渡桥接的三个消费者会静默用错域名组", got.DomainGroupId, groupIds[0])
+	}
+}
