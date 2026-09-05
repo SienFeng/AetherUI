@@ -1,14 +1,18 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sync"
 	"time"
 
+	"a-ui/config"
 	"a-ui/util/common"
 )
 
@@ -175,4 +179,109 @@ func checkUpdatable() (bool, string) {
 		return false, "系统缺少 systemd-run，无法安全地在后台执行更新"
 	}
 	return true, ""
+}
+
+// panelCurrentVersion 抽成变量供测试打桩。
+var panelCurrentVersion = config.GetVersion
+
+// versionCache 是外部世界的一份快照。
+//
+// 刻意不落库：落库要走「新增设置项的五步」（defaultValueMap /
+// entity.AllSetting / CheckValid / getter / models.js），漏掉最后一步会让
+// 整个保存配置接口失败。为一份重启后几分钟内必然自愈的缓存付这个代价
+// 不划算。代价是面板重启后 UI 上会短暂显示「尚未检查」。
+type versionCache struct {
+	mu   sync.RWMutex
+	info PanelVersionInfo
+	// all 是拉回来的全部 release（最多 per_page 条），只用于 KnownCurrent
+	// 判定；info.Releases 是被截断到 rollbackListSize 的回退列表。
+	all []ReleaseBrief
+}
+
+var panelVersionCache versionCache
+
+type PanelVersionService struct{}
+
+func fetchReleases() ([]ReleaseBrief, error) {
+	resp, err := panelVersionHTTPClient.Get(panelReleasesURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, common.NewErrorf("GitHub 返回 HTTP %d", resp.StatusCode)
+	}
+	// 限速时 GitHub 返回的是 {"message": "..."} 这样的对象而不是数组，
+	// 直接 Unmarshal 进切片会报错——这正是我们要的，不能静默当成空列表。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var raw []githubRelease
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, common.NewError("解析 GitHub 响应失败:", err)
+	}
+	return toBriefs(raw), nil
+}
+
+// Refresh 重新拉取并更新缓存。
+//
+// 失败时保留上一次成功的数据，只写 LastError——与域名组订阅刷新同一个
+// 原则。清空的话界面会从「有新版可更新」退回「尚未检查」，且 tag 白名单
+// 变空会让更新按钮全部失效，一次网络抖动就把功能整个关掉。
+func (s *PanelVersionService) Refresh() error {
+	all, err := fetchReleases()
+	if err != nil {
+		panelVersionCache.mu.Lock()
+		panelVersionCache.info.LastError = err.Error()
+		panelVersionCache.mu.Unlock()
+		return err
+	}
+
+	current := panelCurrentVersion()
+	latest, hasUpdate, known := computeVersionState(current, all)
+	rollback := all
+	if len(rollback) > rollbackListSize {
+		rollback = rollback[:rollbackListSize]
+	}
+	updatable, reason := checkUpdatable()
+
+	panelVersionCache.mu.Lock()
+	panelVersionCache.all = all
+	panelVersionCache.info = PanelVersionInfo{
+		Current:           current,
+		Latest:            latest,
+		HasUpdate:         hasUpdate,
+		KnownCurrent:      known,
+		Releases:          rollback,
+		CheckedAt:         time.Now().UnixMilli(),
+		LastError:         "",
+		Updatable:         updatable,
+		UnsupportedReason: reason,
+	}
+	panelVersionCache.mu.Unlock()
+	return nil
+}
+
+// Get 返回缓存快照。从未成功检查过时，Current 与 Updatable 仍要是真的——
+// 版本号本来就在本地，没有理由因为拉不到 GitHub 就不显示。
+func (s *PanelVersionService) Get() PanelVersionInfo {
+	panelVersionCache.mu.RLock()
+	info := panelVersionCache.info
+	panelVersionCache.mu.RUnlock()
+
+	if info.Current == "" {
+		info.Current = panelCurrentVersion()
+	}
+	if info.CheckedAt == 0 {
+		info.Updatable, info.UnsupportedReason = checkUpdatable()
+	}
+	return info
+}
+
+// allowedTags 是 tag 白名单，等于回退列表。
+func (s *PanelVersionService) allowedTags() []ReleaseBrief {
+	panelVersionCache.mu.RLock()
+	defer panelVersionCache.mu.RUnlock()
+	return panelVersionCache.info.Releases
 }

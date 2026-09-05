@@ -1,6 +1,9 @@
 package service
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -191,5 +194,167 @@ func TestCheckUpdatableReportsMissingBinary(t *testing.T) {
 	}
 	if !strings.Contains(reason, "/nonexistent/a-ui") {
 		t.Errorf("原因里应点明具体路径，便于管理员排查: %q", reason)
+	}
+}
+
+// resetPanelVersionCache 让每个用例从干净状态开始。缓存是包级变量，
+// 用例之间会互相污染。
+func resetPanelVersionCache(t *testing.T) {
+	t.Helper()
+	panelVersionCache.mu.Lock()
+	panelVersionCache.info = PanelVersionInfo{}
+	panelVersionCache.all = nil
+	panelVersionCache.mu.Unlock()
+}
+
+func stubReleasesServer(t *testing.T, releases []githubRelease) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(releases)
+	}))
+	orig := panelReleasesURL
+	panelReleasesURL = srv.URL
+	t.Cleanup(func() {
+		panelReleasesURL = orig
+		srv.Close()
+	})
+}
+
+func TestRefreshPopulatesCache(t *testing.T) {
+	resetPanelVersionCache(t)
+	stubReleasesServer(t, []githubRelease{
+		{TagName: "v1.5.0", PublishedAt: "2026-09-05T04:08:48Z", HtmlUrl: "u1"},
+		{TagName: "v1.4.1", PublishedAt: "2026-09-05T01:04:22Z", HtmlUrl: "u2"},
+	})
+	s := PanelVersionService{}
+	if err := s.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	info := s.Get()
+	if info.Latest != "v1.5.0" {
+		t.Errorf("Latest = %q", info.Latest)
+	}
+	if info.CheckedAt == 0 {
+		t.Error("CheckedAt 应被写入")
+	}
+	if info.LastError != "" {
+		t.Errorf("LastError = %q, want empty", info.LastError)
+	}
+	if len(info.Releases) != 2 {
+		t.Errorf("Releases len = %d, want 2", len(info.Releases))
+	}
+}
+
+// 回退列表只给前 rollbackListSize 条，这既是 UI 约束也是 tag 白名单。
+func TestRefreshTruncatesRollbackList(t *testing.T) {
+	resetPanelVersionCache(t)
+	raw := make([]githubRelease, 0, 10)
+	for i := 0; i < 10; i++ {
+		raw = append(raw, githubRelease{TagName: "v1." + string(rune('0'+i)) + ".0"})
+	}
+	stubReleasesServer(t, raw)
+	s := PanelVersionService{}
+	if err := s.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := len(s.Get().Releases); got != rollbackListSize {
+		t.Errorf("Releases len = %d, want %d", got, rollbackListSize)
+	}
+	if got := len(s.allowedTags()); got != rollbackListSize {
+		t.Errorf("allowedTags len = %d, want %d", got, rollbackListSize)
+	}
+}
+
+// KnownCurrent 用全部拉回来的 release 判定，而不是被截断的回退列表：
+// 落后 6~10 个版本的人恰恰最需要看到红点。
+func TestKnownCurrentUsesFullListNotTruncated(t *testing.T) {
+	resetPanelVersionCache(t)
+	raw := []githubRelease{
+		{TagName: "v1.9.0"}, {TagName: "v1.8.0"}, {TagName: "v1.7.0"},
+		{TagName: "v1.6.0"}, {TagName: "v1.5.0"}, {TagName: "v1.4.0"},
+		{TagName: "v1.3.0"},
+	}
+	stubReleasesServer(t, raw)
+	origVersion := panelCurrentVersion
+	defer func() { panelCurrentVersion = origVersion }()
+	// v1.3.0 排第 7，超出了 5 条的回退列表
+	panelCurrentVersion = func() string { return "v1.3.0" }
+
+	s := PanelVersionService{}
+	if err := s.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	info := s.Get()
+	if !info.KnownCurrent {
+		t.Error("KnownCurrent = false —— 落后 6 个版本的人被误判成「不在发布列表中」")
+	}
+	if !info.HasUpdate {
+		t.Error("HasUpdate = false, want true")
+	}
+}
+
+// 拉取失败必须保留上一次成功的数据，只更新 LastError。
+// 清空的话界面会从「有新版可更新」变成「尚未检查」，而且更新按钮会因为
+// 白名单变空而全部失效——一次网络抖动就把功能整个关掉了。
+func TestRefreshFailureKeepsLastGoodData(t *testing.T) {
+	resetPanelVersionCache(t)
+	stubReleasesServer(t, []githubRelease{{TagName: "v1.5.0"}})
+	s := PanelVersionService{}
+	if err := s.Refresh(); err != nil {
+		t.Fatalf("首次 Refresh: %v", err)
+	}
+	firstCheckedAt := s.Get().CheckedAt
+
+	// 换成一个必然失败的地址
+	orig := panelReleasesURL
+	panelReleasesURL = "http://127.0.0.1:1/nope"
+	defer func() { panelReleasesURL = orig }()
+
+	if err := s.Refresh(); err == nil {
+		t.Fatal("期望 Refresh 返回错误")
+	}
+	info := s.Get()
+	if len(info.Releases) != 1 || info.Releases[0].TagName != "v1.5.0" {
+		t.Errorf("失败后丢掉了上次成功的数据: %+v", info.Releases)
+	}
+	if info.LastError == "" {
+		t.Error("LastError 应被写入")
+	}
+	if info.CheckedAt != firstCheckedAt {
+		t.Error("CheckedAt 不该被失败的刷新改写——它表示「上次成功检查」的时刻")
+	}
+}
+
+// GitHub 限速时返回的是一个 JSON 对象而不是数组，不能 panic。
+func TestRefreshHandlesNonArrayResponse(t *testing.T) {
+	resetPanelVersionCache(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	}))
+	defer srv.Close()
+	orig := panelReleasesURL
+	panelReleasesURL = srv.URL
+	defer func() { panelReleasesURL = orig }()
+
+	s := PanelVersionService{}
+	if err := s.Refresh(); err == nil {
+		t.Error("限速响应应返回错误而不是静默成功")
+	}
+}
+
+func TestRefreshRejectsNon200(t *testing.T) {
+	resetPanelVersionCache(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	orig := panelReleasesURL
+	panelReleasesURL = srv.URL
+	defer func() { panelReleasesURL = orig }()
+
+	if err := (&PanelVersionService{}).Refresh(); err == nil {
+		t.Error("HTTP 403 应返回错误")
 	}
 }
