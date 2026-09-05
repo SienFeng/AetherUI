@@ -22,6 +22,31 @@ panel_port=""
 # have nothing listening on them, which is more urgent than the first hint.
 stopped_web_svc=""
 
+# Whether this install/update has already stopped the panel. Any failure
+# exit after that point must bring it back up first: a-ui.service is
+# Type=simple with no Restart=, so bailing out here leaves the machine with
+# a stopped panel that will never come back on its own — while the user
+# assumes "the update failed, so nothing changed", and only finds out when
+# someone reports the nodes are down.
+a_ui_stopped=0
+
+# Print an error and exit, restarting the panel if this script stopped it.
+# Only touch systemctl when we really did stop it: on a fresh install,
+# starting a service that isn't configured yet just adds a failure log line
+# unrelated to the actual problem, sending troubleshooting down a dead end.
+die_restoring_panel() {
+    echo -e "${red}$1${plain}"
+    if [[ ${a_ui_stopped} -eq 1 ]]; then
+        echo -e "${yellow}The panel was stopped by this install, restarting it...${plain}"
+        if systemctl start a-ui; then
+            echo -e "${green}Panel restarted${plain}"
+        else
+            echo -e "${red}Failed to start the panel, please run: systemctl start a-ui${plain}"
+        fi
+    fi
+    exit 1
+}
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}Fatal error:${plain}please run this script with root privilege\n" && exit 1
 
@@ -1268,20 +1293,17 @@ install_a-ui() {
         panel_port="${pre_stop_port}"
     fi
 
-    systemctl stop a-ui
     cd /usr/local/
 
     if [ $# == 0 ]; then
         last_version=$(curl -Ls "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}refresh a-ui version failed,it may due to Github API restriction,please try it later${plain}"
-            exit 1
+            die_restoring_panel "refresh a-ui version failed,it may due to Github API restriction,please try it later"
         fi
         echo -e "get a-ui latest version succeed:${last_version},begin to install..."
         wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}-english.tar.gz
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}dowanload a-ui failed,please be sure that your server can access Github{plain}"
-            exit 1
+            die_restoring_panel "download a-ui failed,please be sure that your server can access Github"
         fi
     else
         last_version=$1
@@ -1289,10 +1311,19 @@ install_a-ui() {
         echo -e "begin to install a-ui $1 ..."
         wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}dowanload a-ui $1 failed,please check the verison exists${plain}"
-            exit 1
+            die_restoring_panel "download a-ui $1 failed,please check the verison exists"
         fi
     fi
+
+    # Stopping the panel happens only after the download succeeded. Stopping
+    # first means that any failure in version detection or download (flaky
+    # network, GitHub API rate limit, a version that does not exist) exits the
+    # script and leaves a machine whose panel is stopped and will not come back
+    # on its own — and those two steps are precisely the ones that depend on
+    # external network and fail most often. The port probe must still run before
+    # the stop; the block above already did that, so reordering is safe.
+    systemctl stop a-ui
+    a_ui_stopped=1
 
     if [[ -e /usr/local/a-ui/ ]]; then
         rm /usr/local/a-ui/ -rf
@@ -1303,9 +1334,26 @@ install_a-ui() {
     cd a-ui
     chmod +x a-ui bin/xray-linux-${arch}
     cp -f a-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/a-ui https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui_en.sh
+    # Download the management script to a temp file first, confirm it
+    # succeeded and is non-empty, then move it into /usr/bin/a-ui.
+    # wget -O truncates the target before writing: downloading straight into
+    # /usr/bin/a-ui leaves an empty file on failure, and the chmod +x right
+    # after still succeeds — every later `a-ui` invocation is then silently
+    # a no-op, indistinguishable from "never installed" yet impossible to
+    # diagnose from the symptom.
+    local mgr_tmp
+    mgr_tmp=$(mktemp) || die_restoring_panel "failed to create a temp file"
+    if ! wget --no-check-certificate -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui_en.sh; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "download of the a-ui management script failed, please be sure your server can reach raw.githubusercontent.com"
+    fi
+    if [[ ! -s "${mgr_tmp}" ]]; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "the downloaded a-ui management script is empty, the connection was probably cut"
+    fi
+    install -m 755 "${mgr_tmp}" /usr/bin/a-ui
+    rm -f "${mgr_tmp}"
     chmod +x /usr/local/a-ui/a-ui_en.sh
-    chmod +x /usr/bin/a-ui
     config_after_install
     setup_wizard
     systemctl daemon-reload
