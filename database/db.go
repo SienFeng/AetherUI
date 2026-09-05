@@ -16,6 +16,9 @@ var db *gorm.DB
 // accessDB 是访问日志专用的库，与主库物理分开，原因见 model.AccessLog。
 var accessDB *gorm.DB
 
+// trafficDB 是用量历史专用的库，与主库物理分开，原因见 model.TrafficBucket。
+var trafficDB *gorm.DB
+
 func initUser() error {
 	err := db.AutoMigrate(&model.User{})
 	if err != nil {
@@ -153,6 +156,32 @@ func InitAccessLogDB(dbPath string) error {
 	return nil
 }
 
+// InitTrafficDB 打开（必要时创建）用量历史库。
+//
+// 独立于 InitDB：即使这里失败，面板其余功能也必须照常可用——图表坏了不该
+// 让人登不上面板，更不该影响计费用的累计流量。
+func InitTrafficDB(dbPath string) error {
+	dir := path.Dir(dbPath)
+	if err := os.MkdirAll(dir, fs.ModeDir); err != nil {
+		return err
+	}
+	var gormLogger logger.Interface
+	if config.IsDebug() {
+		gormLogger = logger.Default
+	} else {
+		gormLogger = logger.Discard
+	}
+	tdb, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{Logger: gormLogger})
+	if err != nil {
+		return err
+	}
+	if err := tdb.AutoMigrate(&model.TrafficBucket{}); err != nil {
+		return err
+	}
+	trafficDB = tdb
+	return nil
+}
+
 func GetDB() *gorm.DB {
 	return db
 }
@@ -160,6 +189,11 @@ func GetDB() *gorm.DB {
 // GetAccessLogDB 返回访问日志库；未初始化成功时为 nil，调用方必须判空。
 func GetAccessLogDB() *gorm.DB {
 	return accessDB
+}
+
+// GetTrafficDB 返回用量历史库；未初始化成功时为 nil，调用方必须判空。
+func GetTrafficDB() *gorm.DB {
+	return trafficDB
 }
 
 func IsNotFound(err error) bool {

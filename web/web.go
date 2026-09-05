@@ -412,6 +412,11 @@ func (s *Server) Start() (err error) {
 		logger.Warning("清理了", pruned, "条已删除入站遗留的访问日志")
 	}
 
+	// 用量历史同样用独立的库。打不开只影响图表，不影响累计流量与限额判定。
+	if err := database.InitTrafficDB(config.GetTrafficDBPath()); err != nil {
+		logger.Warning("open traffic history database failed, 用量图表将不可用:", err)
+	}
+
 	s.startTask()
 
 	s.httpServer = &http.Server{
