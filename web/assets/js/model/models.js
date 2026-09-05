@@ -193,6 +193,8 @@ class AllSetting {
         this.ipdbUpdateTime = "";
         this.accessLogEnable = 0;
         this.accessLogRetentionDays = 7;
+        this.trafficHourRetentionDays = 30;
+        this.trafficDayRetentionDays = 365;
         this.concurrencyIdleTimeout = 120;
         this.tcInterface = "";
 

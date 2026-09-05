@@ -162,6 +162,24 @@
                     </a-col>
                 </a-row>
             </transition>
+            <a-row style="margin-top: 10px">
+                <a-card hoverable>
+                    <div slot="title">
+                        最近使用 (Top [[ overviewSeriesCount ]])
+                    </div>
+                    <a-radio-group size="small" :value="overviewRange" @change="changeOverviewRange">
+                        <a-radio-button value="24h">24 小时</a-radio-button>
+                        <a-radio-button value="7d">7 天</a-radio-button>
+                        <a-radio-button value="30d">30 天</a-radio-button>
+                        <a-radio-button value="1y">1 年</a-radio-button>
+                    </a-radio-group>
+                    <a-alert v-if="overviewReason" type="info" show-icon style="margin-top: 12px"
+                             :message="overviewReason"></a-alert>
+                    <div style="position: relative; height: 320px; margin-top: 12px">
+                        <canvas id="overview-chart"></canvas>
+                    </div>
+                </a-card>
+            </a-row>
         </a-layout-content>
     </a-layout>
     <a-modal id="version-modal" v-model="versionModal.visible" title="切换版本"
@@ -178,6 +196,8 @@
     </a-modal>
 </a-layout>
 {{template "js" .}}
+<script src="{{ .base_path }}assets/chart.js/chart.umd.min.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
 
     const State = {
@@ -257,6 +277,15 @@
         }
     }
 
+    let overviewChart = null;
+
+    // 12 个区分度足够的颜色，按系列顺序取，超过 12 个入站时循环
+    // （Top N 默认就是 12，正常取不到循环）。
+    const OVERVIEW_COLORS = [
+        '#1890ff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#eb2f96',
+        '#13c2c2', '#fa8c16', '#2f54eb', '#a0d911', '#08979c', '#c41d7f',
+    ];
+
     const versionModal = {
         visible: false,
         versions: [],
@@ -278,6 +307,9 @@
             versionModal,
             spinning: false,
             loadingTip: '加载中',
+            overviewRange: '24h',
+            overviewReason: '',
+            overviewSeriesCount: 0,
         },
         methods: {
             loading(spinning, tip = '加载中') {
@@ -316,8 +348,49 @@
                     },
                 });
             },
+            changeOverviewRange(e) {
+                this.overviewRange = e.target.value;
+                this.loadOverviewChart();
+            },
+            async loadOverviewChart() {
+                const msg = await HttpUtil.post('/aui/inbound/traffic/overview', {
+                    range: this.overviewRange,
+                    top: 12,
+                });
+                if (!msg.success) {
+                    return;
+                }
+                const data = msg.obj;
+                this.overviewReason = data.reason || '';
+                this.overviewSeriesCount = data.series.length;
+                this.$nextTick(() => {
+                    const canvas = document.getElementById('overview-chart');
+                    if (!canvas) {
+                        return;
+                    }
+                    if (overviewChart) {
+                        overviewChart.destroy();
+                        overviewChart = null;
+                    }
+                    overviewChart = new Chart(canvas, {
+                        type: 'line',
+                        data: {
+                            labels: data.labels,
+                            datasets: data.series.map((s, i) => ({
+                                label: s.remark,
+                                data: s.points,
+                                borderColor: OVERVIEW_COLORS[i % OVERVIEW_COLORS.length],
+                                backgroundColor: OVERVIEW_COLORS[i % OVERVIEW_COLORS.length],
+                                borderWidth: 2, pointRadius: 2, tension: 0.3, fill: false,
+                            })),
+                        },
+                        options: trafficChartOptions(14),
+                    });
+                });
+            },
         },
         async mounted() {
+            this.loadOverviewChart();
             while (true) {
                 try {
                     await this.getStatus();

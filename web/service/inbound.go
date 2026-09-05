@@ -149,6 +149,12 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := accessLogService.DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的访问日志失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 用量历史同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来
+	// 的入站会看到上一个用户的用量曲线。失败只告警不阻断，理由同访问日志，
+	// 残留由每小时一次的 PruneOrphans 兜底。
+	if err := (&TrafficHistoryService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的用量历史失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 封禁同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
 	// 入站会凭空继承上一个用户的封禁名单。这里失败要阻断——残留封禁会让
 	// 新用户莫名其妙连不上，且没有定时任务兜底清理孤儿封禁。
@@ -216,6 +222,14 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	if len(traffics) == 0 {
 		return nil
+	}
+	// 先记一份分时历史，再走累加。两者写的是不同的库，主库的事务包不住
+	// 时序库的写入，所以不放进同一个事务——硬凑只会得到一个原子性的假象。
+	//
+	// 失败只告警不阻断：inbounds.up/down 是限额与到期判定的输入，它停止
+	// 累加的后果（用户超额不被停用）比图上少一段曲线严重得多。
+	if err := (&TrafficHistoryService{}).Record(traffics, time.Now()); err != nil {
+		logger.Warning("记录用量历史失败:", err)
 	}
 	db := database.GetDB()
 	db = db.Model(model.Inbound{})

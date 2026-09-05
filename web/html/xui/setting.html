@@ -125,6 +125,16 @@
                                                    v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
+                        <a-tab-pane key="9" tab="用量图表">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-list-item type="number" title="小时数据保留天数"
+                                                   desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
+                                                   v-model.number="allSetting.trafficHourRetentionDays"></setting-list-item>
+                                <setting-list-item type="number" title="每日数据保留天数"
+                                                   desc="用量图「1 年」这一档用的数据，一个入站一年只占 365 行。可填 1 ~ 3650，默认 365"
+                                                   v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
                         <a-tab-pane key="8" tab="并发限制">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="number" title="闲置超时（秒）"

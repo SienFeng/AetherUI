@@ -132,6 +132,21 @@
                                                   @click="showAccessLog(dbInbound, online.ip)">访问日志</a-button>
                                     </template>
                                 </a-table>
+                                <div style="margin-top: 16px">
+                                    <a-radio-group size="small" :value="trafficRangeOf(dbInbound.id)"
+                                                   @change="e => changeTrafficRange(dbInbound.id, e.target.value)">
+                                        <a-radio-button value="24h">24 小时</a-radio-button>
+                                        <a-radio-button value="7d">7 天</a-radio-button>
+                                        <a-radio-button value="30d">30 天</a-radio-button>
+                                        <a-radio-button value="1y">1 年</a-radio-button>
+                                    </a-radio-group>
+                                    <a-alert v-if="trafficReasonOf(dbInbound.id)" type="info" show-icon
+                                             style="margin-top: 12px"
+                                             :message="trafficReasonOf(dbInbound.id)"></a-alert>
+                                    <div style="position: relative; height: 220px; margin-top: 12px">
+                                        <canvas :id="'traffic-chart-' + dbInbound.id"></canvas>
+                                    </div>
+                                </div>
                             </template>
                             <template slot="action" slot-scope="text, dbInbound">
                                 <a-dropdown :trigger="['click']">
@@ -240,6 +255,8 @@
     </a-layout>
 </a-layout>
 {{template "js" .}}
+<script src="{{ .base_path }}assets/chart.js/chart.umd.min.js?{{ .cur_ver }}"></script>
+<script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
 
     const columns = [{
@@ -359,6 +376,10 @@
     // 与「没人在线」是两回事，与展开行同一条口径。
     const emptyOnlineCount = { supported: false, count: 0, reason: '正在读取连接表...' };
 
+    // Chart 实例不放进 Vue 的 data：它是个庞大的对象，做成响应式既没有
+    // 意义，还会拖慢每一次重绘。
+    const trafficCharts = {};
+
     const app = new Vue({
         delimiters: ['[[', ']]'],
         el: '#app',
@@ -370,6 +391,8 @@
             searchKey: '',
             onlineColumns,
             expandedKeys: [],
+            trafficRanges: {},
+            trafficReasons: {},
             onlines: {},
             onlineTimer: null,
             // 列表页那一列：inboundId -> OnlineCount。整个接口失败时用
@@ -580,9 +603,11 @@
                 if (expanded) {
                     this.expandedKeys = this.expandedKeys.concat([dbInbound.id]);
                     this.loadOnlines(dbInbound.id);
+                    this.loadTrafficChart(dbInbound.id);
                 } else {
                     this.expandedKeys = this.expandedKeys.filter(id => id !== dbInbound.id);
                     this.$delete(this.onlines, dbInbound.id);
+                    this.destroyTrafficChart(dbInbound.id);
                 }
                 this.syncOnlineTimer();
             },
@@ -614,6 +639,66 @@
                 } else if (!needTimer && this.onlineTimer != null) {
                     clearInterval(this.onlineTimer);
                     this.onlineTimer = null;
+                }
+            },
+            trafficRangeOf(id) {
+                return this.trafficRanges[id] || '24h';
+            },
+            trafficReasonOf(id) {
+                return this.trafficReasons[id] || '';
+            },
+            changeTrafficRange(id, range) {
+                // Vue 2 无法侦测新增的对象属性，必须走 $set。
+                this.$set(this.trafficRanges, id, range);
+                this.loadTrafficChart(id);
+            },
+            async loadTrafficChart(id) {
+                const range = this.trafficRangeOf(id);
+                const msg = await HttpUtil.post('/aui/inbound/traffic/history/' + id, { range: range });
+                if (!msg.success) {
+                    return;
+                }
+                const data = msg.obj;
+                this.$set(this.trafficReasons, id, data.reason || '');
+                // 等 Vue 把 canvas 渲染进 DOM 再取它：expandedRowRender 是
+                // 动态渲染的，指令执行时元素还不存在。
+                this.$nextTick(() => {
+                    const canvas = document.getElementById('traffic-chart-' + id);
+                    if (!canvas) {
+                        return;
+                    }
+                    this.destroyTrafficChart(id);
+                    trafficCharts[id] = new Chart(canvas, {
+                        type: 'line',
+                        data: {
+                            labels: data.labels,
+                            datasets: [
+                                {
+                                    label: '上传',
+                                    data: data.points.map(p => p.up),
+                                    borderColor: '#52c41a',
+                                    backgroundColor: 'rgba(82, 196, 26, 0.1)',
+                                    borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
+                                },
+                                {
+                                    label: '下载',
+                                    data: data.points.map(p => p.down),
+                                    borderColor: '#1890ff',
+                                    backgroundColor: 'rgba(24, 144, 255, 0.1)',
+                                    borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
+                                },
+                            ],
+                        },
+                        options: trafficChartOptions(12),
+                    });
+                });
+            },
+            destroyTrafficChart(id) {
+                // Chart 实例持有 canvas 引用与 resize 监听。不销毁的话，反复
+                // 展开折叠会一直累积，页面开几小时就会明显吃内存。
+                if (trafficCharts[id]) {
+                    trafficCharts[id].destroy();
+                    delete trafficCharts[id];
                 }
             },
             showAccessLog(dbInbound, ip) {

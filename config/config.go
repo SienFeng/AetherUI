@@ -55,6 +55,12 @@ func GetAccessLogDBPath() string {
 	return fmt.Sprintf("/etc/%s/%s-access.db", GetName(), GetName())
 }
 
+// GetTrafficDBPath 是用量历史库的路径。与主库同目录但分文件，理由同访问
+// 日志库：高频写入不该和面板的普通操作抢同一把写锁。
+func GetTrafficDBPath() string {
+	return fmt.Sprintf("/etc/%s/%s-traffic.db", GetName(), GetName())
+}
+
 // GetIPDBPath 是 ip2region 归属地库的落盘路径，GetQQWryPath 是纯真库那一路。
 //
 // 与主库同目录（/etc/<name>/），而不是安装目录下的 bin/：install.sh 更新面板时
