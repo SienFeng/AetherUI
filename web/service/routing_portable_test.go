@@ -973,3 +973,183 @@ func TestExportRulesScopeStillRejectsDuplicateGroupRemarks(t *testing.T) {
 		t.Error("scope=rules 时域名组重名仍应拒绝导出")
 	}
 }
+
+// Task 3 让所有测试夹具同时写 DomainGroupId 与 DomainGroupIds，这掩盖了一整类
+// 缺陷：真实写入路径（ruleFromForm / importRules）此后只写 DomainGroupIds，
+// DomainGroupId 恒为 0，而双写夹具永远造不出这个形态。本用例刻意只写新字段，
+// 复现真实写入路径的产出，守住「导出不会静默漏掉这类规则」。
+//
+// 症状之所以必须测：toPortableRule 读不到域名组时只 logger.Warning 后 continue，
+// 规则从导出文件里静默消失，界面上没有任何信号。
+func TestExportRuleWithOnlyDomainGroupIds(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	// RoutingRuleService.Add 原样落库，不补旧字段，所以这条规则的
+	// DomainGroupId 会是 0——正是 Task 6 之后 ruleFromForm 产出的形态。
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "只有新字段", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	f, err := (&RoutingPortableService{}).Export("rules")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.Rules) != 1 {
+		t.Fatalf("只写 DomainGroupIds 的规则被导出漏掉了（导出 %d 条，want 1）", len(f.Rules))
+	}
+	if f.Rules[0].DomainGroupRef != "Claude" {
+		t.Errorf("domainGroupRef = %q, want Claude", f.Rules[0].DomainGroupRef)
+	}
+}
+
+// 多组规则导出时 domainGroupRef 必须留空：旧面板见到空值会明确拒绝，
+// 好过让它在多个同名候选里猜一个，产生一条指向错误组的规则——那种规则
+// 在规则表和生成的配置里都渲染得完全正常，只是流量走错节点。
+func TestExportMultiGroupRuleLeavesLegacyRefEmpty(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "两组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id, chatgpt.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := (&RoutingPortableService{}).Export("rules")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.Rules) != 1 {
+		t.Fatalf("导出了 %d 条规则，want 1", len(f.Rules))
+	}
+	if f.Rules[0].DomainGroupRef != "" {
+		t.Errorf("多组规则的 domainGroupRef 必须为空，got %q", f.Rules[0].DomainGroupRef)
+	}
+	if f.Rules[0].DomainGroupRefs == nil || len(*f.Rules[0].DomainGroupRefs) != 2 {
+		t.Fatalf("domainGroupRefs = %v, want 两个组名", f.Rules[0].DomainGroupRefs)
+	}
+}
+
+func TestExportSingleGroupRuleFillsLegacyRef(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "一组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	f, err := (&RoutingPortableService{}).Export("rules")
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if f.Rules[0].DomainGroupRef != "Claude" {
+		t.Errorf("单组规则必须填 domainGroupRef 以兼容旧面板，got %q", f.Rules[0].DomainGroupRef)
+	}
+}
+
+// v1.7.0 及更早导出的文件只有 domainGroupRef。
+func TestImportAcceptsLegacySingleGroupRef(t *testing.T) {
+	setupDB(t)
+	newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	refs := []PortableInboundRef{{Remark: in.Remark, Port: in.Port}}
+	f := &ExportFile{
+		Kind: ExportKind, Version: ExportVersion, Scope: []string{"rules"},
+		Rules: []PortableRule{{
+			Remark: "旧格式", DomainGroupRef: "Claude", InboundRefs: &refs,
+			Action: model.ActionBlock, Enable: true,
+		}},
+	}
+	report, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rules.Created != 1 {
+		t.Fatalf("旧格式必须能导入: %+v", report)
+	}
+}
+
+func TestImportRejectsRuleWithoutAnyGroupRef(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	refs := []PortableInboundRef{{Remark: in.Remark, Port: in.Port}}
+	empty := []string{}
+	for name, rule := range map[string]PortableRule{
+		"两个字段都缺": {Remark: "A", InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
+		"显式空数组":  {Remark: "B", DomainGroupRefs: &empty, InboundRefs: &refs, Action: model.ActionBlock, Enable: true},
+	} {
+		f := &ExportFile{
+			Kind: ExportKind, Version: ExportVersion, Scope: []string{"rules"},
+			Rules: []PortableRule{rule},
+		}
+		report, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+		if err != nil {
+			t.Fatalf("%s：Import: %v", name, err)
+		}
+		if report.Rules.Created != 0 {
+			t.Errorf("%s：一个域名组都没有的规则必须整条拒绝，got created=%d",
+				name, report.Rules.Created)
+		}
+	}
+}
+
+// 与入站对称：部分组认不出 → 导入成禁用；全部认不出 → 整条丢弃。
+func TestImportPartialGroupMatchImportsDisabled(t *testing.T) {
+	setupDB(t)
+	newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	refs := []PortableInboundRef{{Remark: in.Remark, Port: in.Port}}
+	groups := []string{"Claude", "本机没有的组"}
+	f := &ExportFile{
+		Kind: ExportKind, Version: ExportVersion, Scope: []string{"rules"},
+		Rules: []PortableRule{{
+			Remark: "部分命中", DomainGroupRefs: &groups, InboundRefs: &refs,
+			Action: model.ActionBlock, Enable: true,
+		}},
+	}
+	report, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rules.Created != 1 {
+		t.Fatalf("部分命中应导入成禁用而不是丢弃: %+v", report)
+	}
+	rules, err := (&RoutingRuleService{}).GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(rules) != 1 || rules[0].Enable {
+		t.Errorf("部分命中的规则必须导入成禁用状态, got enable=%v", rules[0].Enable)
+	}
+}
+
+func TestImportDropsRuleWhenNoGroupMatches(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	refs := []PortableInboundRef{{Remark: in.Remark, Port: in.Port}}
+	groups := []string{"本机没有的组"}
+	f := &ExportFile{
+		Kind: ExportKind, Version: ExportVersion, Scope: []string{"rules"},
+		Rules: []PortableRule{{
+			Remark: "全不命中", DomainGroupRefs: &groups, InboundRefs: &refs,
+			Action: model.ActionBlock, Enable: true,
+		}},
+	}
+	report, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rules.Created != 0 {
+		t.Errorf("一个组都认不出必须整条丢弃，got created=%d", report.Rules.Created)
+	}
+}
