@@ -104,11 +104,12 @@ func TestExportRewritesReferencesToBusinessKeys(t *testing.T) {
 	if r.OutboundRef != "a-ui-hk" {
 		t.Errorf("OutboundRef = %q, want a-ui-hk", r.OutboundRef)
 	}
-	if len(r.InboundRefs) != 1 {
-		t.Fatalf("InboundRefs len = %d, want 1", len(r.InboundRefs))
+	if r.InboundRefs == nil || len(*r.InboundRefs) != 1 {
+		t.Fatalf("InboundRefs = %v, want 长度 1 的非 nil 指针", r.InboundRefs)
 	}
-	if r.InboundRefs[0].Remark != "用户甲" || r.InboundRefs[0].Port != 2886 {
-		t.Errorf("InboundRefs[0] = %+v", r.InboundRefs[0])
+	refs := *r.InboundRefs
+	if refs[0].Remark != "用户甲" || refs[0].Port != 2886 {
+		t.Errorf("InboundRefs[0] = %+v", refs[0])
 	}
 	if f.Kind != ExportKind || f.Version != ExportVersion {
 		t.Errorf("Kind/Version = %q/%d", f.Kind, f.Version)
@@ -132,11 +133,21 @@ func TestExportKeepsGlobalRuleAsEmptyRefs(t *testing.T) {
 	if len(f.Rules) != 1 {
 		t.Fatalf("Rules len = %d", len(f.Rules))
 	}
+	// InboundRefs 是指针：nil 对应 JSON 的 null/字段缺失，导入端会整条拒绝；
+	// 必须是一个指向空切片的非 nil 指针，才能表达「对所有入站生效」这个
+	// 用户显式表达过的语义。
 	if f.Rules[0].InboundRefs == nil {
-		t.Error("全局规则的 InboundRefs 应是空切片而不是 nil —— nil 序列化成 null，导入端无法与「字段缺失」区分")
+		t.Fatal("全局规则的 InboundRefs 不该是 nil —— nil 会被导入端当成「字段缺失」整条拒绝")
 	}
-	if len(f.Rules[0].InboundRefs) != 0 {
-		t.Errorf("InboundRefs = %+v, want 空", f.Rules[0].InboundRefs)
+	if len(*f.Rules[0].InboundRefs) != 0 {
+		t.Errorf("InboundRefs = %+v, want 空", *f.Rules[0].InboundRefs)
+	}
+	raw, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"inboundRefs":[]`) {
+		t.Errorf("全局规则序列化后应是 inboundRefs:[] 而不是 null: %s", raw)
 	}
 }
 
@@ -349,6 +360,15 @@ func baseExportFile() *ExportFile {
 	}
 }
 
+// refsPtr 构造 PortableRule.InboundRefs 需要的指针字面量。该字段是指针而
+// 不是值类型切片，为的是能把「显式空数组」（对所有入站生效）与「null/
+// 字段缺失」（必须整条拒绝的不可信输入）区分开，构造测试数据时需要取地址。
+// 不传参数时返回指向空切片的非 nil 指针，对应文件里显式写的 []。
+func refsPtr(refs ...PortableInboundRef) *[]PortableInboundRef {
+	list := append([]PortableInboundRef{}, refs...)
+	return &list
+}
+
 func TestImportRejectsWrongKind(t *testing.T) {
 	setupDB(t)
 	f := baseExportFile()
@@ -504,10 +524,10 @@ func TestImportDisablesRuleWhenInboundMissing(t *testing.T) {
 	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
 	f.Rules = []PortableRule{{
 		Remark: "走香港", DomainGroupRef: "ChatGPT", OutboundRef: "",
-		InboundRefs: []PortableInboundRef{
-			{Remark: "用户甲", Port: 2886},
-			{Remark: "对面才有的用户", Port: 9999},
-		},
+		InboundRefs: refsPtr(
+			PortableInboundRef{Remark: "用户甲", Port: 2886},
+			PortableInboundRef{Remark: "对面才有的用户", Port: 9999},
+		),
 		Action: model.ActionBlock, Enable: true,
 	}}
 	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
@@ -552,7 +572,7 @@ func TestImportKeepsEnabledWhenAllInboundsMatch(t *testing.T) {
 	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
 	f.Rules = []PortableRule{{
 		Remark: "封禁", DomainGroupRef: "ChatGPT",
-		InboundRefs: []PortableInboundRef{{Remark: "用户甲", Port: 2886}},
+		InboundRefs: refsPtr(PortableInboundRef{Remark: "用户甲", Port: 2886}),
 		Action:      model.ActionBlock, Enable: true,
 	}}
 	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err != nil {
@@ -570,7 +590,7 @@ func TestImportKeepsGlobalRuleGlobal(t *testing.T) {
 	f.DomainGroups = []PortableDomainGroup{{Remark: "违规", Domains: []string{"domain:bad.com"}}}
 	f.Rules = []PortableRule{{
 		Remark: "全局封禁", DomainGroupRef: "违规",
-		InboundRefs: []PortableInboundRef{}, // 显式的「所有入站」
+		InboundRefs: refsPtr(), // 显式的「所有入站」
 		Action:      model.ActionBlock, Enable: true,
 	}}
 	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err != nil {
@@ -593,7 +613,7 @@ func TestImportSkipsRuleWithMissingGroupRef(t *testing.T) {
 	f := baseExportFile()
 	f.Rules = []PortableRule{{
 		Remark: "孤儿规则", DomainGroupRef: "本机没有的组",
-		InboundRefs: []PortableInboundRef{}, Action: model.ActionBlock, Enable: true,
+		InboundRefs: refsPtr(), Action: model.ActionBlock, Enable: true,
 	}}
 	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
 	if err != nil {
@@ -651,5 +671,207 @@ func TestImportRejectsBadSubscribeUrl(t *testing.T) {
 	}
 	if rep.DomainGroups.Failed != 1 {
 		t.Errorf("非 http(s) 订阅地址应被拒: %+v", rep.DomainGroups)
+	}
+}
+
+// C1：inboundRefs 为 null 或字段缺失时，与显式的空数组 []（对所有入站
+// 生效，用户明确表达的语义）在语义上天差地别，绝不能当成后者放行——
+// 手工改过、别的工具生成的、传输被截断的文件都可能命中这条。
+func TestImportRejectsRuleWithNilInboundRefs(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "缺字段", DomainGroupRef: "ChatGPT",
+		// InboundRefs 留零值 nil：序列化后是 "inboundRefs":null，模拟文件
+		// 里该字段为 null 或整个键缺失（两者反序列化结果完全相同）。
+		Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Failed != 1 {
+		t.Errorf("inboundRefs 为 null/缺失应整条拒绝: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 0 {
+		t.Errorf("不该落库: %+v", rules)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "inboundRefs") {
+		t.Errorf("报告应点名缺少 inboundRefs 字段: %v", rep.Messages)
+	}
+}
+
+// C2：DomainGroup.Remark 没有唯一约束，本机存在两个同名组是完全可达的
+// 状态。导出侧对此是硬拒绝，导入侧面对同一个歧义绝不能猜一个——猜错会
+// 产生一条指向错误域名组的规则，规则表渲染得完全正常、配置也正常生成，
+// 只是流量走错了节点，没有任何一层防线会发现。
+func TestImportRejectsRuleWhenDomainGroupRemarkAmbiguous(t *testing.T) {
+	setupDB(t)
+	if err := (&DomainGroupService{}).Add(&model.DomainGroup{Remark: "国内域名", Domains: "[]"}); err != nil {
+		t.Fatalf("Add group 1: %v", err)
+	}
+	if err := (&DomainGroupService{}).Add(&model.DomainGroup{Remark: "国内域名", Domains: "[]"}); err != nil {
+		t.Fatalf("Add group 2: %v", err)
+	}
+	f := baseExportFile()
+	f.Rules = []PortableRule{{
+		Remark: "走哪个", DomainGroupRef: "国内域名",
+		InboundRefs: refsPtr(), Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Failed != 1 {
+		t.Errorf("本机域名组重名时应拒绝，不能猜: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 0 {
+		t.Errorf("不该落库: %+v", rules)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "国内域名") {
+		t.Errorf("报告应点名: %v", rep.Messages)
+	}
+}
+
+// I1：一个入站都没认出来时必须整条丢弃——删掉这道判断，其余测试依然
+// 全部通过，而删掉它的后果正是本功能最高危的路径：InboundIds 被编码成
+// []，等于把一条本该只覆盖某几个人的规则放大成「对所有入站生效」。
+// 顺带覆盖 I2：报告不该先说「已导入但保持禁用」再说「整条跳过」——
+// 两句自相矛盾，管理员会去规则列表里找一条根本不存在的禁用规则。
+func TestImportDropsRuleWhenNoInboundMatched(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "全认不出", DomainGroupRef: "ChatGPT",
+		InboundRefs: refsPtr(
+			PortableInboundRef{Remark: "甲", Port: 11111},
+			PortableInboundRef{Remark: "乙", Port: 22222},
+		),
+		Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Failed != 1 {
+		t.Errorf("一个都没认出来应整条丢弃: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 0 {
+		t.Errorf("不该落库，哪怕是禁用状态: %+v", rules)
+	}
+	joined := strings.Join(rep.Messages, "\n")
+	if strings.Contains(joined, "已导入但保持禁用") {
+		t.Errorf("不该同时出现「已导入但保持禁用」与「整条跳过」这两条自相矛盾的消息: %v", rep.Messages)
+	}
+}
+
+// I3：手工新增路径的 allocTag 恒定产出 a-ui-<...>，结构上不可能与模板
+// 撞名——「所有生成的 tag 统一带 a-ui- 前缀」这条不变量就是这么成立的。
+// 导入保留原 tag 打破了这条隔离：web/service/config.json 模板里有一个
+// tag 为 blocked 的出站，撞名会让 xray 报 existing tag found 并拒绝启动
+// 整份配置——全员断网，而面板首页仍显示 running。
+func TestImportRejectsOutboundTagWithoutAUIPrefix(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Outbounds = []PortableOutbound{
+		{Tag: "blocked", Remark: "撞模板", Protocol: "socks",
+			Config: `{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":1080}]}}`,
+			Enable: true},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Outbounds.Failed != 1 {
+		t.Errorf("非 a-ui- 前缀的 tag 应被拒绝，可能与模板出站撞名: %+v %v", rep.Outbounds, rep.Messages)
+	}
+	nodes, _ := (&OutboundNodeService{}).GetAll()
+	if len(nodes) != 0 {
+		t.Errorf("不该落库: %+v", nodes)
+	}
+}
+
+// I4：两级匹配可能把两个不同的 ref 撞到同一个本机入站——一个 ref 按
+// remark 精确命中，另一个 ref 的 remark 对不上、退到 port 又刚好命中了
+// 同一个入站。此时 resolveInboundRefs 不会产生 missing（两个 ref 都
+// 「命中」了），但 EncodeInboundIds 会把重复 id 静默去重，覆盖范围因此
+// 缩小——这是消费端能零成本察觉的塌缩，必须报告并禁用。
+func TestImportDisablesRuleWhenInboundRefsCollapseToSameInbound(t *testing.T) {
+	setupDB(t)
+	newPortableTestInbound(t, "老张", 2886)
+
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "覆盖两人", DomainGroupRef: "ChatGPT",
+		InboundRefs: refsPtr(
+			PortableInboundRef{Remark: "老张", Port: 2886},
+			PortableInboundRef{Remark: "对面的老王", Port: 2886}, // remark 对不上，退到 port，刚好撞上老张
+		),
+		Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Created != 1 {
+		t.Fatalf("规则应被导入（禁用状态）: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 1 {
+		t.Fatalf("规则数 = %d", len(rules))
+	}
+	if rules[0].Enable {
+		t.Error("入站引用塌缩到同一个入站时必须导入为禁用，覆盖范围已经缩小")
+	}
+	ids, err := DecodeInboundIds(rules[0].InboundIds)
+	if err != nil {
+		t.Fatalf("DecodeInboundIds: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Errorf("塌缩后应只剩一个 id: %v", ids)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "同一个入站") {
+		t.Errorf("报告应提示覆盖范围已缩小: %v", rep.Messages)
+	}
+}
+
+// M2：Skipped 的定义是「本机已存在」。重复导入被 checkConflict 拒下的
+// 规则语义上正是「已存在」，不该计入 Failed——否则一次完全正常的重跑会
+// 显示成「规则：失败 N」，与「导入是幂等的」这条设计前提自相矛盾。
+func TestImportRuleConflictCountsAsSkippedNotFailed(t *testing.T) {
+	setupDB(t)
+	newPortableTestInbound(t, "用户甲", 2886)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark:         "封禁",
+		DomainGroupRef: "ChatGPT",
+		InboundRefs:    refsPtr(PortableInboundRef{Remark: "用户甲", Port: 2886}),
+		Action:         model.ActionBlock, Enable: true,
+	}}
+	raw := exportJSON(t, f)
+	s := RoutingPortableService{}
+	if _, err := s.Import(raw); err != nil {
+		t.Fatalf("首次 Import: %v", err)
+	}
+	rep, err := s.Import(raw)
+	if err != nil {
+		t.Fatalf("二次 Import: %v", err)
+	}
+	if rep.Rules.Failed != 0 {
+		t.Errorf("重复导入的规则不该计入 Failed: %+v %v", rep.Rules, rep.Messages)
+	}
+	if rep.Rules.Skipped != 1 {
+		t.Errorf("重复导入的规则应计入 Skipped: %+v", rep.Rules)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 1 {
+		t.Errorf("规则不该变成两份: %+v", rules)
 	}
 }

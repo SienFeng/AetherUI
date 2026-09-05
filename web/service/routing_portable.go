@@ -64,12 +64,18 @@ type PortableRule struct {
 	DomainGroupRef string `json:"domainGroupRef"`
 	// OutboundRef 在 action=block 时为空。
 	OutboundRef string `json:"outboundRef"`
-	// InboundRefs 为空切片表示「对所有入站生效」，是用户显式表达的语义。
-	// 必须序列化成 [] 而不是 null——导入端要能把它与「字段缺失」区分开。
-	InboundRefs []PortableInboundRef `json:"inboundRefs"`
-	Action      string               `json:"action"`
-	Priority    int                  `json:"priority"`
-	Enable      bool                 `json:"enable"`
+	// InboundRefs 是指针而不是值类型切片：显式的空数组 [] 表示「对所有入站
+	// 生效」，是用户明确表达的语义；而 JSON 的 null 与**键缺失**在导入端
+	// 必须整条拒绝——手工改过、别的工具生成的、传输被截断的文件都可能命中。
+	// 值类型切片做不到这一点：encoding/json 把 null、缺失键、显式 []
+	// 全部 unmarshal 成 len()==0 的 nil 切片，三者在 Go 侧完全无法区分，
+	// 会让「拒绝」误判成「显式全局规则」，把规则静默放大到全体。
+	// 导出侧 toPortableRule 永远返回非 nil 指针；导入侧见到 nil 指针
+	// （对应 null 或字段缺失）必须整条拒绝，见 importRules。
+	InboundRefs *[]PortableInboundRef `json:"inboundRefs"`
+	Action      string                `json:"action"`
+	Priority    int                   `json:"priority"`
+	Enable      bool                  `json:"enable"`
 }
 
 type ExportFile struct {
@@ -264,7 +270,7 @@ func (s *RoutingPortableService) toPortableRule(
 		Remark:         r.Remark,
 		DomainGroupRef: g.Remark,
 		OutboundRef:    outboundRef,
-		InboundRefs:    refs,
+		InboundRefs:    &refs,
 		Action:         r.Action,
 		Priority:       r.Priority,
 		Enable:         r.Enable,
@@ -305,6 +311,22 @@ func resolveInboundRefs(refs []PortableInboundRef, inbounds []*model.Inbound) ([
 	return ids, missing
 }
 
+// hasDuplicateIds 判断两个不同的 ref 是否被两级匹配撞到了同一个本机入站
+// （remark 换机器后对不上、退到 port 又刚好命中了另一条 ref 已经命中过的
+// 那个）。EncodeInboundIds 会静默把重复 id 去重，覆盖范围因此缩小——
+// 这是消费端能零成本察觉的塌缩，调用方必须报告并禁用，不能让一条本该
+// 覆盖多人的规则悄悄少覆盖一个人。
+func hasDuplicateIds(ids []int) bool {
+	seen := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			return true
+		}
+		seen[id] = true
+	}
+	return false
+}
+
 type ImportCounts struct {
 	Created int `json:"created"`
 	Skipped int `json:"skipped"` // 本机已存在
@@ -322,6 +344,16 @@ type ImportReport struct {
 
 func (r *ImportReport) say(format string, a ...any) {
 	r.Messages = append(r.Messages, fmt.Sprintf(format, a...))
+}
+
+// fail 记一条导致某个分类 Failed++ 的消息：既写进报告（前端展示导入结果
+// 唯一的反馈通道），也记 logger.Warning。管理员关掉 modal 之后不该完全没
+// 有留痕——这与 buildRules 把跳过原因记进 logger.Warning 的既有做法一致，
+// 「不让防线对用户隐形」不能只对生成期成立。
+func (r *ImportReport) fail(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	r.Messages = append(r.Messages, msg)
+	logger.Warning("导入分流配置：", msg)
 }
 
 // Import 逐条处理、逐条报告，**不用事务**。
@@ -375,8 +407,8 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 	}
 	existing, err := s.domainGroupService.GetAll()
 	if err != nil {
-		report.say("读取本机域名组失败：%v", err)
 		report.DomainGroups.Failed += len(items)
+		report.fail("读取本机域名组失败：%v", err)
 		return false
 	}
 	byRemark := make(map[string]bool, len(existing))
@@ -389,7 +421,7 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 	for _, item := range items {
 		if item.Remark == "" {
 			report.DomainGroups.Failed++
-			report.say("有一个域名组的备注为空，已跳过")
+			report.fail("有一个域名组的备注为空，已跳过")
 			continue
 		}
 		if byRemark[item.Remark] {
@@ -404,25 +436,25 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 			list, err := ParseDomains(strings.Join(item.Domains, "\n"))
 			if err != nil {
 				report.DomainGroups.Failed++
-				report.say("域名组「%s」的域名格式有误：%v", item.Remark, err)
+				report.fail("域名组「%s」的域名格式有误：%v", item.Remark, err)
 				continue
 			}
 			if err := ValidateDomains(list); err != nil {
 				report.DomainGroups.Failed++
-				report.say("域名组「%s」的域名未通过校验：%v", item.Remark, err)
+				report.fail("域名组「%s」的域名未通过校验：%v", item.Remark, err)
 				continue
 			}
 			encoded, err = EncodeDomains(list)
 			if err != nil {
 				report.DomainGroups.Failed++
-				report.say("域名组「%s」编码失败：%v", item.Remark, err)
+				report.fail("域名组「%s」编码失败：%v", item.Remark, err)
 				continue
 			}
 		}
 		if item.SubscribeUrl != "" {
 			if err := ValidateSubscribeURL(item.SubscribeUrl); err != nil {
 				report.DomainGroups.Failed++
-				report.say("域名组「%s」的订阅地址非法：%v", item.Remark, err)
+				report.fail("域名组「%s」的订阅地址非法：%v", item.Remark, err)
 				continue
 			}
 		}
@@ -434,7 +466,7 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 		}
 		if err := s.domainGroupService.Add(g); err != nil {
 			report.DomainGroups.Failed++
-			report.say("域名组「%s」写库失败：%v", item.Remark, err)
+			report.fail("域名组「%s」写库失败：%v", item.Remark, err)
 			continue
 		}
 		byRemark[item.Remark] = true
@@ -457,8 +489,8 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 	}
 	existing, err := s.outboundService.GetAll()
 	if err != nil {
-		report.say("读取本机出站节点失败：%v", err)
 		report.Outbounds.Failed += len(items)
+		report.fail("读取本机出站节点失败：%v", err)
 		return false
 	}
 	byTag := make(map[string]bool, len(existing))
@@ -470,7 +502,7 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 	for _, item := range items {
 		if item.Tag == "" || len(item.Tag) > 128 {
 			report.Outbounds.Failed++
-			report.say("出站节点「%s」的 tag 为空或过长，已跳过", item.Remark)
+			report.fail("出站节点「%s」的 tag 为空或过长，已跳过", item.Remark)
 			continue
 		}
 		// 保留 tag 不在 outbound_nodes 表里，数据库唯一约束看不见它们。
@@ -478,7 +510,21 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 		// 而面板首页仍显示 running。判定统一走 model.IsReservedTag。
 		if model.IsReservedTag(item.Tag) {
 			report.Outbounds.Failed++
-			report.say("出站节点「%s」的 tag %s 是系统保留 tag，拒绝导入", item.Remark, item.Tag)
+			report.fail("出站节点「%s」的 tag %s 是系统保留 tag，拒绝导入", item.Remark, item.Tag)
+			continue
+		}
+		// 手工新增路径的 allocTag 恒定产出 a-ui-<...>，结构上不可能与模板
+		// 撞名——「所有生成的 tag 统一带 a-ui- 前缀，与手工模板隔离」这条
+		// 不变量就是这么成立的。导入保留原 tag（这是对的，规则靠 tag 对上
+		// 引用），因此这里必须自己把这条隔离补回来：web/service/config.json
+		// 模板里有一个 tag 为 blocked 的出站，一个同 tag 的导入节点会让
+		// 生成配置出现重复 tag，与保留 tag 撞名同一形状同一后果——xray 拒绝
+		// 启动整份配置、全员断网、面板首页仍显示 running，只是这里没有
+		// IsReservedTag 那种 fail-close 的专门防线，只能靠 ValidateOutbound
+		// 的 fail-open 兜底，所以必须在这里补一道 fail-close 的前缀检查。
+		if !strings.HasPrefix(item.Tag, model.OutboundTagPrefix+"-") {
+			report.Outbounds.Failed++
+			report.fail("出站节点「%s」的 tag %s 不是 a-ui- 前缀，可能与模板出站撞名，拒绝导入", item.Remark, item.Tag)
 			continue
 		}
 		if byTag[item.Tag] {
@@ -490,13 +536,13 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 		var ob map[string]any
 		if err := json.Unmarshal([]byte(item.Config), &ob); err != nil {
 			report.Outbounds.Failed++
-			report.say("出站节点 %s 的配置不是合法 JSON：%v", item.Tag, err)
+			report.fail("出站节点 %s 的配置不是合法 JSON：%v", item.Tag, err)
 			continue
 		}
 		// "null" 能通过 Unmarshal 却留下一个 nil map，下一行赋值直接 panic。
 		if ob == nil {
 			report.Outbounds.Failed++
-			report.say("出站节点 %s 的配置为 null", item.Tag)
+			report.fail("出站节点 %s 的配置为 null", item.Tag)
 			continue
 		}
 		ob["tag"] = item.Tag
@@ -505,13 +551,13 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 		// xray 二进制缺失或超时时 ValidateOutbound 会放行并记日志。
 		if err := ValidateOutbound(ob); err != nil {
 			report.Outbounds.Failed++
-			report.say("出站节点 %s 未通过 xray 校验：%v", item.Tag, err)
+			report.fail("出站节点 %s 未通过 xray 校验：%v", item.Tag, err)
 			continue
 		}
 		encoded, err := json.Marshal(ob)
 		if err != nil {
 			report.Outbounds.Failed++
-			report.say("出站节点 %s 编码失败：%v", item.Tag, err)
+			report.fail("出站节点 %s 编码失败：%v", item.Tag, err)
 			continue
 		}
 		protocol := item.Protocol
@@ -524,7 +570,7 @@ func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, repor
 		}
 		if err := database.GetDB().Save(node).Error; err != nil {
 			report.Outbounds.Failed++
-			report.say("出站节点 %s 写库失败：%v", item.Tag, err)
+			report.fail("出站节点 %s 写库失败：%v", item.Tag, err)
 			continue
 		}
 		byTag[item.Tag] = true
@@ -540,18 +586,29 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 	}
 	groups, err := s.domainGroupService.GetAll()
 	if err != nil {
-		report.say("读取本机域名组失败：%v", err)
 		report.Rules.Failed += len(items)
+		report.fail("读取本机域名组失败：%v", err)
 		return false
 	}
+	// DomainGroup.Remark 没有唯一约束（controller 新增域名组也不查重），
+	// 本机存在两个同名组是完全可达的状态。导出侧对此是硬拒绝
+	// （checkDuplicateGroupRemarks），导入侧面对同一个歧义绝不能猜一个
+	// （比如取 id 最小/最大的那个）——猜错会产生一条指向错误域名组的规则，
+	// 而规则表会渲染得完全正常、配置也会正常生成，只是流量走错了节点，
+	// 没有任何一层防线会发现。
 	groupByRemark := make(map[string]*model.DomainGroup, len(groups))
+	ambiguousGroupRemark := make(map[string]bool, len(groups))
 	for _, g := range groups {
+		if _, exists := groupByRemark[g.Remark]; exists {
+			ambiguousGroupRemark[g.Remark] = true
+			continue
+		}
 		groupByRemark[g.Remark] = g
 	}
 	nodes, err := s.outboundService.GetAll()
 	if err != nil {
-		report.say("读取本机出站节点失败：%v", err)
 		report.Rules.Failed += len(items)
+		report.fail("读取本机出站节点失败：%v", err)
 		return false
 	}
 	nodeByTag := make(map[string]*model.OutboundNode, len(nodes))
@@ -560,8 +617,8 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 	}
 	inbounds, err := s.inboundService.GetAllInbounds()
 	if err != nil {
-		report.say("读取本机入站失败：%v", err)
 		report.Rules.Failed += len(items)
+		report.fail("读取本机入站失败：%v", err)
 		return false
 	}
 
@@ -571,46 +628,93 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		if label == "" {
 			label = "(无备注)"
 		}
+
+		// nil 指针对应 JSON 的 null 或字段缺失，与显式的空数组 []（对所有
+		// 入站生效，用户明确表达的语义）在 Go 侧本来无法区分——这正是把
+		// InboundRefs 从值类型切片改成指针的原因。手工改过、别的工具生成
+		// 的、传输被截断的文件都可能命中这条，必须整条拒绝，绝不能当成
+		// 显式全局规则放行，否则会静默放大到全体入站。
+		if item.InboundRefs == nil {
+			report.Rules.Failed++
+			report.fail("规则「%s」缺少 inboundRefs 字段，无法区分「对所有入站生效」与「字段缺失」，整条跳过", label)
+			continue
+		}
+		refs := *item.InboundRefs
+
+		if ambiguousGroupRemark[item.DomainGroupRef] {
+			report.Rules.Failed++
+			report.fail("规则「%s」引用的域名组「%s」在本机有多个同名组，无法确定指向哪一个，整条跳过（请先在域名组页面改名）",
+				label, item.DomainGroupRef)
+			continue
+		}
 		g, ok := groupByRemark[item.DomainGroupRef]
 		if !ok {
 			report.Rules.Failed++
-			report.say("规则「%s」引用的域名组「%s」不存在，整条跳过", label, item.DomainGroupRef)
+			report.fail("规则「%s」引用的域名组「%s」不存在，整条跳过", label, item.DomainGroupRef)
 			continue
 		}
+
 		outboundId := 0
 		if item.Action == model.ActionProxy {
 			n, ok := nodeByTag[item.OutboundRef]
 			if !ok {
 				report.Rules.Failed++
-				report.say("规则「%s」引用的出站节点 %s 不存在，整条跳过", label, item.OutboundRef)
+				report.fail("规则「%s」引用的出站节点 %s 不存在，整条跳过", label, item.OutboundRef)
 				continue
 			}
 			outboundId = n.Id
+			// 出站存在但被禁用：规则本身照常导入（其余部分都是好的），
+			// 但 buildRule 在生成期会因出站被禁用整条跳过它——规则列表
+			// 上却看起来是一条正常启用的规则，管理员察觉不到这个落差。
+			if !n.Enable {
+				report.say("规则「%s」引用的出站节点 %s 当前处于禁用状态，该规则不会写进配置，请先启用该节点",
+					label, item.OutboundRef)
+			}
 		}
 
-		ids, missing := resolveInboundRefs(item.InboundRefs, inbounds)
+		ids, missing := resolveInboundRefs(refs, inbounds)
+		// 一个都没找到是唯一必须整条丢弃的情形：refs 非空却没有任何一项
+		// 解析出 id，若照常导入会在编码时被去重成 []，等于把这条规则放大
+		// 成「对所有入站生效」——哪怕导入成禁用状态也不行，管理员一旦手滑
+		// 启用就会全员中招。这个判断必须放在下面「部分命中」分支之前：
+		// 否则报告会先说「已导入但保持禁用」、紧接着又说「整条跳过」，
+		// 两句自相矛盾，管理员会去规则列表里找一条根本不存在的禁用规则。
+		if len(refs) > 0 && len(ids) == 0 {
+			report.Rules.Failed++
+			report.fail("规则「%s」的入站在本机一个都没找到，整条跳过（若照常导入，它会变成对所有用户生效）", label)
+			continue
+		}
+
 		enable := item.Enable
 		if len(missing) > 0 {
-			// 绝不把认不出的入站剔掉后当作完整覆盖集——剔到空就是
-			// 「对所有入站生效」。导入成禁用状态，把缺失的点名报告，
-			// 管理员打开编辑弹窗勾一下就好。整条丢弃也不对：规则的其余
-			// 部分（域名组、出站、优先级、动作）都是好的。
+			// 绝不把认不出的入站剔掉后当作完整覆盖集——剔到空就是上面
+			// 已经处理的「对所有入站生效」。部分命中时导入成禁用状态，
+			// 把缺失的点名报告，管理员打开编辑弹窗勾一下就好。整条丢弃
+			// 也不对：规则的其余部分（域名组、出站、优先级、动作）都是好的。
 			enable = false
 			report.say("规则「%s」的入站 %s 在本机未找到，已导入但保持禁用，请手工指定入站后启用",
 				label, strings.Join(missing, "、"))
 		}
-		encoded, err := EncodeInboundIds(ids)
+		// 两级匹配可能把两个不同的 ref 撞到同一个本机入站（一个 ref 按
+		// remark 命中了它，另一个 ref 的 remark 对不上、退到 port 又刚好
+		// 命中了同一个入站）。EncodeInboundIdsStrict 会静默把重复 id
+		// 去重，覆盖范围因此缩小——这是消费端能零成本察觉的塌缩，必须
+		// 报告并禁用，不能让一条本该覆盖多人的规则悄悄少覆盖一个人。
+		if hasDuplicateIds(ids) {
+			enable = false
+			report.say("规则「%s」有多个入站引用指向了本机同一个入站，覆盖范围已缩小，已导入但保持禁用，请手工确认", label)
+		}
+
+		// 用 Strict 版本：写入路径的既有约定（EncodeInboundIds 的函数注释
+		// 明写「写入路径一律用 EncodeInboundIdsStrict」）。但 Strict 看的
+		// 是解析后的 ids，不是原始的 item.InboundRefs——全部认不出时 ids
+		// 本身就是空切片，Strict 在这条路径上和非 Strict 一样安静地返回
+		// "[]"，不会报错。上面那道「一个都没找到」检查必须自己写，不能
+		// 指望 Strict 替我们拦住。
+		encoded, err := EncodeInboundIdsStrict(ids)
 		if err != nil {
 			report.Rules.Failed++
-			report.say("规则「%s」的入站编码失败：%v", label, err)
-			continue
-		}
-		// 部分命中却编码成了 []，等于把规则放大到全体。这种情况只可能在
-		// 已命中集合为空时出现，此时必须整条丢弃而不是导入一条覆盖全员的
-		// 规则——哪怕它是禁用的，管理员一旦启用就会全员中招。
-		if encoded == "[]" && len(item.InboundRefs) > 0 {
-			report.Rules.Failed++
-			report.say("规则「%s」的入站在本机一个都没找到，整条跳过（若照常导入，它会变成对所有用户生效）", label)
+			report.fail("规则「%s」的入站编码失败：%v", label, err)
 			continue
 		}
 
@@ -622,8 +726,18 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		// 走 Add 而不是直接写库：它自带 validate（域名组/出站存在、动作合法）
 		// 与 checkConflict（同一域名组下入站不得重叠）。
 		if err := s.ruleService.Add(rule); err != nil {
-			report.Rules.Failed++
-			report.say("规则「%s」导入失败：%v", label, err)
+			// checkConflict 拒绝的规则语义上就是「Skipped 定义」里的
+			// 「本机已存在」——已经有一条规则覆盖了同样的范围。用错误文本
+			// 匹配而不是哨兵错误类型，因为 checkConflict 没有导出一个；
+			// 落进 Failed 会让一次完全正常的重跑显示成「规则：失败 N」，
+			// 与「导入是幂等的」这条设计前提自相矛盾。
+			if strings.Contains(err.Error(), "冲突") {
+				report.Rules.Skipped++
+				report.say("规则「%s」已存在同覆盖范围的规则，跳过", label)
+			} else {
+				report.Rules.Failed++
+				report.fail("规则「%s」导入失败：%v", label, err)
+			}
 			continue
 		}
 		report.Rules.Created++
