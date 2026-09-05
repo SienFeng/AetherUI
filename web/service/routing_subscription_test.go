@@ -312,6 +312,56 @@ func TestRefreshWritesSubscribedDomainsOnSuccess(t *testing.T) {
 	}
 }
 
+// 设计 §5.3 的新不变量：**成功**的一次拉取必须把两侧都写掉，哪怕其中一侧
+// 是空。它与「失败时绝不清空」（下一个测试）方向相反，两条必须同时立住——
+// 上游真的不再列 IP 了还留着上一次的 IP，就是拿过期数据分流，比 IP 条件
+// 消失更危险，而且不会有任何一层报错。
+func TestRefreshClearsSubscribedCidrsWhenUpstreamDropsThem(t *testing.T) {
+	setupDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\n"))
+	}))
+	defer srv.Close()
+
+	// 先造出「上一次拉取带回了 IP 段」的状态。
+	group := &model.DomainGroup{
+		Remark: "国内", Domains: "[]", SubscribeUrl: srv.URL,
+		SubscribedCidrs: `["1.1.1.1/32","8.8.8.0/24"]`,
+		LastUpdatedAt:   1,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	got, err := s.Get(group.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cidrs, err := DecodeSubscribedCidrs(got.SubscribedCidrs)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedCidrs: %v", err)
+	}
+	if len(cidrs) != 0 {
+		t.Errorf("上游这次一条 IP 都没给，旧的必须清掉，实际 %v", cidrs)
+	}
+	// 另一侧照常写入，确认清空不是「整次刷新没生效」造成的假象。
+	domains, err := DecodeSubscribedDomains(got.SubscribedDomains)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedDomains: %v", err)
+	}
+	if len(domains) != 1 || domains[0] != "domain:qq.com" {
+		t.Errorf("domains = %v, want [domain:qq.com]", domains)
+	}
+	if got.LastError != "" {
+		t.Errorf("LastError = %q, want empty", got.LastError)
+	}
+}
+
 // 失败时清空订阅域名会让合并结果为空、规则被 buildRule 跳过、
 // 流量静默退回直连。这是本功能最危险的失败模式，必须锁死。
 func TestRefreshKeepsOldDataOnFailure(t *testing.T) {
