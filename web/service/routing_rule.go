@@ -165,6 +165,11 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 		}
 		// 用 NewErrorf 而不是 NewError：后者走 fmt.Sprintln，会在每个参数
 		// 之间插空格，拼出「与分流规则「 甲 」冲突」这种带空隙的句子。
+		//
+		// 注意：routing_portable.go 的 importRules 用
+		// strings.Contains(err.Error(), "冲突") 把这类错误识别成「本机已存在
+		// 同覆盖范围的规则」（计入 Skipped 而不是 Failed，导入才能保持幂等）。
+		// 改这句文案（尤其是去掉「冲突」二字）前，先去同步看那一处。
 		return common.NewErrorf(
 			"与分流规则「%s」冲突：%s在域名组「%s」下已被它覆盖。同一个用户在同一个域名组下只能有一条规则。",
 			ruleLabel(other), inboundLabel(who), s.groupLabel(rule.DomainGroupId))

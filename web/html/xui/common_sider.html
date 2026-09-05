@@ -42,7 +42,124 @@
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
+    <div class="sider-version">
+        <a-popover v-model="versionPopoverVisible" trigger="click" placement="topRight"
+                   overlay-class-name="version-popover">
+            <template slot="content">
+                <div class="version-panel">
+                    <div class="version-panel-head">
+                        <span>当前版本</span>
+                        <a-icon type="sync" :spin="versionRefreshing"
+                                @click="refreshPanelVersion()"></a-icon>
+                    </div>
+                    <div class="version-panel-body">
+                        <div class="version-current">
+                            [[ panelVersion.current ]]
+                            <a-icon v-if="panelVersion.knownCurrent && !panelVersion.hasUpdate"
+                                    type="check-circle" theme="filled" style="color:#52c41a"></a-icon>
+                        </div>
+                        <div class="version-state">[[ versionStateText() ]]</div>
+                        <div v-if="panelVersion.lastError" class="version-error">
+                            [[ panelVersion.lastError ]]
+                        </div>
+                        <a-button v-if="panelVersion.hasUpdate && panelVersion.updatable"
+                                  type="primary" size="small" style="margin-top:8px"
+                                  @click="confirmUpgrade(panelVersion.latest, false)">
+                            更新到 [[ panelVersion.latest ]]
+                        </a-button>
+                        <div v-if="!panelVersion.updatable && panelVersion.unsupportedReason"
+                             class="version-unsupported">
+                            [[ panelVersion.unsupportedReason ]]
+                        </div>
+                        <div style="margin-top:8px">
+                            <a :href="'https://github.com/SienFeng/AetherUI/releases'"
+                               target="_blank" rel="noopener">
+                                <a-icon type="github"></a-icon> 查看发布
+                            </a>
+                        </div>
+                    </div>
+                    <div v-if="panelVersion.updatable && (panelVersion.releases || []).length"
+                         class="version-rollback">
+                        <div class="version-rollback-head" @click="rollbackOpen = !rollbackOpen">
+                            <span><a-icon type="clock-circle"></a-icon> 版本回退</span>
+                            <a-icon :type="rollbackOpen ? 'up' : 'down'"></a-icon>
+                        </div>
+                        <div v-if="rollbackOpen">
+                            <div class="version-rollback-tip">
+                                选择要回退到的版本（近 [[ panelVersion.releases.length ]] 个版本）
+                            </div>
+                            <a-radio-group v-model="rollbackTag" style="width:100%">
+                                <div v-for="r in panelVersion.releases" :key="r.tagName"
+                                     class="version-rollback-item">
+                                    <a-radio :value="r.tagName">[[ r.tagName ]]</a-radio>
+                                    <span class="version-rollback-date">
+                                        [[ formatReleaseDate(r.publishedAt) ]]
+                                    </span>
+                                </div>
+                            </a-radio-group>
+                            <a-button size="small" :disabled="!rollbackTag"
+                                      style="margin-top:8px;width:100%"
+                                      @click="confirmUpgrade(rollbackTag, true)">
+                                回退到选中版本
+                            </a-button>
+                        </div>
+                    </div>
+                </div>
+            </template>
+            <a-badge :dot="panelVersion.hasUpdate">
+                <span class="sider-version-tag">[[ panelVersion.current || '—' ]]</span>
+            </a-badge>
+        </a-popover>
+    </div>
 </a-layout-sider>
+<a-modal :visible="upgradeState !== 'idle'" title="面板更新"
+         :closable="false" :mask-closable="false" :footer="null" :width="460">
+    <div style="text-align:center;padding:12px 0">
+        <template v-if="upgradeState === 'starting'">
+            <a-spin size="large"></a-spin>
+            <p style="margin-top:16px">正在更新到 [[ upgradeTarget ]]…</p>
+            <p style="color:#8c8c8c;font-size:12px">
+                更新在后台独立进程中执行，请不要关闭此页面
+            </p>
+        </template>
+        <template v-else-if="upgradeState === 'restarting'">
+            <a-spin size="large"></a-spin>
+            <p style="margin-top:16px">面板重启中…</p>
+            <p style="color:#8c8c8c;font-size:12px">这是更新过程中的正常现象</p>
+        </template>
+        <template v-else-if="upgradeState === 'done'">
+            <a-icon type="check-circle" theme="filled"
+                    style="font-size:48px;color:#52c41a"></a-icon>
+            <p style="margin-top:16px">更新完成，当前版本 [[ panelVersion.current ]]</p>
+            <a-button type="primary" @click="location.reload()">刷新页面</a-button>
+        </template>
+        <template v-else-if="upgradeState === 'timeout'">
+            <a-icon type="exclamation-circle" theme="filled"
+                    style="font-size:48px;color:#faad14"></a-icon>
+            <p style="margin-top:16px">3 分钟内版本号仍未变化</p>
+            <p style="color:#8c8c8c;font-size:12px">
+                更新可能仍在进行中（慢速网络下载发版包可能超过 3 分钟），也可能已经失败。
+                <b>请不要重复点击更新</b>，先查看日志确认。
+            </p>
+            <p style="color:#8c8c8c;font-size:12px">
+                若是登录态已失效导致查询中断，刷新页面重新登录即可确认当前版本。
+            </p>
+            <a-button style="margin-right:8px" @click="openUpgradeLog()">查看日志</a-button>
+            <a-button @click="upgradeState = 'idle'">关闭</a-button>
+        </template>
+    </div>
+</a-modal>
+
+<a-modal v-model="upgradeLogVisible" title="更新日志" :footer="null" :width="800">
+    <p style="color:#8c8c8c;font-size:12px">
+        服务器上的 /var/log/a-ui-update.log，只显示最后 200 行
+    </p>
+    <pre class="upgrade-log"><template v-for="line in upgradeLogLines">[[ line ]]
+</template></pre>
+    <div v-if="!upgradeLogLines.length" style="color:#8c8c8c">
+        日志为空，说明还没有执行过更新
+    </div>
+</a-modal>
 <a-drawer id="sider-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"
           :visible="siderDrawer.visible" :wrap-style="{ padding: 0 }">

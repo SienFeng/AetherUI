@@ -299,6 +299,7 @@
     };
 
     const app = new Vue({
+        mixins: [panelVersionMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
