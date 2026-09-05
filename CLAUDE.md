@@ -291,6 +291,26 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 这次改造收窄的是**面板**的暴露面（明文 HTTP、固定端口、默认根路径 `/`），**不是**已创建入站的暴露面。`:2886` 这类 vmess+ws+tls 入站改造前后一样直接监听在公网端口上，浏览器直连会得到 400 或断连，这个特征没有变化，443 上的伪装站也保护不到它们——伪装站只接管 Caddy 自己监听的 80/443。安装完成的提示文案必须如实告知这一点（`print_result` 末尾那段），不能让管理员误以为「配了域名 = 节点也变安全了」。真正把入站收编到 Caddy 之后（明文 ws 监听 127.0.0.1、按随机 path 由 Caddy 分流）是设计文档里明确写的下一期，不在本次范围。
 
+## 面板版本与一键更新
+
+侧栏底部常驻版本号（`config.GetVersion()`），有新版打红点，点开可更新或回退到最近 5 个版本。设计文档在 `docs/superpowers/specs/2026-09-05-panel-version-update-design.md`。
+
+**版本判定不做语义化解析。** 仓库 tag 格式不统一（`0.3.4.4` 与 `v1.2.10` 并存），字符串比较会把 `v1.2.9 > v1.2.10` 判反。改用 GitHub releases 列表的天然顺序：当前版本等于第 0 条即最新，在列表里且下标 > 0 即有更新，**不在列表里则既不打红点也不显示「已是最新」**（本地开发版 `config/version` 就是这种情况）。拉 `per_page=10` 但回退列表只给前 5 条——`KnownCurrent` 用全部 10 条判定，落后 6~10 个版本的管理员恰恰最需要看到红点。
+
+**更新必须经 `systemd-run` 起独立 transient unit 执行，不能直接 `os/exec`。** 面板的子进程与面板同在 `/system.slice/a-ui.service` 这个 cgroup 里（实测确认 xray 就在里面），而 `install.sh` 会 `systemctl stop a-ui`，默认 `KillMode=control-group` 会把更新脚本一起杀掉——脚本死在 `rm -rf /usr/local/a-ui/` 前后，留下一台面板已删一半、服务已停、且因 `Restart=no` 不会自愈的机器，只能 SSH 上去手动重装。2026-09-05 实测：`systemd-run` 的 unit 在父 service 被 stop 后存活，而**加了 `setsid` 的对照组仍被杀死**——`setsid` 改的是会话不是 cgroup，不要拿它替代。
+
+**tag 是命令注入路径，两道防线都必须硬拒绝。** 它会被拼进 `bash -c` 的字符串并以 root 执行：先过 `^[A-Za-z0-9._-]{1,64}$`，再必须精确出现在缓存的发布列表里。第二道顺带实现了「只能回退到最近 5 个版本」。这与 `routing_validate.go` 的 fail open 取向**相反且必须相反**：那里放行的是「没法证明非法」的配置，最坏后果是 xray 拒绝启动；这里放行的是一段以 root 执行的字符串。
+
+**`Updatable` 前置检查挡住 Docker 与本地开发**（非 Linux / 找不到 `/usr/local/a-ui/a-ui` / 找不到 systemd 单元 / 没有 `systemd-run`）。在容器里跑 `install.sh` 是纯粹的破坏。`UnsupportedReason` 要具体到哪一条没过并原样显示给管理员。
+
+**回退有两个后果，必须写进二次确认框**：① xray 核心会跟着回退——`install.sh` 解压的发版包带着 `bin/xray-linux-<arch>`，会覆盖机器上现有的那份（v1.2.8 之前的包里是 Xray 1.4.x 构建，没有 `RoutingService` 符号，配置热更新会静默失效）；② 数据库不回滚，`AutoMigrate` 只加列不删列，数据不丢但新功能失效。另有一条不写进 UI 但要记住的偏差：`install.sh` 无论装哪个版本，它自己和 `/usr/bin/a-ui` 都是从 **main 分支**拉的最新版，所以回退得到的是「旧二进制 + 新管理脚本」——改动 `a-ui bootstrap` / `a-ui setting` 的参数时要考虑这一点。
+
+**版本缓存不落库。** 新增设置项要同步改 5 处，漏掉 `models.js` 那一处会让**整个保存配置接口失败**；为一份重启后 10 秒内自愈的缓存付这个代价不划算。`PanelVersionJob` 每 6 小时刷新，`Server.startTask` 里另有一个延迟 10 秒的首次触发——`cron.AddJob` 的首次执行在一个完整周期之后，不做延迟触发新装的面板要等 6 小时才显示版本状态。
+
+**拉取失败保留上一次成功的数据，只写 `LastError`。** 清空会让界面从「有新版可更新」退回「尚未检查」，且 tag 白名单变空会让更新按钮全部失效——一次网络抖动就把功能整个关掉。同理 `CheckedAt` 表示「上次**成功**检查」的时刻，不被失败的刷新改写。
+
+**前端版本区走 Vue mixin（`web/assets/js/util/panel-version.js`）。** `common_sider.html` 被四个页面共用，但每个页面各有一个 `new Vue({el:'#app'})`，data 互不相干——少给一个页面挂 mixin，那个页面就会引用 undefined。mixin 的 `data` 是函数、根实例的 `data` 是对象，Vue 的 `mergeDataOrFn` 会正确合并，不用改现有页面的写法。
+
 ## 运维脚本
 
 四个 shell 脚本必须成对维护，改一个就要同步另一个：

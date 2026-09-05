@@ -260,7 +260,7 @@ const panelVersionMixin = {
 
 `<a-layout-sider id="sider">` 底部固定一块版本区。ant-design-vue 1.x 的 sider 内部结构是 `.ant-layout-sider-children`，给它 `display:flex; flex-direction:column`，版本区 `margin-top:auto` 贴底。样式加在 `web/assets/css/custom.css`（已有 `#sider` 相关规则）。
 
-侧栏 `collapsed-width="0"`，md 以下完全收起，版本区跟着消失——移动端从 drawer 进，drawer 里不重复放版本区（drawer 是临时浮层，常驻信息放那里没有意义）。
+侧栏 `collapsed-width="0"`，md 以下（<768px）完全收起，版本区随之不可见。移动端改走 `#sider-drawer`（`a-drawer`，见 6.4 之外的独立抽屉）唤出导航菜单，但**刻意不在 drawer 里放版本区副本**：一是 drawer 是临时浮层，常驻信息放在里面语义不对；二是一键更新在移动端本就是高风险操作——更新过程中面板会重启，移动网络的连接稳定性又明显弱于桌面。代价是**移动端完全没有版本入口**：看不到版本号，也看不到是否有新版可更新，更新和回退功能对移动端管理员不可用；需要更新时得切到桌面浏览器或 SSH 上机操作。这是本次改造刻意接受的功能空白，不是遗漏。
 
 ### 6.4 弹出层结构
 
