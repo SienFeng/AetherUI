@@ -52,6 +52,8 @@ type AllSetting struct {
 
 	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
 
+	DNSServers string `json:"dnsServers" form:"dnsServers"`
+
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
 
 	DefaultDomain   string `json:"defaultDomain" form:"defaultDomain"`
@@ -67,6 +69,48 @@ func checkIPDBSourceUrl(label, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return common.NewError(label+"必须是 http 或 https 开头的完整地址:", raw)
+	}
+	return nil
+}
+
+// dnsServerSchemes 是 xray 的 dns.servers 支持的地址前缀。
+var dnsServerSchemes = []string{
+	"udp://", "tcp://", "tls://", "https://", "h2c://", "quic://",
+}
+
+// checkDNSServer 只查语法，不测可达性。
+//
+// 可达性交给运行时：配错的最坏后果已经被「只用 UseIP 系列」兜住——解析
+// 失败时 freedom 回落按域名直连（proxy/freedom/freedom.go:298 只在
+// ForceIP() 时才把失败变成断连），而路由侧的 IPIfNonMatch 解析失败也只是
+// IP 规则不命中（features/routing/dns/context.go:21）。在保存这一刻做网络
+// 探测，换来的是一次网络抖动就把管理员挡在门外。
+//
+// 裸域名（dns.google）拒绝：xray 要先解析这个域名本身才能用它，而此时还
+// 没有可用的解析器，是个鸡生蛋问题。IP 型端点（https://8.8.8.8/dns-query）
+// 零 bootstrap 依赖，是唯一稳妥的写法。
+func checkDNSServer(item string) error {
+	if item == "localhost" {
+		return nil
+	}
+	for _, scheme := range dnsServerSchemes {
+		if !strings.HasPrefix(item, scheme) {
+			continue
+		}
+		if len(item) == len(scheme) {
+			return common.NewError("DNS 服务器地址缺少主机名:", item)
+		}
+		return nil
+	}
+	host := item
+	if h, _, err := net.SplitHostPort(item); err == nil {
+		host = h
+	}
+	if net.ParseIP(host) == nil {
+		return common.NewError("DNS 服务器地址不支持:", item,
+			"——应为 IP（8.8.8.8）、IP:端口、localhost，或 "+
+				strings.Join(dnsServerSchemes, " ")+"开头的地址。"+
+				"域名型端点（dns.google）不支持：xray 要先解析它本身才能用它")
 	}
 	return nil
 }
@@ -209,6 +253,17 @@ func (s *AllSetting) CheckValid() error {
 	// 而那会让整份配置加载失败——全员断网。
 	if s.IPRuleResolveDomain != 0 && s.IPRuleResolveDomain != 1 {
 		return common.NewError("「IP 规则匹配域名目标」只能是 0 或 1:", s.IPRuleResolveDomain)
+	}
+
+	// 空表示不启用，是正常状态。
+	for _, line := range strings.Split(s.DNSServers, "\n") {
+		item := strings.TrimSpace(line)
+		if item == "" {
+			continue
+		}
+		if err := checkDNSServer(item); err != nil {
+			return err
+		}
 	}
 
 	// 不允许 0：0 在这里最容易被理解成「永不清除」，而实现上会变成

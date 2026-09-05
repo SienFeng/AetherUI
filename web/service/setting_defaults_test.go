@@ -86,3 +86,50 @@ func TestCheckValidRejectsOutOfRangeIPRuleResolveDomain(t *testing.T) {
 		t.Error("expected error for a value other than 0/1")
 	}
 }
+
+func TestDNSServersDefaultsToEmpty(t *testing.T) {
+	setupDB(t)
+	all, err := (&SettingService{}).GetAllSetting()
+	if err != nil {
+		t.Fatalf("GetAllSetting: %v", err)
+	}
+	if all.DNSServers != "" {
+		t.Errorf("DNSServers = %q, want empty", all.DNSServers)
+	}
+}
+
+func TestCheckValidAcceptsSupportedDNSForms(t *testing.T) {
+	all := validBaseSetting()
+	all.DNSServers = "8.8.8.8\n1.1.1.1:53\nlocalhost\n" +
+		"udp://223.5.5.5\ntcp://223.5.5.5\ntls://8.8.8.8\n" +
+		"https://8.8.8.8/dns-query\nh2c://223.5.5.5/dns-query\nquic://8.8.8.8\n" +
+		"2001:4860:4860::8888"
+	if err := all.CheckValid(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckValidRejectsBareDomainDNS(t *testing.T) {
+	all := validBaseSetting()
+	all.DNSServers = "dns.google"
+	if err := all.CheckValid(); err == nil {
+		t.Error("expected error for a bare domain: xray needs a scheme or an IP")
+	}
+}
+
+func TestCheckValidRejectsSchemeWithoutHost(t *testing.T) {
+	all := validBaseSetting()
+	all.DNSServers = "https://"
+	if err := all.CheckValid(); err == nil {
+		t.Error("expected error for a scheme with no host")
+	}
+}
+
+// 空值必须放行：这是「不启用」的正常状态。
+func TestCheckValidAcceptsEmptyDNSServers(t *testing.T) {
+	all := validBaseSetting()
+	all.DNSServers = ""
+	if err := all.CheckValid(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

@@ -41,6 +41,7 @@ var defaultValueMap = map[string]string{
 	"trafficDayRetentionDays":  "365",
 	"concurrencyIdleTimeout":   "120",
 	"ipRuleResolveDomain":      "0",
+	"dnsServers":               "",
 	"tcInterface":              "",
 	"defaultDomain":            "",
 	"defaultCertFile":          "",
@@ -478,6 +479,14 @@ func (s *SettingService) GetIPRuleResolveDomain() (bool, error) {
 		return false, err
 	}
 	return v != 0, nil
+}
+
+// GetDNSServers 返回管理员配置的 DNS 服务器原文（换行分隔）。
+//
+// 空字符串表示不启用：此时 DNSInjector 一个字节都不改，xray 会用它自己的
+// 默认解析器 localdns（core/xray.go:216），即系统的 /etc/resolv.conf。
+func (s *SettingService) GetDNSServers() (string, error) {
+	return s.getString("dnsServers")
 }
 
 // GetAccessLogRetentionDays 返回访问日志保留天数。
