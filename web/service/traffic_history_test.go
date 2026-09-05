@@ -181,3 +181,16 @@ func TestRecordIsNoOpWhenDatabaseUnavailable(t *testing.T) {
 		t.Errorf("库不可用时 Record 应静默返回 nil，实际返回 %v", err)
 	}
 }
+
+func TestTrafficRetentionDefaults(t *testing.T) {
+	setupTrafficTest(t)
+	svc := SettingService{}
+
+	// 默认值直接影响磁盘占用与图能拉多远，改动要有意识。
+	if got, err := svc.GetTrafficHourRetentionDays(); err != nil || got != 30 {
+		t.Errorf("小时桶保留天数默认 = %d (err %v)，期望 30", got, err)
+	}
+	if got, err := svc.GetTrafficDayRetentionDays(); err != nil || got != 365 {
+		t.Errorf("日桶保留天数默认 = %d (err %v)，期望 365", got, err)
+	}
+}

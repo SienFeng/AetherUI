@@ -11,16 +11,18 @@ import "a-ui/web/entity"
 // 踩过三次了。新增设置项时**只需要在这里补一个合法值**。
 func validBaseSetting() *entity.AllSetting {
 	return &entity.AllSetting{
-		WebPort:                54321,
-		WebBasePath:            "/",
-		TimeLocation:           "Asia/Shanghai",
-		XrayTemplateConfig:     "{}",
-		SubscriptionUpdateTime: "04:00",
-		IPDBSourceUrl:          "https://example.com/ipv4_source.txt",
-		QQWrySourceUrl:         "https://example.com/qqwry.dat",
-		IPDBUpdateTime:         "",
-		AccessLogEnable:        0,
-		AccessLogRetentionDays: 7,
-		TCInterface:            "",
+		WebPort:                  54321,
+		WebBasePath:              "/",
+		TimeLocation:             "Asia/Shanghai",
+		XrayTemplateConfig:       "{}",
+		SubscriptionUpdateTime:   "04:00",
+		IPDBSourceUrl:            "https://example.com/ipv4_source.txt",
+		QQWrySourceUrl:           "https://example.com/qqwry.dat",
+		IPDBUpdateTime:           "",
+		AccessLogEnable:          0,
+		AccessLogRetentionDays:   7,
+		TCInterface:              "",
+		TrafficHourRetentionDays: 30,
+		TrafficDayRetentionDays:  365,
 	}
 }

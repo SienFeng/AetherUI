@@ -23,25 +23,27 @@ import (
 var xrayTemplateConfig string
 
 var defaultValueMap = map[string]string{
-	"xrayTemplateConfig":     xrayTemplateConfig,
-	"webListen":              "",
-	"webPort":                "54321",
-	"webCertFile":            "",
-	"webKeyFile":             "",
-	"secret":                 random.Seq(32),
-	"webBasePath":            "/",
-	"timeLocation":           "Asia/Shanghai",
-	"subscriptionUpdateTime": "04:00",
-	"ipdbSourceUrl":          "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ipv4_source.txt",
-	"ipdbUpdateTime":         "",
-	"qqwrySourceUrl":         "https://raw.githubusercontent.com/FW27623/qqwry/main/qqwry.dat",
-	"accessLogEnable":        "0",
-	"accessLogRetentionDays": "7",
-	"concurrencyIdleTimeout": "120",
-	"tcInterface":            "",
-	"defaultDomain":          "",
-	"defaultCertFile":        "",
-	"defaultKeyFile":         "",
+	"xrayTemplateConfig":       xrayTemplateConfig,
+	"webListen":                "",
+	"webPort":                  "54321",
+	"webCertFile":              "",
+	"webKeyFile":               "",
+	"secret":                   random.Seq(32),
+	"webBasePath":              "/",
+	"timeLocation":             "Asia/Shanghai",
+	"subscriptionUpdateTime":   "04:00",
+	"ipdbSourceUrl":            "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ipv4_source.txt",
+	"ipdbUpdateTime":           "",
+	"qqwrySourceUrl":           "https://raw.githubusercontent.com/FW27623/qqwry/main/qqwry.dat",
+	"accessLogEnable":          "0",
+	"accessLogRetentionDays":   "7",
+	"trafficHourRetentionDays": "30",
+	"trafficDayRetentionDays":  "365",
+	"concurrencyIdleTimeout":   "120",
+	"tcInterface":              "",
+	"defaultDomain":            "",
+	"defaultCertFile":          "",
+	"defaultKeyFile":           "",
 }
 
 type SettingService struct {
@@ -468,6 +470,16 @@ func (s *SettingService) GetConcurrencyIdleTimeout() (int, error) {
 // GetAccessLogRetentionDays 返回访问日志保留天数。
 func (s *SettingService) GetAccessLogRetentionDays() (int, error) {
 	return s.getInt("accessLogRetentionDays")
+}
+
+// GetTrafficHourRetentionDays 返回用量小时桶的保留天数。
+func (s *SettingService) GetTrafficHourRetentionDays() (int, error) {
+	return s.getInt("trafficHourRetentionDays")
+}
+
+// GetTrafficDayRetentionDays 返回用量日桶的保留天数。
+func (s *SettingService) GetTrafficDayRetentionDays() (int, error) {
+	return s.getInt("trafficDayRetentionDays")
 }
 
 // GetTCInterface 返回下发限速规则的网卡名。留空表示按默认路由自动探测。

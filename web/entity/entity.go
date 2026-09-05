@@ -44,9 +44,11 @@ type AllSetting struct {
 	QQWrySourceUrl string `json:"qqwrySourceUrl" form:"qqwrySourceUrl"`
 	IPDBUpdateTime string `json:"ipdbUpdateTime" form:"ipdbUpdateTime"`
 
-	AccessLogEnable        int `json:"accessLogEnable" form:"accessLogEnable"`
-	AccessLogRetentionDays int `json:"accessLogRetentionDays" form:"accessLogRetentionDays"`
-	ConcurrencyIdleTimeout int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
+	AccessLogEnable          int `json:"accessLogEnable" form:"accessLogEnable"`
+	AccessLogRetentionDays   int `json:"accessLogRetentionDays" form:"accessLogRetentionDays"`
+	TrafficHourRetentionDays int `json:"trafficHourRetentionDays" form:"trafficHourRetentionDays"`
+	TrafficDayRetentionDays  int `json:"trafficDayRetentionDays" form:"trafficDayRetentionDays"`
+	ConcurrencyIdleTimeout   int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
 
@@ -209,6 +211,16 @@ func (s *AllSetting) CheckValid() error {
 	}
 	if s.AccessLogRetentionDays < 1 || s.AccessLogRetentionDays > 365 {
 		return common.NewError("访问日志保留天数应在 1 ~ 365 天之间:", s.AccessLogRetentionDays)
+	}
+
+	// 小时桶是图上「近期看细节」的那一级，行数随天数线性增长；日桶一年
+	// 才 365 行，上界给得宽。两者都不允许为 0：0 会让清理任务把全部历史
+	// 一次删光，而这不是任何人想通过「填 0」表达的意思。
+	if s.TrafficHourRetentionDays < 1 || s.TrafficHourRetentionDays > 365 {
+		return common.NewError("用量小时数据保留天数应在 1 ~ 365 天之间:", s.TrafficHourRetentionDays)
+	}
+	if s.TrafficDayRetentionDays < 1 || s.TrafficDayRetentionDays > 3650 {
+		return common.NewError("用量每日数据保留天数应在 1 ~ 3650 天之间:", s.TrafficDayRetentionDays)
 	}
 
 	// 网卡名会被拼进 tc/ip 的命令参数。留空表示自动探测。
