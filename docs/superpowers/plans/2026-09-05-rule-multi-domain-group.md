@@ -490,7 +490,7 @@ Expected: 第一条合计 60 处；第二条**无输出**（没有漏网的单�
 Run: `go test ./web/service/`
 Expected: PASS。生产代码此刻仍只读 `DomainGroupId`，新字段是纯冗余，行为不变。
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
 git add web/service/*_test.go
@@ -956,6 +956,41 @@ func TestBuildRuleDropsWholeRuleWhenAllGroupsEmpty(t *testing.T) {
 	}
 }
 
+// DomainGroupIds 为 "[]" 是迁移对脏数据（domain_group_id <= 0）唯一会产出的
+// 形态，也是 validate 挡不住的形态（直接改库、并发写入都能造出来）。这一支
+// 与「组存在但域名为空」是 buildRule 里两道不同的检查，必须各测各的。
+func TestBuildRuleDropsRuleWithEmptyDomainGroupIds(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	// 绕过 service 直接写库：Add 的 validate 会拒绝空的域名组集合，
+	// 而这里要造的正是「绕过了 validate 的脏数据」。
+	err := database.GetDB().Exec(`INSERT INTO routing_rules
+		(remark, inbound_ids, domain_group_id, domain_group_ids, action, outbound_id, priority, enable)
+		VALUES ('脏数据', ?, 0, '[]', 'block', 0, 0, 1)`, mustEncodeIds(t, []int{in.Id})).Error
+	if err != nil {
+		t.Fatalf("insert dirty rule: %v", err)
+	}
+
+	cfg, err := (&XrayService{}).GetXrayConfig()
+	if err != nil {
+		t.Fatalf("GetXrayConfig: %v", err)
+	}
+	var router struct {
+		Rules []struct {
+			Domain  []string `json:"domain"`
+			Inbound []string `json:"inboundTag"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal(cfg.RouterConfig, &router); err != nil {
+		t.Fatalf("unmarshal router: %v", err)
+	}
+	for _, r := range router.Rules {
+		if len(r.Inbound) > 0 && len(r.Domain) == 0 {
+			t.Fatal("DomainGroupIds 为 [] 的规则必须整条丢弃，绝不能输出 domain 为空的规则")
+		}
+	}
+}
+
 // 「生成逐字节确定」是 Config.Equals 能正确判断配置是否变化的前提；
 // 顺序一抖动，那个 10 秒的重启 cron 会不停重启 xray。
 func TestBuildRuleGenerationIsByteDeterministic(t *testing.T) {
@@ -1143,7 +1178,14 @@ git commit -m "feat(routing): buildRule 跨域名组合并，失效的组剔除�
 	GroupsBroken bool `json:"groupsBroken"`
 ```
 
-- [ ] **Step 2: 改 `ruleFromForm`**
+- [ ] **Step 2: 改 `ruleFromForm`（替换桥接）**
+
+> **注意**：Task 4 在这个函数里留了一段**过渡桥接**——保留 `DomainGroupId: form.DomainGroupId`
+> 的同时，用 `service.EncodeDomainGroupIdsStrict([]int{form.DomainGroupId})` 编出
+> `DomainGroupIds` 一并写入，并带一句「过渡桥接」注释。本 Step 要**替换掉**它：
+> 表单字段本身改成数组之后，桥接就没有存在意义了。连同那句过渡注释一起删除，
+> 不要留下两套并存的编码逻辑。
+
 
 ```go
 func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
@@ -1427,7 +1469,14 @@ Expected: 编译失败，`PortableRule` 没有 `DomainGroupRefs` 字段。
 		DomainGroupRef:  legacyRef,
 ```
 
-- [ ] **Step 5: 改 `importRules`**
+- [ ] **Step 5: 改 `importRules`（含替换桥接）**
+
+> **注意**：Task 4 在本函数构造 `&model.RoutingRule{...}` 的地方留了一段**过渡桥接**——
+> 保留 `DomainGroupId: g.Id` 的同时，用 `EncodeDomainGroupIdsStrict([]int{g.Id})` 编出
+> `DomainGroupIds` 一并写入，并带一句「过渡桥接」注释。本 Step 的多组解析会取代它：
+> 删掉桥接那几行连同过渡注释，改用下面解析出的 `encodedGroups`。
+> 不要留下两处都在算 `DomainGroupIds` 的代码。
+
 
 把 `importRules` 里从 `if item.DomainGroupRef == ""` 到 `g, ok := groupByRemark[...]` 那一整段（含 `ambiguousGroupRemark` 判断）替换成：
 
@@ -1793,12 +1842,29 @@ git commit -m "feat(routing): 分流规则表单的域名组改为复选框多�
 - Consumes: 前八个 Task 的全部产出
 - Produces: 无
 
-- [ ] **Step 1: 确认生产代码不再读写 `DomainGroupId`**
+- [ ] **Step 1: 删除三处过渡桥接**
+
+Task 4 为了让每个 Task 都以全绿结束，在三个地方留了写 `DomainGroupId` 的**过渡桥接**（均带「过渡桥接」注释）。到本 Task 时 `buildRule`、`listRules`、`toPortableRule` 都已改读 `DomainGroupIds`，桥接必须全部删除：
+
+1. `web/controller/routing.go` 的 `ruleFromForm` —— Task 6 应已替换，在此确认没有残留
+2. `web/service/routing_portable.go` 的 `importRules` —— Task 7 应已替换，在此确认没有残留
+3. `web/service/routing_rule.go` 的 `Update` —— **本 Step 删除**，去掉同步 `old.DomainGroupId` 的那一行与它的过渡注释
+
+删干净是 spec §11 描述的回退行为成立的前提：删除后新建的多组规则 `domain_group_id` 为 0，回退到旧版二进制时旧代码会整条丢弃它们（分流范围缩小而非放大，安全侧正确）。桥接若残留，旧代码会按第一个组分流——不算危险，但与文档不符。
+
+- [ ] **Step 2: 确认生产代码不再读写 `DomainGroupId`**
 
 Run: `grep -rn "DomainGroupId\b" --include="*.go" --include="*.js" --include="*.html" . | grep -v "_test.go" | grep -v "DomainGroupIds"`
-Expected: 只剩两处——`database/model/routing.go` 的字段声明与注释、`database/db.go` 的迁移。其余任何一处都说明有路径没切干净。
+Expected: 只剩两处——`database/model/routing.go` 的字段声明与注释、`database/db.go` 的迁移。其余任何一处都说明有路径没切干净或桥接没删净。
 
-- [ ] **Step 2: 更新 CLAUDE.md**
+- [ ] **Step 3: `gofmt` 收尾**
+
+Task 2 给 `database/model/routing.go` 插注释时破坏了结构体字段的 gofmt 对齐（改动前该文件是 gofmt-clean 的）。`make verify` 不含 gofmt 步骤，抓不到这个。
+
+Run: `gofmt -l ./database/ ./web/ ./xray/ ./util/ && gofmt -w database/model/routing.go`
+Expected: 修掉 `database/model/routing.go`。其余文件若本来就不 gofmt-clean（例如 `database/db.go` 的 import 顺序是既有状态），**不要动**——那不是本次改造引入的。
+
+- [ ] **Step 4: 更新 CLAUDE.md**
 
 在「域名分流管理 → 数据模型」的五条字段约定里，把第三条「同一个域名组下，任何一个入站至多被一条规则覆盖」改成：
 
@@ -1820,7 +1886,7 @@ Expected: 只剩两处——`database/model/routing.go` 的字段声明与注释
 **规则的域名组引用是数组 `domainGroupRefs`，`domainGroupRef` 保留作单组时的兼容字段。** 导出侧单组时两个都写、多组时只写数组——这样新面板导出的文件放进旧面板，单组规则照常可用，多组规则被旧面板明确拒绝（「domainGroupRef 为空 → 整条跳过」），而不是静默产生一条指向错误组的规则。导入侧优先数组字段，为 nil 时回落单值字段；组认不出的策略与入站对称：部分认不出导入成禁用并点名，一个都认不出整条丢弃（编码结果会落回 `[]`，是上面那条非法值）。
 ```
 
-- [ ] **Step 3: 全量验证**
+- [ ] **Step 5: 全量验证**
 
 Run: `make verify`
 Expected: vet 无输出、全部测试 PASS、编译成功。

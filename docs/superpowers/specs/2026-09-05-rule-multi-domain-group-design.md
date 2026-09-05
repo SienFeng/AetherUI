@@ -278,7 +278,7 @@ DomainGroupRef  string    `json:"domainGroupRef,omitempty"`
 |---|---|
 | `database/routing_migrate_test.go` | 回填 `domain_group_ids`；幂等（跑两次结果不变）；`domain_group_id = 0` 的脏数据回填成 `[]`；已有 `domain_group_ids` 的行不被覆盖 |
 | `web/service/routing_rule_test.go` | `EncodeDomainGroupIdsStrict` 拒绝空输入与全非法输入；`intersectGroups` 不把空集合当全集；§2.3 表格五行逐行落成用例；`CheckDomainGroupRefs` 在解码失败时拦住删除 |
-| `web/service/routing_inject_test.go` | 跨组合并去重保序；部分组失效剔除且规则仍生成；全部失效整条丢弃；**同输入两次生成结果逐字节相同**；空 `DomainGroupIds` 绝不输出空 `domain` |
+| `web/service/routing_inject_test.go` | 跨组合并去重保序；部分组失效剔除且规则仍生成；全部失效整条丢弃；**`DomainGroupIds` 为 `[]`（迁移对脏数据的产出形态）整条丢弃**；**同输入两次生成结果逐字节相同** |
 | `web/service/routing_portable_test.go` | 新格式往返；旧格式（只有 `domainGroupRef`）能导入；多组导出时 `domainGroupRef` 为空；部分组认不出 → 禁用导入；全部认不出 → 丢弃；重跑幂等 |
 | `web/html_test.go` | 既有的 `TestAllTemplatesParse` 与 `TestVueDirectivesLiveInsideAVueRoot` 跑通（新复选框在既有 modal 内，应不受影响） |
 
