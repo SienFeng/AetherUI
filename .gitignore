@@ -14,3 +14,5 @@ a-ui-*.tar.gz
 .superpowers/
 # 手工下载的 macOS 版 xray，仅本地开发用
 Xray-macos-*.zip
+# Claude Code 原生 worktree 的落地目录（隔离工作区，不入库）
+.claude/worktrees/
