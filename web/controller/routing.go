@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"a-ui/database/model"
+	"a-ui/util/common"
 	"a-ui/util/link"
 	"a-ui/web/service"
 )
@@ -136,6 +137,7 @@ type RoutingController struct {
 	outboundService    service.OutboundNodeService
 	ruleService        service.RoutingRuleService
 	xrayService        service.XrayService
+	portableService    service.RoutingPortableService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -167,6 +169,9 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	rl.POST("/add", a.addRule)
 	rl.POST("/update/:id", a.updateRule)
 	rl.POST("/del/:id", a.delRule)
+
+	g.POST("/export", a.exportRouting)
+	g.POST("/import", a.importRouting)
 }
 
 // 域名组
@@ -522,4 +527,46 @@ func (a *RoutingController) delRule(c *gin.Context) {
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// exportRouting 返回导出结构，由前端自己 stringify 成 Blob 下载。
+//
+// 不走 Content-Disposition：现有前端全部是 axios POST + session cookie，
+// 改成 GET 下载要另开一条不带 X-Requested-With 的鉴权路径，得不偿失。
+func (a *RoutingController) exportRouting(c *gin.Context) {
+	scope := c.PostForm("scope")
+	if scope == "" {
+		scope = service.ExportScopeAll
+	}
+	f, err := a.portableService.Export(scope)
+	if err != nil {
+		jsonMsg(c, "导出分流配置", err)
+		return
+	}
+	jsonObj(c, f, nil)
+}
+
+func (a *RoutingController) importRouting(c *gin.Context) {
+	data := c.PostForm("data")
+	if strings.TrimSpace(data) == "" {
+		jsonMsg(c, "导入分流配置", common.NewError("没有收到导入内容"))
+		return
+	}
+	// 导入的每个出站节点都会触发一次 ValidateOutbound（一次 GetXrayConfig + 1~2 次
+	// exec 真实 xray），开销随条目数线性放大，而这是个同步请求。controller 是不可信
+	// 输入的边界，在这里挡住失控的体积，不让 service 去跑一个几分钟的循环。
+	// 真实导出文件是几 KB 到几十 KB（订阅已拉取的域名不导出），10MB 极其宽松。
+	const maxImportBytes = 10 << 20
+	if len(data) > maxImportBytes {
+		jsonMsg(c, "导入分流配置", common.NewErrorf(
+			"导入文件过大（%d 字节，上限 %d 字节），请确认这是 AetherUI 导出的分流配置文件",
+			len(data), maxImportBytes))
+		return
+	}
+	report, err := a.portableService.Import(data)
+	if err != nil {
+		jsonMsg(c, "导入分流配置", err)
+		return
+	}
+	jsonObj(c, report, nil)
 }
