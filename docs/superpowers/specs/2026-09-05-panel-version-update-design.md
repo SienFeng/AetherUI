@@ -153,6 +153,8 @@ type PanelVersionInfo struct {
 
 **首次检查在 `Server.startTask` 里延迟触发**：`cron.AddJob("@every 6h", ...)` 注册后第一次执行是 6 小时后，不做延迟触发的话新装的面板要等 6 小时才显示版本状态。参照 `XrayTrafficJob` 的做法，起一个 `go func(){ time.Sleep(10s); job.Run() }()`——延迟 10 秒是为了避开面板刚启动时和 xray 启动抢网络。
 
+**`PanelVersionService.Get()` 保证 `Releases` 永远序列化成 JSON 数组，绝不是 `null`。** `PanelVersionInfo` 零值的 `Releases` 是 nil 切片，`encoding/json` 会把它编成 `"releases":null`；而缓存为空（面板刚启动前 10 秒、连不上 `api.github.com`、或一键更新成功后的那一刻）是完全常见的状态，`CheckedAt == 0` 时 `Get()` 仍会照常重算 `Updatable`。前端模板 `common_sider.html` 里 `panelVersion.updatable && panelVersion.releases.length` 一旦对 `null.length` 求值就会抛 `TypeError`——而这段 `<template slot="content">` 因为没有 `slot-scope`，Vue 2.6 把它编译进了 `#app` 根实例的 render 函数，不需要 popover 被打开就会参与每次求值，一次异常会让 `_update` 变成 no-op，整页从此停止响应式更新（状态轮询、入站列表、更新进度框全部冻结）。`Get()` 因此在返回前把 nil 规整为 `[]ReleaseBrief{}`，前端 `(panelVersion.releases || []).length` 是第二道防线，两处都不能省。
+
 ## 5. 更新执行
 
 ### 5.1 必须用 systemd-run 脱离 cgroup
@@ -166,20 +168,20 @@ type PanelVersionInfo struct {
 的机器。**面板从此彻底消失，且没有任何东西会把它拉回来**，只能 SSH 上去手动重装。这是本功能唯一的灾难性失败模式。
 
 ```
-systemd-run --unit=a-ui-update-<unix秒> --collect \
+systemd-run --unit=a-ui-update --collect \
             --description="AetherUI 面板更新" \
             /bin/bash -c '<脚本>'
 ```
 
 - transient unit 有自己的 cgroup，`systemctl stop a-ui` 碰不到它。
-- `--collect`：unit 退出后自动清理。不加的话失败的 unit 会以 `failed` 状态残留，下次同名 `systemd-run` 直接报错——而 unit 名带时间戳本来就不会重名，`--collect` 防的是 `systemctl list-units --failed` 里越积越多的垃圾。
-- unit 名带 Unix 秒而不是固定名：固定名在上一次更新的 unit 尚未清理时会冲突。
+- `--collect`：unit 退出后自动清理，名字随之释放，不会长期占用。
+- **unit 名固定为 `a-ui-update`，不带时间戳，这是有意的。** 3 分钟的前端超时不代表更新真的失败或结束——发版包已涨到约 40MB，慢速 VPS 上 `install.sh` 可能仍在 `wget` 或刚进 `rm -rf /usr/local/a-ui/`。超时框的「关闭」按钮会把前端状态打回 `idle`、重新点亮更新/回退按钮，此时若第二次点击生成一个带新时间戳的 unit 名，systemd 不会拒绝——两个 `install.sh` 会并发跑，同时下载同一个文件、同时 `rm -rf` + `tar` 同一个目录，结果是一台安装损坏且不会自愈的机器。固定 unit 名把互斥判断交给 systemd 本身：第二次 `systemd-run` 在第一个 unit 还在跑时会直接报错（`Unit a-ui-update.service already exists`），这条报错通过 `runUpgradeCommand` 的 `CombinedOutput` 原样透传给管理员，而不是被更「优化」的写法（比如带时间戳、或先 `systemctl reset-failed` 再起）悄悄绕开。曾经的判断（「固定名在上一次更新的 unit 尚未清理时会冲突」）把这个冲突当成缺点——它其实是本功能唯一需要的并发保护，`--collect` 保证的是正常结束后的自动清理，不是为了让固定名"可以重来"。
 
 ### 5.2 内层脚本
 
 ```bash
-curl -fLso /tmp/a-ui-install.sh https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh \
-  && bash /tmp/a-ui-install.sh <tag> </dev/null
+d=$(mktemp -d) && curl -fLso "$d/install.sh" https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh \
+  && bash "$d/install.sh" <tag> </dev/null; rc=$?; rm -rf "$d"; exit $rc
 ```
 
 整体输出重定向到 `/var/log/a-ui-update.log`，用 `>` **覆盖**而不是 `>>` 追加：只保留最近一次更新的日志，排查够用，也不会无限增长（`tar zxvf` 会列出包里每个文件，单次输出几十 KB）。
@@ -187,6 +189,7 @@ curl -fLso /tmp/a-ui-install.sh https://raw.githubusercontent.com/SienFeng/Aethe
 - `curl -f`：HTTP 错误码时返回非零。不加的话 GitHub 返回 404 页面会被当成脚本内容执行。
 - `</dev/null`：走 `config_after_install` 的 else 分支，不写库。见 §2.1 ③（已实测）。
 - 不传 `--wizard-only`、不传 `force`：让 `setup_wizard` 的幂等判断生效。
+- **脚本落到 `mktemp -d` 建的私有目录，不是固定路径 `/tmp/a-ui-install.sh`。** 固定路径 + 全局可写的 `/tmp` + 以 root 执行，等于给本机任一非特权用户一条 TOCTOU 提权路径：预先在该路径放一个自己拥有的文件，在 `curl` 与 `bash` 之间把内容换成任意脚本即可拿到 root 代码执行。现代发行版的 `fs.protected_regular` 能缓解，但 `install.sh` 明确支持 CentOS（3.10 内核无此保护），不能依赖这条防线。`mktemp -d` 生成的目录默认 `0700` 且名字不可预测，脚本结束时 `rm -rf` 清理，不留痕迹。这是本次改造相对既有 `a-ui.sh` 的 `update()`（`bash <(curl -Ls ...)`，根本不落盘）新增的暴露面，必须补上。
 
 ### 5.3 前置检查（`Updatable`）
 

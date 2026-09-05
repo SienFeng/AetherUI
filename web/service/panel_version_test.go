@@ -206,8 +206,25 @@ func resetPanelVersionCache(t *testing.T) {
 	t.Helper()
 	panelVersionCache.mu.Lock()
 	panelVersionCache.info = PanelVersionInfo{}
-	panelVersionCache.all = nil
 	panelVersionCache.mu.Unlock()
+}
+
+// Go 的 nil 切片会被 encoding/json 编成 null。前端模板里
+// `panelVersion.releases.length` 对 null 抛 TypeError，而那段模板编译在
+// #app 根实例的 render 函数里——一次异常就让整页停止响应式更新。
+// 空缓存（从未成功刷新过、或连不上 GitHub）是常见状态，必须保证契约是数组。
+func TestGetAlwaysSerializesReleasesAsArray(t *testing.T) {
+	resetPanelVersionCache(t)
+	raw, err := json.Marshal((&PanelVersionService{}).Get())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), `"releases":null`) {
+		t.Errorf("空缓存下 releases 被编成了 null，前端会崩: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"releases":[]`) {
+		t.Errorf("releases 应为空数组: %s", raw)
+	}
 }
 
 func stubReleasesServer(t *testing.T, releases []githubRelease) {
@@ -270,9 +287,10 @@ func TestRefreshTruncatesRollbackList(t *testing.T) {
 }
 
 // 截断时必须同时截断容量，防止底层数组被 append 污染。
-// all 的容量是 10（toBriefs 用 make([]ReleaseBrief, 0, len(raw))），
-// 只截长度会留下 cap=10 的 rollback 别名，any append 都会写进 panelVersionCache.all
-// 的第 6+ 个槽位——这在完全无锁的情况下发生，绕过了 RWMutex 保护。
+// fetchReleases 返回的切片容量是 10（toBriefs 用
+// make([]ReleaseBrief, 0, len(raw))），只截长度会留下 cap=10 的 rollback
+// 别名——它就是 Get() 泄漏给调用方的 info.Releases，调用方对它 append
+// 会写穿到原始数组的第 6+ 个槽位，绕过 RWMutex 保护，污染其他持有者看到的数据。
 func TestRefreshTruncatesRollbackCapacity(t *testing.T) {
 	resetPanelVersionCache(t)
 	raw := make([]githubRelease, 0, 10)
@@ -485,6 +503,11 @@ func TestUpgradeLogReturnsTail(t *testing.T) {
 	}
 	if len(lines) != upgradeLogTailLines {
 		t.Fatalf("len = %d, want %d", len(lines), upgradeLogTailLines)
+	}
+	// 只断言长度和末元素锁不死环形缓冲的 off-by-one：500 行留 200 行，
+	// 首元素必须是 line-300，差一个都能让长度和末元素同时“凑巧”对上。
+	if lines[0] != "line-300" {
+		t.Errorf("第一行 = %q, want line-300", lines[0])
 	}
 	if lines[len(lines)-1] != "line-499" {
 		t.Errorf("最后一行 = %q, want line-499", lines[len(lines)-1])

@@ -78,7 +78,7 @@
                             </a>
                         </div>
                     </div>
-                    <div v-if="panelVersion.updatable && panelVersion.releases.length"
+                    <div v-if="panelVersion.updatable && (panelVersion.releases || []).length"
                          class="version-rollback">
                         <div class="version-rollback-head" @click="rollbackOpen = !rollbackOpen">
                             <span><a-icon type="clock-circle"></a-icon> 版本回退</span>
@@ -136,9 +136,13 @@
         <template v-else-if="upgradeState === 'timeout'">
             <a-icon type="exclamation-circle" theme="filled"
                     style="font-size:48px;color:#faad14"></a-icon>
-            <p style="margin-top:16px">3 分钟内版本号仍未变化，更新可能失败</p>
+            <p style="margin-top:16px">3 分钟内版本号仍未变化</p>
             <p style="color:#8c8c8c;font-size:12px">
-                面板本身未受影响。查看日志可以看到具体原因。
+                更新可能仍在进行中（慢速网络下载发版包可能超过 3 分钟），也可能已经失败。
+                <b>请不要重复点击更新</b>，先查看日志确认。
+            </p>
+            <p style="color:#8c8c8c;font-size:12px">
+                若是登录态已失效导致查询中断，刷新页面重新登录即可确认当前版本。
             </p>
             <a-button style="margin-right:8px" @click="openUpgradeLog()">查看日志</a-button>
             <a-button @click="upgradeState = 'idle'">关闭</a-button>

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -33,8 +34,7 @@ var (
 )
 
 const (
-	upgradeScriptPath = "/tmp/a-ui-install.sh"
-	upgradeLogPath    = "/var/log/a-ui-update.log"
+	upgradeLogPath = "/var/log/a-ui-update.log"
 	// rollbackListSize 是回退列表长度，也是 tag 白名单的长度——
 	// 「只能回退到最近 5 个版本」这条约束就是靠白名单只有 5 条实现的。
 	rollbackListSize = 5
@@ -70,7 +70,7 @@ type PanelVersionInfo struct {
 	// KnownCurrent 为 false 表示当前版本不在拉回来的发布列表里（本地开发版，
 	// 或落后太多已经翻页）。此时既不打红点也不显示「已是最新」。
 	KnownCurrent      bool           `json:"knownCurrent"`
-	Releases          []ReleaseBrief `json:"releases"` // 最多 rollbackListSize 条
+	Releases          []ReleaseBrief `json:"releases"`  // 最多 rollbackListSize 条
 	CheckedAt         int64          `json:"checkedAt"` // 0 表示从未成功
 	LastError         string         `json:"lastError"`
 	Updatable         bool           `json:"updatable"`
@@ -148,10 +148,14 @@ func validateUpgradeTag(tag string, allowed []ReleaseBrief) error {
 //
 // unitName 由调用方传入而不是在函数内取时间戳，为的是这个函数可测。
 func buildUpgradeCommand(tag, unitName string) []string {
+	// 脚本落到 mktemp -d 建的私有目录而不是固定的 /tmp 路径：固定路径 +
+	// 全局可写的 /tmp + root 执行，等于给本机非特权用户一条 TOCTOU 提权路径
+	// （在 curl 与 bash 之间改写文件内容）。mktemp -d 的目录是 0700 且名字不可预测。
 	inner := fmt.Sprintf(
-		"{ curl -fLso %s %s && bash %s %s </dev/null ; } >%s 2>&1",
-		upgradeScriptPath, installScriptURL, upgradeScriptPath, tag, upgradeLogPath,
+		"d=$(mktemp -d) && curl -fLso \"$d/install.sh\" %s && bash \"$d/install.sh\" %s </dev/null; rc=$?; rm -rf \"$d\"; exit $rc",
+		installScriptURL, tag,
 	)
+	inner = fmt.Sprintf("{ %s ; } >%s 2>&1", inner, upgradeLogPath)
 	return []string{
 		"systemd-run",
 		"--unit=" + unitName,
@@ -182,6 +186,18 @@ func checkUpdatable() (bool, string) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return false, "系统缺少 systemd-run，无法安全地在后台执行更新"
 	}
+	// 一台装过面板的机器上用 go run 做开发时，上面四条都会通过，而更新会真的去
+	// rm -rf 掉 /usr/local/a-ui/ 那份生产安装。要求当前进程就是那份安装本身。
+	exe, err := os.Executable()
+	if err != nil {
+		return false, "无法确定当前程序路径，出于安全考虑不允许一键更新"
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if exe != panelBinaryPath {
+		return false, "当前运行的不是标准安装路径下的面板（" + exe + "），一键更新只对 " + panelBinaryPath + " 生效"
+	}
 	return true, ""
 }
 
@@ -197,9 +213,6 @@ var panelCurrentVersion = config.GetVersion
 type versionCache struct {
 	mu   sync.RWMutex
 	info PanelVersionInfo
-	// all 是拉回来的全部 release（最多 per_page 条），只用于 KnownCurrent
-	// 判定；info.Releases 是被截断到 rollbackListSize 的回退列表。
-	all []ReleaseBrief
 }
 
 var panelVersionCache versionCache
@@ -251,7 +264,6 @@ func (s *PanelVersionService) Refresh() error {
 	updatable, reason := checkUpdatable()
 
 	panelVersionCache.mu.Lock()
-	panelVersionCache.all = all
 	panelVersionCache.info = PanelVersionInfo{
 		Current:           current,
 		Latest:            latest,
@@ -280,6 +292,13 @@ func (s *PanelVersionService) Get() PanelVersionInfo {
 	if info.CheckedAt == 0 {
 		info.Updatable, info.UnsupportedReason = checkUpdatable()
 	}
+	// Go 的 nil 切片会被 encoding/json 编成 null，而前端模板里
+	// `panelVersion.releases.length` 会对 null 抛 TypeError——那段模板编译在
+	// #app 根实例的 render 函数里，一次异常就让整页停止响应式更新。
+	// 契约固定为数组，不把这个坑留给每一个消费方。
+	if info.Releases == nil {
+		info.Releases = []ReleaseBrief{}
+	}
 	return info
 }
 
@@ -300,7 +319,13 @@ var (
 	// 生产代码永远走 checkUpdatable。
 	forceUpdatableForTest = false
 	runUpgradeCommand     = func(argv []string) error {
-		return exec.Command(argv[0], argv[1:]...).Run()
+		out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		if err != nil {
+			// systemd-run 的 stderr 是这里唯一有用的诊断（比如
+			// "Unit a-ui-update.service already exists"），不能只透传 exit status。
+			return common.NewErrorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
 	}
 )
 
@@ -320,7 +345,11 @@ func (s *PanelVersionService) Upgrade(tag string) error {
 	if err := validateUpgradeTag(tag, s.allowedTags()); err != nil {
 		return err
 	}
-	unitName := fmt.Sprintf("a-ui-update-%d", time.Now().Unix())
+	// unit 名固定而不带时间戳：systemd 会拒绝创建同名 unit，这正是本功能唯一
+	// 需要的并发互斥——超时文案让管理员以为可以重试时，第二次点击会被 systemd
+	// 挡下，而不是两个 install.sh 并发 rm -rf + tar 同一个目录。
+	// --collect 保证 unit 结束后名字自动释放，固定名不会长期占用。
+	const unitName = "a-ui-update"
 	argv := buildUpgradeCommand(tag, unitName)
 	logger.Info("面板更新：交给 systemd unit", unitName, "目标版本", tag)
 	if err := runUpgradeCommand(argv); err != nil {
