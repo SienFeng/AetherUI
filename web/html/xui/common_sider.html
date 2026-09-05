@@ -112,6 +112,50 @@
         </a-popover>
     </div>
 </a-layout-sider>
+<a-modal :visible="upgradeState !== 'idle'" title="面板更新"
+         :closable="false" :mask-closable="false" :footer="null" :width="460">
+    <div style="text-align:center;padding:12px 0">
+        <template v-if="upgradeState === 'starting'">
+            <a-spin size="large"></a-spin>
+            <p style="margin-top:16px">正在更新到 [[ upgradeTarget ]]…</p>
+            <p style="color:#8c8c8c;font-size:12px">
+                更新在后台独立进程中执行，请不要关闭此页面
+            </p>
+        </template>
+        <template v-else-if="upgradeState === 'restarting'">
+            <a-spin size="large"></a-spin>
+            <p style="margin-top:16px">面板重启中…</p>
+            <p style="color:#8c8c8c;font-size:12px">这是更新过程中的正常现象</p>
+        </template>
+        <template v-else-if="upgradeState === 'done'">
+            <a-icon type="check-circle" theme="filled"
+                    style="font-size:48px;color:#52c41a"></a-icon>
+            <p style="margin-top:16px">更新完成，当前版本 [[ panelVersion.current ]]</p>
+            <a-button type="primary" @click="location.reload()">刷新页面</a-button>
+        </template>
+        <template v-else-if="upgradeState === 'timeout'">
+            <a-icon type="exclamation-circle" theme="filled"
+                    style="font-size:48px;color:#faad14"></a-icon>
+            <p style="margin-top:16px">3 分钟内版本号仍未变化，更新可能失败</p>
+            <p style="color:#8c8c8c;font-size:12px">
+                面板本身未受影响。查看日志可以看到具体原因。
+            </p>
+            <a-button style="margin-right:8px" @click="openUpgradeLog()">查看日志</a-button>
+            <a-button @click="upgradeState = 'idle'">关闭</a-button>
+        </template>
+    </div>
+</a-modal>
+
+<a-modal v-model="upgradeLogVisible" title="更新日志" :footer="null" :width="800">
+    <p style="color:#8c8c8c;font-size:12px">
+        服务器上的 /var/log/a-ui-update.log，只显示最后 200 行
+    </p>
+    <pre class="upgrade-log"><template v-for="line in upgradeLogLines">[[ line ]]
+</template></pre>
+    <div v-if="!upgradeLogLines.length" style="color:#8c8c8c">
+        日志为空，说明还没有执行过更新
+    </div>
+</a-modal>
 <a-drawer id="sider-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"
           :visible="siderDrawer.visible" :wrap-style="{ padding: 0 }">
