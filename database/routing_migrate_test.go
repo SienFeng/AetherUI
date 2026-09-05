@@ -138,9 +138,35 @@ func TestMigrateRoutingRuleDomainGroupIds(t *testing.T) {
 			t.Fatalf("insert %s: %v", remark, err)
 		}
 	}
+	// GORM 的 ALTER TABLE ADD COLUMN 给既有行留下的是 NULL，不是空串——
+	// 也就是说 100% 的真实升级走的是 IS NULL 那条分支。只造空串夹具等于
+	// 把唯一会被真实执行的路径漏在测试之外。
+	insertNullColumn := func(remark string, groupId int) {
+		t.Helper()
+		err := db.Exec(`INSERT INTO routing_rules
+			(remark, inbound_ids, domain_group_id, action, outbound_id, priority, enable)
+			VALUES (?, '[]', ?, 'block', 0, 0, 1)`, remark, groupId).Error
+		if err != nil {
+			t.Fatalf("insert %s: %v", remark, err)
+		}
+	}
+
 	insert("普通规则", 7, "")
 	insert("脏数据", 0, "")
 	insert("已迁移过的", 3, "[3,9]")
+	insertNullColumn("刚 ADD COLUMN 的行", 5)
+	insertNullColumn("刚 ADD COLUMN 的脏数据", 0)
+
+	// 前提校验：夹具真的留下了 NULL 而不是被默认值填成空串，否则下面两条
+	// 断言会在空串分支上通过，NULL 分支仍然没被覆盖。
+	var nullRows int64
+	if err := db.Raw("SELECT COUNT(*) FROM routing_rules WHERE domain_group_ids IS NULL").
+		Scan(&nullRows).Error; err != nil {
+		t.Fatalf("count null rows: %v", err)
+	}
+	if nullRows != 2 {
+		t.Fatalf("NULL 夹具没造出来（domain_group_ids IS NULL 的行数 = %d, want 2）", nullRows)
+	}
 
 	if err := migrateRoutingRuleDomainGroupIds(); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -165,6 +191,13 @@ func TestMigrateRoutingRuleDomainGroupIds(t *testing.T) {
 	// 已经有值的行绝不能被覆盖，否则多组规则会在每次重启时被压回单组。
 	if got := read("已迁移过的"); got != "[3,9]" {
 		t.Errorf("已迁移过的 = %q, want [3,9]（不得被覆盖）", got)
+	}
+	// NULL 分支——真实升级唯一会走的那条。
+	if got := read("刚 ADD COLUMN 的行"); got != "[5]" {
+		t.Errorf("NULL 行 = %q, want [5]", got)
+	}
+	if got := read("刚 ADD COLUMN 的脏数据"); got != "[]" {
+		t.Errorf("NULL 脏数据行 = %q, want []", got)
 	}
 
 	// 幂等：面板每次启动都会跑，重启多少次都必须安全。
