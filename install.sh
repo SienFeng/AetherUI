@@ -18,6 +18,28 @@ panel_port=""
 # 且此时 80/443 上是真的什么都不监听了，比第一次提示时更紧急。
 stopped_web_svc=""
 
+# 面板是否已被本次安装/更新停掉。停掉之后的任何失败退出都必须先把它拉回来：
+# a-ui.service 是 Type=simple 且没有配 Restart=，脚本就这么 exit 的话，机器上
+# 会留下一个已经停止、且永远不会自己起来的面板——而用户多半以为"更新失败了，
+# 那就还是原来的样子"，直到有人来报节点不通才发现。
+a_ui_stopped=0
+
+# 打印错误并退出，退出前把被本脚本停掉的面板重新拉起来。
+# 只在确实停过时才动 systemctl：全新安装时去 start 一个还没配好的服务，
+# 只会多出一条与真正病因无关的失败日志，把排查带偏。
+die_restoring_panel() {
+    echo -e "${red}$1${plain}"
+    if [[ ${a_ui_stopped} -eq 1 ]]; then
+        echo -e "${yellow}面板已被本次安装停止，正在重新启动...${plain}"
+        if systemctl start a-ui; then
+            echo -e "${green}面板已重新启动${plain}"
+        else
+            echo -e "${red}面板启动失败，请手动执行: systemctl start a-ui${plain}"
+        fi
+    fi
+    exit 1
+}
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -1116,20 +1138,17 @@ install_a-ui() {
         panel_port="${pre_stop_port}"
     fi
 
-    systemctl stop a-ui
     cd /usr/local/
 
     if [ $# == 0 ]; then
         last_version=$(curl -Lsk "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 a-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 a-ui 版本安装${plain}"
-            exit 1
+            die_restoring_panel "检测 a-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 a-ui 版本安装"
         fi
         echo -e "检测到 a-ui 最新版本：${last_version}，开始安装"
         wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}.tar.gz
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 a-ui 失败，请确保你的服务器能够下载 Github 的文件${plain}"
-            exit 1
+            die_restoring_panel "下载 a-ui 失败，请确保你的服务器能够下载 Github 的文件"
         fi
     else
         last_version=$1
@@ -1137,10 +1156,17 @@ install_a-ui() {
         echo -e "开始安装 a-ui $1"
         wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz ${url}
         if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 a-ui $1 失败，请确保此版本存在${plain}"
-            exit 1
+            die_restoring_panel "下载 a-ui $1 失败，请确保此版本存在"
         fi
     fi
+
+    # 停面板放在下载成功之后。先停再下载的话，版本探测或下载只要一失败
+    # （网络抖动、超出 GitHub API 限制、指定的版本不存在），脚本就直接 exit
+    # 了，留下一台面板已停止、且不会自己起来的机器——而这两步恰恰是整个
+    # 安装流程里最依赖外部网络、最容易失败的两步。端口探测必须在 stop 之前
+    # 完成，上面那段已经做过了，这里改动顺序不影响它。
+    systemctl stop a-ui
+    a_ui_stopped=1
 
     if [[ -e /usr/local/a-ui/ ]]; then
         rm /usr/local/a-ui/ -rf
@@ -1151,9 +1177,23 @@ install_a-ui() {
     cd a-ui
     chmod +x a-ui bin/xray-linux-${arch}
     cp -f a-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/a-ui https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui.sh
+    # 管理脚本先下到临时文件，确认下载成功且非空，再落到 /usr/bin/a-ui。
+    # wget -O 会先把目标文件清空再写：直接对着 /usr/bin/a-ui 下载，一旦失败
+    # 就留下一个空文件，而紧接着的 chmod +x 照样成功——用户此后每敲一次
+    # a-ui 都是静默无输出，和"根本没装"完全无法区分，却又查不出哪里坏了。
+    local mgr_tmp
+    mgr_tmp=$(mktemp) || die_restoring_panel "创建临时文件失败"
+    if ! wget --no-check-certificate -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui.sh; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "下载 a-ui 管理脚本失败，请确保你的服务器能够访问 raw.githubusercontent.com"
+    fi
+    if [[ ! -s "${mgr_tmp}" ]]; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "下载到的 a-ui 管理脚本是空文件，可能是网络中途被切断"
+    fi
+    install -m 755 "${mgr_tmp}" /usr/bin/a-ui
+    rm -f "${mgr_tmp}"
     chmod +x /usr/local/a-ui/a-ui.sh
-    chmod +x /usr/bin/a-ui
     config_after_install
     #echo -e "如果是全新安装，默认网页端口为 ${green}54321${plain}，用户名和密码默认都是 ${green}admin${plain}"
     #echo -e "请自行确保此端口没有被其他程序占用，${yellow}并且确保 54321 端口已放行${plain}"
