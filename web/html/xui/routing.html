@@ -261,7 +261,11 @@
             </a-form-item>
             <a-form-item label="手工域名（一行一条）">
                 <a-input type="textarea" :rows="8" v-model="groupModal.domains"
-                         placeholder="domain:openai.com&#10;geosite:openai&#10;full:chat.openai.com&#10;可留空，只用订阅内容"></a-input>
+                         placeholder="domain:openai.com&#10;full:chat.openai.com&#10;keyword:openai&#10;geosite:openai&#10;可留空，只用订阅内容"></a-input>
+                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                    可用前缀：domain:（含子域名）/ full:（精确）/ keyword:（子串）/ regexp: / dotless: / geosite: / ext:。
+                    不带前缀且不含点的会按 keyword: 处理；含点的必须写前缀。
+                </div>
             </a-form-item>
             <a-form-item label="订阅地址">
                 <a-input v-model="groupModal.subscribeUrl"

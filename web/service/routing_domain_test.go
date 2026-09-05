@@ -2,6 +2,7 @@ package service
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"a-ui/database"
@@ -143,5 +144,118 @@ func TestMergeDomainsDropsEmptyStrings(t *testing.T) {
 	got := MergeDomains([]string{"", "domain:a.com"}, []string{"", ""})
 	if len(got) != 1 || got[0] != "domain:a.com" {
 		t.Errorf("got = %v, want [domain:a.com]", got)
+	}
+}
+
+func TestParseDomainsAcceptsAllXrayPrefixes(t *testing.T) {
+	raw := "domain:openai.com\nfull:chat.openai.com\nkeyword:openai\n" +
+		"regexp:.*\\.oaistatic\\.com\ndotless:localhost\n" +
+		"geosite:openai\next:geoip.dat:cn\next-domain:x.dat:tag\next-site:y.dat:tag"
+	got, err := ParseDomains(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 9 {
+		t.Fatalf("len = %d, want 9: %v", len(got), got)
+	}
+	if got[2] != "keyword:openai" {
+		t.Errorf("got[2] = %q, want keyword:openai", got[2])
+	}
+}
+
+// 管理员从小火箭配置里整段粘贴过来的原文，逐行都必须能过。
+// 最后两行是 DOMAIN-KEYWORD 的转写，改动前正是它们让整段粘贴失败。
+func TestParseDomainsAcceptsPastedShadowrocketBlock(t *testing.T) {
+	raw := `domain:openai.com
+domain:chatgpt.com
+domain:chatgpt.site
+domain:chat.com
+domain:ai.com
+domain:sora.com
+domain:oaistatic.com
+domain:oaiusercontent.com
+domain:oaistatsig.com
+domain:openaicom.imgix.net
+domain:openaimerge.com
+domain:crixet.com
+domain:openaiapi-site.azureedge.net
+domain:client-api.arkoselabs.com
+full:openai-api.arkoselabs.com
+full:chat.openai.com.cdn.cloudflare.net
+full:openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net
+full:openaicomproductionae4b.blob.core.windows.net
+full:production-openaicom-storage.azureedge.net
+openai
+chatgpt-async-webps`
+	got, err := ParseDomains(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 21 {
+		t.Fatalf("len = %d, want 21", len(got))
+	}
+	if got[19] != "keyword:openai" {
+		t.Errorf("got[19] = %q, want keyword:openai", got[19])
+	}
+	if got[20] != "keyword:chatgpt-async-webps" {
+		t.Errorf("got[20] = %q, want keyword:chatgpt-async-webps", got[20])
+	}
+}
+
+// 含点的裸串在 xray 的 routing 规则里是子串匹配，在 geosite 数据文件里却是
+// 后缀匹配。放行等于让从 geosite 列表复制来的 openai.com 静默变成能命中
+// notopenai.com.evil.net 的规则，而没有任何一层会报错。
+func TestParseDomainsRejectsAmbiguousBareDomain(t *testing.T) {
+	_, err := ParseDomains("openai.com")
+	if err == nil {
+		t.Fatal("expected error for bare dotted string")
+	}
+	for _, want := range []string{"domain:openai.com", "full:openai.com", "keyword:openai.com"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err.Error(), want)
+		}
+	}
+}
+
+// xray 只把目标域名转小写、不归一化配置里的模式
+// （app/router/condition.go:59），所以大写的模式是永不命中的哑规则。
+func TestParseDomainsLowercasesMatchableValues(t *testing.T) {
+	got, err := ParseDomains("domain:OpenAI.COM\nfull:Chat.OpenAI.com\nkeyword:OpenAI\nOpenAI")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"domain:openai.com", "full:chat.openai.com", "keyword:openai", "keyword:openai"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// regexp: 与 dotless: 会被编译成正则，转小写会把 \D 变成 \d 这种
+// 意义完全相反的东西。geosite:/ext: 的 code 由 xray 自己 ToUpper。
+func TestParseDomainsKeepsCaseSensitiveForms(t *testing.T) {
+	raw := "regexp:^API\\D+\\.Example\\.COM$\ndotless:LocalHost\ngeosite:OpenAI"
+	got, err := ParseDomains(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"regexp:^API\\D+\\.Example\\.COM$", "dotless:LocalHost", "geosite:OpenAI"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseDomainsRejectsEmptyPrefixValue(t *testing.T) {
+	if _, err := ParseDomains("domain:"); err == nil {
+		t.Error("expected error for prefix with no value")
+	}
+}
+
+func TestParseDomainsRejectsKeywordWithSeparators(t *testing.T) {
+	if _, err := ParseDomains("open ai"); err == nil {
+		t.Error("expected error for keyword containing a space")
 	}
 }

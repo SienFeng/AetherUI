@@ -12,11 +12,32 @@ import (
 	"a-ui/util/common"
 )
 
-// xray 支持的域名匹配前缀。不带前缀的裸域名 xray 也接受（等价于子串匹配），
-// 但容易误伤，这里要求显式前缀。
-var domainPrefixes = []string{"domain:", "full:", "geosite:", "regexp:", "ext:"}
+// xray 支持的域名匹配前缀，见 common/geodata/rule_parser.go:226
+// parseCustomDomainRule 与 parseGeoSiteRule。
+// ext-domain: / ext-site: 是 ext: 的别名。
+//
+// 顺序无关：各前缀互不为前缀（ext: 与 ext-domain: 在第 4 个字符上就分岔）。
+var domainPrefixes = []string{
+	"domain:", "full:", "keyword:", "regexp:", "dotless:",
+	"geosite:", "ext:", "ext-domain:", "ext-site:",
+}
 
-// ParseDomains 把用户在 textarea 中一行一条录入的域名解析成列表。
+// lowercaseValuePrefixes 里的前缀，其值必须转小写才可能命中。
+//
+// xray 只把「目标域名」转小写，不归一化配置里的模式
+// （app/router/condition.go:59），所以 domain:OpenAI.com 是一条永不命中的
+// 哑规则，且没有任何一层会报错——不是洁癖，是防一个静默失效。
+//
+// regexp: 与 dotless: 刻意不在此列：它们会被编译成正则，转小写会把 \D 变成
+// \d 这种意义完全相反的东西。geosite: / ext:* 的 code 由 xray 自己 ToUpper
+// （rule_parser.go:211），同样不该在这里动。
+var lowercaseValuePrefixes = map[string]bool{
+	"domain:": true, "full:": true, "keyword:": true,
+}
+
+// ParseDomains 把用户在 textarea 中一行一条录入的域名解析成入库列表。
+//
+// 按输入行序输出，不排序：顺序是「生成逐字节确定」不变量的一部分。
 func ParseDomains(raw string) ([]string, error) {
 	lines := strings.Split(raw, "\n")
 	list := make([]string, 0, len(lines))
@@ -25,22 +46,61 @@ func ParseDomains(raw string) ([]string, error) {
 		if item == "" {
 			continue
 		}
-		ok := false
-		for _, p := range domainPrefixes {
-			if strings.HasPrefix(item, p) && len(item) > len(p) {
-				ok = true
-				break
-			}
+		normalized, err := normalizeDomainRule(item)
+		if err != nil {
+			return nil, err
 		}
-		if !ok {
-			return nil, common.NewError("域名格式不支持，必须以 domain: / full: / geosite: / regexp: / ext: 开头:", item)
-		}
-		list = append(list, item)
+		list = append(list, normalized)
 	}
 	if len(list) == 0 {
 		return nil, common.NewError("域名列表不能为空")
 	}
 	return list, nil
+}
+
+// normalizeDomainRule 把一行录入归一成入库形态，或说明它为什么不合法。
+func normalizeDomainRule(item string) (string, error) {
+	for _, p := range domainPrefixes {
+		if !strings.HasPrefix(item, p) {
+			continue
+		}
+		value := item[len(p):]
+		if value == "" {
+			return "", common.NewError("域名格式不支持，前缀后面没有内容:", item)
+		}
+		if lowercaseValuePrefixes[p] {
+			return p + strings.ToLower(value), nil
+		}
+		return item, nil
+	}
+
+	// 带冒号却没匹配上任何前缀：几乎必然是前缀拼错。放行的话 xray 会把整串
+	// 当子串匹配（infra/conf/router.go:175 传的 defaultType 是 Domain_Substr），
+	// 而 SNI/Host 里不含冒号——一条永不命中的哑规则，且 Configuration OK。
+	if strings.Contains(item, ":") {
+		return "", common.NewError("域名格式不支持，无法识别的前缀:", item,
+			"可用前缀:", strings.Join(domainPrefixes, " / "))
+	}
+
+	// 无前缀的裸串在 xray 的 routing 规则里是子串匹配，但在 geosite 数据文件
+	// （domain-list-community）里是后缀匹配——同一份文本两种含义。含点的裸串
+	// 两种解读都说得通，放行等于让从 geosite 列表复制来的 openai.com 静默变成
+	// 能命中 notopenai.com.evil.net 的规则。拒绝是廉价的：报错里点名三种写法，
+	// 补个前缀即可。
+	if strings.Contains(item, ".") {
+		return "", common.NewError("域名写法有歧义:", item,
+			"——不带前缀时 xray 按子串匹配。请明确写成 domain:"+item+
+				"（含子域名）、full:"+item+"（精确匹配）或 keyword:"+item+
+				"（确实要子串匹配）")
+	}
+
+	// 不含点也不含冒号：不可能是域名，意图唯一是关键词（对应 Surge/Clash 的
+	// DOMAIN-KEYWORD）。归一成显式的 keyword: 存库，让域名组列表里的标签
+	// 自己说清楚它在做什么，也让手工与订阅两条路径的存储形态一致。
+	if !isValidKeyword(item) {
+		return "", common.NewError("关键词含有非法字符:", item)
+	}
+	return "keyword:" + strings.ToLower(item), nil
 }
 
 // EncodeDomains 把域名列表序列化为入库格式。
