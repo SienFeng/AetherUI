@@ -100,6 +100,10 @@
                                             </span>
                                         </template>
                                     </template>
+                                    <template slot="cidrs" slot-scope="text, group">
+                                        <span v-if="!group.cidrCount" style="color: #bbb;">—</span>
+                                        <span v-else>[[ group.cidrCount ]] 条</span>
+                                    </template>
                                     <template slot="subscribe" slot-scope="text, group">
                                         <span v-if="group.subscribeState === 'none'" style="color: #bbb;">—</span>
                                         <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
@@ -267,11 +271,21 @@
                     不带前缀且不含点的会按 keyword: 处理；含点的必须写前缀。
                 </div>
             </a-form-item>
+            <a-form-item label="IP 段（一行一条）">
+                <a-input type="textarea" :rows="4" v-model="groupModal.cidrs"
+                         placeholder="1.2.3.0/24&#10;8.8.8.8&#10;2001:db8::/32&#10;geoip:cn&#10;可留空"></a-input>
+                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                    IP 段与域名各自生成一条独立的分流规则，互不影响。
+                    默认只对客户端直接连 IP 的连接生效；要让它也匹配域名目标，
+                    到「面板设置」打开「让 IP 规则也匹配域名目标」。
+                </div>
+            </a-form-item>
             <a-form-item label="订阅地址">
                 <a-input v-model="groupModal.subscribeUrl"
                          placeholder="留空表示不订阅，例如 https://example.com/rules.list"></a-input>
                 <div style="color: #888; font-size: 12px; margin-top: 4px;">
-                    支持 Surge/Clash 规则集与纯域名列表。IP-CIDR 等非域名规则会被忽略。
+                    支持 Surge/Clash 规则集、纯域名列表与纯 IP 列表。
+                    IP-CIDR / IP-CIDR6 / GEOIP 会进 IP 段；IP-ASN、SRC-IP-CIDR 等无法忠实翻译的规则会被忽略。
                     保存后由定时任务拉取，或在列表里点「立即更新」。
                 </div>
             </a-form-item>
@@ -472,6 +486,7 @@
             groupColumns: [
                 { title: '备注', dataIndex: 'remark', width: 160 },
                 { title: '域名', scopedSlots: { customRender: 'domains' } },
+                { title: 'IP 段', width: 100, scopedSlots: { customRender: 'cidrs' } },
                 { title: '订阅', width: 220, scopedSlots: { customRender: 'subscribe' } },
                 { title: '操作', width: 140, scopedSlots: { customRender: 'action' } },
             ],
@@ -492,8 +507,9 @@
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
             groupModal: {
-                visible: false, id: 0, remark: '', domains: '', subscribeUrl: '',
+                visible: false, id: 0, remark: '', domains: '', cidrs: '', subscribeUrl: '',
                 subscribedPreview: [], subscribedCount: 0, lastError: '', lastSkipped: 0, lastUpdatedAt: 0,
+                subscribedCidrPreview: [], subscribedCidrCount: 0,
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '', groupFilter: '' },
@@ -627,9 +643,12 @@
                 this.groupModal.id = group ? group.id : 0;
                 this.groupModal.remark = group ? group.remark : '';
                 this.groupModal.domains = '';
+                this.groupModal.cidrs = '';
                 this.groupModal.subscribeUrl = '';
                 this.groupModal.subscribedPreview = [];
                 this.groupModal.subscribedCount = 0;
+                this.groupModal.subscribedCidrPreview = [];
+                this.groupModal.subscribedCidrCount = 0;
                 this.groupModal.lastError = '';
                 this.groupModal.lastSkipped = 0;
                 this.groupModal.lastUpdatedAt = 0;
@@ -638,9 +657,12 @@
                     if (!msg.success) return;
                     const d = msg.obj;
                     this.groupModal.domains = d.domains || '';
+                    this.groupModal.cidrs = d.cidrs || '';
                     this.groupModal.subscribeUrl = d.subscribeUrl || '';
                     this.groupModal.subscribedPreview = d.subscribedPreview || [];
                     this.groupModal.subscribedCount = d.subscribedCount || 0;
+                    this.groupModal.subscribedCidrPreview = d.subscribedCidrPreview || [];
+                    this.groupModal.subscribedCidrCount = d.subscribedCidrCount || 0;
                     this.groupModal.lastError = d.lastError || '';
                     this.groupModal.lastSkipped = d.lastSkipped || 0;
                     this.groupModal.lastUpdatedAt = d.lastUpdatedAt || 0;
@@ -651,6 +673,7 @@
                 const data = {
                     remark: this.groupModal.remark,
                     domains: this.groupModal.domains,
+                    cidrs: this.groupModal.cidrs,
                     subscribeUrl: this.groupModal.subscribeUrl,
                 };
                 const url = this.groupModal.id

@@ -283,3 +283,37 @@ func TestUpdateFieldsForClearsSubscribedCidrsWhenUrlChanges(t *testing.T) {
 		t.Errorf("subscribed_domains = %v, want cleared", fields["subscribed_domains"])
 	}
 }
+
+// TestDomainGroupUpdatePersistsCidrs 走一遍真实的 Add -> Update -> Get，
+// 而不是像上面两条那样只测 updateFieldsFor 这个纯函数。这条测试钉的是
+// updateFieldsFor 的列名单一旦漏掉 "cidrs"：Update 不会报任何错（GORM
+// 的 Updates 对没提到的列不闻不问），但 Get 出来的 Cidrs 仍是改之前的
+// 旧值——保存「成功」，内容却静默没变，这正是 CLAUDE.md 里点名的那类
+// 后果最严重的 bug。同时改了 Remark，确认真正改动到的列不受影响。
+func TestDomainGroupUpdatePersistsCidrs(t *testing.T) {
+	setupDB(t)
+	s := DomainGroupService{}
+
+	g := &model.DomainGroup{Remark: "before", Domains: "[]", Cidrs: `["1.2.3.0/24"]`}
+	if err := s.Add(g); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if err := s.Update(&model.DomainGroup{
+		Id: g.Id, Remark: "after", Domains: "[]", Cidrs: `["8.8.8.8"]`,
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(g.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Remark != "after" {
+		t.Errorf("Remark = %q, want %q", got.Remark, "after")
+	}
+	if got.Cidrs != `["8.8.8.8"]` {
+		t.Errorf("Cidrs = %q, want %q — updateFieldsFor 若漏掉 cidrs 列，这里会拿到 Update 之前的旧值",
+			got.Cidrs, `["8.8.8.8"]`)
+	}
+}

@@ -23,6 +23,7 @@ type domainGroupForm struct {
 	Id      int    `json:"id" form:"id"`
 	Remark  string `json:"remark" form:"remark"`
 	Domains string `json:"domains" form:"domains"`
+	Cidrs   string `json:"cidrs" form:"cidrs"`
 	// SubscribeUrl 用指针，为的是区分「表单没提供这个字段」（nil）与
 	// 「用户主动清空了订阅地址」（指向空串）。两者后果天差地别：前者是前端
 	// 疏漏，此时必须沿用库里的原值；后者是取消订阅，此时清空订阅数据才对。
@@ -46,6 +47,7 @@ type domainGroupSummary struct {
 	EffectiveCount  int      `json:"effectiveCount"`
 	ManualCount     int      `json:"manualCount"`
 	SubscribedCount int      `json:"subscribedCount"`
+	CidrCount       int      `json:"cidrCount"`
 	SubscribeUrl    string   `json:"subscribeUrl"`
 	LastUpdatedAt   int64    `json:"lastUpdatedAt"`
 	LastError       string   `json:"lastError"`
@@ -58,15 +60,18 @@ type domainGroupSummary struct {
 }
 
 type domainGroupDetail struct {
-	Id                int      `json:"id"`
-	Remark            string   `json:"remark"`
-	Domains           string   `json:"domains"`
-	SubscribeUrl      string   `json:"subscribeUrl"`
-	SubscribedPreview []string `json:"subscribedPreview"`
-	SubscribedCount   int      `json:"subscribedCount"`
-	LastUpdatedAt     int64    `json:"lastUpdatedAt"`
-	LastError         string   `json:"lastError"`
-	LastSkipped       int      `json:"lastSkipped"`
+	Id                    int      `json:"id"`
+	Remark                string   `json:"remark"`
+	Domains               string   `json:"domains"`
+	Cidrs                 string   `json:"cidrs"`
+	SubscribeUrl          string   `json:"subscribeUrl"`
+	SubscribedPreview     []string `json:"subscribedPreview"`
+	SubscribedCount       int      `json:"subscribedCount"`
+	SubscribedCidrPreview []string `json:"subscribedCidrPreview"`
+	SubscribedCidrCount   int      `json:"subscribedCidrCount"`
+	LastUpdatedAt         int64    `json:"lastUpdatedAt"`
+	LastError             string   `json:"lastError"`
+	LastSkipped           int      `json:"lastSkipped"`
 }
 
 type routingRuleForm struct {
@@ -142,6 +147,24 @@ func decodeGroupDomains(group *model.DomainGroup) (manual, subscribed []string, 
 	return manual, subscribed, broken
 }
 
+// decodeGroupCidrs 是 decodeGroupDomains 的 IP 段版本，写法与语义完全对称：
+// 手工 Cidrs 与订阅 SubscribedCidrs 各自解码，任一列解码失败都记 broken，
+// 调用方与域名一侧一样把这个 broken 并进同一个 Broken 字段，不单独开一个
+// CidrsBroken——两类数据损坏对界面而言是同一句话「这条组的规则不会写进配置」。
+func decodeGroupCidrs(group *model.DomainGroup) (manual, subscribed []string, broken bool) {
+	manual, err := service.DecodeCidrs(group.Cidrs)
+	if err != nil {
+		manual = nil
+		broken = true
+	}
+	subscribed, err = service.DecodeSubscribedCidrs(group.SubscribedCidrs)
+	if err != nil {
+		subscribed = nil
+		broken = true
+	}
+	return manual, subscribed, broken
+}
+
 type RoutingController struct {
 	domainGroupService service.DomainGroupService
 	outboundService    service.OutboundNodeService
@@ -195,13 +218,17 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 	summaries := make([]*domainGroupSummary, 0, len(groups))
 	for _, group := range groups {
 		manual, subscribed, broken := decodeGroupDomains(group)
+		cidrManual, cidrSubscribed, cidrBroken := decodeGroupCidrs(group)
+		broken = broken || cidrBroken
 		merged := service.MergeDomains(manual, subscribed)
 		effectiveCount := len(merged)
+		cidrCount := len(service.MergeDomains(cidrManual, cidrSubscribed))
 		if broken {
 			// 数据损坏时 buildRule 会整条丢弃规则，不能让 SubscribedDomains
 			// 那一半仍然完好就把 EffectiveCount 撑成非零——那样列表显示健康，
-			// 引用它的规则却已经从生成的配置里消失了。
+			// 引用它的规则却已经从生成的配置里消失了。CidrCount 同理。
 			effectiveCount = 0
+			cidrCount = 0
 		}
 		preview := merged
 		if len(preview) > domainGroupPreviewLimit {
@@ -214,6 +241,7 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 			EffectiveCount:  effectiveCount,
 			ManualCount:     len(manual),
 			SubscribedCount: len(subscribed),
+			CidrCount:       cidrCount,
 			SubscribeUrl:    group.SubscribeUrl,
 			LastUpdatedAt:   group.LastUpdatedAt,
 			LastError:       group.LastError,
@@ -238,20 +266,28 @@ func (a *RoutingController) detailDomainGroup(c *gin.Context) {
 		return
 	}
 	manual, subscribed, _ := decodeGroupDomains(group)
+	cidrManual, cidrSubscribed, _ := decodeGroupCidrs(group)
 	preview := subscribed
 	if len(preview) > subscribedPreviewLimit {
 		preview = preview[:subscribedPreviewLimit]
 	}
+	cidrPreview := cidrSubscribed
+	if len(cidrPreview) > subscribedPreviewLimit {
+		cidrPreview = cidrPreview[:subscribedPreviewLimit]
+	}
 	jsonObj(c, &domainGroupDetail{
-		Id:                group.Id,
-		Remark:            group.Remark,
-		Domains:           strings.Join(manual, "\n"),
-		SubscribeUrl:      group.SubscribeUrl,
-		SubscribedPreview: preview,
-		SubscribedCount:   len(subscribed),
-		LastUpdatedAt:     group.LastUpdatedAt,
-		LastError:         group.LastError,
-		LastSkipped:       group.LastSkipped,
+		Id:                    group.Id,
+		Remark:                group.Remark,
+		Domains:               strings.Join(manual, "\n"),
+		Cidrs:                 strings.Join(cidrManual, "\n"),
+		SubscribeUrl:          group.SubscribeUrl,
+		SubscribedPreview:     preview,
+		SubscribedCount:       len(subscribed),
+		SubscribedCidrPreview: cidrPreview,
+		SubscribedCidrCount:   len(cidrSubscribed),
+		LastUpdatedAt:         group.LastUpdatedAt,
+		LastError:             group.LastError,
+		LastSkipped:           group.LastSkipped,
 	}, nil)
 }
 
@@ -285,6 +321,22 @@ func encodeDomainsFromForm(raw string) (string, error) {
 	return service.EncodeDomains(list)
 }
 
+// encodeCidrsFromForm 把 textarea 原文校验并转成入库格式。
+// 允许为空：一个组可以只有域名，或只有订阅内容。
+func encodeCidrsFromForm(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "[]", nil
+	}
+	list, err := service.ParseCidrs(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := service.ValidateCidrs(list); err != nil {
+		return "", err
+	}
+	return service.EncodeCidrs(list)
+}
+
 func (a *RoutingController) addDomainGroup(c *gin.Context) {
 	form := &domainGroupForm{}
 	if err := c.ShouldBind(form); err != nil {
@@ -292,6 +344,11 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 		return
 	}
 	encoded, err := encodeDomainsFromForm(form.Domains)
+	if err != nil {
+		jsonMsg(c, "添加域名组", err)
+		return
+	}
+	encodedCidrs, err := encodeCidrsFromForm(form.Cidrs)
 	if err != nil {
 		jsonMsg(c, "添加域名组", err)
 		return
@@ -309,7 +366,7 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 		}
 	}
 	group := &model.DomainGroup{
-		Remark: form.Remark, Domains: encoded, SubscribeUrl: subscribeUrl,
+		Remark: form.Remark, Domains: encoded, Cidrs: encodedCidrs, SubscribeUrl: subscribeUrl,
 	}
 	err = a.domainGroupService.Add(group)
 	jsonMsg(c, "添加域名组", err)
@@ -334,6 +391,11 @@ func (a *RoutingController) updateDomainGroup(c *gin.Context) {
 		jsonMsg(c, "修改域名组", err)
 		return
 	}
+	encodedCidrs, err := encodeCidrsFromForm(form.Cidrs)
+	if err != nil {
+		jsonMsg(c, "修改域名组", err)
+		return
+	}
 	// form.SubscribeUrl 为 nil 表示这次提交根本没带订阅地址字段，此时必须
 	// 沿用库里的原值。否则 Update 会看到「原值 -> 空串」，判定为订阅地址被
 	// 改动而清空 SubscribedDomains——一次「只改备注」的提交就让这个域名组
@@ -354,7 +416,7 @@ func (a *RoutingController) updateDomainGroup(c *gin.Context) {
 		}
 	}
 	err = a.domainGroupService.Update(&model.DomainGroup{
-		Id: id, Remark: form.Remark, Domains: encoded, SubscribeUrl: subscribeUrl,
+		Id: id, Remark: form.Remark, Domains: encoded, Cidrs: encodedCidrs, SubscribeUrl: subscribeUrl,
 	})
 	jsonMsg(c, "修改域名组", err)
 	if err == nil {
