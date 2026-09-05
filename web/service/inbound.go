@@ -149,6 +149,12 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := accessLogService.DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的访问日志失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 用量历史同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来
+	// 的入站会看到上一个用户的用量曲线。失败只告警不阻断，理由同访问日志，
+	// 残留由每小时一次的 PruneOrphans 兜底。
+	if err := (&TrafficHistoryService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的用量历史失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 封禁同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
 	// 入站会凭空继承上一个用户的封禁名单。这里失败要阻断——残留封禁会让
 	// 新用户莫名其妙连不上，且没有定时任务兜底清理孤儿封禁。

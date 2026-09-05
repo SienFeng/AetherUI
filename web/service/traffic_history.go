@@ -107,3 +107,52 @@ func upsertBucket(db *gorm.DB, g model.TrafficGranularity, inboundId int, start,
 		}),
 	}).Create(bucket).Error
 }
+
+// Cleanup 删除某一级中早于保留期的桶，返回删除行数。
+//
+// 两级各有各的保留期，所以条件里必须带 granularity——不带的话，一次
+// 「清理小时桶」会把同样早于该时刻的日桶一起删掉，长期趋势图会静默变空。
+func (s *TrafficHistoryService) Cleanup(g model.TrafficGranularity, retentionDays int, now time.Time) (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil || retentionDays <= 0 {
+		return 0, nil
+	}
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour).Unix()
+	result := db.Where("granularity = ? and bucket_start < ?", g, cutoff).
+		Delete(&model.TrafficBucket{})
+	return result.RowsAffected, result.Error
+}
+
+// PruneOrphans 删除已不存在的入站遗留的桶，返回删除行数。
+//
+// 这是第二道防线，兜住 DelInbound 里那次删除失败或漏调的情况。第一道在
+// DelInbound 内。两道都要有：SQLite 会复用被删除的自增 id，残留的桶会绑到
+// 下一个建出来的入站上，那时引用不再悬空，图会渲染得非常合理，只是画的是
+// 别人的数据。
+func (s *TrafficHistoryService) PruneOrphans() (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return 0, nil
+	}
+	var ids []int
+	if err := database.GetDB().Model(model.Inbound{}).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	tx := db.Where("inbound_id != 0")
+	if len(ids) > 0 {
+		tx = tx.Where("inbound_id not in ?", ids)
+	}
+	result := tx.Delete(&model.TrafficBucket{})
+	return result.RowsAffected, result.Error
+}
+
+// DeleteByInbound 删除某入站的全部用量历史（两级都删）。
+//
+// 必须在删除入站时调用，理由见 PruneOrphans。
+func (s *TrafficHistoryService) DeleteByInbound(inboundId int) error {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return nil
+	}
+	return db.Where("inbound_id = ?", inboundId).Delete(&model.TrafficBucket{}).Error
+}

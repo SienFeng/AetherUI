@@ -194,3 +194,89 @@ func TestTrafficRetentionDefaults(t *testing.T) {
 		t.Errorf("日桶保留天数默认 = %d (err %v)，期望 365", got, err)
 	}
 }
+
+// writeBucket 直接往库里塞一个桶，用于构造清理与查询测试的初始状态。
+func writeBucket(t *testing.T, g model.TrafficGranularity, inboundId int, start, up, down int64) {
+	t.Helper()
+	row := &model.TrafficBucket{
+		Granularity: g, InboundId: inboundId, BucketStart: start, Up: up, Down: down,
+	}
+	if err := database.GetTrafficDB().Create(row).Error; err != nil {
+		t.Fatalf("写入桶: %v", err)
+	}
+}
+
+func TestCleanupAppliesRetentionPerGranularity(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30101, "甲")
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	svc := TrafficHistoryService{}
+
+	old := now.Add(-40 * 24 * time.Hour).Unix()   // 40 天前
+	fresh := now.Add(-10 * 24 * time.Hour).Unix() // 10 天前
+	for _, g := range []model.TrafficGranularity{model.GranularityHour, model.GranularityDay} {
+		writeBucket(t, g, in.Id, old, 1, 1)
+		writeBucket(t, g, in.Id, fresh, 2, 2)
+	}
+
+	// 小时桶保留 30 天：40 天前的该删，10 天前的该留。
+	deleted, err := svc.Cleanup(model.GranularityHour, 30, now)
+	if err != nil {
+		t.Fatalf("Cleanup 小时桶: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("删除了 %d 行小时桶，期望 1", deleted)
+	}
+	if rows := listBuckets(t, model.GranularityHour); len(rows) != 1 || rows[0].BucketStart != fresh {
+		t.Errorf("剩余小时桶 = %+v，期望只剩 10 天前那条", rows)
+	}
+	// 日桶保留期更长，同一时刻的日桶不该被上面那次清理带走。
+	if rows := listBuckets(t, model.GranularityDay); len(rows) != 2 {
+		t.Errorf("日桶剩 %d 行，期望 2——清理必须按 granularity 隔离", len(rows))
+	}
+}
+
+func TestPruneOrphansRemovesDeletedInboundBuckets(t *testing.T) {
+	setupTrafficTest(t)
+	alive := mkTrafficInbound(t, 30102, "在")
+	svc := TrafficHistoryService{}
+
+	writeBucket(t, model.GranularityHour, alive.Id, 1000, 5, 5)
+	// 一个库里已经不存在的入站 id。SQLite 会复用自增 id，留着它的话，
+	// 下一个建出来的入站会看到上一个用户的曲线，而且引用不再悬空，
+	// 生成期的任何跳过防线都拦不住。
+	writeBucket(t, model.GranularityHour, 9999, 1000, 7, 7)
+
+	pruned, err := svc.PruneOrphans()
+	if err != nil {
+		t.Fatalf("PruneOrphans: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("清理了 %d 行，期望 1", pruned)
+	}
+	rows := listBuckets(t, model.GranularityHour)
+	if len(rows) != 1 || rows[0].InboundId != alive.Id {
+		t.Errorf("剩余 = %+v，期望只剩存活入站那条", rows)
+	}
+}
+
+func TestDeleteByInboundOnlyTouchesTarget(t *testing.T) {
+	setupTrafficTest(t)
+	a := mkTrafficInbound(t, 30103, "甲")
+	b := mkTrafficInbound(t, 30104, "乙")
+	svc := TrafficHistoryService{}
+
+	writeBucket(t, model.GranularityHour, a.Id, 1000, 1, 1)
+	writeBucket(t, model.GranularityDay, a.Id, 1000, 1, 1)
+	writeBucket(t, model.GranularityHour, b.Id, 1000, 2, 2)
+
+	if err := svc.DeleteByInbound(a.Id); err != nil {
+		t.Fatalf("DeleteByInbound: %v", err)
+	}
+	if rows := listBuckets(t, model.GranularityHour); len(rows) != 1 || rows[0].InboundId != b.Id {
+		t.Errorf("小时桶剩余 = %+v，期望只剩乙的", rows)
+	}
+	if rows := listBuckets(t, model.GranularityDay); len(rows) != 0 {
+		t.Errorf("日桶剩余 = %+v，期望甲的两级都被删掉", rows)
+	}
+}

@@ -92,6 +92,8 @@ type Server struct {
 
 	accessLogService service.AccessLogService
 
+	trafficHistoryService service.TrafficHistoryService
+
 	cron *cron.Cron
 
 	ctx    context.Context
@@ -326,6 +328,9 @@ func (s *Server) startTask() {
 	// 每小时按保留期清理访问日志
 	s.cron.AddJob("@every 1h", job.NewAccessLogCleanupJob())
 
+	// 每小时按各自的保留期清理用量历史
+	s.cron.AddJob("@every 1h", job.NewTrafficCleanupJob())
+
 	// 每 10 秒对齐一次端口限速规则；没人配限速时不碰 tc
 	s.cron.AddJob("@every 10s", job.NewShapingJob())
 }
@@ -415,6 +420,12 @@ func (s *Server) Start() (err error) {
 	// 用量历史同样用独立的库。打不开只影响图表，不影响累计流量与限额判定。
 	if err := database.InitTrafficDB(config.GetTrafficDBPath()); err != nil {
 		logger.Warning("open traffic history database failed, 用量图表将不可用:", err)
+	} else if pruned, err := s.trafficHistoryService.PruneOrphans(); err != nil {
+		logger.Warning("清理孤儿用量数据失败:", err)
+	} else if pruned > 0 {
+		// 与访问日志同理：删除入站时若用量库恰好不可写，桶会留下来。启动时
+		// 先扫一遍，把窗口从「最多一小时」缩到「最多到下次重启」。
+		logger.Warning("清理了", pruned, "条已删除入站遗留的用量数据")
 	}
 
 	s.startTask()
