@@ -1883,6 +1883,8 @@ Task 4 为了让每个 Task 都以全绿结束，在三个地方留了写 `Domai
 2. `web/service/routing_portable.go` 的 `importRules` —— Task 7 应已替换，在此确认没有残留
 3. `web/service/routing_rule.go` 的 `Update` —— **本 Step 删除**，去掉同步 `old.DomainGroupId` 的那一行与它的过渡注释
 
+**这一处已被证实是死代码，删除时不需要再做额外调查。** Task 7 完成后控制端与审查者各自独立 grep 全仓库确认：除 `database/model/routing.go` 的字段声明本身、以及这处桥接自己的写入语句之外，**没有任何非测试代码读 `DomainGroupId`**。桥接注释里点名的三个消费者已在 Task 5（`buildRule`）、Task 6（`listRules`）、Task 7（`toPortableRule`）逐个切完，那句注释因此已经失实——它是随着 Task 5→7 逐步腐化的，不是谁写错了。直接删掉整段（注释 + `if` 块），不要保留任何一半。
+
 删干净是 spec §11 描述的回退行为成立的前提：删除后新建的多组规则 `domain_group_id` 为 0，回退到旧版二进制时旧代码会整条丢弃它们（分流范围缩小而非放大，安全侧正确）。桥接若残留，旧代码会按第一个组分流——不算危险，但与文档不符。
 
 - [ ] **Step 2: 确认生产代码不再读写 `DomainGroupId`**
