@@ -238,42 +238,23 @@ git commit -m "feat(dns): 新增 dnsServers 设置项，非空即启用
 
 新建 `web/service/dns_inject_test.go`：
 
+**复用同包既有的辅助函数，不要新造**：`newTemplateConfig(t)`（`routing_inject_test.go:24`）
+与 `decodeOutbounds(t, cfg)`（`routing_inject_test.go:33`）已经存在于 `package service`，
+在新文件里重新定义 `decodeOutbounds` 会直接编译失败（同包重复声明）。
+
+
 ```go
 package service
 
 import (
 	"encoding/json"
 	"testing"
-
-	"a-ui/xray"
 )
-
-func dnsBaseConfig(t *testing.T) *xray.Config {
-	t.Helper()
-	tpl, err := (&SettingService{}).GetXrayConfigTemplate()
-	if err != nil {
-		t.Fatalf("GetXrayConfigTemplate: %v", err)
-	}
-	cfg := &xray.Config{}
-	if err := json.Unmarshal([]byte(tpl), cfg); err != nil {
-		t.Fatalf("unmarshal template: %v", err)
-	}
-	return cfg
-}
-
-func decodeOutbounds(t *testing.T, cfg *xray.Config) []map[string]any {
-	t.Helper()
-	var raw []map[string]any
-	if err := json.Unmarshal(cfg.OutboundConfigs, &raw); err != nil {
-		t.Fatalf("unmarshal outbounds: %v", err)
-	}
-	return raw
-}
 
 // 不配置 = 一个字节都不改。升级后行为零变化靠的就是这一条。
 func TestDNSInjectorNoopWhenUnset(t *testing.T) {
 	setupDB(t)
-	cfg := dnsBaseConfig(t)
+	cfg := newTemplateConfig(t)
 	beforeDNS := string(cfg.DNSConfig)
 	beforeOut := string(cfg.OutboundConfigs)
 	if err := (&DNSInjector{}).Inject(cfg); err != nil {
@@ -292,7 +273,7 @@ func TestDNSInjectorWritesServersAndFallback(t *testing.T) {
 	if err := (&SettingService{}).setString("dnsServers", "https://8.8.8.8/dns-query\n1.1.1.1"); err != nil {
 		t.Fatalf("setString: %v", err)
 	}
-	cfg := dnsBaseConfig(t)
+	cfg := newTemplateConfig(t)
 	if err := (&DNSInjector{}).Inject(cfg); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}
@@ -319,7 +300,7 @@ func TestDNSInjectorDoesNotDuplicateFallback(t *testing.T) {
 	if err := (&SettingService{}).setString("dnsServers", "localhost\n1.1.1.1"); err != nil {
 		t.Fatalf("setString: %v", err)
 	}
-	cfg := dnsBaseConfig(t)
+	cfg := newTemplateConfig(t)
 	if err := (&DNSInjector{}).Inject(cfg); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}
@@ -347,7 +328,7 @@ func TestDNSInjectorSetsFreedomDomainStrategy(t *testing.T) {
 	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
 		t.Fatalf("setString: %v", err)
 	}
-	cfg := dnsBaseConfig(t)
+	cfg := newTemplateConfig(t)
 	if err := (&DNSInjector{}).Inject(cfg); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}
@@ -363,7 +344,7 @@ func TestDNSInjectorLeavesNonFreedomDefaultOutboundAlone(t *testing.T) {
 	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
 		t.Fatalf("setString: %v", err)
 	}
-	cfg := dnsBaseConfig(t)
+	cfg := newTemplateConfig(t)
 	cfg.OutboundConfigs = []byte(`[{"protocol":"socks","tag":"custom","settings":{}}]`)
 	if err := (&DNSInjector{}).Inject(cfg); err != nil {
 		t.Fatalf("Inject: %v", err)
@@ -381,8 +362,8 @@ func TestDNSInjectorIsDeterministic(t *testing.T) {
 	if err := (&SettingService{}).setString("dnsServers", "https://8.8.8.8/dns-query\n1.1.1.1"); err != nil {
 		t.Fatalf("setString: %v", err)
 	}
-	first := dnsBaseConfig(t)
-	second := dnsBaseConfig(t)
+	first := newTemplateConfig(t)
+	second := newTemplateConfig(t)
 	if err := (&DNSInjector{}).Inject(first); err != nil {
 		t.Fatalf("Inject: %v", err)
 	}

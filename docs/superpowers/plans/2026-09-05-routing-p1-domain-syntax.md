@@ -24,7 +24,7 @@
 ### Task 1: `ParseDomains` 接受 xray 的全部域名写法
 
 **Files:**
-- Modify: `web/service/routing_domain.go:17-42`（`domainPrefixes` 与 `ParseDomains`）
+- Modify: `web/service/routing_domain.go:15-42`（`domainPrefixes` 上方的注释块、`domainPrefixes`、`ParseDomains`）
 - Modify: `web/html/xui/routing.html:262-265`（手工域名 placeholder）
 - Test: `web/service/routing_domain_test.go`
 
@@ -160,7 +160,9 @@ Expected: FAIL。`TestParseDomainsAcceptsAllXrayPrefixes` 报 `域名格式不�
 
 - [ ] **Step 3: 实现**
 
-把 `web/service/routing_domain.go` 的第 17-42 行（`domainPrefixes` 到 `ParseDomains` 结束）整段替换为：
+把 `web/service/routing_domain.go` 的第 **15-42** 行整段替换为下面的内容。起点是第 15 行的注释块开头
+（`// xray 支持的域名匹配前缀。不带前缀的裸域名 xray 也接受……`），不是第 17 行的 `var`——
+那两行注释描述的是改动前的行为（「这里要求显式前缀」），留着会与新代码直接矛盾：
 
 ```go
 // xray 支持的域名匹配前缀，见 common/geodata/rule_parser.go:226
