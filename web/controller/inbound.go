@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"strconv"
+	"time"
 	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/web/global"
@@ -12,11 +13,12 @@ import (
 )
 
 type InboundController struct {
-	inboundService   service.InboundService
-	xrayService      service.XrayService
-	onlineService    service.OnlineService
-	accessLogService service.AccessLogService
-	geoService       service.GeoService
+	inboundService        service.InboundService
+	xrayService           service.XrayService
+	onlineService         service.OnlineService
+	accessLogService      service.AccessLogService
+	geoService            service.GeoService
+	trafficHistoryService service.TrafficHistoryService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -40,6 +42,8 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/unban/:id", a.unban)
 	g.POST("/accessLogs/:id", a.getAccessLogs)
 	g.POST("/recentSources/:id", a.getRecentSources)
+	g.POST("/traffic/history/:id", a.getTrafficHistory)
+	g.POST("/traffic/overview", a.getTrafficOverview)
 	g.POST("/provinces", a.getProvinces)
 }
 
@@ -264,4 +268,49 @@ func (a *InboundController) getAccessLogs(c *gin.Context) {
 
 func (a *InboundController) getProvinces(c *gin.Context) {
 	jsonObj(c, a.geoService.Regions(), nil)
+}
+
+func (a *InboundController) getTrafficHistory(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取用量历史", err)
+		return
+	}
+	// 同其它接口：前端发的是 urlencoded，绑定标签必须是 form。
+	form := struct {
+		Range string `form:"range"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "获取用量历史", err)
+		return
+	}
+	result, err := a.trafficHistoryService.History(id, service.TrafficRange(form.Range), time.Now())
+	if err != nil {
+		jsonMsg(c, "获取用量历史", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+func (a *InboundController) getTrafficOverview(c *gin.Context) {
+	form := struct {
+		Range string `form:"range"`
+		Top   int    `form:"top"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "获取用量总览", err)
+		return
+	}
+	// 图例上超过几十条线已经没法看了，而这个数字来自请求体：前端的 bug 或
+	// 一次手工请求传个大数，会让服务端白白拉出远超所需的系列。上界在这里
+	// 钳住——controller 是不可信输入的边界，service 不该为此操心。
+	if form.Top <= 0 || form.Top > 50 {
+		form.Top = 12
+	}
+	result, err := a.trafficHistoryService.Overview(service.TrafficRange(form.Range), form.Top, time.Now())
+	if err != nil {
+		jsonMsg(c, "获取用量总览", err)
+		return
+	}
+	jsonObj(c, result, nil)
 }
