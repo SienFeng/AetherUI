@@ -228,16 +228,30 @@ func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
 	if err != nil {
 		return s.recordFailure(group, err)
 	}
-	domains, skipped, err := ParseSubscription(raw)
+	domains, cidrs, skipped, err := ParseSubscription(raw)
 	if err != nil {
 		return s.recordFailure(group, err)
 	}
-	// 落库前过真实 xray 校验。ValidateDomains 自身是 fail open 的：
+	// 落库前过真实 xray 校验。两个 Validate 自身都是 fail open 的：
 	// 二进制缺失、超时等一律放行，只有 xray 明确判定非法才拦。
-	if err := ValidateDomains(domains); err != nil {
+	//
+	// 空列表不送检：探针规则的条件为空数组时 xray 会报
+	// "this rule has no effective fields"，把「这一侧没有内容」这个正常
+	// 状态变成整次刷新失败。ValidateCidrs 自己挡了空，ValidateDomains
+	// 没有（它的既有调用点保证了非空），所以在这里显式判。
+	if len(domains) > 0 {
+		if err := ValidateDomains(domains); err != nil {
+			return s.recordFailure(group, err)
+		}
+	}
+	if err := ValidateCidrs(cidrs); err != nil {
 		return s.recordFailure(group, err)
 	}
-	encoded, err := EncodeDomains(domains)
+	encodedDomains, err := EncodeDomains(domains)
+	if err != nil {
+		return s.recordFailure(group, err)
+	}
+	encodedCidrs, err := EncodeCidrs(cidrs)
 	if err != nil {
 		return s.recordFailure(group, err)
 	}
@@ -245,15 +259,20 @@ func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
 	// 用 map 而不是 struct：GORM 的 struct 更新会跳过零值，
 	// LastError 与 LastSkipped 清不掉。
 	//
+	// 两侧【都】写，哪怕其中一个是空——这不与「失败时绝不清空」冲突，
+	// 那条约束的是失败路径。成功路径上，订阅源真的不再列 IP 了，保留上一次
+	// 的 IP 就是拿过期数据分流，比 IP 条件消失更危险。
+	//
 	// Where 里带上 subscribe_url：拉取耗时可达 30s，一批组更是分钟级，
 	// 这期间管理员可能已经把订阅地址改成了别的（Update 不取 subscriptionMu）。
 	// 不加这个条件，本次用旧地址拉到的内容会被当成新地址的结果写回——
-	// 组的 URL 是新的，域名却是旧地址的，界面还显示「刚刚更新」，
+	// 组的 URL 是新的，内容却是旧地址的，界面还显示「刚刚更新」，
 	// 比规则单纯不生效更危险（见 spec §5.5）。
 	res := database.GetDB().Model(model.DomainGroup{}).
 		Where("id = ? AND subscribe_url = ?", group.Id, group.SubscribeUrl).
 		Updates(map[string]any{
-			"subscribed_domains": encoded,
+			"subscribed_domains": encodedDomains,
+			"subscribed_cidrs":   encodedCidrs,
 			"last_updated_at":    time.Now().UnixMilli(),
 			"last_error":         "",
 			"last_skipped":       skipped,

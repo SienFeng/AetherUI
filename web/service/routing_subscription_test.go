@@ -21,7 +21,7 @@ DOMAIN-KEYWORD,baidu
 IP-CIDR,1.1.1.1/32,no-resolve
 PROCESS-NAME,Telegram
 `
-	domains, skipped, err := ParseSubscription(raw)
+	domains, cidrs, skipped, err := ParseSubscription(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -36,14 +36,19 @@ PROCESS-NAME,Telegram
 			t.Errorf("domains[%d] = %q, want %q", i, domains[i], want[i])
 		}
 	}
-	if skipped != 2 {
-		t.Errorf("skipped = %d, want 2", skipped)
+	// IP-CIDR 现在被收进 IP 段而不是当成非域名规则跳过；只有 PROCESS-NAME
+	// 仍不认识，跳过并计数——这是本任务引入的预期行为变化。
+	if len(cidrs) != 1 || cidrs[0] != "1.1.1.1/32" {
+		t.Errorf("cidrs = %v, want [1.1.1.1/32]", cidrs)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1", skipped)
 	}
 }
 
 func TestParseSubscriptionPlainDomainList(t *testing.T) {
 	raw := ".360.cn\n163.com\n\n# comment\n.qq.com\n"
-	domains, skipped, err := ParseSubscription(raw)
+	domains, _, skipped, err := ParseSubscription(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +68,7 @@ func TestParseSubscriptionPlainDomainList(t *testing.T) {
 
 func TestParseSubscriptionClashYaml(t *testing.T) {
 	raw := "payload:\n  - '+.qq.com'\n  - \"163.com\"\n  - '.baidu.com'\n"
-	domains, _, err := ParseSubscription(raw)
+	domains, _, _, err := ParseSubscription(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +84,7 @@ func TestParseSubscriptionClashYaml(t *testing.T) {
 }
 
 func TestParseSubscriptionHandlesCRLF(t *testing.T) {
-	domains, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\r\nDOMAIN-SUFFIX,163.com\r\n")
+	domains, _, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\r\nDOMAIN-SUFFIX,163.com\r\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,25 +93,27 @@ func TestParseSubscriptionHandlesCRLF(t *testing.T) {
 	}
 }
 
-// 一条域名都解析不出来必须报错，绝不能返回空数组。
-// 空的域名组会让 buildRule 跳过整条规则，流量静默退回直连——
+// 域名和 IP 段都解析不出来时必须报错，绝不能返回空数组。
+// 空的分流组会让 buildRule 跳过整条规则，流量静默退回直连——
 // 这正是订阅源改格式或 URL 失效返回 404 页面时会走到的路径。
+//
+// 「全是 IP 规则」不再属于这个集合：本任务之后 IP-CIDR/IP-CIDR6 会被解析
+// 进 IP 段，属于合法的非空结果，覆盖场景见 TestParseSubscriptionCollectsIPRules。
 func TestParseSubscriptionRejectsEmptyResult(t *testing.T) {
 	cases := map[string]string{
-		"全是 IP 规则": "IP-CIDR,1.1.1.1/32\nIP-CIDR6,::1/128\n",
 		"全是注释":     "# nothing here\n# really\n",
 		"空文本":      "   \n\n  \n",
 		"404 HTML": "<!DOCTYPE html>\n<html><body>404: Not Found</body></html>\n",
 	}
 	for name, raw := range cases {
-		if _, _, err := ParseSubscription(raw); err == nil {
+		if _, _, _, err := ParseSubscription(raw); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
 	}
 }
 
 func TestParseSubscriptionDeduplicates(t *testing.T) {
-	domains, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\n.qq.com\nqq.com\n")
+	domains, _, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\n.qq.com\nqq.com\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -116,7 +123,7 @@ func TestParseSubscriptionDeduplicates(t *testing.T) {
 }
 
 func TestParseSubscriptionIgnoresTrailingPolicyField(t *testing.T) {
-	domains, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com,DIRECT\nDOMAIN,a.com,PROXY,no-resolve\n")
+	domains, _, _, err := ParseSubscription("DOMAIN-SUFFIX,qq.com,DIRECT\nDOMAIN,a.com,PROXY,no-resolve\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,7 +134,7 @@ func TestParseSubscriptionIgnoresTrailingPolicyField(t *testing.T) {
 
 func TestParseSubscriptionRejectsGarbageEntries(t *testing.T) {
 	// 含空格、斜杠、协议头的都不是域名，必须跳过而不是原样放进配置
-	domains, skipped, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\nhttps://evil.com/path\nhas space\n")
+	domains, _, skipped, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\nhttps://evil.com/path\nhas space\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,25 +146,36 @@ func TestParseSubscriptionRejectsGarbageEntries(t *testing.T) {
 	}
 }
 
-// 纯 IP 字面量满足域名格式的所有其他检查（含点、无非法字符），但作为
-// xray 的 domain 条件永远匹配不到任何流量——订阅一份纯 IP 列表不该「成功」。
-func TestParseSubscriptionRejectsPlainIPLiterals(t *testing.T) {
-	domains, skipped, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\n1.1.1.1\n8.8.8.8\n2001:4860:4860::8888\n")
+// 纯 IP 字面量满足域名格式的所有其他检查（含点、无非法字符），isValidDomain
+// 仍然拒绝把它们当域名——但本任务之后它们不再被当成垃圾丢弃计入 skipped，
+// 而是落入 IP 段：无逗号的行先试 isValidCIDR，裸 IP 天然是合法的
+// /32、/128 条件。
+func TestParseSubscriptionPlainIPLiteralsBecomeCidrs(t *testing.T) {
+	domains, cidrs, skipped, err := ParseSubscription("DOMAIN-SUFFIX,qq.com\n1.1.1.1\n8.8.8.8\n2001:4860:4860::8888\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(domains) != 1 || domains[0] != "domain:qq.com" {
-		t.Errorf("got = %v, want [domain:qq.com]", domains)
+		t.Errorf("domains = %v, want [domain:qq.com]", domains)
 	}
-	if skipped != 3 {
-		t.Errorf("skipped = %d, want 3", skipped)
+	want := []string{"1.1.1.1", "8.8.8.8", "2001:4860:4860::8888"}
+	if len(cidrs) != len(want) {
+		t.Fatalf("cidrs = %v, want %v", cidrs, want)
+	}
+	for i := range want {
+		if cidrs[i] != want[i] {
+			t.Errorf("cidrs[%d] = %q, want %q", i, cidrs[i], want[i])
+		}
+	}
+	if skipped != 0 {
+		t.Errorf("skipped = %d, want 0", skipped)
 	}
 }
 
 // 部分订阅源（尤其 Windows 工具导出的）在文件开头带 UTF-8 BOM，
 // 不去掉的话会粘在第一行规则类型前面，导致该行匹配全部失配、被误计成跳过。
 func TestParseSubscriptionTrimsLeadingBOM(t *testing.T) {
-	domains, skipped, err := ParseSubscription("\uFEFFDOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\n")
+	domains, _, skipped, err := ParseSubscription("\uFEFFDOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,7 +194,7 @@ func TestParseSubscriptionTrimsLeadingBOM(t *testing.T) {
 }
 
 func TestParseSubscriptionLowercasesKeyword(t *testing.T) {
-	domains, _, err := ParseSubscription("DOMAIN-KEYWORD,BaiDu\nDOMAIN-KEYWORD,baidu\n")
+	domains, _, _, err := ParseSubscription("DOMAIN-KEYWORD,BaiDu\nDOMAIN-KEYWORD,baidu\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -248,7 +266,9 @@ func TestFetchSubscriptionRejectsOversizedBody(t *testing.T) {
 func TestRefreshWritesSubscribedDomainsOnSuccess(t *testing.T) {
 	setupDB(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("DOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\nIP-CIDR,1.1.1.1/32\n"))
+		// IP-CIDR 现在会被解析进 SubscribedCidrs 而不是跳过；PROCESS-NAME 仍
+		// 不认识，用它保留一条真正会被跳过的规则，不然 LastSkipped 测不出东西。
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,163.com\nIP-CIDR,1.1.1.1/32\nPROCESS-NAME,Telegram\n"))
 	}))
 	defer srv.Close()
 
@@ -272,6 +292,14 @@ func TestRefreshWritesSubscribedDomainsOnSuccess(t *testing.T) {
 	}
 	if len(domains) != 2 || domains[0] != "domain:qq.com" {
 		t.Errorf("domains = %v", domains)
+	}
+	// 两侧都写是本任务的核心行为：订阅解析出的 IP 段必须落到 SubscribedCidrs。
+	cidrs, err := DecodeSubscribedCidrs(got.SubscribedCidrs)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedCidrs: %v", err)
+	}
+	if len(cidrs) != 1 || cidrs[0] != "1.1.1.1/32" {
+		t.Errorf("cidrs = %v, want [1.1.1.1/32]", cidrs)
 	}
 	if got.LastUpdatedAt == 0 {
 		t.Error("LastUpdatedAt should be set")
@@ -654,7 +682,7 @@ func TestRefreshDiscardsResultWhenUrlChangedDuringFetch(t *testing.T) {
 
 // 手工录入与订阅拉取必须产出同一个字符串，否则 MergeDomains 去不掉重复。
 func TestSubscriptionKeywordMatchesManualForm(t *testing.T) {
-	fromSub, _, err := ParseSubscription("DOMAIN-KEYWORD,openai\n")
+	fromSub, _, _, err := ParseSubscription("DOMAIN-KEYWORD,openai\n")
 	if err != nil {
 		t.Fatalf("ParseSubscription: %v", err)
 	}
@@ -664,5 +692,71 @@ func TestSubscriptionKeywordMatchesManualForm(t *testing.T) {
 	}
 	if fromSub[0] != fromManual[0] {
 		t.Errorf("subscription produced %q but manual produced %q", fromSub[0], fromManual[0])
+	}
+}
+
+func TestParseSubscriptionCollectsIPRules(t *testing.T) {
+	raw := `# comment
+DOMAIN-SUFFIX,qq.com,DIRECT
+IP-CIDR,1.1.1.0/24,PROXY,no-resolve
+IP-CIDR6,2001:db8::/32,PROXY
+GEOIP,CN,DIRECT
+IP-ASN,20473,PROXY
+SRC-IP-CIDR,192.168.1.0/24,DIRECT
+PROCESS-NAME,Telegram,PROXY
+`
+	domains, cidrs, skipped, err := ParseSubscription(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(domains) != 1 || domains[0] != "domain:qq.com" {
+		t.Errorf("domains = %v", domains)
+	}
+	want := []string{"1.1.1.0/24", "2001:db8::/32", "geoip:cn"}
+	if len(cidrs) != len(want) {
+		t.Fatalf("cidrs = %v, want %v", cidrs, want)
+	}
+	for i := range want {
+		if cidrs[i] != want[i] {
+			t.Errorf("cidrs[%d] = %q, want %q", i, cidrs[i], want[i])
+		}
+	}
+	// IP-ASN（xray 没有 ASN 匹配能力）、SRC-IP-CIDR（那是 source，按客户端 IP，
+	// 塞进 ip 是语义错误）、PROCESS-NAME 三条必须跳过并计数。
+	if skipped != 3 {
+		t.Errorf("skipped = %d, want 3", skipped)
+	}
+}
+
+// 纯 IP 列表（如中国 IP 段）从此是合法订阅源：改动前它会因「没解析出任何
+// 域名」整份报错，而失败路径会保留上一次的数据，管理员看不出问题在哪。
+func TestParseSubscriptionAcceptsPlainIPList(t *testing.T) {
+	domains, cidrs, _, err := ParseSubscription("1.0.1.0/24\n1.0.2.0/23\n8.8.8.8\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(domains) != 0 {
+		t.Errorf("domains = %v, want empty", domains)
+	}
+	if len(cidrs) != 3 {
+		t.Errorf("cidrs = %v, want 3 entries", cidrs)
+	}
+}
+
+// 两侧都空才报错。报错是为了让调用方保留上一次成功的数据——上游改格式、
+// URL 失效返回 404 页面、CDN 返回空响应都会走到这里。
+func TestParseSubscriptionErrorsOnlyWhenBothEmpty(t *testing.T) {
+	if _, _, _, err := ParseSubscription("IP-ASN,20473,PROXY\n"); err == nil {
+		t.Error("expected error when nothing was parsed")
+	}
+}
+
+func TestParseSubscriptionDedupesCidrs(t *testing.T) {
+	_, cidrs, _, err := ParseSubscription("IP-CIDR,1.1.1.0/24,A\nIP-CIDR,1.1.1.0/24,B\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cidrs) != 1 {
+		t.Errorf("cidrs = %v, want 1 entry", cidrs)
 	}
 }
