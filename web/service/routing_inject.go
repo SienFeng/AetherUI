@@ -187,97 +187,124 @@ func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []a
 				"reason:", skip)
 			continue
 		}
-		if isBlock {
-			blockRules = append(blockRules, generated)
-		} else {
-			proxyRules = append(proxyRules, generated)
+		// 一条数据库规则最多产出两条 xray 规则（域名一条、IP 一条）。
+		// 顺序由 buildRule 固定（domain 在前），这里原样追加，不重排。
+		for _, g := range generated {
+			if isBlock {
+				blockRules = append(blockRules, g)
+			} else {
+				proxyRules = append(proxyRules, g)
+			}
 		}
 	}
 	return blockRules, proxyRules, nil
 }
 
-// buildRule 生成一条规则，或说明为什么必须整条丢弃。
+// buildRule 生成 0~2 条 xray 规则，或说明为什么必须整条丢弃。
 //
 // 第三个返回值非 nil 即表示跳过，且必须给出原因——调用方要把它记进日志，
 // 否则这道防线对用户是隐形的。
 //
-// 绝不能退而求其次生成一条缺少 domain 的规则：xray 把缺失的条件视为
-// 「不限制」，那样的规则会劫持该入站的全部流量，且不会有任何报错。
+// 一条数据库规则最多产出两条 xray 规则：域名条件一条、IP 条件一条。
+// **绝不把两者并列进同一条**——同一条规则内的条件是 AND
+// （app/router/config.go:33 的 BuildCondition + condition.go:35 的
+// ConditionChan.Apply），并列会让「这批域名或这批 IP 走 B」变成「域名命中
+// 且解析出的 IP 也命中」，几乎永不命中，而 xray 返回 Configuration OK、
+// 面板首页照样显示 running。
 //
-// 域名来自一条规则引用的多个域名组的合并（DomainGroupIds，升序）。每个组内
-// 再合并手工录入（Domains 字段）与订阅更新（SubscribedDomains 字段）。两级
-// 合并顺序都是确定的（组间按 id 升序、组内手工在前订阅在后，均保留首次出现），
-// 是「生成逐字节确定」不变量的一部分。
+// 也绝不能退而求其次生成一条条件为空数组的规则：xray 把长度为 0 的条件
+// 视为「不限制」，那样的规则会劫持该入站的全部流量，且不会有任何报错。
+//
+// 条件来自一条规则引用的多个分流组的合并（DomainGroupIds，升序）。每个组内
+// 再合并手工录入与订阅更新。两级合并顺序都是确定的，是「生成逐字节确定」
+// 不变量的一部分。
 func (s *RoutingInjector) buildRule(
 	rule *model.RoutingRule,
 	inboundTagById map[int]string,
 	outboundTagById map[int]string,
-) (map[string]any, bool, error) {
+) ([]map[string]any, bool, error) {
 	groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds)
 	if err != nil {
-		return nil, false, common.NewError("规则的域名组数据损坏, id:", rule.Id, "err:", err)
+		return nil, false, common.NewError("规则的分流组数据损坏, id:", rule.Id, "err:", err)
 	}
 	if len(groupIds) == 0 {
-		return nil, false, common.NewError("规则没有指定任何域名组, id:", rule.Id,
-			"（域名条件为空会让规则退化成劫持该入站全部流量）")
+		return nil, false, common.NewError("规则没有指定任何分流组, id:", rule.Id,
+			"（条件为空会让规则退化成劫持该入站全部流量）")
 	}
 
-	// 按 DomainGroupIds 的升序逐组取域名。失效的组剔除而不是整条丢弃：
+	// 按 DomainGroupIds 的升序逐组取条件。失效的组剔除而不是整条丢弃：
 	// 一个订阅从未拉取成功的空组，不该把同一条规则里本来好好的分流一起
-	// 废掉；对 block 规则尤其如此——整条丢弃等于本该封禁的域名全部裸奔，
+	// 废掉；对 block 规则尤其如此——整条丢弃等于本该封禁的目标全部裸奔，
 	// 部分生成至少封住了还在的那部分。
 	//
-	// 「数据损坏」与「组为空」的后果完全相同（该组贡献 0 条域名），统一
+	// 「数据损坏」与「组为空」的后果完全相同（该组贡献 0 条条件），统一
 	// 走剔除；剔除的方向是缩小匹配范围，安全侧一致。
-	lists := make([][]string, 0, len(groupIds))
+	domainLists := make([][]string, 0, len(groupIds))
+	cidrLists := make([][]string, 0, len(groupIds))
 	for _, gid := range groupIds {
 		group, groupErr := s.domainGroupService.Get(gid)
 		if groupErr != nil {
-			logger.Warning("routing rule drops a domain group that no longer exists, rule id:",
+			logger.Warning("routing rule drops a group that no longer exists, rule id:",
 				rule.Id, "group id:", gid)
 			continue
 		}
-		manual, decodeErr := DecodeDomains(group.Domains)
+		manualDomains, decodeErr := DecodeDomains(group.Domains)
 		if decodeErr != nil {
-			logger.Warning("routing rule drops a domain group with corrupt manual domains, rule id:",
+			logger.Warning("routing rule drops a group with corrupt manual domains, rule id:",
 				rule.Id, "group id:", gid, "err:", decodeErr)
 			continue
 		}
-		subscribed, decodeErr := DecodeSubscribedDomains(group.SubscribedDomains)
+		subscribedDomains, decodeErr := DecodeSubscribedDomains(group.SubscribedDomains)
 		if decodeErr != nil {
-			logger.Warning("routing rule drops a domain group with corrupt subscribed domains, rule id:",
+			logger.Warning("routing rule drops a group with corrupt subscribed domains, rule id:",
+				rule.Id, "group id:", gid, "err:", decodeErr)
+			continue
+		}
+		manualCidrs, decodeErr := DecodeCidrs(group.Cidrs)
+		if decodeErr != nil {
+			logger.Warning("routing rule drops a group with corrupt manual cidrs, rule id:",
+				rule.Id, "group id:", gid, "err:", decodeErr)
+			continue
+		}
+		subscribedCidrs, decodeErr := DecodeSubscribedCidrs(group.SubscribedCidrs)
+		if decodeErr != nil {
+			logger.Warning("routing rule drops a group with corrupt subscribed cidrs, rule id:",
 				rule.Id, "group id:", gid, "err:", decodeErr)
 			continue
 		}
 		// 组内合并顺序确定（手工在前、订阅在后、保留首次出现）。
-		one := MergeDomains(manual, subscribed)
-		if len(one) == 0 {
-			logger.Warning("routing rule drops an empty domain group, rule id:",
+		// MergeDomains 只是「有序去重」，两类值都用它。
+		oneDomains := MergeDomains(manualDomains, subscribedDomains)
+		oneCidrs := MergeDomains(manualCidrs, subscribedCidrs)
+		if len(oneDomains) == 0 && len(oneCidrs) == 0 {
+			logger.Warning("routing rule drops an empty group, rule id:",
 				rule.Id, "group id:", gid)
 			continue
 		}
-		lists = append(lists, one)
+		if len(oneDomains) > 0 {
+			domainLists = append(domainLists, oneDomains)
+		}
+		if len(oneCidrs) > 0 {
+			cidrLists = append(cidrLists, oneCidrs)
+		}
 	}
 
 	// 跨组按上面的遍历顺序合并去重。禁止改用遍历 map 产生顺序——
 	// 那样生成不再逐字节确定，Config.Equals 恒为 false，10 秒的重启 cron
 	// 会不停重启 xray。
-	domains := MergeDomains(lists...)
-	if len(domains) == 0 {
-		return nil, false, common.NewError("规则的域名组全部不存在或为空, rule id:", rule.Id,
+	domains := MergeDomains(domainLists...)
+	cidrs := MergeDomains(cidrLists...)
+	if len(domains) == 0 && len(cidrs) == 0 {
+		return nil, false, common.NewError("规则的分流组全部不存在或为空, rule id:", rule.Id,
 			"group ids:", groupIds,
-			"（域名条件为空会让规则退化成劫持该入站全部流量）")
-	}
-
-	generated := map[string]any{
-		"type":   "field",
-		"domain": domains,
+			"（条件为空会让规则退化成劫持该入站全部流量）")
 	}
 
 	inboundIds, err := DecodeInboundIds(rule.InboundIds)
 	if err != nil {
 		return nil, false, common.NewError("规则的入站数据损坏, id:", rule.Id, "err:", err)
 	}
+	var inboundTags []string
 	if len(inboundIds) > 0 {
 		tags := make([]string, 0, len(inboundIds))
 		missing := make([]int, 0)
@@ -292,8 +319,8 @@ func (s *RoutingInjector) buildRule(
 		if len(tags) == 0 {
 			// 剩下空数组绝不能输出。实测（Xray 26.7.28）确认 xray 把
 			// inboundTag: [] 当作「不限制」而非「不匹配任何入站」——一条本该
-			// 只覆盖甲的规则会劫持所有人的这批域名，且 Configuration OK、
-			// 面板首页照样显示 running。与 domain 为空数组是同一类事故。
+			// 只覆盖甲的规则会劫持所有人的流量，且 Configuration OK、
+			// 面板首页照样显示 running。
 			return nil, false, common.NewError("规则指定的入站全部不存在或已禁用, ids:", inboundIds)
 		}
 		if len(missing) > 0 {
@@ -304,24 +331,48 @@ func (s *RoutingInjector) buildRule(
 		}
 		// tags 的顺序由 InboundIds 的升序保证，不得改用遍历 inboundTagById
 		// 这个 map 来产生顺序——那样生成不再逐字节确定。
-		generated["inboundTag"] = tags
+		inboundTags = tags
 	}
 
+	var outboundTag string
+	isBlock := false
 	switch rule.Action {
 	case model.ActionBlock:
-		generated["outboundTag"] = model.BlockOutboundTag
-		return generated, true, nil
+		outboundTag = model.BlockOutboundTag
+		isBlock = true
 	case model.ActionProxy:
 		tag, ok := outboundTagById[rule.OutboundId]
 		if !ok {
 			return nil, false, common.NewError("出站节点不存在、已禁用或未写入配置, id:",
 				rule.OutboundId)
 		}
-		generated["outboundTag"] = tag
-		return generated, false, nil
+		outboundTag = tag
 	default:
 		return nil, false, common.NewError("未知的动作:", rule.Action)
 	}
+
+	// 顺序固定：domain 在前、ip 在后。这是「生成逐字节确定」的一部分。
+	generated := make([]map[string]any, 0, 2)
+	emit := func(conditionKey string, values []string) {
+		g := map[string]any{
+			"type":        "field",
+			conditionKey:  values,
+			"outboundTag": outboundTag,
+		}
+		// 空数组绝不写进配置（见函数注释）。inboundTags 为空表示这是一条
+		// 全局规则，此时正确的做法是压根不输出 inboundTag 这个键。
+		if len(inboundTags) > 0 {
+			g["inboundTag"] = inboundTags
+		}
+		generated = append(generated, g)
+	}
+	if len(domains) > 0 {
+		emit("domain", domains)
+	}
+	if len(cidrs) > 0 {
+		emit("ip", cidrs)
+	}
+	return generated, isBlock, nil
 }
 
 // buildGeoRules 生成地区限制规则，并把允许集写进 bin/a-ui-geo.dat。

@@ -364,7 +364,8 @@ func (s *DomainGroupService) RefreshDue() (int, error) {
 	return updated, nil
 }
 
-// MergeDomains 按传入顺序合并多个域名列表，去重并保留首次出现。
+// MergeDomains 按传入顺序合并多个字符串列表，去重并保留首次出现。
+// 域名与 IP 段两类规则值都用它——它只是一个有序去重，与值的语义无关。
 //
 // 顺序确定是「生成逐字节确定」不变量的一部分：调用方按固定顺序传入
 // （手工在前、订阅在后；跨组则按域名组 id 升序），本函数不重排。
