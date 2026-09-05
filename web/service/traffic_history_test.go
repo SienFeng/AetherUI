@@ -280,3 +280,215 @@ func TestDeleteByInboundOnlyTouchesTarget(t *testing.T) {
 		t.Errorf("日桶剩余 = %+v，期望甲的两级都被删掉", rows)
 	}
 }
+
+func TestHistoryPadsMissingBucketsWithZero(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30201, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	// 只写当前小时这一个桶，其余 23 个小时库里根本没有行（零流量不写行）。
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now, sh), 111, 222)
+
+	res, err := svc.History(in.Id, Range24h, now)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(res.Points) != 24 {
+		t.Fatalf("点数 = %d，期望 24（缺失的桶必须补零，否则图上会缺一段而不是显示 0）", len(res.Points))
+	}
+	if len(res.Labels) != len(res.Points) {
+		t.Fatalf("labels %d 与 points %d 不等长，Chart.js 会错位", len(res.Labels), len(res.Points))
+	}
+	last := res.Points[len(res.Points)-1]
+	if last.Up != 111 || last.Down != 222 {
+		t.Errorf("最后一个点 = %+v，期望 up=111 down=222（当前小时应在最右）", last)
+	}
+	for i, p := range res.Points[:len(res.Points)-1] {
+		if p.Up != 0 || p.Down != 0 {
+			t.Errorf("第 %d 个点 = %+v，期望补零", i, p)
+		}
+	}
+	if res.Granularity != "hour" {
+		t.Errorf("granularity = %q，期望 hour", res.Granularity)
+	}
+}
+
+func TestHistoryOneYearUsesDayBuckets(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30202, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	writeBucket(t, model.GranularityDay, in.Id, model.AlignDay(now, sh), 9, 9)
+	// 同一天的小时桶不该混进 1 年这一档。
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now, sh), 500, 500)
+
+	res, err := svc.History(in.Id, Range1y, now)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if res.Granularity != "day" || len(res.Points) != 365 {
+		t.Fatalf("granularity=%q 点数=%d，期望 day / 365", res.Granularity, len(res.Points))
+	}
+	if last := res.Points[364]; last.Up != 9 || last.Down != 9 {
+		t.Errorf("最后一个点 = %+v，期望取日桶的 9/9 而不是小时桶的 500/500", last)
+	}
+}
+
+func TestHistoryExcludesOtherInbounds(t *testing.T) {
+	setupTrafficTest(t)
+	a := mkTrafficInbound(t, 30203, "甲")
+	b := mkTrafficInbound(t, 30204, "乙")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	writeBucket(t, model.GranularityHour, b.Id, model.AlignHour(now, sh), 999, 999)
+
+	res, err := svc.History(a.Id, Range24h, now)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	for _, p := range res.Points {
+		if p.Up != 0 || p.Down != 0 {
+			t.Fatalf("甲的图里出现了乙的数据: %+v", p)
+		}
+	}
+}
+
+func TestHistoryUnknownRangeFallsBackTo24h(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30205, "甲")
+	svc := TrafficHistoryService{}
+
+	res, err := svc.History(in.Id, TrafficRange("不认识的档位"), time.Now())
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	// 前端传错档位时给一张能看的图，而不是报错或空图。
+	if res.Granularity != "hour" || len(res.Points) != 24 {
+		t.Errorf("granularity=%q 点数=%d，期望回落到 24 小时档", res.Granularity, len(res.Points))
+	}
+}
+
+func TestHistoryReportsReasonWhenDatabaseUnavailable(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30206, "甲")
+	database.ResetTrafficDBForTest()
+	svc := TrafficHistoryService{}
+
+	res, err := svc.History(in.Id, Range24h, time.Now())
+	if err != nil {
+		t.Fatalf("库不可用时不该返回错误，实际: %v", err)
+	}
+	// 「看不到」和「没有」必须能被区分开，否则管理员会以为这个人没用流量。
+	if res.Reason == "" {
+		t.Error("库不可用时 Reason 应说明原因，不能返回一张看起来正常的空图")
+	}
+}
+
+func TestOverviewRanksByTotalAndTruncates(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+	slot := model.AlignHour(now, sh)
+
+	// 三个入站，用量 300 / 100 / 200，取 Top 2 应得到 300 和 200。
+	big := mkTrafficInbound(t, 30301, "大")
+	small := mkTrafficInbound(t, 30302, "小")
+	mid := mkTrafficInbound(t, 30303, "中")
+	writeBucket(t, model.GranularityHour, big.Id, slot, 150, 150)
+	writeBucket(t, model.GranularityHour, small.Id, slot, 50, 50)
+	writeBucket(t, model.GranularityHour, mid.Id, slot, 100, 100)
+
+	res, err := svc.Overview(Range24h, 2, now)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(res.Series) != 2 {
+		t.Fatalf("系列数 = %d，期望 2", len(res.Series))
+	}
+	if res.Series[0].Remark != "大" || res.Series[1].Remark != "中" {
+		t.Errorf("排序 = %q, %q，期望 大, 中（按总量降序）", res.Series[0].Remark, res.Series[1].Remark)
+	}
+	if got := res.Series[0].Points[len(res.Series[0].Points)-1]; got != 300 {
+		t.Errorf("最大系列的最后一个点 = %d，期望 300（up+down）", got)
+	}
+	for _, s := range res.Series {
+		if len(s.Points) != len(res.Labels) {
+			t.Errorf("系列 %q 的点数 %d 与 labels %d 不等长", s.Remark, len(s.Points), len(res.Labels))
+		}
+	}
+}
+
+func TestOverviewReturnsAllWhenFewerThanTopN(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	in := mkTrafficInbound(t, 30304, "唯一")
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now, sh), 1, 1)
+
+	res, err := svc.Overview(Range24h, 12, now)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(res.Series) != 1 {
+		t.Errorf("系列数 = %d，期望 1", len(res.Series))
+	}
+}
+
+func TestOverviewFallsBackToIdWhenRemarkEmpty(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	in := mkTrafficInbound(t, 30305, "")
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now, sh), 1, 1)
+
+	res, err := svc.Overview(Range24h, 12, now)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	// 图例上留一个空标签，管理员分不出这条线是谁的。
+	want := fmt.Sprintf("#%d", in.Id)
+	if len(res.Series) != 1 || res.Series[0].Remark != want {
+		t.Errorf("备注 = %q，期望回落成 %q", res.Series[0].Remark, want)
+	}
+}
+
+func TestOverviewIgnoresBucketsOutsideRange(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	in := mkTrafficInbound(t, 30306, "甲")
+	// 48 小时前的桶落在 24 小时档之外，既不该出现在点里，
+	// 也不该让这个入站因为它而挤进 Top N。
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now.Add(-48*time.Hour), sh), 9999, 9999)
+
+	res, err := svc.Overview(Range24h, 12, now)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(res.Series) != 0 {
+		t.Errorf("系列数 = %d，期望 0——范围外的桶不该把入站带进 Top N", len(res.Series))
+	}
+}
+
+// mustLoadShanghai 与面板的默认时区一致（defaultValueMap 里的 timeLocation）。
+func mustLoadShanghai(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	return loc
+}
