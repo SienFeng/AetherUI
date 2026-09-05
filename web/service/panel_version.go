@@ -341,7 +341,7 @@ func (s *PanelVersionService) UpgradeLog() ([]string, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return []string{}, nil
 		}
-		return nil, err
+		return nil, common.NewError("读取更新日志失败:", err)
 	}
 	defer f.Close()
 
@@ -358,7 +358,7 @@ func (s *PanelVersionService) UpgradeLog() ([]string, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, common.NewError("读取更新日志失败:", err)
 	}
 	return ring, nil
 }

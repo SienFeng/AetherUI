@@ -390,6 +390,10 @@ func TestUpgradeRejectsWhenNotUpdatable(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
+	origForce := forceUpdatableForTest
+	defer func() { forceUpdatableForTest = origForce }()
+	forceUpdatableForTest = false
+
 	origBin := panelBinaryPath
 	defer func() { panelBinaryPath = origBin }()
 	panelBinaryPath = "/nonexistent/a-ui"
