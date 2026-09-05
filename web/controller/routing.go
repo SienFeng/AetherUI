@@ -73,27 +73,33 @@ type routingRuleForm struct {
 	Remark string `json:"remark" form:"remark"`
 	// InboundIds 为空数组表示「所有用户」。空与「全是非法 id」必须区分开，
 	// 转换时走 EncodeInboundIdsStrict——后者报错，前者才是合法的全局规则。
-	InboundIds    []int  `json:"inboundIds" form:"inboundIds"`
-	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
-	Action        string `json:"action" form:"action"`
-	OutboundId    int    `json:"outboundId" form:"outboundId"`
-	Priority      int    `json:"priority" form:"priority"`
-	Enable        bool   `json:"enable" form:"enable"`
+	InboundIds []int `json:"inboundIds" form:"inboundIds"`
+	// DomainGroupIds 至少要有一个元素。空数组【不是】「所有域名组」——
+	// 与 InboundIds 的空数组语义相反，见 model.RoutingRule 的字段注释。
+	DomainGroupIds []int  `json:"domainGroupIds" form:"domainGroupIds"`
+	Action         string `json:"action" form:"action"`
+	OutboundId     int    `json:"outboundId" form:"outboundId"`
+	Priority       int    `json:"priority" form:"priority"`
+	Enable         bool   `json:"enable" form:"enable"`
 }
 
 type routingRuleView struct {
-	Id            int    `json:"id"`
-	Remark        string `json:"remark"`
-	InboundIds    []int  `json:"inboundIds"`
-	DomainGroupId int    `json:"domainGroupId"`
-	Action        string `json:"action"`
-	OutboundId    int    `json:"outboundId"`
-	Priority      int    `json:"priority"`
-	Enable        bool   `json:"enable"`
+	Id             int    `json:"id"`
+	Remark         string `json:"remark"`
+	InboundIds     []int  `json:"inboundIds"`
+	DomainGroupIds []int  `json:"domainGroupIds"`
+	Action         string `json:"action"`
+	OutboundId     int    `json:"outboundId"`
+	Priority       int    `json:"priority"`
+	Enable         bool   `json:"enable"`
 	// Broken 标记 InboundIds 列解码失败。这种规则 buildRule 会整条丢弃，
 	// 但解码失败得到的空数组在前端看来就是「所有用户」——不带这个标记，
 	// 一条已经不生效的规则会在界面上显示成覆盖全员的正常规则。
 	Broken bool `json:"broken"`
+	// GroupsBroken 标记 DomainGroupIds 列解码失败，与 Broken（InboundIds
+	// 解码失败）分开而不合并：两者的界面文案不同，合并会让「入站数据损坏」
+	// 和「域名组数据损坏」显示成同一句话，管理员照着去修错的地方。
+	GroupsBroken bool `json:"groupsBroken"`
 }
 
 // ruleFromForm 把表单转成待落库的规则。
@@ -102,13 +108,7 @@ func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 过渡桥接：Task 4 把 validate 切到读 DomainGroupIds，而本 controller 的
-	// 多域名组表单改造在后续 Task。这里先用表单的单个组编出集合，保持
-	// 添加/编辑分流规则可用；后续改造会把它替换成真正的多组解析。
-	//
-	// 用 Strict 版本而非普通版本：表单传 0 或负数时必须报错，不能静默编成
-	// []——那正是「域名条件为空、劫持该用户全部流量」那个洞。
-	groupIds, err := service.EncodeDomainGroupIdsStrict([]int{form.DomainGroupId})
+	encodedGroups, err := service.EncodeDomainGroupIdsStrict(form.DomainGroupIds)
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +116,7 @@ func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
 		Id:             id,
 		Remark:         form.Remark,
 		InboundIds:     encoded,
-		DomainGroupId:  form.DomainGroupId,
-		DomainGroupIds: groupIds,
+		DomainGroupIds: encodedGroups,
 		Action:         form.Action,
 		OutboundId:     form.OutboundId,
 		Priority:       form.Priority,
@@ -476,11 +475,24 @@ func (a *RoutingController) listRules(c *gin.Context) {
 			// null 会在渲染规则列表时抛异常，整页数据都出不来。
 			ids = []int{}
 		}
+		groupIds, groupsErr := service.DecodeDomainGroupIds(rule.DomainGroupIds)
+		groupsBroken := groupsErr != nil
+		if groupsBroken {
+			groupIds = nil
+		}
+		if groupIds == nil {
+			// 必须是 []，不能是 null：前端对它做 .length / .includes，
+			// null 会在渲染规则列表时抛异常，整页数据都出不来。
+			//
+			// 与 InboundIds 不同的是，空的域名组数组在前端没有「所有域名组」
+			// 这个歧义解读，渲染成红色的「域名组数据损坏」标签即可。
+			groupIds = []int{}
+		}
 		views = append(views, &routingRuleView{
 			Id: rule.Id, Remark: rule.Remark, InboundIds: ids,
-			DomainGroupId: rule.DomainGroupId, Action: rule.Action,
+			DomainGroupIds: groupIds, Action: rule.Action,
 			OutboundId: rule.OutboundId, Priority: rule.Priority,
-			Enable: rule.Enable, Broken: broken,
+			Enable: rule.Enable, Broken: broken, GroupsBroken: groupsBroken,
 		})
 	}
 	jsonObj(c, views, nil)
