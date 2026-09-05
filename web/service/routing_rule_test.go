@@ -489,3 +489,105 @@ func TestConflictErrorNamesTheUserAndTheRule(t *testing.T) {
 		t.Errorf("conflict error has stray spaces inside the quotes: %s", msg)
 	}
 }
+
+// mustEncodeGroupIds 是测试夹具共用的域名组编码器。用非 Strict 版本，
+// 因为部分用例要故意造出「空集合」这种非法状态来验证下游会拒绝它。
+func mustEncodeGroupIds(t *testing.T, ids []int) string {
+	t.Helper()
+	encoded, err := EncodeDomainGroupIds(ids)
+	if err != nil {
+		t.Fatalf("EncodeDomainGroupIds: %v", err)
+	}
+	return encoded
+}
+
+func TestEncodeDomainGroupIdsSortsAndDedupes(t *testing.T) {
+	got, err := EncodeDomainGroupIds([]int{3, 1, 3, 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "[1,2,3]" {
+		t.Errorf("got %q, want [1,2,3]", got)
+	}
+}
+
+// 与 EncodeInboundIdsStrict 的关键分歧：入站那边「原始列表本来就空」是
+// 合法的（= 所有用户），域名组这边必须报错——空的 domain 条件会让规则
+// 劫持该用户的全部流量。
+func TestEncodeDomainGroupIdsStrictRejectsEmptyInput(t *testing.T) {
+	if _, err := EncodeDomainGroupIdsStrict(nil); err == nil {
+		t.Error("empty input must be rejected: [] would make the domain condition empty")
+	}
+	if _, err := EncodeDomainGroupIdsStrict([]int{}); err == nil {
+		t.Error("empty slice must be rejected")
+	}
+}
+
+func TestEncodeDomainGroupIdsStrictRejectsAllInvalid(t *testing.T) {
+	if _, err := EncodeDomainGroupIdsStrict([]int{0, -1}); err == nil {
+		t.Error("all-invalid input must be rejected, not silently collapse to []")
+	}
+}
+
+func TestEncodeDomainGroupIdsStrictAcceptsValid(t *testing.T) {
+	got, err := EncodeDomainGroupIdsStrict([]int{2, 1})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "[1,2]" {
+		t.Errorf("got %q, want [1,2]", got)
+	}
+}
+
+// 空串/null 不报错：迁移回填前、直接改库、并发写入都可能留下空值，
+// 在解码这一层报错会让整份配置生成失败。交给 validate / buildRule
+// 各自按空集合处理（都会拒绝）。
+func TestDecodeDomainGroupIdsTreatsBlankAsEmpty(t *testing.T) {
+	for _, raw := range []string{"", "   ", "null"} {
+		got, err := DecodeDomainGroupIds(raw)
+		if err != nil {
+			t.Errorf("DecodeDomainGroupIds(%q) returned error: %v", raw, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("DecodeDomainGroupIds(%q) = %v, want empty", raw, got)
+		}
+	}
+}
+
+func TestDecodeDomainGroupIdsRejectsCorruptData(t *testing.T) {
+	if _, err := DecodeDomainGroupIds("{oops"); err == nil {
+		t.Error("corrupt JSON must return an error so the rule is dropped whole")
+	}
+}
+
+// intersectGroups 绝不能复用 intersectInbounds：后者把空切片当全集，
+// 而域名组的空集合是非法值。复用会让两条各自损坏的规则被判成互相冲突，
+// 把管理员锁在门外——既修不了旧规则，也建不了新规则。
+func TestIntersectGroupsTreatsEmptyAsEmptyNotUniversal(t *testing.T) {
+	if ok, _ := intersectGroups(nil, []int{1}); ok {
+		t.Error("empty set must not intersect anything")
+	}
+	if ok, _ := intersectGroups([]int{1}, nil); ok {
+		t.Error("empty set must not intersect anything")
+	}
+	if ok, _ := intersectGroups(nil, nil); ok {
+		t.Error("two empty sets must not intersect")
+	}
+}
+
+func TestIntersectGroupsReportsSmallestSharedId(t *testing.T) {
+	ok, who := intersectGroups([]int{2, 5, 9}, []int{5, 9})
+	if !ok {
+		t.Fatal("expected intersection")
+	}
+	// b 已升序，取到的是最小的相交 id，保证错误信息稳定可测。
+	if who != 5 {
+		t.Errorf("who = %d, want 5", who)
+	}
+}
+
+func TestIntersectGroupsDisjoint(t *testing.T) {
+	if ok, _ := intersectGroups([]int{1, 2}, []int{3, 4}); ok {
+		t.Error("disjoint sets must not intersect")
+	}
+}

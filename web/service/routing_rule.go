@@ -347,3 +347,93 @@ func DecodeInboundIds(encoded string) ([]int, error) {
 	}
 	return ids, nil
 }
+
+// EncodeDomainGroupIds 把域名组 id 列表编成入库格式：丢弃非正数、去重、升序。
+//
+// 升序去重是「生成逐字节确定」的一部分：buildRule 按这个顺序逐组取域名再
+// 合并，顺序一抖动，Config.Equals 恒为 false，那个 10 秒的重启 cron 会不停
+// 重启 xray。
+//
+// 注意本函数会丢弃非正数，因此 [0] 这类输入会得到 "[]"——而空的域名组集合
+// 会让规则的 domain 条件为空。写入路径一律用 EncodeDomainGroupIdsStrict。
+func EncodeDomainGroupIds(ids []int) (string, error) {
+	seen := make(map[int]bool, len(ids))
+	cleaned := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		cleaned = append(cleaned, id)
+	}
+	sort.Ints(cleaned)
+	b, err := json.Marshal(cleaned)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// EncodeDomainGroupIdsStrict 是写入路径该用的版本。
+//
+// 与 EncodeInboundIdsStrict 的关键分歧：那边只在「原始非空却编出 []」时报错，
+// 因为入站的空列表是用户通过「所有用户」复选框显式表达的合法语义。域名组
+// 没有对应的概念——空的域名组集合意味着 domain 条件为空，xray 会把它当作
+// 「不限制」，规则从「这批域名走 B」退化成「该用户全部流量走 B」，且返回
+// Configuration OK、面板首页显示 running。所以这里对空结果一律报错，
+// 无论原始列表是否为空。
+func EncodeDomainGroupIdsStrict(ids []int) (string, error) {
+	encoded, err := EncodeDomainGroupIds(ids)
+	if err != nil {
+		return "", err
+	}
+	if encoded == "[]" {
+		if len(ids) == 0 {
+			return "", common.NewError("必须至少指定一个域名组")
+		}
+		return "", common.NewError("域名组选择非法：提交了", len(ids),
+			"个域名组，但没有一个是有效的域名组 id")
+	}
+	return encoded, nil
+}
+
+// DecodeDomainGroupIds 是 EncodeDomainGroupIds 的逆操作。
+//
+// 空字符串与 "null" 当作空切片且不报错：迁移会回填，但直接改库、并发写入
+// 等路径仍可能留下空值，在这里报错会让整份配置生成失败。空切片本身是非法
+// 状态，由 validate（拒绝写入）与 buildRule（整条丢弃）各自处理。
+// 真正的语法错误仍返回 error，交给调用方整条丢弃该规则。
+func DecodeDomainGroupIds(encoded string) ([]int, error) {
+	trimmed := strings.TrimSpace(encoded)
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var ids []int
+	if err := json.Unmarshal([]byte(trimmed), &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// intersectGroups 判断两个域名组集合是否相交。
+//
+// 与 intersectInbounds 的关键分歧：那边把空切片当全集（「所有用户」），
+// 这里的空集合是非法值而不是全集，绝不能复用——复用会让两条各自损坏的
+// 规则被判成互相冲突，管理员既修不了旧规则也建不了新规则。
+//
+// 第二个返回值是相交的最小 id（b 已升序），保证错误信息稳定可测。
+func intersectGroups(a, b []int) (bool, int) {
+	if len(a) == 0 || len(b) == 0 {
+		return false, 0
+	}
+	set := make(map[int]bool, len(a))
+	for _, id := range a {
+		set[id] = true
+	}
+	for _, id := range b {
+		if set[id] {
+			return true, id
+		}
+	}
+	return false, 0
+}
