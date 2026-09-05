@@ -400,3 +400,103 @@ func TestGeneratedConfigWithIPRuleResolveDomainIsAcceptedByRealXray(t *testing.T
 	}
 	assertRealXrayAccepts(t, data)
 }
+
+// 本期新增设置项 dnsServers：非空时接管 dns 段并给默认出站的 settings 写
+// domainStrategy。这条 e2e 覆盖的是「形状是否被真实 xray 接受」，不是「键
+// 写在哪一层」——后者已由 dns_inject_test.go 的
+// TestDNSInjectorSetsFreedomDomainStrategy(ThroughGetXrayConfig) 断言死了。
+// 之所以两者都要留：DNSInjector 的第一版实现把 domainStrategy 写在了
+// outbound 对象本身而不是它的 settings 里，而 xray 的 infra/conf 从不用
+// DisallowUnknownFields，多出来的键被静默丢弃，run -test 照样判
+// Configuration OK——单靠真实 xray 这一关，那个 bug 会被放过。
+func TestGeneratedConfigWithDNSServersIsAcceptedByRealXray(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+
+	newE2EInbound(t, 10001, "b831381d-6324-4d53-ad4f-8cda48b30811")
+	// 一个 IP 形态的 DoH 端点 + 一个裸 IP，覆盖 servers 数组里不止一种写法。
+	if err := (&SettingService{}).setString("dnsServers", "https://8.8.8.8/dns-query\n1.1.1.1"); err != nil {
+		t.Fatalf("setString(dnsServers): %v", err)
+	}
+
+	cfg, err := (&XrayService{}).GetXrayConfig()
+	if err != nil {
+		t.Fatalf("GetXrayConfig: %v", err)
+	}
+
+	// 断言 dns 段确实生成且带上了兜底的 localhost——纯做「真实 xray 接受」
+	// 的检查发现不了「整段 dns 没写出来」这类回归：一份完全没有 dns 段的
+	// 配置同样会被 xray 判定 Configuration OK。
+	var dns struct {
+		Servers []string `json:"servers"`
+	}
+	if err := json.Unmarshal(cfg.DNSConfig, &dns); err != nil {
+		t.Fatalf("decode dns: %v", err)
+	}
+	want := []string{"https://8.8.8.8/dns-query", "1.1.1.1", "localhost"}
+	if len(dns.Servers) != len(want) {
+		t.Fatalf("servers = %v, want %v", dns.Servers, want)
+	}
+	for i := range want {
+		if dns.Servers[i] != want[i] {
+			t.Errorf("servers[%d] = %q, want %q", i, dns.Servers[i], want[i])
+		}
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	assertRealXrayAccepts(t, data)
+}
+
+// dnsServers 与 ipRuleResolveDomain 是本期同时新增的两个设置项，各自往配置
+// 的不同角落写一个同名字段：前者写 outbounds[0].settings.domainStrategy
+// （UseIP），后者写 routing.domainStrategy（IPIfNonMatch）。分开测都已被
+// 上面两条 e2e 与 dns_inject_test.go 的单测覆盖；这条补的是两者同时打开、
+// 走同一条 GetXrayConfig 流水线时，注入顺序不会互相覆盖或串位——例如若
+// DNSInjector 或 RoutingInjector 未来被改成共享同一个 map 再各自写键，两个
+// 同名字段就可能被写到同一个对象上，产生一份语法合法但语义错误、又只有真实
+// xray 才可能拒绝或管理员事后才能发现的配置。
+func TestGeneratedConfigWithDNSServersAndIPRuleResolveDomainIsAcceptedByRealXray(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+
+	newE2EInbound(t, 10001, "b831381d-6324-4d53-ad4f-8cda48b30811")
+	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
+		t.Fatalf("setString(dnsServers): %v", err)
+	}
+	if err := (&SettingService{}).setInt("ipRuleResolveDomain", 1); err != nil {
+		t.Fatalf("setInt(ipRuleResolveDomain): %v", err)
+	}
+
+	cfg, err := (&XrayService{}).GetXrayConfig()
+	if err != nil {
+		t.Fatalf("GetXrayConfig: %v", err)
+	}
+
+	var routing struct {
+		DomainStrategy string `json:"domainStrategy"`
+	}
+	if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+		t.Fatalf("decode routing: %v", err)
+	}
+	if routing.DomainStrategy != "IPIfNonMatch" {
+		t.Fatalf("routing.domainStrategy = %q, want IPIfNonMatch", routing.DomainStrategy)
+	}
+
+	first := decodeOutbounds(t, cfg)[0]
+	settings, ok := first["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings missing or not an object: %v", first)
+	}
+	if settings["domainStrategy"] != "UseIP" {
+		t.Errorf("outbounds[0].settings.domainStrategy = %v, want UseIP", settings["domainStrategy"])
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	assertRealXrayAccepts(t, data)
+}
