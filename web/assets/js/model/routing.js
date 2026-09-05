@@ -62,16 +62,19 @@ class OutboundNode {
 }
 
 class RoutingRule {
-    constructor(id = 0, remark = "", inboundIds = [], domainGroupId = 0,
+    constructor(id = 0, remark = "", inboundIds = [], domainGroupIds = [],
                 action = RULE_ACTION.PROXY, outboundId = 0, priority = 0,
-                enable = true, broken = false) {
+                enable = true, broken = false, groupsBroken = false) {
         this.id = id;
         this.remark = remark;
         // 空数组 = 所有用户（含以后新建的入站）。
         // 注意它与「一个用户都没勾」在提交体里长得一模一样，弹窗必须自己
         // 区分这两种意图，见 routing.html 的 saveRule。
         this.inboundIds = inboundIds;
-        this.domainGroupId = domainGroupId;
+        // 与 inboundIds 相反：空数组【不是】「所有域名组」，而是非法状态。
+        // 域名条件为空会让 xray 把规则当作「不限制」，规则从「这批域名走 B」
+        // 退化成「该用户全部流量走 B」。saveRule 必须自己拦住它。
+        this.domainGroupIds = domainGroupIds;
         this.action = action;
         this.outboundId = outboundId;
         this.priority = priority;
@@ -79,11 +82,14 @@ class RoutingRule {
         // broken 为真表示服务端解码 inboundIds 失败。这种规则不会写进配置，
         // 但它的 inboundIds 是空数组，看起来和「所有用户」一样，必须区分渲染。
         this.broken = broken;
+        // groupsBroken 为真表示服务端解码 domainGroupIds 失败。与 broken 分开
+        // 是因为界面文案不同，合并会让管理员照着去修错的地方。
+        this.groupsBroken = groupsBroken;
     }
 
     static fromJson(json = {}) {
         return new RoutingRule(json.id, json.remark, json.inboundIds || [],
-            json.domainGroupId, json.action, json.outboundId, json.priority,
-            json.enable, json.broken);
+            json.domainGroupIds || [], json.action, json.outboundId, json.priority,
+            json.enable, json.broken, json.groupsBroken);
     }
 }
