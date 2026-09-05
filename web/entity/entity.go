@@ -67,6 +67,19 @@ func checkIPDBSourceUrl(label, raw string) error {
 	return nil
 }
 
+// isLoopbackListen 判断面板监听地址是否是回环地址，即面板只能经由本机的
+// 前置反向代理访问。
+//
+// 空串**不算**：它是 webListen 的默认值，含义是「监听所有 IP」，那种部署下
+// 面板直接对外，自行配置 TLS 是完全正当的。
+func isLoopbackListen(listen string) bool {
+	if listen == "" {
+		return false
+	}
+	ip := net.ParseIP(listen)
+	return ip != nil && ip.IsLoopback()
+}
+
 func validInterfaceName(name string) bool {
 	if len(name) > 15 {
 		return false
@@ -92,6 +105,30 @@ func (s *AllSetting) CheckValid() error {
 
 	if s.WebPort <= 0 || s.WebPort > 65535 {
 		return common.NewError("web port is not a valid port:", s.WebPort)
+	}
+
+	// 这一条必须排在下面的 LoadX509KeyPair 之前：只填了公钥或只填了密钥时，
+	// 加载必定失败，报出来的是 "open : no such file or directory"——指向一个
+	// 空路径，完全看不出真正的问题是「这个拓扑下根本不该填」。
+	//
+	// 面板监听在回环地址，意味着它藏在前置反向代理后面（安装向导的 Caddy
+	// 拓扑就是这样）：TLS 由反代终结，再以明文转发进来。此时面板若还自己
+	// 监听 TLS，network.AutoHttpsConn 会把反代转发来的明文首包判成「非 TLS
+	// 连接」，对每个请求回一个 307 跳到同一个 URL，从外面看就是无限重定向，
+	// 面板彻底打不开。
+	//
+	// 之所以要在保存这一刻硬拒绝，而不是只在界面上提示：这个状态没有退路。
+	// 面板已经打不开，改不回来；重装也救不回来——bootstrap 靠 webBasePath
+	// != "/" 判定「已经配置过」而整体跳过，不会重新清空这两项；而唯一被打印
+	// 过的救援命令 `a-ui setting -listen ""` 只改监听地址，不碰证书字段。
+	//
+	// 反过来，面板直接对外暴露时（无域名安装的 REALITY 分支不装任何反代，
+	// webListen 保持空串即「监听所有 IP」）这两项是管理员给面板加 HTTPS 的
+	// 唯一手段，所以只对回环地址生效，绝不能扩大到全部。
+	if isLoopbackListen(s.WebListen) && (s.WebCertFile != "" || s.WebKeyFile != "") {
+		return common.NewErrorf("面板监听在回环地址 %v 时不能配置面板证书："+
+			"此时 TLS 由前置反向代理终结并以明文转发给面板，面板再自行监听 TLS 会导致每个请求被 307 重定向到自身、形成死循环而彻底打不开。"+
+			"请把「面板证书公钥文件路径」和「面板证书密钥文件路径」都留空，证书交给反向代理配置", s.WebListen)
 	}
 
 	if s.WebCertFile != "" || s.WebKeyFile != "" {
