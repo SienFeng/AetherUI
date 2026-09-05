@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,10 +11,12 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"a-ui/config"
+	"a-ui/logger"
 	"a-ui/util/common"
 )
 
@@ -284,4 +288,77 @@ func (s *PanelVersionService) allowedTags() []ReleaseBrief {
 	panelVersionCache.mu.RLock()
 	defer panelVersionCache.mu.RUnlock()
 	return panelVersionCache.info.Releases
+}
+
+const upgradeLogTailLines = 200
+
+// 这三个变量供测试打桩。upgradeLogPathForTest 初值就是真实路径，
+// 生产代码路径上它与常量 upgradeLogPath 等价。
+var (
+	upgradeLogPathForTest = upgradeLogPath
+	// forceUpdatableForTest 为 true 时跳过环境前置检查。只有测试会设它，
+	// 生产代码永远走 checkUpdatable。
+	forceUpdatableForTest = false
+	runUpgradeCommand     = func(argv []string) error {
+		return exec.Command(argv[0], argv[1:]...).Run()
+	}
+)
+
+// Upgrade 把更新交给一个独立的 systemd transient unit 后立即返回。
+//
+// 必须先返回响应再让更新开始：面板自己马上就要被 systemctl stop 掉，
+// 等更新结果等不到。systemd-run 是 fire-and-forget——它把 unit 交给
+// systemd 后立即返回，此时更新脚本还没开始跑。所以：
+//   - systemd-run 返回非零 → 连 unit 都没起来 → 如实报错，面板毫发无损
+//   - systemd-run 返回 0   → 只说明「已经开始」，不代表会成功
+func (s *PanelVersionService) Upgrade(tag string) error {
+	if !forceUpdatableForTest {
+		if ok, reason := checkUpdatable(); !ok {
+			return common.NewError("当前环境不支持一键更新:", reason)
+		}
+	}
+	if err := validateUpgradeTag(tag, s.allowedTags()); err != nil {
+		return err
+	}
+	unitName := fmt.Sprintf("a-ui-update-%d", time.Now().Unix())
+	argv := buildUpgradeCommand(tag, unitName)
+	logger.Info("面板更新：交给 systemd unit", unitName, "目标版本", tag)
+	if err := runUpgradeCommand(argv); err != nil {
+		return common.NewError("启动更新任务失败:", err)
+	}
+	return nil
+}
+
+// UpgradeLog 返回更新日志的末尾若干行。
+//
+// 路径硬编码、不接受任何参数——这是一个读文件的接口，参数化就是路径穿越。
+//
+// 文件不存在返回空切片而不是错误：从没更新过是正常状态，报错会让「查看
+// 日志」弹一个红色失败提示，管理员会以为更新出了问题。
+func (s *PanelVersionService) UpgradeLog() ([]string, error) {
+	f, err := os.Open(upgradeLogPathForTest)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	// 环形缓冲，避免把整个日志读进内存。
+	ring := make([]string, 0, upgradeLogTailLines)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if len(ring) < upgradeLogTailLines {
+			ring = append(ring, line)
+		} else {
+			ring = append(ring[1:], line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return ring, nil
 }

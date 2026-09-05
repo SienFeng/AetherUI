@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -377,5 +380,125 @@ func TestRefreshRejectsNon200(t *testing.T) {
 
 	if err := (&PanelVersionService{}).Refresh(); err == nil {
 		t.Error("HTTP 403 应返回错误")
+	}
+}
+
+func TestUpgradeRejectsWhenNotUpdatable(t *testing.T) {
+	resetPanelVersionCache(t)
+	stubReleasesServer(t, []githubRelease{{TagName: "v1.5.0"}})
+	if err := (&PanelVersionService{}).Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	origBin := panelBinaryPath
+	defer func() { panelBinaryPath = origBin }()
+	panelBinaryPath = "/nonexistent/a-ui"
+
+	var called bool
+	origRun := runUpgradeCommand
+	defer func() { runUpgradeCommand = origRun }()
+	runUpgradeCommand = func(argv []string) error { called = true; return nil }
+
+	if err := (&PanelVersionService{}).Upgrade("v1.5.0"); err == nil {
+		t.Error("环境不支持时应拒绝")
+	}
+	if called {
+		t.Error("环境不支持时绝不能真的去执行命令")
+	}
+}
+
+func TestUpgradeRejectsInjectionBeforeExec(t *testing.T) {
+	resetPanelVersionCache(t)
+	stubReleasesServer(t, []githubRelease{{TagName: "v1.5.0"}})
+	if err := (&PanelVersionService{}).Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	var called bool
+	origRun := runUpgradeCommand
+	defer func() { runUpgradeCommand = origRun }()
+	runUpgradeCommand = func(argv []string) error { called = true; return nil }
+	origUpdatable := forceUpdatableForTest
+	defer func() { forceUpdatableForTest = origUpdatable }()
+	forceUpdatableForTest = true
+
+	if err := (&PanelVersionService{}).Upgrade("v1.5.0; rm -rf /"); err == nil {
+		t.Error("注入串应被拒绝")
+	}
+	if called {
+		t.Error("注入串绝不能到达执行阶段")
+	}
+}
+
+func TestUpgradePassesValidatedTagToCommand(t *testing.T) {
+	resetPanelVersionCache(t)
+	stubReleasesServer(t, []githubRelease{{TagName: "v1.5.0"}, {TagName: "v1.4.1"}})
+	if err := (&PanelVersionService{}).Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	origUpdatable := forceUpdatableForTest
+	defer func() { forceUpdatableForTest = origUpdatable }()
+	forceUpdatableForTest = true
+
+	var gotArgv []string
+	origRun := runUpgradeCommand
+	defer func() { runUpgradeCommand = origRun }()
+	runUpgradeCommand = func(argv []string) error { gotArgv = argv; return nil }
+
+	if err := (&PanelVersionService{}).Upgrade("v1.4.1"); err != nil {
+		t.Fatalf("Upgrade: %v", err)
+	}
+	if len(gotArgv) == 0 {
+		t.Fatal("命令没有被执行")
+	}
+	if gotArgv[0] != "systemd-run" {
+		t.Errorf("argv[0] = %q", gotArgv[0])
+	}
+	if !strings.Contains(strings.Join(gotArgv, " "), "v1.4.1") {
+		t.Error("命令里没有目标版本")
+	}
+}
+
+func TestUpgradeLogReturnsTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "update.log")
+	var sb strings.Builder
+	for i := 0; i < 500; i++ {
+		sb.WriteString("line-")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	orig := upgradeLogPathForTest
+	defer func() { upgradeLogPathForTest = orig }()
+	upgradeLogPathForTest = path
+
+	lines, err := (&PanelVersionService{}).UpgradeLog()
+	if err != nil {
+		t.Fatalf("UpgradeLog: %v", err)
+	}
+	if len(lines) != upgradeLogTailLines {
+		t.Fatalf("len = %d, want %d", len(lines), upgradeLogTailLines)
+	}
+	if lines[len(lines)-1] != "line-499" {
+		t.Errorf("最后一行 = %q, want line-499", lines[len(lines)-1])
+	}
+}
+
+// 从没更新过时日志文件不存在，这不是错误——不能让「查看日志」按钮
+// 弹一个红色的失败提示，那会让管理员以为更新出了问题。
+func TestUpgradeLogMissingFileIsNotAnError(t *testing.T) {
+	orig := upgradeLogPathForTest
+	defer func() { upgradeLogPathForTest = orig }()
+	upgradeLogPathForTest = filepath.Join(t.TempDir(), "nope.log")
+
+	lines, err := (&PanelVersionService{}).UpgradeLog()
+	if err != nil {
+		t.Errorf("文件不存在不该报错: %v", err)
+	}
+	if len(lines) != 0 {
+		t.Errorf("应返回空切片, got %v", lines)
 	}
 }
