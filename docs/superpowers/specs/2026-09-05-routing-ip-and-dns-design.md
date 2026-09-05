@@ -291,7 +291,8 @@ cidrs   非空 → 发一条带 ip   的规则
 | 文件 | 改动 |
 |---|---|
 | `database/model/routing.go` | `DomainGroup` 加 `Cidrs` / `SubscribedCidrs` |
-| `web/service/routing_domain.go` | `ParseCidrs` / `EncodeCidrs` / `DecodeCidrs` / `DecodeSubscribedCidrs`；`updateFieldsFor` 加 `cidrs`；订阅地址变更时清空 |
+| `web/service/routing_cidr.go` | **新建**。`ParseCidrs` / `EncodeCidrs` / `DecodeCidrs` / `DecodeSubscribedCidrs` / `isValidCIDR`。单独成文件而不是塞进 `routing_domain.go`：后者已有 300 行、承载着分流组的 CRUD 与订阅调度，IP 段的解析与编解码是自成一体的一块 |
+| `web/service/routing_domain.go` | `updateFieldsFor` 加 `cidrs`；订阅地址变更时两侧一起清空；`refreshLocked` 写两侧；`MergeDomains` 的文档注释说明它同时服务于域名与 IP 两类值 |
 | `web/service/routing_validate.go` | `ValidateCidrs` |
 | `web/service/routing_subscription.go` | `ParseSubscription` 返回值；`convertSubscriptionLine` 新增 IP 类型；`isValidCIDR` |
 | `web/service/routing_inject.go` | `buildRule` 返回 0~2 条规则；`buildRules` 消费；`Inject` 写 `domainStrategy` |
