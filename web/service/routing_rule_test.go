@@ -591,3 +591,128 @@ func TestIntersectGroupsDisjoint(t *testing.T) {
 		t.Error("disjoint sets must not intersect")
 	}
 }
+
+// addMultiGroupRule 建一条引用多个域名组的规则。
+func addMultiGroupRule(t *testing.T, groupIds []int, inboundIds []int, remark string) error {
+	t.Helper()
+	return (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark:         remark,
+		InboundIds:     mustEncodeIds(t, inboundIds),
+		DomainGroupIds: mustEncodeGroupIds(t, groupIds),
+		Action:         model.ActionBlock,
+		Enable:         true,
+	})
+}
+
+func TestAddRuleRejectsEmptyDomainGroups(t *testing.T) {
+	setupDB(t)
+	in := newTestInbound(t, 10001)
+	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "没选域名组", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: "[]", Action: model.ActionBlock, Enable: true,
+	})
+	if err == nil {
+		t.Fatal("空域名组集合必须被拒绝：domain 条件为空会劫持该用户的全部流量")
+	}
+}
+
+func TestAddRuleRejectsAnyMissingDomainGroup(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	err := addMultiGroupRule(t, []int{g.Id, 999}, []int{in.Id}, "一个存在一个不存在")
+	if err == nil {
+		t.Fatal("引用了不存在的域名组必须被拒绝")
+	}
+}
+
+func TestAddRuleAcceptsMultipleDomainGroups(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id}, []int{in.Id}, "两组"); err != nil {
+		t.Fatalf("多域名组规则必须被接受: %v", err)
+	}
+}
+
+// spec §2.3 的表格逐行落成用例。冲突判定的单位是「域名组 × 用户」的组合。
+func TestConflictGroupSetsPartiallyOverlapSameUser(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id}, []int{in.Id}, "两组走 A"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	err := addMultiGroupRule(t, []int{chatgpt.Id}, []int{in.Id}, "ChatGPT 走 B")
+	if err == nil {
+		t.Fatal("组集合在 ChatGPT 上相交且用户相同，必须拒绝")
+	}
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Errorf("错误信息必须含「冲突」二字（importRules 靠它归类）: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ChatGPT") {
+		t.Errorf("错误信息必须点名相交的那个域名组: %v", err)
+	}
+}
+
+func TestConflictAllowsDisjointGroupSetsSameUser(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{in.Id}, "Claude 走 A"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := addMultiGroupRule(t, []int{chatgpt.Id}, []int{in.Id}, "ChatGPT 走 B"); err != nil {
+		t.Fatalf("组集合不相交必须被接受: %v", err)
+	}
+}
+
+func TestConflictAllowsSameGroupSetDifferentUsers(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	a := newTestInbound(t, 10001)
+	b := newTestInbound(t, 10002)
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{a.Id}, "甲"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := addMultiGroupRule(t, []int{claude.Id}, []int{b.Id}, "乙"); err != nil {
+		t.Fatalf("同组不同人必须被接受: %v", err)
+	}
+}
+
+// 引用守卫：解码失败时必须拦住删除。SQLite 复用自增 id，孤儿规则会静默
+// 绑到新建的域名组上，那时引用不再悬空，生成期的跳过防线也拦不住。
+func TestCheckDomainGroupRefsSeesIdInTheMiddleOfAMultiGroupRule(t *testing.T) {
+	setupDB(t)
+	claude := newTestGroup(t, "Claude")
+	chatgpt := newTestGroup(t, "ChatGPT")
+	banned := newTestGroup(t, "违规")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{claude.Id, chatgpt.Id, banned.Id}, []int{in.Id}, "三组"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := (&RoutingRuleService{}).CheckDomainGroupRefs(chatgpt.Id); err == nil {
+		t.Error("被引用的域名组（位于数组中间）必须拦住删除")
+	}
+}
+
+func TestCheckDomainGroupRefsBlocksDeletionOnCorruptData(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "Claude")
+	in := newTestInbound(t, 10001)
+	if err := addMultiGroupRule(t, []int{g.Id}, []int{in.Id}, "好规则"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	// 绕过 service 直接写坏数据，模拟直接改库 / 并发写入留下的残骸。
+	err := database.GetDB().Exec(
+		"UPDATE routing_rules SET domain_group_ids = '{oops' WHERE remark = ?", "好规则").Error
+	if err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if err := (&RoutingRuleService{}).CheckDomainGroupRefs(g.Id); err == nil {
+		t.Error("解码失败时必须拦住删除，不能放行")
+	}
+}
