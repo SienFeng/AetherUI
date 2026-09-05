@@ -17,6 +17,17 @@
     #routing-tabs .ant-tabs-bar {
         margin-bottom: 16px;
     }
+
+    .import-messages {
+        max-height: 360px;
+        overflow: auto;
+        background: #fafafa;
+        border: 1px solid #f0f0f0;
+        border-radius: 4px;
+        padding: 12px;
+        font-size: 13px;
+        line-height: 1.8;
+    }
 </style>
 <body>
 <a-layout id="app" v-cloak>
@@ -51,6 +62,12 @@
                                 <a-tag :color="subscriptionErrorCount ? 'red' : 'green'">[[ subscriptionErrorCount ]]</a-tag>
                             </a-col>
                         </a-row>
+                        <a-row style="margin-top:12px">
+                            <a-col :span="24" style="text-align:right">
+                                <a-button icon="download" @click="confirmExport('all')">导出全部</a-button>
+                                <a-button icon="upload" style="margin-left:8px" @click="pickImportFile()">导入全部</a-button>
+                            </a-col>
+                        </a-row>
                     </a-card>
                 </transition>
 
@@ -61,6 +78,10 @@
                             <a-card hoverable>
                                 <div slot="title">
                                     <a-button type="primary" icon="plus" @click="openGroup()">添加域名组</a-button>
+                                    <a-button icon="download" style="margin-left:8px"
+                                              @click="confirmExport('domainGroups')">导出</a-button>
+                                    <a-button icon="upload" style="margin-left:8px"
+                                              @click="pickImportFile()">导入</a-button>
                                 </div>
                                 <a-table :columns="groupColumns" :data-source="groups"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
@@ -114,6 +135,10 @@
                             <a-card hoverable>
                                 <div slot="title">
                                     <a-button type="primary" icon="plus" @click="openNode()">添加出站节点</a-button>
+                                    <a-button icon="download" style="margin-left:8px"
+                                              @click="confirmExport('outbounds')">导出</a-button>
+                                    <a-button icon="upload" style="margin-left:8px"
+                                              @click="pickImportFile()">导入</a-button>
                                 </div>
                                 <a-table :columns="nodeColumns" :data-source="nodes"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
@@ -154,6 +179,10 @@
                             <a-card hoverable>
                                 <div slot="title">
                                     <a-button type="primary" icon="plus" @click="openRule()">添加分流规则</a-button>
+                                    <a-button icon="download" style="margin-left:8px"
+                                              @click="confirmExport('rules')">导出</a-button>
+                                    <a-button icon="upload" style="margin-left:8px"
+                                              @click="pickImportFile()">导入</a-button>
                                 </div>
                                 <a-table :columns="ruleColumns" :data-source="rules"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
@@ -360,6 +389,39 @@
             </a-form-item>
         </a-form>
     </a-modal>
+
+    <input type="file" ref="importFile" accept=".json,application/json"
+           style="display:none" @change="onImportFileChosen">
+
+    <a-modal v-model="importReportVisible" title="导入结果" :footer="null" :width="720">
+        <a-row style="margin-bottom:12px">
+            <a-col :span="8">
+                域名组：<a-tag color="green">新增 [[ importReport.domainGroups.created ]]</a-tag>
+                <a-tag>跳过 [[ importReport.domainGroups.skipped ]]</a-tag>
+                <a-tag v-if="importReport.domainGroups.failed" color="red">
+                    失败 [[ importReport.domainGroups.failed ]]
+                </a-tag>
+            </a-col>
+            <a-col :span="8">
+                出站节点：<a-tag color="green">新增 [[ importReport.outbounds.created ]]</a-tag>
+                <a-tag>跳过 [[ importReport.outbounds.skipped ]]</a-tag>
+                <a-tag v-if="importReport.outbounds.failed" color="red">
+                    失败 [[ importReport.outbounds.failed ]]
+                </a-tag>
+            </a-col>
+            <a-col :span="8">
+                分流规则：<a-tag color="green">新增 [[ importReport.rules.created ]]</a-tag>
+                <a-tag>跳过 [[ importReport.rules.skipped ]]</a-tag>
+                <a-tag v-if="importReport.rules.failed" color="red">
+                    失败 [[ importReport.rules.failed ]]
+                </a-tag>
+            </a-col>
+        </a-row>
+        <div v-if="importReport.messages && importReport.messages.length" class="import-messages">
+            <div v-for="(m, i) in importReport.messages" :key="i">[[ m ]]</div>
+        </div>
+        <div v-else style="color:#8c8c8c">全部导入成功，没有需要说明的项。</div>
+    </a-modal>
 </a-layout>
 
 {{template "js" .}}
@@ -403,6 +465,13 @@
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '' },
+            importReportVisible: false,
+            importReport: {
+                domainGroups: { created: 0, skipped: 0, failed: 0 },
+                outbounds: { created: 0, skipped: 0, failed: 0 },
+                rules: { created: 0, skipped: 0, failed: 0 },
+                messages: [],
+            },
         },
         computed: {
             enabledNodeCount() {
@@ -864,6 +933,73 @@
                     }
                 }
                 return '';
+            },
+
+            // 导出前必须二次确认。出站节点的 config 里就是完整可用的凭据，
+            // 一个随手扔进群里的 JSON 等于把落地服务器送出去。
+            confirmExport(scope) {
+                const scopeLabel = {
+                    all: '全部分流配置', domainGroups: '域名组',
+                    outbounds: '出站节点', rules: '分流规则',
+                }[scope] || scope;
+                const extra = scope === 'rules'
+                    ? '规则依赖域名组和出站节点，跨机器搬迁建议用「导出全部」。'
+                    : '';
+                this.$confirm({
+                    title: '导出' + scopeLabel,
+                    content: h => h('div', [
+                        h('p', '导出文件包含出站节点的 UUID / 密码等凭据，任何拿到该文件的人都可以直接使用这些节点。'),
+                        h('p', '请妥善保管，不要发到公开渠道。'),
+                        extra ? h('p', { style: 'color:#8c8c8c' }, extra) : null,
+                    ]),
+                    okText: '导出',
+                    cancelText: '取消',
+                    onOk: () => this.doExport(scope),
+                });
+            },
+            async doExport(scope) {
+                const msg = await this.post('/aui/routing/export', { scope });
+                if (!msg.success || !msg.obj) return;
+                const text = JSON.stringify(msg.obj, null, 2);
+                const blob = new Blob([text], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'a-ui-routing-' + scope + '-' + moment().format('YYYYMMDD-HHmm') + '.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                // 不 revoke 的话这个 Blob 会一直挂在内存里，反复导出会累积
+                URL.revokeObjectURL(url);
+            },
+            pickImportFile() {
+                // 清空 value，否则连续选同一个文件不会触发 change
+                this.$refs.importFile.value = '';
+                this.$refs.importFile.click();
+            },
+            async onImportFileChosen(e) {
+                const file = e.target.files && e.target.files[0];
+                if (!file) return;
+                const text = await file.text();
+                // 前端先验一道，格式明显不对就不发请求，报错更快也更具体
+                let parsed;
+                try {
+                    parsed = JSON.parse(text);
+                } catch (err) {
+                    this.$message.error('这不是一个合法的 JSON 文件');
+                    return;
+                }
+                if (!parsed || parsed.kind !== 'a-ui-routing-export') {
+                    this.$message.error('这不是 AetherUI 导出的分流配置文件');
+                    return;
+                }
+                // 复用既有的 post()：它已经负责 spinning 状态和请求级失败提示，
+                // 不需要另外的 loading 开关。
+                const msg = await this.post('/aui/routing/import', { data: text });
+                if (!msg.success || !msg.obj) return;
+                this.importReport = msg.obj;
+                this.importReportVisible = true;
+                await this.loadAll();
             },
         },
         async mounted() {
