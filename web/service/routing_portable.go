@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -266,4 +267,38 @@ func (s *RoutingPortableService) toPortableRule(
 		Priority:       r.Priority,
 		Enable:         r.Enable,
 	}, nil
+}
+
+// resolveInboundRefs 把导出文件里的入站线索映射到本机的入站 id。
+//
+// 两级匹配：先按 remark 精确匹配（**恰好命中 1 条才算**，重名视为无法
+// 区分），失败再按 port 匹配（port 有 unique 约束，命中即唯一）。
+// 备注优先是因为换机器后端口很可能改了，而备注是管理员认得的东西。
+//
+// 返回的 missing 非空时，调用方**必须**把整条规则导入成禁用状态，
+// 绝不能拿部分命中的 ids 当作完整覆盖集：剔掉认不出的那几个之后，
+// 一条本该只覆盖某个人的规则会被缩小或（剔到空时）放大成覆盖全体，
+// 而 xray 对空 inboundTag 返回 Configuration OK，不会有任何报错。
+func resolveInboundRefs(refs []PortableInboundRef, inbounds []*model.Inbound) ([]int, []string) {
+	byRemark := make(map[string][]*model.Inbound, len(inbounds))
+	byPort := make(map[int]*model.Inbound, len(inbounds))
+	for _, in := range inbounds {
+		byRemark[in.Remark] = append(byRemark[in.Remark], in)
+		byPort[in.Port] = in
+	}
+
+	ids := make([]int, 0, len(refs))
+	missing := make([]string, 0)
+	for _, ref := range refs {
+		if matched := byRemark[ref.Remark]; len(matched) == 1 {
+			ids = append(ids, matched[0].Id)
+			continue
+		}
+		if in, ok := byPort[ref.Port]; ok {
+			ids = append(ids, in.Id)
+			continue
+		}
+		missing = append(missing, fmt.Sprintf("%s (端口 %d)", ref.Remark, ref.Port))
+	}
+	return ids, missing
 }

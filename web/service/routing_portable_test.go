@@ -244,3 +244,88 @@ func TestExportRejectsUnknownScope(t *testing.T) {
 		t.Error("未知 scope 应报错")
 	}
 }
+
+func inboundsFixture() []*model.Inbound {
+	return []*model.Inbound{
+		{Id: 1, Remark: "用户甲", Port: 2886},
+		{Id: 2, Remark: "用户乙", Port: 2887},
+		{Id: 3, Remark: "重名", Port: 2888},
+		{Id: 4, Remark: "重名", Port: 2889},
+	}
+}
+
+func TestResolveInboundRefsMatchesByRemark(t *testing.T) {
+	ids, missing := resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "用户甲", Port: 9999}}, inboundsFixture())
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want empty", missing)
+	}
+	// 备注优先于端口：换机器后端口很可能改了，备注才是管理员认得的东西
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("ids = %v, want [1]", ids)
+	}
+}
+
+func TestResolveInboundRefsFallsBackToPort(t *testing.T) {
+	ids, missing := resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "对面才有的备注", Port: 2887}}, inboundsFixture())
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v", missing)
+	}
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Errorf("ids = %v, want [2]", ids)
+	}
+}
+
+// 备注重名时无法区分是哪一个，不能猜——退到端口匹配。
+func TestResolveInboundRefsSkipsAmbiguousRemark(t *testing.T) {
+	ids, missing := resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "重名", Port: 2889}}, inboundsFixture())
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v", missing)
+	}
+	if len(ids) != 1 || ids[0] != 4 {
+		t.Errorf("ids = %v, want [4] —— 备注重名应退到端口匹配", ids)
+	}
+}
+
+// 备注重名且端口也对不上，就是真的认不出来了。
+func TestResolveInboundRefsReportsMissing(t *testing.T) {
+	ids, missing := resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "重名", Port: 7777}}, inboundsFixture())
+	if len(missing) != 1 {
+		t.Fatalf("missing = %v, want 1 项", missing)
+	}
+	if !strings.Contains(missing[0], "重名") || !strings.Contains(missing[0], "7777") {
+		t.Errorf("missing 描述应同时含备注与端口，便于管理员对号入座: %q", missing[0])
+	}
+	if len(ids) != 0 {
+		t.Errorf("认不出时不该返回任何 id: %v", ids)
+	}
+}
+
+// 部分命中时返回已命中的 id 和缺失清单。调用方据此决定禁用整条规则——
+// 绝不能拿这个部分列表当作完整覆盖集去启用规则。
+func TestResolveInboundRefsPartialMatch(t *testing.T) {
+	ids, missing := resolveInboundRefs([]PortableInboundRef{
+		{Remark: "用户甲", Port: 2886},
+		{Remark: "不存在的人", Port: 7777},
+	}, inboundsFixture())
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("ids = %v, want [1]", ids)
+	}
+	if len(missing) != 1 {
+		t.Errorf("missing = %v, want 1 项", missing)
+	}
+}
+
+// 空 refs 是「对所有入站生效」，是合法且必须原样保留的语义，不是「认不出」。
+func TestResolveInboundRefsEmptyMeansGlobal(t *testing.T) {
+	ids, missing := resolveInboundRefs([]PortableInboundRef{}, inboundsFixture())
+	if len(missing) != 0 {
+		t.Errorf("空 refs 不该产生 missing: %v", missing)
+	}
+	if len(ids) != 0 {
+		t.Errorf("空 refs 应返回空 ids: %v", ids)
+	}
+}
