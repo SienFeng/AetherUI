@@ -54,7 +54,7 @@ func TestExportContainsNoIds(t *testing.T) {
 		t.Fatalf("EncodeInboundIds: %v", err)
 	}
 	rule := &model.RoutingRule{
-		Remark: "走香港", InboundIds: ids, DomainGroupId: g.Id,
+		Remark: "走香港", InboundIds: ids, DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionProxy, OutboundId: ob.Id, Priority: 10, Enable: true,
 	}
 	if err := (&RoutingRuleService{}).Add(rule); err != nil {
@@ -84,7 +84,7 @@ func TestExportRewritesReferencesToBusinessKeys(t *testing.T) {
 	in := newPortableTestInbound(t, "用户甲", 2886)
 	ids, _ := EncodeInboundIds([]int{in.Id})
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "走香港", InboundIds: ids, DomainGroupId: g.Id,
+		Remark: "走香港", InboundIds: ids, DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionProxy, OutboundId: ob.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -121,7 +121,7 @@ func TestExportKeepsGlobalRuleAsEmptyRefs(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id,
+		Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -225,7 +225,7 @@ func TestExportScopeDoesNotWiden(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	ob := newTestOutbound(t, "a-ui-hk", "香港")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "走香港", InboundIds: "[]", DomainGroupId: g.Id,
+		Remark: "走香港", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionProxy, OutboundId: ob.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)

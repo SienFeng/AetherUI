@@ -25,7 +25,7 @@ func newTestGroup(t *testing.T, remark string) *model.DomainGroup {
 func TestAddRuleRejectsMissingDomainGroup(t *testing.T) {
 	setupDB(t)
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock, Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock, Enable: true})
 	if err == nil {
 		t.Error("expected error when domain group does not exist")
 	}
@@ -35,7 +35,7 @@ func TestAddRuleRejectsProxyWithoutOutbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: 0, Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: 0, Enable: true})
 	if err == nil {
 		t.Error("expected error when proxy rule has no outbound")
 	}
@@ -45,7 +45,7 @@ func TestAddRuleRejectsUnknownAction(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: "drop", Enable: true})
+	err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: "drop", Enable: true})
 	if err == nil {
 		t.Error("expected error for unknown action")
 	}
@@ -55,7 +55,7 @@ func TestAddBlockRuleWithGlobalInbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	s := RoutingRuleService{}
-	r := &model.RoutingRule{Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}
+	r := &model.RoutingRule{Remark: "全局封禁", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true}
 	if err := s.Add(r); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCheckDomainGroupRefsBlocksDeletion(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	s := RoutingRuleService{}
-	if err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true}); err != nil {
+	if err := s.Add(&model.RoutingRule{DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := s.CheckDomainGroupRefs(g.Id); err == nil {
@@ -88,7 +88,7 @@ func TestCheckOutboundRefsBlocksDeletion(t *testing.T) {
 	}
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestGetEnabledRulesSortedByPriorityThenId(t *testing.T) {
 	for i, p := range []int{20, 10, 10} {
 		g := newTestGroup(t, "组 "+strconv.Itoa(i))
 		if err := s.Add(&model.RoutingRule{
-			DomainGroupId: g.Id, Action: model.ActionBlock, Priority: p, Enable: true,
+			DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Priority: p, Enable: true,
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestDelDomainGroupRejectsWhenReferenced(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	rs := RoutingRuleService{}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestDelOutboundNodeRejectsWhenReferenced(t *testing.T) {
 	}
 	rs := RoutingRuleService{}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	g := newTestGroup(t, "ChatGPT")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id,
+		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -233,7 +233,7 @@ func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
 	in := newTestInbound(t, 10002)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "全员封禁", InboundIds: "[]", DomainGroupId: g.Id,
+		Remark: "全员封禁", InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
 		Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
@@ -301,7 +301,7 @@ func TestCheckInboundRefsSeesIdInTheMiddleOfAMultiInboundRule(t *testing.T) {
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
 		InboundIds:    mustEncodeIds(t, []int{a.Id, b.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestCheckInboundRefsIgnoresAllUsersRule(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	s := RoutingRuleService{}
 	if err := s.Add(&model.RoutingRule{
-		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -342,7 +342,7 @@ func addRuleWith(t *testing.T, groupId int, ids []int, remark string) *model.Rou
 	t.Helper()
 	r := &model.RoutingRule{
 		Remark: remark, InboundIds: mustEncodeIds(t, ids),
-		DomainGroupId: groupId, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: groupId, DomainGroupIds: mustEncodeGroupIds(t, []int{groupId}), Action: model.ActionBlock, Enable: true,
 	}
 	if err := (&RoutingRuleService{}).Add(r); err != nil {
 		t.Fatalf("Add %s: %v", remark, err)
@@ -356,7 +356,7 @@ func TestConflictRejectsOverlappingInbounds(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "乙丙走 C", InboundIds: mustEncodeIds(t, []int{b.Id, c.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: inbound b is already covered in this domain group")
@@ -369,7 +369,7 @@ func TestConflictAllowsDisjointInbounds(t *testing.T) {
 
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "乙", InboundIds: mustEncodeIds(t, []int{b.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("disjoint inbounds must be accepted: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestConflictAllUsersBlocksSpecificUser(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: an all-users rule already covers this domain group")
@@ -396,7 +396,7 @@ func TestConflictSpecificUserBlocksAllUsers(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "所有用户", InboundIds: "[]",
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: a specific-user rule already exists in this domain group")
@@ -409,7 +409,7 @@ func TestConflictAllUsersBlocksAnotherAllUsers(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "所有用户 2", InboundIds: "[]",
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: two all-users rules in the same domain group")
@@ -425,7 +425,7 @@ func TestConflictIgnoresOtherDomainGroups(t *testing.T) {
 
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲在另一个组", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: other.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: other.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{other.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("different domain groups must never conflict: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestConflictCountsDisabledRules(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲走别处", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected conflict: a disabled rule still holds its slot")
@@ -472,7 +472,7 @@ func TestConflictErrorNamesTheUserAndTheRule(t *testing.T) {
 
 	err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		Remark: "甲的 ChatGPT 走 C", InboundIds: mustEncodeIds(t, []int{a.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	})
 	if err == nil {
 		t.Fatal("expected a conflict")

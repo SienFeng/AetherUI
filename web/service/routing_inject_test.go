@@ -82,7 +82,7 @@ func TestInjectAppendsBlockOutboundAndKeepsFreedomFirst(t *testing.T) {
 func TestInjectSkipsRuleWhenDomainGroupMissing(t *testing.T) {
 	setupDB(t)
 	// 直接建一条引用不存在域名组的规则，绕过 service 校验，模拟脏数据
-	rule := &model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestInjectSkipsProxyRuleWhenOutboundDisabled(t *testing.T) {
 		t.Fatalf("AddFromLink: %v", err)
 	}
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add rule: %v", err)
 	}
@@ -131,13 +131,13 @@ func TestInjectBlockRulesComeBeforeProxyRules(t *testing.T) {
 	rs := RoutingRuleService{}
 	// 先插 proxy 规则，priority 更小，以证明排序不是靠插入顺序或 priority
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: chatgpt.Id, Action: model.ActionProxy, OutboundId: node.Id,
+		DomainGroupId: chatgpt.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{chatgpt.Id}), Action: model.ActionProxy, OutboundId: node.Id,
 		Priority: 1, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add proxy rule: %v", err)
 	}
 	if err := rs.Add(&model.RoutingRule{
-		DomainGroupId: banned.Id, Action: model.ActionBlock, Priority: 99, Enable: true,
+		DomainGroupId: banned.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{banned.Id}), Action: model.ActionBlock, Priority: 99, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add block rule: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestInjectGlobalRuleOmitsInboundTag(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "违规域名")
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestInjectPerInboundRuleUsesCurrentTag(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestInjectIsDeterministic(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		g := newTestGroup(t, "组 "+strconv.Itoa(i))
 		if err := rs.Add(&model.RoutingRule{
-			DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+			DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 		}); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
@@ -242,7 +242,7 @@ func TestInjectSkipsRuleWhenDomainListEmpty(t *testing.T) {
 	if err := database.GetDB().Save(empty).Error; err != nil {
 		t.Fatalf("save group: %v", err)
 	}
-	rule := &model.RoutingRule{DomainGroupId: empty.Id, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: empty.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{empty.Id}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestInjectSkipsRuleWhenInboundDeleted(t *testing.T) {
 	g := newTestGroup(t, "ChatGPT")
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestInjectSkipsRuleWhenOutboundConfigCorrupt(t *testing.T) {
 		t.Fatalf("AddFromLink: %v", err)
 	}
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		DomainGroupId: g.Id, Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionProxy, OutboundId: node.Id, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -407,11 +407,11 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 		name string
 		rule *model.RoutingRule
 	}{
-		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, Action: model.ActionBlock}},
-		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, Action: model.ActionBlock}},
-		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, InboundIds: "[999]", Action: model.ActionBlock}},
-		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionProxy, OutboundId: 999}},
-		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, Action: "definitely-not-an-action"}},
+		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock}},
+		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{emptyGroup.Id}), Action: model.ActionBlock}},
+		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), InboundIds: "[999]", Action: model.ActionBlock}},
+		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionProxy, OutboundId: 999}},
+		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: "definitely-not-an-action"}},
 	}
 	for _, tc := range cases {
 		generated, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{})
@@ -434,7 +434,7 @@ func TestBuildRuleMergesManualAndSubscribedDomains(t *testing.T) {
 	if err := database.GetDB().Save(group).Error; err != nil {
 		t.Fatalf("save group: %v", err)
 	}
-	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestBuildRuleWorksWithOnlySubscribedDomains(t *testing.T) {
 	if err := database.GetDB().Save(group).Error; err != nil {
 		t.Fatalf("save group: %v", err)
 	}
-	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestBuildRuleSkipsWhenBothSourcesEmpty(t *testing.T) {
 	if err := database.GetDB().Save(group).Error; err != nil {
 		t.Fatalf("save group: %v", err)
 	}
-	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestInjectIsByteDeterministicWithSubscribedDomains(t *testing.T) {
 	if err := database.GetDB().Save(group).Error; err != nil {
 		t.Fatalf("save group: %v", err)
 	}
-	rule := &model.RoutingRule{DomainGroupId: group.Id, Action: model.ActionBlock, Enable: true}
+	rule := &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionBlock, Enable: true}
 	if err := database.GetDB().Save(rule).Error; err != nil {
 		t.Fatalf("save rule: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestInjectMultiInboundRuleListsAllTagsInOrder(t *testing.T) {
 	b := newTestInbound(t, 10002)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		InboundIds:    mustEncodeIds(t, []int{b.Id, a.Id}), // 故意逆序传入
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestInjectMultiInboundRuleDropsDeadInboundsButKeepsRule(t *testing.T) {
 	dead := newTestInbound(t, 10002)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		InboundIds:    mustEncodeIds(t, []int{alive.Id, dead.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -619,7 +619,7 @@ func TestInjectSkipsRuleWhenAllInboundsAreGone(t *testing.T) {
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
 		InboundIds:    mustEncodeIds(t, []int{in.Id}),
-		DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestInjectSkipsRuleWithCorruptInboundIds(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "ChatGPT")
 	r := &model.RoutingRule{
-		InboundIds: "[]", DomainGroupId: g.Id, Action: model.ActionBlock, Enable: true,
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
 	}
 	if err := (&RoutingRuleService{}).Add(r); err != nil {
 		t.Fatalf("Add: %v", err)
