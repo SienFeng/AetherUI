@@ -875,3 +875,101 @@ func TestImportRuleConflictCountsAsSkippedNotFailed(t *testing.T) {
 		t.Errorf("规则不该变成两份: %+v", rules)
 	}
 }
+
+// F1：空 remark 不是「认不出来」的候补键。DBInbound.remark 的默认值就是
+// 空串，入站表单也不强制填，两台机器各自有一个未命名入站是完全可达的
+// 组合。resolveInboundRefs 必须把 ref.Remark == "" 当成「没有可用的
+// remark 线索」直接退到 port，绝不能去 byRemark[""] 里查——否则会静默
+// 命中本机那个同样没起名的入站，端口线索被完全绕过，且因为「命中了」
+// 而连「认不全就禁用」这道兜底都不会触发。
+func TestResolveInboundRefsDoesNotMatchEmptyRemark(t *testing.T) {
+	inbounds := []*model.Inbound{
+		{Id: 1, Remark: "", Port: 2886},
+		{Id: 2, Remark: "用户乙", Port: 2887},
+	}
+
+	// 端口也对不上：不能落到 id 1 头上，必须诚实地报告认不出来。
+	ids, missing := resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "", Port: 9999}}, inbounds)
+	if len(ids) != 0 {
+		t.Errorf("空 remark 不该命中任何入站: ids = %v", ids)
+	}
+	if len(missing) != 1 {
+		t.Fatalf("missing = %v, want 1 项", missing)
+	}
+
+	// 端口对得上：空 remark 应该正常退到 port 匹配。
+	ids, missing = resolveInboundRefs(
+		[]PortableInboundRef{{Remark: "", Port: 2886}}, inbounds)
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want empty", missing)
+	}
+	if len(ids) != 1 || ids[0] != 1 {
+		t.Errorf("ids = %v, want [1] —— 空 remark 应能退到 port 匹配", ids)
+	}
+}
+
+// F1：同一个问题在域名组侧重演——DomainGroup.Remark 没有唯一约束，本机
+// 存在一个备注为空的域名组是完全可达的状态（导出侧遇到备注为空的组会
+// 忠实保留 domainGroupRef=""）。groupByRemark[""] 若参与匹配，会在本机
+// 恰好也有一个空备注组时静默命中它，产生一条指向错误域名组、看起来完全
+// 正常的规则。必须在查表之前就把空字符串当成「没有指定域名组」拒绝。
+func TestImportRejectsRuleWithEmptyDomainGroupRef(t *testing.T) {
+	setupDB(t)
+	// 本机存在一个备注同样为空的域名组——若不拦截，会被静默命中。
+	if err := (&DomainGroupService{}).Add(&model.DomainGroup{Remark: "", Domains: "[]"}); err != nil {
+		t.Fatalf("Add group: %v", err)
+	}
+	f := baseExportFile()
+	f.Rules = []PortableRule{{
+		Remark: "没组的规则", DomainGroupRef: "",
+		InboundRefs: refsPtr(), Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Failed != 1 {
+		t.Errorf("domainGroupRef 为空应整条拒绝，不能命中本机同样没起名的域名组: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 0 {
+		t.Errorf("不该落库: %+v", rules)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "没组的规则") {
+		t.Errorf("报告应点名: %v", rep.Messages)
+	}
+}
+
+// F2：checkDuplicateGroupRemarks 在分发 scope 之前无条件执行时，管理员
+// 只想导出出站节点也会因库里两个与本次导出毫无关系的同名域名组而整体
+// 失败。scope=outbounds 与域名组完全无关，不该被挡住。
+func TestExportOutboundsOnlyIgnoresDuplicateGroupRemarks(t *testing.T) {
+	setupDB(t)
+	newTestGroup(t, "国内域名")
+	newTestGroup(t, "国内域名")
+	ob := newTestOutbound(t, "a-ui-hk", "香港")
+
+	f, err := (&RoutingPortableService{}).Export(ExportScopeOutbounds)
+	if err != nil {
+		t.Fatalf("scope=outbounds 不该被无关的域名组重名挡住: %v", err)
+	}
+	if len(f.Outbounds) != 1 || f.Outbounds[0].Tag != ob.Tag {
+		t.Errorf("Outbounds = %+v, want 含 %s", f.Outbounds, ob.Tag)
+	}
+	if len(f.DomainGroups) != 0 {
+		t.Errorf("scope=outbounds 不该带出域名组: %+v", f.DomainGroups)
+	}
+}
+
+// F2：scope=rules 虽不导出域名组本身，但规则里带着 domainGroupRef，重名
+// 同样会让导入端无法确定指向哪一个，必须继续拒绝——不能把 outbounds 的
+// 豁免连带扩大到 rules。
+func TestExportRulesScopeStillRejectsDuplicateGroupRemarks(t *testing.T) {
+	setupDB(t)
+	newTestGroup(t, "国内域名")
+	newTestGroup(t, "国内域名")
+	if _, err := (&RoutingPortableService{}).Export(ExportScopeRules); err == nil {
+		t.Error("scope=rules 时域名组重名仍应拒绝导出")
+	}
+}

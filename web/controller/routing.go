@@ -549,7 +549,12 @@ func (a *RoutingController) exportRouting(c *gin.Context) {
 func (a *RoutingController) importRouting(c *gin.Context) {
 	data := c.PostForm("data")
 	if strings.TrimSpace(data) == "" {
-		jsonMsg(c, "导入分流配置", common.NewError("没有收到导入内容"))
+		// net/http 的 parsePostForm 对非 multipart 请求体有 10MB 的硬上限
+		// （maxFormSize），前端走的正是 axios 的 urlencoded；超限时
+		// c.PostForm("data") 直接返回空串，与「真的没传」无法区分。
+		// urlencode 还会把 JSON 里的 {、"、: 各膨胀成 3 字节，手工域名极多的
+		// 域名组是可能撞到这个上限的，所以这里同时提示两种可能的原因。
+		jsonMsg(c, "导入分流配置", common.NewError("没有收到导入内容（若文件较大，也可能是请求体超过了服务端上限）"))
 		return
 	}
 	// 导入的每个出站节点都会触发一次 ValidateOutbound（一次 GetXrayConfig + 1~2 次

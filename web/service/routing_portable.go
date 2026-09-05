@@ -117,10 +117,14 @@ func (s *RoutingPortableService) Export(scope string) (*ExportFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 重名检查不看 scope：规则文件与域名组文件将来会被配套使用，
-	// 只在导出规则时才检查会留下一个可被绕开的洞。
-	if err := checkDuplicateGroupRemarks(groups); err != nil {
-		return nil, err
+	// 域名组重名检查覆盖 domainGroups 与 rules 两个 scope：前者导出的就是域名组
+	// 本身，后者虽然不导出域名组、但规则里带着 domainGroupRef，重名同样会让导入端
+	// 无法确定指向哪一个。scope=outbounds 与域名组完全无关，不该被库里两个不相干的
+	// 同名组挡住——那会把管理员指向一个与他正在做的事毫无关系的地方。
+	if scopeIncludes(scope, ExportScopeDomainGroups) || scopeIncludes(scope, ExportScopeRules) {
+		if err := checkDuplicateGroupRemarks(groups); err != nil {
+			return nil, err
+		}
 	}
 
 	f := &ExportFile{
@@ -298,9 +302,16 @@ func resolveInboundRefs(refs []PortableInboundRef, inbounds []*model.Inbound) ([
 	ids := make([]int, 0, len(refs))
 	missing := make([]string, 0)
 	for _, ref := range refs {
-		if matched := byRemark[ref.Remark]; len(matched) == 1 {
-			ids = append(ids, matched[0].Id)
-			continue
+		// 空备注不参与 remark 匹配。DBInbound.remark 的默认值就是空串、表单也
+		// 不强制填，所以「备注为空的入站」是本项目的合法状态且相当常见；拿空串
+		// 去 byRemark 里查，会命中本机某个同样没起名的入站，remark 优先级高于
+		// port，端口线索会被完全绕过——结果是一条 enable=true 的规则绑在一个与
+		// 源机器毫无关系的用户身上，且因为「命中了」而连禁用兜底都不会触发。
+		if ref.Remark != "" {
+			if matched := byRemark[ref.Remark]; len(matched) == 1 {
+				ids = append(ids, matched[0].Id)
+				continue
+			}
 		}
 		if in, ok := byPort[ref.Port]; ok {
 			ids = append(ids, in.Id)
@@ -641,6 +652,17 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 		}
 		refs := *item.InboundRefs
 
+		// 空字符串不参与域名组匹配，理由与 resolveInboundRefs 里空 remark
+		// 不参与入站匹配完全同构：DomainGroupRef 为空时本该是「引用的域名组
+		// 缺失/损坏」，但 groupByRemark[""] 会在本机恰好存在一个备注为空的
+		// 域名组时静默命中它，产生一条指向错误域名组的规则——与 §3.2 判定
+		// 的域名组重名歧义同一形状，必须在查表之前拒绝，不能让空串冒充业务键。
+		if item.DomainGroupRef == "" {
+			report.Rules.Failed++
+			report.fail("规则「%s」没有指定域名组（domainGroupRef 为空），整条跳过", label)
+			continue
+		}
+
 		if ambiguousGroupRemark[item.DomainGroupRef] {
 			report.Rules.Failed++
 			report.fail("规则「%s」引用的域名组「%s」在本机有多个同名组，无法确定指向哪一个，整条跳过（请先在域名组页面改名）",
@@ -733,7 +755,10 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 			// 与「导入是幂等的」这条设计前提自相矛盾。
 			if strings.Contains(err.Error(), "冲突") {
 				report.Rules.Skipped++
-				report.say("规则「%s」已存在同覆盖范围的规则，跳过", label)
+				// checkConflict 的错误里带着具体冲突规则名与相交入站
+				// （routing_rule.go 的「与分流规则「%s」冲突：%s在域名组
+				// 「%s」下已被它覆盖」），原样附上，管理员才知道是跟哪条撞的。
+				report.say("规则「%s」已存在同覆盖范围的规则，跳过：%v", label, err)
 			} else {
 				report.Rules.Failed++
 				report.fail("规则「%s」导入失败：%v", label, err)
