@@ -48,10 +48,14 @@ type domainGroupSummary struct {
 	ManualCount     int      `json:"manualCount"`
 	SubscribedCount int      `json:"subscribedCount"`
 	CidrCount       int      `json:"cidrCount"`
-	SubscribeUrl    string   `json:"subscribeUrl"`
-	LastUpdatedAt   int64    `json:"lastUpdatedAt"`
-	LastError       string   `json:"lastError"`
-	LastSkipped     int      `json:"lastSkipped"`
+	// SubscribedCidrCount 单列，不并进 SubscribedCount：订阅摘要那句话要
+	// 分别报域名和 IP 段的条数。合成一个数之后，一个纯 IP 订阅会显示
+	// 「共 N 条」而列表里一条域名都没有，看着像数据对不上。
+	SubscribedCidrCount int    `json:"subscribedCidrCount"`
+	SubscribeUrl        string `json:"subscribeUrl"`
+	LastUpdatedAt       int64  `json:"lastUpdatedAt"`
+	LastError           string `json:"lastError"`
+	LastSkipped         int    `json:"lastSkipped"`
 	// Broken 标记 Domains 或 SubscribedDomains 任一列 JSON 解码失败。这种组
 	// buildRule 会因「域名组数据损坏」整条丢弃规则，不能让 EffectiveCount 靠
 	// SubscribedDomains 单独撑起一个非零值而在列表里显得健康——那样规则表会
@@ -242,11 +246,14 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 			ManualCount:     len(manual),
 			SubscribedCount: len(subscribed),
 			CidrCount:       cidrCount,
-			SubscribeUrl:    group.SubscribeUrl,
-			LastUpdatedAt:   group.LastUpdatedAt,
-			LastError:       group.LastError,
-			LastSkipped:     group.LastSkipped,
-			Broken:          broken,
+			// 不跟着 broken 归零：它描述的是「上一次订阅拉到了什么」，
+			// 与这个组当前能不能生效是两回事。
+			SubscribedCidrCount: len(cidrSubscribed),
+			SubscribeUrl:        group.SubscribeUrl,
+			LastUpdatedAt:       group.LastUpdatedAt,
+			LastError:           group.LastError,
+			LastSkipped:         group.LastSkipped,
+			Broken:              broken,
 		})
 	}
 	jsonObj(c, summaries, nil)

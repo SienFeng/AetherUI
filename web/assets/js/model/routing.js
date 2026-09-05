@@ -20,6 +20,7 @@ class DomainGroup {
         this.manualCount = json.manualCount || 0;
         this.subscribedCount = json.subscribedCount || 0;
         this.cidrCount = json.cidrCount || 0;
+        this.subscribedCidrCount = json.subscribedCidrCount || 0;
         this.subscribeUrl = json.subscribeUrl || "";
         this.lastUpdatedAt = json.lastUpdatedAt || 0;
         this.lastError = json.lastError || "";

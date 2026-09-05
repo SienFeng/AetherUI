@@ -95,13 +95,22 @@
                                             <span v-if="group.effectiveCount > group.preview.length" style="color: #888;">
                                                 +[[ group.effectiveCount - group.preview.length ]]
                                             </span>
-                                            <span v-if="group.effectiveCount === 0" style="color: #f5222d;">
+                                            <!-- 纯 IP 组不是「空」：buildRule 的跳过条件是
+                                                 域名和 IP 段都为空，纯 IP 组照样会生成一条 ip 规则。
+                                                 这一列只说域名，红字留给真正两侧都空的组。 -->
+                                            <span v-if="group.effectiveCount === 0 && group.cidrCount" style="color: #bbb;">—</span>
+                                            <span v-else-if="group.effectiveCount === 0" style="color: #f5222d;">
                                                 空（引用它的规则不会写进配置）
                                             </span>
                                         </template>
                                     </template>
                                     <template slot="cidrs" slot-scope="text, group">
-                                        <span v-if="!group.cidrCount" style="color: #bbb;">—</span>
+                                        <!-- broken 是两列共用的标记（Cidrs 解码失败同样置位），
+                                             后端已把 cidrCount 强制归零。不单独渲染的话，
+                                             只有 IP 段损坏的组在这一列显示「—」，与「本来就没填」
+                                             完全分不开，而它引用的规则其实整条都不会写进配置。 -->
+                                        <span v-if="group.broken" style="color: #f5222d;">数据损坏</span>
+                                        <span v-else-if="!group.cidrCount" style="color: #bbb;">—</span>
                                         <span v-else>[[ group.cidrCount ]] 条</span>
                                     </template>
                                     <template slot="subscribe" slot-scope="text, group">
@@ -110,7 +119,11 @@
                                             <a-tag color="red">拉取失败</a-tag>
                                         </a-tooltip>
                                         <a-tag v-else-if="group.subscribeState === 'pending'" color="orange">等待首次拉取</a-tag>
-                                        <a-tooltip v-else :title="'共 ' + group.subscribedCount + ' 条，已忽略 ' + group.lastSkipped + ' 条非域名规则'">
+                                        <!-- 订阅现在也收 IP-CIDR/IP-CIDR6/GEOIP，两类都要报数：
+                                             只报域名的话，一个纯 IP 订阅会显示「共 0 条」而实际拉到了几千条。
+                                             lastSkipped 也不再是「非域名规则」——IP 段已经收下了，
+                                             跳过的是 IP-ASN、SRC-IP-CIDR、进程/UA 这些没法忠实翻译的。 -->
+                                        <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
                                             <a-tag color="green">[[ relativeTime(group.lastUpdatedAt) ]]</a-tag>
                                         </a-tooltip>
                                     </template>
@@ -267,7 +280,7 @@
                 <a-input type="textarea" :rows="8" v-model="groupModal.domains"
                          placeholder="domain:openai.com&#10;full:chat.openai.com&#10;keyword:openai&#10;geosite:openai&#10;可留空，只用订阅内容"></a-input>
                 <div style="color: #888; font-size: 12px; margin-top: 4px;">
-                    可用前缀：domain:（含子域名）/ full:（精确）/ keyword:（子串）/ regexp: / dotless: / geosite: / ext:。
+                    可用前缀：domain:（含子域名）/ full:（精确）/ keyword:（子串）/ regexp: / dotless: / geosite: / ext:（别名 ext-domain: 与 ext-site:）。
                     不带前缀且不含点的会按 keyword: 处理；含点的必须写前缀。
                 </div>
             </a-form-item>
@@ -294,9 +307,16 @@
                          style="margin-bottom: 8px;"></a-alert>
                 <a-alert v-else-if="!groupModal.lastUpdatedAt" type="warning" show-icon
                          message="订阅地址已更改或尚未拉取，等待首次拉取" style="margin-bottom: 8px;"></a-alert>
+                <!-- 忽略计数是本次拉取共用的，域名与 IP 段各算各的条数，所以它不能
+                     待在下面那个 subscribedCount 块里：纯 IP 订阅的域名是 0 条，
+                     那个块整个不渲染，这句话会跟着一起消失。 -->
+                <div v-if="groupModal.lastUpdatedAt && !groupModal.lastError"
+                     style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                    本次已忽略 [[ groupModal.lastSkipped ]] 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）。
+                </div>
                 <div v-if="groupModal.subscribedCount">
                     <div style="color: #888; font-size: 12px; margin-bottom: 4px;">
-                        共 [[ groupModal.subscribedCount ]] 条，已忽略 [[ groupModal.lastSkipped ]] 条非域名规则。
+                        共 [[ groupModal.subscribedCount ]] 条。
                         <span v-if="groupModal.subscribedCount > groupModal.subscribedPreview.length">
                             此处只显示前 [[ groupModal.subscribedPreview.length ]] 条。
                         </span>
@@ -911,6 +931,22 @@
             groupMissing(id) {
                 return !this.groups.find(x => x.id === id);
             },
+            // groupEffective 与后端 buildRule 的「这个组还能贡献条件吗」同义：
+            // 域名与 IP 段任一非空即可。
+            //
+            // 不把两者在后端合成一个 effectiveCount：域名列的 "+N" 溢出计数
+            // 用的就是 effectiveCount 减 preview 长度，合并会让那一列静默算错。
+            // 组合的语义只在需要它的这一处组合。
+            groupEffective(g) {
+                return !!g && (g.effectiveCount > 0 || g.cidrCount > 0);
+            },
+            // 这条规则是否至少贡献一个域名条件——即后端是否会为它生成 domain 那一条。
+            ruleHasDomains(rule) {
+                return rule.domainGroupIds.some(id => {
+                    const g = this.groups.find(x => x.id === id);
+                    return !!g && g.effectiveCount > 0;
+                });
+            },
             nodeMissing(id) {
                 return !this.nodes.find(x => x.id === id);
             },
@@ -921,8 +957,12 @@
             // ruleIssue 返回空串表示这条规则会正常生效，否则返回失效原因。
             //
             // 两类原因都要说出来，因为两类都是静默失效：
-            // ① 整条不生效——与后端 RoutingInjector.buildRule 的跳过条件一一对应，
-            //   条件残缺的规则整条不输出，配置里根本没有它，而规则表照常渲染。
+            // ① 整条不生效——与后端 RoutingInjector.buildRule 的跳过条件一一对应。
+            //   那条条件是「域名与 IP 段【都】为空」（routing_inject.go），不是
+            //   「域名为空」：一个纯 IP 组照样会生成一条 ip 规则。这里的镜像一旦
+            //   只看域名，就会对一条正常生效的规则言之凿凿地说「不会写进配置」——
+            //   那是本分支要防的那类静默错误的反面，同样有害：它训练管理员忽略
+            //   这一列，而这一列存在的全部意义就是把静默跳过变得看得见。
             // ② 部分不生效——后端只把剔除记进 logger.Warning，管理员看不到；
             //   sniffing 那一条更隐蔽：规则照常生成，但 xray 在路由阶段拿不到
             //   域名，对这些入站永不命中。
@@ -935,10 +975,10 @@
                 // 生效。只有【全部】组都没有可用域名时整条规则才会被丢弃。
                 const deadGroups = rule.domainGroupIds.filter(id => {
                     const g = this.groups.find(x => x.id === id);
-                    return !g || !g.effectiveCount;
+                    return !this.groupEffective(g);
                 });
                 if (deadGroups.length === rule.domainGroupIds.length) {
-                    return '引用的域名组已全部删除或为空，这条规则不会写进配置';
+                    return '引用的域名组已全部删除，或既没有域名也没有 IP 段，这条规则不会写进配置';
                 }
                 // 部分组失效虽然不影响规则生成，但必须说出来：后端 buildRule
                 // 只把剔除记进 logger.Warning，管理员看不到，而界面上「存在但
@@ -946,8 +986,8 @@
                 // 规则行还打绿色对勾——一个订阅从未拉取成功的空组因此完全隐形。
                 // 入站那一侧本来就有同形的提示，两边不该不对称。
                 if (deadGroups.length) {
-                    return '有 ' + deadGroups.length + ' 个域名组已删除或没有任何域名（' +
-                        deadGroups.map(this.groupName).join('、') + '），这些组的域名不受本规则约束';
+                    return '有 ' + deadGroups.length + ' 个域名组已删除或既没有域名也没有 IP 段（' +
+                        deadGroups.map(this.groupName).join('、') + '），这些组不受本规则约束';
                 }
 
                 if (rule.inboundIds.length) {
@@ -971,7 +1011,10 @@
                     if (!node) return '出站节点已删除，这条规则不会写进配置';
                     if (!node.enable) return '出站节点已禁用，这条规则不会写进配置';
                 }
-                const off = this.sniffingOffNames(rule);
+                // sniffing 只影响域名条件：xray 靠嗅探拿 SNI/Host。一条纯 IP 的
+                // 规则匹配的是连接目标 IP，与嗅探无关，对它报「永远不会命中」
+                // 是在说反话。
+                const off = this.ruleHasDomains(rule) ? this.sniffingOffNames(rule) : [];
                 if (off.length) {
                     return '入站 ' + off.join('、') +
                         ' 未开启 sniffing（http/tls），xray 在路由阶段拿不到域名，对这些用户本规则永远不会命中';
