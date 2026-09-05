@@ -77,6 +77,12 @@ func TestDNSInjectorDoesNotDuplicateFallback(t *testing.T) {
 
 // 不设这一项，dns 段对直连流量完全是空转：freedom 只在
 // domainStrategy.HasStrategy() 为真时才走 xray 的内置 DNS 客户端。
+//
+// 断言必须打到 settings.domainStrategy 这一层，不是 outbound 顶层——
+// freedom 的 domainStrategy 是 infra/conf.FreedomConfig（settings）的字段，
+// 不是 infra/conf.OutboundDetourConfig（outbound 本身）的字段。写在顶层
+// 会被 xray 的 infra/conf 静默丢弃（它从不对未知字段报错），这条断言若
+// 只查顶层，实现写错层级时测试照样会通过。
 func TestDNSInjectorSetsFreedomDomainStrategy(t *testing.T) {
 	setupDB(t)
 	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
@@ -87,12 +93,20 @@ func TestDNSInjectorSetsFreedomDomainStrategy(t *testing.T) {
 		t.Fatalf("Inject: %v", err)
 	}
 	first := decodeOutbounds(t, cfg)[0]
-	if first["domainStrategy"] != "UseIP" {
-		t.Errorf("domainStrategy = %v, want UseIP", first["domainStrategy"])
+	settings, ok := first["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings missing or not an object: %v", first)
+	}
+	if settings["domainStrategy"] != "UseIP" {
+		t.Errorf("settings.domainStrategy = %v, want UseIP", settings["domainStrategy"])
 	}
 }
 
 // 管理员改过模板、首位不是 freedom 时不动它。只有 freedom 认 domainStrategy。
+//
+// 断言的是 settings 整体未被改动，而不是「顶层没有 domainStrategy」——
+// 后者在修好层级错误之后恒为真（实现从未写过顶层），会把这条测试变成
+// 测不出任何回归的假阳性。
 func TestDNSInjectorLeavesNonFreedomDefaultOutboundAlone(t *testing.T) {
 	setupDB(t)
 	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
@@ -104,8 +118,41 @@ func TestDNSInjectorLeavesNonFreedomDefaultOutboundAlone(t *testing.T) {
 		t.Fatalf("Inject: %v", err)
 	}
 	first := decodeOutbounds(t, cfg)[0]
-	if _, ok := first["domainStrategy"]; ok {
-		t.Errorf("must not set domainStrategy on a non-freedom outbound: %v", first)
+	settings, _ := first["settings"].(map[string]any)
+	if len(settings) != 0 {
+		t.Errorf("settings must stay untouched for a non-freedom outbound: %v", settings)
+	}
+}
+
+// e2e：这条是本轮修复补的——只测 DNSInjector.Inject 本身测不出「写在了
+// xray 不认的层级」这类问题，因为 DNSInjector 自己的测试只关心它做了什么，
+// 不关心 xray 的 infra/conf 认不认这个字段（顶层 outbound 对象没有
+// domainStrategy 这一项，但 map[string]any 反序列化不会拒绝多余的键）。
+// 走 XrayService.GetXrayConfig() 才能验证最终产物里键出现在正确的位置。
+//
+// 这条同时守住调用顺序不变量：若 dnsInjector.Inject 被挪到
+// routingInjector.Inject 之前，routingInjector 的 buildOutbounds 会用模板
+// 重建整个 outbounds 数组，这里加的键会被悄悄冲掉，而 DNSInjector 自己的
+// 单元测试不会发现——它们从不经过 RoutingInjector。
+func TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig(t *testing.T) {
+	setupDB(t)
+	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+	cfg, err := (&XrayService{}).GetXrayConfig()
+	if err != nil {
+		t.Fatalf("GetXrayConfig: %v", err)
+	}
+	first := decodeOutbounds(t, cfg)[0]
+	if first["protocol"] != "freedom" {
+		t.Fatalf("first outbound protocol = %v, want freedom", first["protocol"])
+	}
+	settings, ok := first["settings"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings missing or not an object: %v", first)
+	}
+	if settings["domainStrategy"] != "UseIP" {
+		t.Errorf("settings.domainStrategy = %v, want UseIP", settings["domainStrategy"])
 	}
 }
 

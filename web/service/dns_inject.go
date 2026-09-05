@@ -24,12 +24,15 @@ const dnsFallbackServer = "localhost"
 // 这一条把「DNS 配错等于全员断网」整个消掉，是本功能敢做的前提。
 const freedomDomainStrategy = "UseIP"
 
-// DNSInjector 在管理员配置了 DNS 服务器时，接管 xray 的 dns 段与默认出站的
-// domainStrategy。
+// DNSInjector 在管理员配置了 DNS 服务器时，接管 xray 的 dns 段与默认出站
+// settings 里的 domainStrategy。
 //
 // 必须排在 RoutingInjector.Inject 之后调用：那一步会把整个 outbounds 数组
 // 反序列化再重新序列化，并由 tagDefaultOutbound 保证首个出站存在且带 tag；
-// 本注入器只往那个对象上加一个键，不必自己处理数组不存在的情况。
+// 本注入器只往那个对象的 settings 里加一个键，不必自己处理数组不存在的
+// 情况。若调用顺序反了，routingInjector 重建 outbounds 数组时会把这里
+// 写的键悄悄冲掉，且不会有任何报错——这条不变量靠
+// TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig 兜底。
 type DNSInjector struct {
 	settingService SettingService
 }
@@ -58,6 +61,17 @@ func (s *DNSInjector) Inject(cfg *xray.Config) error {
 		servers = append(servers, dnsFallbackServer)
 	}
 
+	// 模板里手写的 dns 段（hosts/queryStrategy/clientIp/disableCache/tag
+	// 等）会被整体替换掉，不做合并——合并意味着字段级别的取舍规则，而这
+	// 些字段之间存在耦合（比如 hosts 覆盖单个域名的解析结果、
+	// disableCache 影响所有 servers），谁的优先级更高没有唯一答案。接管
+	// 是本功能故意做出的选择，但必须让管理员看见，而不是配了一项设置、
+	// 模板里原有的 dns 定制就无声无息地消失。
+	if len(cfg.DNSConfig) > 0 {
+		logger.Warning("dns servers configured; replacing the template's existing dns section " +
+			"(any hosts/queryStrategy/clientIp/disableCache/tag there is discarded)")
+	}
+
 	// 顺序原样保留：DNS 有优先级语义，排序会改变行为。
 	encoded, err := json.Marshal(map[string]any{"servers": servers})
 	if err != nil {
@@ -68,7 +82,7 @@ func (s *DNSInjector) Inject(cfg *xray.Config) error {
 	return s.applyFreedomStrategy(cfg)
 }
 
-// applyFreedomStrategy 给数组首位的默认出站加上 domainStrategy。
+// applyFreedomStrategy 给数组首位的默认出站的 settings 加上 domainStrategy。
 //
 // 不做这一步，dns 段对直连流量完全是空转：freedom 只在自己的
 // domainStrategy.HasStrategy() 为真时才调 internet.LookupForIP
@@ -77,6 +91,17 @@ func (s *DNSInjector) Inject(cfg *xray.Config) error {
 //
 // 手写模板的人几乎不会知道这一点，这正是本功能相对「自己往模板里塞一段
 // dns」的主要价值。
+//
+// 必须写在 outbound 的 settings 里，绝不能写在 outbound 对象本身上：
+// freedom 的 domainStrategy 是 infra/conf.FreedomConfig 的字段
+// （infra/conf/freedom.go:21），是 settings 里的东西；outbound 对象对应
+// infra/conf.OutboundDetourConfig，其完整字段集是 protocol/sendThrough/
+// tag/settings/streamSettings/proxySettings/mux/targetStrategy
+// （infra/conf/xray.go:213-222）——里面根本没有 domainStrategy 这一项。
+// infra/conf 从不调用 DisallowUnknownFields，写错层级不会有任何报错：
+// run -test 照样 Configuration OK，面板首页照样 running，freedom 停在
+// AsIs 不变，dns 段对直连流量完全不起作用——这正是本功能存在的理由要防
+// 的那种故障，写错一层就原样复现了一遍。
 func (s *DNSInjector) applyFreedomStrategy(cfg *xray.Config) error {
 	outbounds := make([]any, 0)
 	if len(cfg.OutboundConfigs) > 0 {
@@ -102,7 +127,24 @@ func (s *DNSInjector) applyFreedomStrategy(cfg *xray.Config) error {
 			first["protocol"], "); direct traffic keeps using the system resolver")
 		return nil
 	}
-	first["domainStrategy"] = freedomDomainStrategy
+	settings, _ := first["settings"].(map[string]any)
+	if settings == nil {
+		settings = map[string]any{}
+		first["settings"] = settings
+	}
+	// infra/conf/freedom.go:62-65 里 Build 只在 targetStrategy 为空时才
+	// 回落到 domainStrategy——若模板已经显式写了非空 targetStrategy，我们
+	// 写的 domainStrategy 会被静默忽略。这不是能覆盖的：那是管理员在模板
+	// 里做出的显式选择，覆盖它是另一种「改动用户可见行为」。仍然写
+	// domainStrategy（管理员日后清空 targetStrategy 时立刻生效），但把
+	// 「这项设置其实不起作用」变成一条看得见的日志，而不是又一次无声空转。
+	if ts, ok := settings["targetStrategy"].(string); ok && ts != "" {
+		logger.Warning("dns servers configured but the default outbound's settings.targetStrategy " +
+			"is already set to a non-empty value; targetStrategy takes precedence over " +
+			"domainStrategy in freedom, so dns servers will not govern direct traffic until " +
+			"targetStrategy is cleared")
+	}
+	settings["domainStrategy"] = freedomDomainStrategy
 
 	encoded, err := json.Marshal(outbounds)
 	if err != nil {
