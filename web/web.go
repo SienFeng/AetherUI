@@ -333,6 +333,17 @@ func (s *Server) startTask() {
 
 	// 每 10 秒对齐一次端口限速规则；没人配限速时不碰 tc
 	s.cron.AddJob("@every 10s", job.NewShapingJob())
+
+	// 每 6 小时检查一次面板是否有新版本。
+	s.cron.AddJob("@every 6h", job.NewPanelVersionJob())
+
+	// cron.AddJob 的首次执行在一个完整周期之后，不做延迟触发的话新装的
+	// 面板要等 6 小时才显示版本状态。延迟 10 秒是为了避开面板刚启动时
+	// 和 xray 启动抢网络。
+	go func() {
+		time.Sleep(time.Second * 10)
+		job.NewPanelVersionJob().Run()
+	}()
 }
 
 func (s *Server) Start() (err error) {
