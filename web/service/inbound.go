@@ -217,6 +217,14 @@ func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	if len(traffics) == 0 {
 		return nil
 	}
+	// 先记一份分时历史，再走累加。两者写的是不同的库，主库的事务包不住
+	// 时序库的写入，所以不放进同一个事务——硬凑只会得到一个原子性的假象。
+	//
+	// 失败只告警不阻断：inbounds.up/down 是限额与到期判定的输入，它停止
+	// 累加的后果（用户超额不被停用）比图上少一段曲线严重得多。
+	if err := (&TrafficHistoryService{}).Record(traffics, time.Now()); err != nil {
+		logger.Warning("记录用量历史失败:", err)
+	}
 	db := database.GetDB()
 	db = db.Model(model.Inbound{})
 	tx := db.Begin()

@@ -199,3 +199,10 @@ func GetTrafficDB() *gorm.DB {
 func IsNotFound(err error) bool {
 	return err == gorm.ErrRecordNotFound
 }
+
+// ResetTrafficDBForTest 把用量库句柄清空，用于测试「库没打开」这条分支。
+// 生产代码不调用它——面板启动时 InitTrafficDB 失败就是这个状态，而那条
+// 分支上的每一个调用方都必须判空，不能靠运气。
+func ResetTrafficDBForTest() {
+	trafficDB = nil
+}
