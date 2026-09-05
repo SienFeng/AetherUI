@@ -246,7 +246,13 @@ cidrs   非空 → 发一条带 ip   的规则
 非空时生成期做两件事：
 
 1. `cfg.DNSConfig = {"servers": [用户的..., "localhost"]}`。`localhost` 末位固定兜底（用户已写则不重复追加）。配置的解析器全挂时退化成系统解析器，而不是断网。覆盖模板里已有的 `dns` 段，设置项说明写明这一点。
-2. 给 `outbounds[0]` 加 `"domainStrategy": "UseIP"`。
+2. 给 `outbounds[0]` 的 **`settings`** 对象加 `"domainStrategy": "UseIP"`——**不是加在出站对象上**。
+   `OutboundDetourConfig`（`infra/conf/xray.go:213-222`）的字段只有 `protocol` / `sendThrough` / `tag` /
+   `settings` / `streamSettings` / `proxySettings` / `mux` / `targetStrategy`，没有 `domainStrategy`；
+   而 xray 的 `infra/conf` 全模块不启用 `DisallowUnknownFields`，写错层级的键会被**静默丢弃**——
+   `run -test` 返回 `Configuration OK`、面板显示 `running`、freedom 停在 `AsIs`，整个 DNS 设置沦为装饰。
+   freedom 真正读的是 `FreedomConfig.DomainStrategy`（`infra/conf/freedom.go:21`），即 `settings` 里那个。
+   注意同层的 `settings.targetStrategy` 优先于 `domainStrategy`（`freedom.go:62-65`）：模板已设它时不覆盖，记 Warning。
 
 ### 8.4 三条安全约束
 
