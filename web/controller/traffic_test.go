@@ -2,12 +2,15 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"a-ui/database"
+	"a-ui/database/model"
 )
 
 // newTrafficRouter 在 newRenewRouter 的基础上再开一个用量库。
@@ -117,15 +120,77 @@ func TestTrafficOverviewEndpointSurvivesUnavailableDatabase(t *testing.T) {
 	}
 }
 
+// createInboundWithTraffic 建一个入站并在它当前小时的桶里写入指定用量。
+//
+// createInbound（inbound_renew_test.go）的端口写死在 10011，建多个会撞
+// port/tag 的 unique 约束，这里必须自己错开端口。amount 互不相同是为了让
+// Top N 的排序有确定结果，不依赖数据库返回顺序。
+func createInboundWithTraffic(t *testing.T, port int, remark string, amount int64) *model.Inbound {
+	t.Helper()
+	in := &model.Inbound{
+		UserId: 1, Port: port, Protocol: model.VLESS, Tag: fmt.Sprintf("inbound-%d", port),
+		Remark: remark, Enable: true,
+		Settings: "{}", StreamSettings: "{}", Sniffing: "{}",
+	}
+	if err := database.GetDB().Create(in).Error; err != nil {
+		t.Fatalf("创建入站: %v", err)
+	}
+	// 面板默认时区（defaultValueMap["timeLocation"]），与 Overview 内部
+	// GetTimeLocation 在测试环境下的回落值一致。
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	bucket := &model.TrafficBucket{
+		Granularity: model.GranularityHour,
+		InboundId:   in.Id,
+		BucketStart: model.AlignHour(time.Now(), loc),
+		Up:          amount,
+	}
+	if err := database.GetTrafficDB().Create(bucket).Error; err != nil {
+		t.Fatalf("写入用量桶: %v", err)
+	}
+	return in
+}
+
 func TestTrafficOverviewEndpointClampsTop(t *testing.T) {
 	r := newTrafficRouter(t)
-	createInbound(t, 0, true, 0, 0)
 
-	// 越界的 top 不该被透传给 service——钳住它是 controller 的职责。
-	// 这里只能验证接口仍然正常返回：钳制本身没有可观察的输出，
-	// 但一个把 top 原样透传的实现会在 series 数量上暴露出来（若有足够多入站）。
-	// 至少保证不因越界值而失败或 panic。
-	for _, body := range []string{"range=24h&top=999999", "range=24h&top=-5", "range=24h"} {
+	// 15 个入站，数量大于钳制回落值 12，用量互不相同（15 递减到 1）以获得
+	// 确定的 Top N 排序。
+	const n = 15
+	for i := 0; i < n; i++ {
+		createInboundWithTraffic(t, 20500+i, fmt.Sprintf("入站%d", i), int64(n-i))
+	}
+
+	// top=999999：没有钳制的话会原样传给 service 的 db.Limit(999999)，
+	// 合法 SQL、不报错，15 个入站会被全部返回。钳制生效则回落到 12——
+	// 这一条只有 controller 的钳制能满足，是本测试要证伪的核心。
+	msg := postForm(t, r, "/aui/inbound/traffic/overview", "range=24h&top=999999")
+	if !msg.Success {
+		t.Fatalf("success = false, msg = %q", msg.Msg)
+	}
+	obj := decodeTrafficObj(t, msg.Obj)
+	series, _ := obj["series"].([]interface{})
+	if len(series) != 12 {
+		t.Errorf("top=999999 时 series 长度 = %d，期望被钳到 12", len(series))
+	}
+
+	// 合法值必须原样透传：防的是把钳制写成无条件覆盖成 12，
+	// 那样这里也会返回 12 而不是 3。
+	msg = postForm(t, r, "/aui/inbound/traffic/overview", "range=24h&top=3")
+	if !msg.Success {
+		t.Fatalf("success = false, msg = %q", msg.Msg)
+	}
+	obj = decodeTrafficObj(t, msg.Obj)
+	series, _ = obj["series"].([]interface{})
+	if len(series) != 3 {
+		t.Errorf("top=3 时 series 长度 = %d，期望原样透传为 3", len(series))
+	}
+
+	// 越界的负值与零值靠 service 层既有的 topN <= 0 → 12 回落，
+	// 这里只保证不因此失败或 panic。
+	for _, body := range []string{"range=24h&top=-5", "range=24h"} {
 		msg := postForm(t, r, "/aui/inbound/traffic/overview", body)
 		if !msg.Success {
 			t.Errorf("body=%q: success = false, msg = %q", body, msg.Msg)
