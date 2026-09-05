@@ -230,6 +230,42 @@ func ValidateDomains(domains []string) error {
 	}, minimal)
 }
 
+// ValidateCidrs 校验 IP 段列表，能抓出不存在的 geoip 类别（checkFile 会打开
+// dat 找 code，见 common/geodata/geodat_loader.go:16）与非法的 CIDR。
+// 候选值挂在一条追加到末尾的探针规则上，出站指向注入器始终会注入的黑洞，
+// 因此这条探针不会引入悬空引用。
+//
+// 空列表直接放行：ip 为空数组时探针只剩 outboundTag 一个非条件字段，
+// xray 会报 "this rule has no effective fields" 而整份配置被判非法——
+// 一个「这个组没有 IP 段」的正常状态会变成保存失败。
+func ValidateCidrs(cidrs []string) error {
+	if len(cidrs) == 0 {
+		return nil
+	}
+	probe := map[string]any{
+		"type": "field", "ip": cidrs, "outboundTag": model.BlockOutboundTag,
+	}
+	minimal := map[string]any{
+		"outbounds": []any{
+			map[string]any{"tag": "direct", "protocol": "freedom", "settings": map[string]any{}},
+		},
+		"routing": map[string]any{
+			"rules": []any{
+				map[string]any{"type": "field", "ip": cidrs, "outboundTag": "direct"},
+			},
+		},
+	}
+	return validateWithFullConfig(func(cfg map[string]any) {
+		routing, _ := cfg["routing"].(map[string]any)
+		if routing == nil {
+			routing = map[string]any{}
+			cfg["routing"] = routing
+		}
+		rules, _ := routing["rules"].([]any)
+		routing["rules"] = append(rules, probe)
+	}, minimal)
+}
+
 // removeInboundByTag 摘掉完整配置里同 tag 的那份旧入站。
 //
 // 编辑一个已存在的入站时必须先摘掉：候选对象与库里那份端口相同、tag 相同，
