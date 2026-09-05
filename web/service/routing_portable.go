@@ -1,11 +1,13 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"a-ui/config"
+	"a-ui/database"
 	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/common"
@@ -301,4 +303,331 @@ func resolveInboundRefs(refs []PortableInboundRef, inbounds []*model.Inbound) ([
 		missing = append(missing, fmt.Sprintf("%s (端口 %d)", ref.Remark, ref.Port))
 	}
 	return ids, missing
+}
+
+type ImportCounts struct {
+	Created int `json:"created"`
+	Skipped int `json:"skipped"` // 本机已存在
+	Failed  int `json:"failed"`
+}
+
+type ImportReport struct {
+	DomainGroups ImportCounts `json:"domainGroups"`
+	Outbounds    ImportCounts `json:"outbounds"`
+	Rules        ImportCounts `json:"rules"`
+	// Messages 是人话，逐条说明每一个非 Created 的结果。前端用 modal 展示，
+	// 不能用 $message——可能有几十行。
+	Messages []string `json:"messages"`
+}
+
+func (r *ImportReport) say(format string, a ...any) {
+	r.Messages = append(r.Messages, fmt.Sprintf(format, a...))
+}
+
+// Import 逐条处理、逐条报告，**不用事务**。
+//
+// 出站节点落库前要 exec 真实 xray 校验，一次几百毫秒且策略是 fail open。
+// 包进事务会在校验期间长时间持有 SQLite 那把写锁，把整个面板（含每 10 秒
+// 的流量统计、每秒的并发判定）一起卡住。这与 routing_validate.go 里
+// 「落库之前校验，因此不需要事务回滚」的取向一致。
+//
+// 代价是导入可能「成功一半」。可接受：每条的成败都在报告里，而且导入是
+// 幂等的（冲突一律跳过），重跑一次就补齐了。
+func (s *RoutingPortableService) Import(raw string) (*ImportReport, error) {
+	var f ExportFile
+	if err := json.Unmarshal([]byte(raw), &f); err != nil {
+		return nil, common.NewError("导入文件不是合法的 JSON:", err)
+	}
+	if f.Kind != ExportKind {
+		return nil, common.NewErrorf("不是 AetherUI 的分流配置文件（kind=%q）", f.Kind)
+	}
+	if f.Version != ExportVersion {
+		return nil, common.NewErrorf(
+			"导入文件版本 %d 与当前面板支持的版本 %d 不一致，请用同版本的面板导出",
+			f.Version, ExportVersion)
+	}
+
+	report := &ImportReport{Messages: []string{}}
+	changed := false
+
+	if s.importDomainGroups(f.DomainGroups, report) {
+		changed = true
+	}
+	if s.importOutbounds(f.Outbounds, report) {
+		changed = true
+	}
+	if s.importRules(f.Rules, report) {
+		changed = true
+	}
+
+	if changed {
+		// 复用既有链路：置原子标志 → InboundController 的 10 秒 cron 消费
+		// → RestartXray(false) → Config.Equals 察觉 RouterConfig/OutboundConfigs
+		// 变了 → 先试热应用，不行才整进程重启。管理员不需要额外操作。
+		(&XrayService{}).SetToNeedRestart()
+	}
+	return report, nil
+}
+
+func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup, report *ImportReport) bool {
+	if len(items) == 0 {
+		return false
+	}
+	existing, err := s.domainGroupService.GetAll()
+	if err != nil {
+		report.say("读取本机域名组失败：%v", err)
+		report.DomainGroups.Failed += len(items)
+		return false
+	}
+	byRemark := make(map[string]bool, len(existing))
+	for _, g := range existing {
+		byRemark[g.Remark] = true
+	}
+
+	changed := false
+	subscribedCount := 0
+	for _, item := range items {
+		if item.Remark == "" {
+			report.DomainGroups.Failed++
+			report.say("有一个域名组的备注为空，已跳过")
+			continue
+		}
+		if byRemark[item.Remark] {
+			report.DomainGroups.Skipped++
+			report.say("域名组「%s」已存在，跳过", item.Remark)
+			continue
+		}
+		// 走与表单同一条校验路径。导入文件是不可信输入，与管理员在表单里
+		// 输入的东西同级。
+		encoded := "[]"
+		if len(item.Domains) > 0 {
+			list, err := ParseDomains(strings.Join(item.Domains, "\n"))
+			if err != nil {
+				report.DomainGroups.Failed++
+				report.say("域名组「%s」的域名格式有误：%v", item.Remark, err)
+				continue
+			}
+			if err := ValidateDomains(list); err != nil {
+				report.DomainGroups.Failed++
+				report.say("域名组「%s」的域名未通过校验：%v", item.Remark, err)
+				continue
+			}
+			encoded, err = EncodeDomains(list)
+			if err != nil {
+				report.DomainGroups.Failed++
+				report.say("域名组「%s」编码失败：%v", item.Remark, err)
+				continue
+			}
+		}
+		if item.SubscribeUrl != "" {
+			if err := ValidateSubscribeURL(item.SubscribeUrl); err != nil {
+				report.DomainGroups.Failed++
+				report.say("域名组「%s」的订阅地址非法：%v", item.Remark, err)
+				continue
+			}
+		}
+		// LastUpdatedAt 留 0：ShouldUpdateNow 对 0 直接返回 true，
+		// SubscriptionJob（每 10 分钟）会自动补上首次拉取。这里不同步拉，
+		// 一个慢地址能把这个 HTTP 请求挂满 30 秒。
+		g := &model.DomainGroup{
+			Remark: item.Remark, Domains: encoded, SubscribeUrl: item.SubscribeUrl,
+		}
+		if err := s.domainGroupService.Add(g); err != nil {
+			report.DomainGroups.Failed++
+			report.say("域名组「%s」写库失败：%v", item.Remark, err)
+			continue
+		}
+		byRemark[item.Remark] = true
+		report.DomainGroups.Created++
+		changed = true
+		if item.SubscribeUrl != "" {
+			subscribedCount++
+		}
+	}
+	if subscribedCount > 0 {
+		report.say("%d 个域名组已加入订阅，最迟 10 分钟内完成首次拉取；在此之前，仅依赖订阅内容的规则不会写进配置",
+			subscribedCount)
+	}
+	return changed
+}
+
+func (s *RoutingPortableService) importOutbounds(items []PortableOutbound, report *ImportReport) bool {
+	if len(items) == 0 {
+		return false
+	}
+	existing, err := s.outboundService.GetAll()
+	if err != nil {
+		report.say("读取本机出站节点失败：%v", err)
+		report.Outbounds.Failed += len(items)
+		return false
+	}
+	byTag := make(map[string]bool, len(existing))
+	for _, n := range existing {
+		byTag[n.Tag] = true
+	}
+
+	changed := false
+	for _, item := range items {
+		if item.Tag == "" || len(item.Tag) > 128 {
+			report.Outbounds.Failed++
+			report.say("出站节点「%s」的 tag 为空或过长，已跳过", item.Remark)
+			continue
+		}
+		// 保留 tag 不在 outbound_nodes 表里，数据库唯一约束看不见它们。
+		// 撞名会让 xray 报 existing tag found 并拒绝启动整份配置——全员断网，
+		// 而面板首页仍显示 running。判定统一走 model.IsReservedTag。
+		if model.IsReservedTag(item.Tag) {
+			report.Outbounds.Failed++
+			report.say("出站节点「%s」的 tag %s 是系统保留 tag，拒绝导入", item.Remark, item.Tag)
+			continue
+		}
+		if byTag[item.Tag] {
+			report.Outbounds.Skipped++
+			report.say("出站节点 %s 已存在，跳过", item.Tag)
+			continue
+		}
+
+		var ob map[string]any
+		if err := json.Unmarshal([]byte(item.Config), &ob); err != nil {
+			report.Outbounds.Failed++
+			report.say("出站节点 %s 的配置不是合法 JSON：%v", item.Tag, err)
+			continue
+		}
+		// "null" 能通过 Unmarshal 却留下一个 nil map，下一行赋值直接 panic。
+		if ob == nil {
+			report.Outbounds.Failed++
+			report.say("出站节点 %s 的配置为 null", item.Tag)
+			continue
+		}
+		ob["tag"] = item.Tag
+		// 与新增/编辑路径同样过真实 xray 校验：一个坏配置会让整份
+		// bin/config.json 加载失败、全员断网。fail open 策略照旧——
+		// xray 二进制缺失或超时时 ValidateOutbound 会放行并记日志。
+		if err := ValidateOutbound(ob); err != nil {
+			report.Outbounds.Failed++
+			report.say("出站节点 %s 未通过 xray 校验：%v", item.Tag, err)
+			continue
+		}
+		encoded, err := json.Marshal(ob)
+		if err != nil {
+			report.Outbounds.Failed++
+			report.say("出站节点 %s 编码失败：%v", item.Tag, err)
+			continue
+		}
+		protocol := item.Protocol
+		if p, ok := ob["protocol"].(string); ok && p != "" {
+			protocol = p
+		}
+		node := &model.OutboundNode{
+			Tag: item.Tag, Remark: item.Remark, Protocol: protocol,
+			Config: string(encoded), Enable: item.Enable,
+		}
+		if err := database.GetDB().Save(node).Error; err != nil {
+			report.Outbounds.Failed++
+			report.say("出站节点 %s 写库失败：%v", item.Tag, err)
+			continue
+		}
+		byTag[item.Tag] = true
+		report.Outbounds.Created++
+		changed = true
+	}
+	return changed
+}
+
+func (s *RoutingPortableService) importRules(items []PortableRule, report *ImportReport) bool {
+	if len(items) == 0 {
+		return false
+	}
+	groups, err := s.domainGroupService.GetAll()
+	if err != nil {
+		report.say("读取本机域名组失败：%v", err)
+		report.Rules.Failed += len(items)
+		return false
+	}
+	groupByRemark := make(map[string]*model.DomainGroup, len(groups))
+	for _, g := range groups {
+		groupByRemark[g.Remark] = g
+	}
+	nodes, err := s.outboundService.GetAll()
+	if err != nil {
+		report.say("读取本机出站节点失败：%v", err)
+		report.Rules.Failed += len(items)
+		return false
+	}
+	nodeByTag := make(map[string]*model.OutboundNode, len(nodes))
+	for _, n := range nodes {
+		nodeByTag[n.Tag] = n
+	}
+	inbounds, err := s.inboundService.GetAllInbounds()
+	if err != nil {
+		report.say("读取本机入站失败：%v", err)
+		report.Rules.Failed += len(items)
+		return false
+	}
+
+	changed := false
+	for _, item := range items {
+		label := item.Remark
+		if label == "" {
+			label = "(无备注)"
+		}
+		g, ok := groupByRemark[item.DomainGroupRef]
+		if !ok {
+			report.Rules.Failed++
+			report.say("规则「%s」引用的域名组「%s」不存在，整条跳过", label, item.DomainGroupRef)
+			continue
+		}
+		outboundId := 0
+		if item.Action == model.ActionProxy {
+			n, ok := nodeByTag[item.OutboundRef]
+			if !ok {
+				report.Rules.Failed++
+				report.say("规则「%s」引用的出站节点 %s 不存在，整条跳过", label, item.OutboundRef)
+				continue
+			}
+			outboundId = n.Id
+		}
+
+		ids, missing := resolveInboundRefs(item.InboundRefs, inbounds)
+		enable := item.Enable
+		if len(missing) > 0 {
+			// 绝不把认不出的入站剔掉后当作完整覆盖集——剔到空就是
+			// 「对所有入站生效」。导入成禁用状态，把缺失的点名报告，
+			// 管理员打开编辑弹窗勾一下就好。整条丢弃也不对：规则的其余
+			// 部分（域名组、出站、优先级、动作）都是好的。
+			enable = false
+			report.say("规则「%s」的入站 %s 在本机未找到，已导入但保持禁用，请手工指定入站后启用",
+				label, strings.Join(missing, "、"))
+		}
+		encoded, err := EncodeInboundIds(ids)
+		if err != nil {
+			report.Rules.Failed++
+			report.say("规则「%s」的入站编码失败：%v", label, err)
+			continue
+		}
+		// 部分命中却编码成了 []，等于把规则放大到全体。这种情况只可能在
+		// 已命中集合为空时出现，此时必须整条丢弃而不是导入一条覆盖全员的
+		// 规则——哪怕它是禁用的，管理员一旦启用就会全员中招。
+		if encoded == "[]" && len(item.InboundRefs) > 0 {
+			report.Rules.Failed++
+			report.say("规则「%s」的入站在本机一个都没找到，整条跳过（若照常导入，它会变成对所有用户生效）", label)
+			continue
+		}
+
+		rule := &model.RoutingRule{
+			Remark: item.Remark, InboundIds: encoded, DomainGroupId: g.Id,
+			Action: item.Action, OutboundId: outboundId,
+			Priority: item.Priority, Enable: enable,
+		}
+		// 走 Add 而不是直接写库：它自带 validate（域名组/出站存在、动作合法）
+		// 与 checkConflict（同一域名组下入站不得重叠）。
+		if err := s.ruleService.Add(rule); err != nil {
+			report.Rules.Failed++
+			report.say("规则「%s」导入失败：%v", label, err)
+			continue
+		}
+		report.Rules.Created++
+		changed = true
+	}
+	return changed
 }

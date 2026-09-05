@@ -329,3 +329,327 @@ func TestResolveInboundRefsEmptyMeansGlobal(t *testing.T) {
 		t.Errorf("空 refs 应返回空 ids: %v", ids)
 	}
 }
+
+func exportJSON(t *testing.T, f *ExportFile) string {
+	t.Helper()
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return string(b)
+}
+
+func baseExportFile() *ExportFile {
+	return &ExportFile{
+		Kind: ExportKind, Version: ExportVersion,
+		Scope:        []string{ExportScopeDomainGroups, ExportScopeOutbounds, ExportScopeRules},
+		DomainGroups: []PortableDomainGroup{},
+		Outbounds:    []PortableOutbound{},
+		Rules:        []PortableRule{},
+	}
+}
+
+func TestImportRejectsWrongKind(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Kind = "something-else"
+	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err == nil {
+		t.Error("Kind 不对应整体拒绝")
+	}
+}
+
+func TestImportRejectsWrongVersion(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Version = 999
+	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err == nil {
+		t.Error("Version 不认识应整体拒绝")
+	}
+}
+
+func TestImportRejectsMalformedJSON(t *testing.T) {
+	setupDB(t)
+	if _, err := (&RoutingPortableService{}).Import("{not json"); err == nil {
+		t.Error("坏 JSON 应报错")
+	}
+}
+
+func TestImportCreatesDomainGroupAndOutbound(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{
+		{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}, SubscribeUrl: ""},
+	}
+	f.Outbounds = []PortableOutbound{
+		{Tag: "a-ui-hk", Remark: "香港", Protocol: "socks",
+			Config: `{"tag":"a-ui-hk","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":1080}]}}`,
+			Enable: true},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.DomainGroups.Created != 1 {
+		t.Errorf("DomainGroups.Created = %d, want 1 (%v)", rep.DomainGroups.Created, rep.Messages)
+	}
+	if rep.Outbounds.Created != 1 {
+		t.Errorf("Outbounds.Created = %d, want 1 (%v)", rep.Outbounds.Created, rep.Messages)
+	}
+	groups, _ := (&DomainGroupService{}).GetAll()
+	if len(groups) != 1 || groups[0].Remark != "ChatGPT" {
+		t.Errorf("库里的域名组不对: %+v", groups)
+	}
+	nodes, _ := (&OutboundNodeService{}).GetAll()
+	if len(nodes) != 1 || nodes[0].Tag != "a-ui-hk" {
+		t.Errorf("出站节点的 tag 必须原样保留，否则规则引用会失效: %+v", nodes)
+	}
+}
+
+// 同一个文件导两次不该变成双份，也不该有第二次的副作用。
+func TestImportIsIdempotent(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Outbounds = []PortableOutbound{
+		{Tag: "a-ui-hk", Remark: "香港", Protocol: "socks",
+			Config: `{"tag":"a-ui-hk","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":1080}]}}`,
+			Enable: true},
+	}
+	raw := exportJSON(t, f)
+	s := RoutingPortableService{}
+	if _, err := s.Import(raw); err != nil {
+		t.Fatalf("首次 Import: %v", err)
+	}
+	rep, err := s.Import(raw)
+	if err != nil {
+		t.Fatalf("二次 Import: %v", err)
+	}
+	if rep.DomainGroups.Created != 0 || rep.DomainGroups.Skipped != 1 {
+		t.Errorf("域名组应全部跳过: %+v", rep.DomainGroups)
+	}
+	if rep.Outbounds.Created != 0 || rep.Outbounds.Skipped != 1 {
+		t.Errorf("出站节点应全部跳过: %+v", rep.Outbounds)
+	}
+	groups, _ := (&DomainGroupService{}).GetAll()
+	if len(groups) != 1 {
+		t.Errorf("域名组变成了 %d 份", len(groups))
+	}
+}
+
+// a-ui-block / a-ui-default 是注入器自己发的 tag，不在 outbound_nodes 表里，
+// 数据库唯一约束看不见它们。撞名会让 xray 报 existing tag found 并拒绝启动
+// 整份配置——全员断网，而面板首页仍显示 running。
+func TestImportRejectsReservedTag(t *testing.T) {
+	setupDB(t)
+	for _, tag := range []string{model.BlockOutboundTag, model.DefaultOutboundTag} {
+		f := baseExportFile()
+		f.Outbounds = []PortableOutbound{
+			{Tag: tag, Remark: "坏节点", Protocol: "socks",
+				Config: `{"protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":1080}]}}`,
+				Enable: true},
+		}
+		rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if rep.Outbounds.Failed != 1 {
+			t.Errorf("tag %s 应被拒绝: %+v %v", tag, rep.Outbounds, rep.Messages)
+		}
+		nodes, _ := (&OutboundNodeService{}).GetAll()
+		if len(nodes) != 0 {
+			t.Errorf("保留 tag 的节点不该落库: %+v", nodes)
+		}
+	}
+}
+
+func TestImportRejectsEmptyTag(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Outbounds = []PortableOutbound{
+		{Tag: "", Remark: "没 tag", Protocol: "socks",
+			Config: `{"protocol":"socks","settings":{}}`, Enable: true},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Outbounds.Failed != 1 {
+		t.Errorf("空 tag 应被拒绝: %+v", rep.Outbounds)
+	}
+}
+
+// "null" 能通过 json.Unmarshal 却留下一个 nil map，紧接着给它赋值直接
+// panic（routing_outbound.go 的 Update 里就记着这个坑）。
+func TestImportHandlesNullConfig(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Outbounds = []PortableOutbound{
+		{Tag: "a-ui-bad", Remark: "坏配置", Protocol: "socks", Config: "null", Enable: true},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import 不该 panic 或整体失败: %v", err)
+	}
+	if rep.Outbounds.Failed != 1 {
+		t.Errorf("null config 应被拒绝: %+v", rep.Outbounds)
+	}
+}
+
+// ===== 本文件最重要的一条：入站认不全时必须禁用，绝不清空 =====
+func TestImportDisablesRuleWhenInboundMissing(t *testing.T) {
+	setupDB(t)
+	newPortableTestInbound(t, "用户甲", 2886)
+
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "走香港", DomainGroupRef: "ChatGPT", OutboundRef: "",
+		InboundRefs: []PortableInboundRef{
+			{Remark: "用户甲", Port: 2886},
+			{Remark: "对面才有的用户", Port: 9999},
+		},
+		Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Created != 1 {
+		t.Fatalf("规则应被导入（禁用状态）: %+v %v", rep.Rules, rep.Messages)
+	}
+	rules, err := (&RoutingRuleService{}).GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("规则数 = %d", len(rules))
+	}
+	r := rules[0]
+	if r.Enable {
+		t.Error("入站认不全的规则必须导入为禁用")
+	}
+	if r.InboundIds == "[]" {
+		t.Fatal("InboundIds 被清空成了 []，这等于「对所有入站生效」—— " +
+			"一条本该只覆盖某个人的规则被静默放大到全体，而 xray 对此返回 Configuration OK")
+	}
+	ids, err := DecodeInboundIds(r.InboundIds)
+	if err != nil {
+		t.Fatalf("DecodeInboundIds: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Errorf("应保留已命中的那一个入站: %v", ids)
+	}
+	joined := strings.Join(rep.Messages, "\n")
+	if !strings.Contains(joined, "对面才有的用户") {
+		t.Errorf("报告里应点名缺失的入站: %v", rep.Messages)
+	}
+}
+
+func TestImportKeepsEnabledWhenAllInboundsMatch(t *testing.T) {
+	setupDB(t)
+	newPortableTestInbound(t, "用户甲", 2886)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "封禁", DomainGroupRef: "ChatGPT",
+		InboundRefs: []PortableInboundRef{{Remark: "用户甲", Port: 2886}},
+		Action:      model.ActionBlock, Enable: true,
+	}}
+	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 1 || !rules[0].Enable {
+		t.Errorf("全部命中时应保持文件里的 enable: %+v", rules)
+	}
+}
+
+func TestImportKeepsGlobalRuleGlobal(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "违规", Domains: []string{"domain:bad.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "全局封禁", DomainGroupRef: "违规",
+		InboundRefs: []PortableInboundRef{}, // 显式的「所有入站」
+		Action:      model.ActionBlock, Enable: true,
+	}}
+	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 1 {
+		t.Fatalf("规则数 = %d", len(rules))
+	}
+	if rules[0].InboundIds != "[]" {
+		t.Errorf("全局规则应保持 []: %q", rules[0].InboundIds)
+	}
+	if !rules[0].Enable {
+		t.Error("全局规则不该被误判成「认不出」而禁用")
+	}
+}
+
+func TestImportSkipsRuleWithMissingGroupRef(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.Rules = []PortableRule{{
+		Remark: "孤儿规则", DomainGroupRef: "本机没有的组",
+		InboundRefs: []PortableInboundRef{}, Action: model.ActionBlock, Enable: true,
+	}}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.Rules.Failed != 1 {
+		t.Errorf("引用不到域名组的规则应整条跳过: %+v", rep.Rules)
+	}
+	rules, _ := (&RoutingRuleService{}).GetAll()
+	if len(rules) != 0 {
+		t.Errorf("不该落库: %+v", rules)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "本机没有的组") {
+		t.Errorf("报告应点名: %v", rep.Messages)
+	}
+}
+
+// 新导入的订阅组 LastUpdatedAt = 0，ShouldUpdateNow 对 0 直接返回 true，
+// SubscriptionJob 每 10 分钟一次会自动补上首次拉取。导入路径本身不拉——
+// 一个慢地址能把 HTTP 请求挂满 30 秒。
+func TestImportSubscribedGroupStartsUnfetched(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{
+		{Remark: "订阅组", Domains: []string{}, SubscribeUrl: "https://example.com/list.txt"},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	groups, _ := (&DomainGroupService{}).GetAll()
+	if len(groups) != 1 {
+		t.Fatalf("groups = %+v", groups)
+	}
+	if groups[0].LastUpdatedAt != 0 {
+		t.Errorf("LastUpdatedAt = %d, want 0（0 才会被 ShouldUpdateNow 立即拉取）", groups[0].LastUpdatedAt)
+	}
+	if groups[0].SubscribedDomains != "" {
+		t.Errorf("SubscribedDomains 应为空: %q", groups[0].SubscribedDomains)
+	}
+	if !strings.Contains(strings.Join(rep.Messages, "\n"), "订阅") {
+		t.Errorf("报告应提示订阅组还没拉取: %v", rep.Messages)
+	}
+}
+
+func TestImportRejectsBadSubscribeUrl(t *testing.T) {
+	setupDB(t)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{
+		{Remark: "坏订阅", Domains: []string{}, SubscribeUrl: "ftp://example.com/x"},
+	}
+	rep, err := (&RoutingPortableService{}).Import(exportJSON(t, f))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if rep.DomainGroups.Failed != 1 {
+		t.Errorf("非 http(s) 订阅地址应被拒: %+v", rep.DomainGroups)
+	}
+}
