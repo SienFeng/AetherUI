@@ -306,6 +306,22 @@
                     </div>
                 </div>
             </a-form-item>
+            <!-- 订阅拉取是域名和 IP 段共用的一次请求，成功/失败/等待首次拉取
+                 的状态（上面那两个 a-alert）已经在域名那个块里说过一遍，这里
+                 不重复——重复会让人以为域名和 IP 段是两次独立的订阅。
+                 subscribedCidrCount 为 0 时整块不渲染，纯域名订阅的弹窗
+                 因此和改动前完全一样，不会多出一个空标题。 -->
+            <a-form-item v-if="groupModal.subscribedCidrCount" label="订阅到的 IP 段">
+                <div style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                    共 [[ groupModal.subscribedCidrCount ]] 条。
+                    <span v-if="groupModal.subscribedCidrCount > groupModal.subscribedCidrPreview.length">
+                        此处只显示前 [[ groupModal.subscribedCidrPreview.length ]] 条。
+                    </span>
+                </div>
+                <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
+                    <a-tag v-for="c in groupModal.subscribedCidrPreview" :key="c">[[ c ]]</a-tag>
+                </div>
+            </a-form-item>
         </a-form>
     </a-modal>
 
