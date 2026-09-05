@@ -433,6 +433,7 @@ func TestUpdateFieldsForKeepsSubscriptionColumnsWhenUrlUnchanged(t *testing.T) {
 	want := map[string]any{
 		"remark":  "改了备注",
 		"domains": `["domain:manual.com"]`,
+		"cidrs":   "",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("updateFieldsFor() = %#v, want %#v (地址没变时不该碰订阅列)", got, want)
@@ -453,8 +454,10 @@ func TestUpdateFieldsForClearsSubscriptionColumnsWhenUrlChanges(t *testing.T) {
 	want := map[string]any{
 		"remark":             "组",
 		"domains":            "[]",
+		"cidrs":              "",
 		"subscribe_url":      "http://b.example.com/list",
 		"subscribed_domains": "",
+		"subscribed_cidrs":   "",
 		"last_updated_at":    0,
 		"last_error":         "",
 		"last_skipped":       0,

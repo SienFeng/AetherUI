@@ -184,14 +184,16 @@ func updateFieldsFor(old, next *model.DomainGroup) map[string]any {
 	fields := map[string]any{
 		"remark":  next.Remark,
 		"domains": next.Domains,
+		"cidrs":   next.Cidrs,
 	}
 
 	// 订阅地址变了：旧订阅内容来自另一个来源，继续拿它分流是「用错误的数据
-	// 生效」，比规则暂时不生效更危险。清空并把 LastUpdatedAt 置 0，
-	// SubscriptionJob 的「从未成功过」分支会在下一个检查窗口拉取新地址。
+	// 生效」，比规则暂时不生效更危险。域名与 IP 两侧必须一起清，只清一侧会
+	// 留下一个「域名是新地址的、IP 还是旧地址的」的混合体。
 	if old.SubscribeUrl != next.SubscribeUrl {
 		fields["subscribe_url"] = next.SubscribeUrl
 		fields["subscribed_domains"] = ""
+		fields["subscribed_cidrs"] = ""
 		fields["last_updated_at"] = 0
 		fields["last_error"] = ""
 		fields["last_skipped"] = 0

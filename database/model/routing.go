@@ -39,12 +39,24 @@ type DomainGroup struct {
 	// domain:openai.com / full:chat.openai.com / geosite:openai / regexp:.*\.oaistatic\.com
 	Domains string `json:"domains" form:"domains"`
 
+	// Cidrs 是管理员手工录入的 IP 段，JSON 字符串数组，元素为 xray 原生
+	// ip 语法：1.2.3.0/24 / 8.8.8.8 / 2001:db8::/32 / geoip:cn / geoip:!cn /
+	// ext:文件:标签。与 Domains 平行：一个组同时承载域名与 IP 两类条件，
+	// 生成期各自成为一条独立的 xray 规则（绝不并列进同一条，那是 AND）。
+	Cidrs string `json:"cidrs" form:"cidrs"`
+
 	// SubscribeUrl 为空表示这个组不订阅，行为与本功能上线前完全一致。
 	SubscribeUrl string `json:"subscribeUrl" form:"subscribeUrl"`
 	// SubscribedDomains 是上一次成功拉取并解析出的域名，JSON 字符串数组。
 	// 与 Domains 物理隔离：订阅更新绝不覆盖管理员手工补的条目，
 	// 两个字段各自只有一个写入方，永不交叉。
 	SubscribedDomains string `json:"subscribedDomains" form:"subscribedDomains"`
+
+	// SubscribedCidrs 是上一次成功拉取并解析出的 IP 段，JSON 字符串数组。
+	// 与 Cidrs 物理隔离，理由与 SubscribedDomains 完全相同：两个字段各自
+	// 只有一个写入方，永不交叉。
+	SubscribedCidrs string `json:"subscribedCidrs" form:"subscribedCidrs"`
+
 	// LastUpdatedAt 是上一次「成功」更新的时刻，Unix 毫秒。0 表示从未成功过，
 	// 调度会据此立即拉取一次，见 SubscriptionJob。
 	LastUpdatedAt int64 `json:"lastUpdatedAt" form:"lastUpdatedAt"`

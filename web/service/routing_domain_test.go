@@ -259,3 +259,27 @@ func TestParseDomainsRejectsKeywordWithSeparators(t *testing.T) {
 		t.Error("expected error for keyword containing a space")
 	}
 }
+
+// updateFieldsFor 的列名单是手工维护的。漏掉一个列会让该字段静默地无法
+// 通过编辑接口更新，而 Get 与展示完全正常——极易漏测，所以单独钉一条。
+func TestUpdateFieldsForIncludesCidrs(t *testing.T) {
+	old := &model.DomainGroup{Id: 1, Remark: "a", Domains: "[]", Cidrs: "[]"}
+	next := &model.DomainGroup{Id: 1, Remark: "a", Domains: "[]", Cidrs: `["1.2.3.0/24"]`}
+	fields := updateFieldsFor(old, next)
+	if fields["cidrs"] != `["1.2.3.0/24"]` {
+		t.Errorf("cidrs = %v, want the new value", fields["cidrs"])
+	}
+}
+
+// 订阅地址变了，旧地址拉来的 IP 段继续参与分流就是「用错误的数据生效」。
+func TestUpdateFieldsForClearsSubscribedCidrsWhenUrlChanges(t *testing.T) {
+	old := &model.DomainGroup{Id: 1, SubscribeUrl: "https://a.example/x"}
+	next := &model.DomainGroup{Id: 1, SubscribeUrl: "https://b.example/y"}
+	fields := updateFieldsFor(old, next)
+	if fields["subscribed_cidrs"] != "" {
+		t.Errorf("subscribed_cidrs = %v, want cleared", fields["subscribed_cidrs"])
+	}
+	if fields["subscribed_domains"] != "" {
+		t.Errorf("subscribed_domains = %v, want cleared", fields["subscribed_domains"])
+	}
+}
