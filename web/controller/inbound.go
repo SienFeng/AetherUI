@@ -17,6 +17,7 @@ type InboundController struct {
 	xrayService           service.XrayService
 	onlineService         service.OnlineService
 	accessLogService      service.AccessLogService
+	domainStatService     service.DomainStatService
 	geoService            service.GeoService
 	trafficHistoryService service.TrafficHistoryService
 	sharingService        service.SharingService
@@ -42,6 +43,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/kick/:id", a.kick)
 	g.POST("/unban/:id", a.unban)
 	g.POST("/accessLogs/:id", a.getAccessLogs)
+	g.POST("/topDomains/:id", a.getTopDomains)
 	g.POST("/recentSources/:id", a.getRecentSources)
 	g.POST("/traffic/history/:id", a.getTrafficHistory)
 	g.POST("/traffic/overview", a.getTrafficOverview)
@@ -267,6 +269,46 @@ func (a *InboundController) getAccessLogs(c *gin.Context) {
 	})
 	if err != nil {
 		jsonMsg(c, "获取访问日志", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getTopDomains 返回某入站在给定周期内访问次数最多的域名。
+//
+// 访问日志明细回答「他访问过什么」，这个接口回答「他主要在访问什么」——
+// 一屏几十条同一个站的记录，翻页是看不出比重的。
+func (a *InboundController) getTopDomains(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取域名榜单", err)
+		return
+	}
+	// 与 getTrafficHistory 一样，前端 axios 实际发的是 JSON；form tag
+	// 在两种绑定下都能工作，与既有接口保持一致。
+	form := struct {
+		Range string `form:"range"`
+		Limit int    `form:"limit"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "获取域名榜单", err)
+		return
+	}
+	// 上界在 controller 钳住——controller 是不可信输入的边界，请求体里一个
+	// 失控的数字不该让服务端拉出远超所需的行。与 getTrafficOverview 对 top
+	// 的钳制同源。
+	if form.Limit <= 0 || form.Limit > 50 {
+		form.Limit = 10
+	}
+	// 入站必须存在：不校验的话，一个不存在的 id 会返回一张空榜单，
+	// 看起来像「这个人没访问过任何网站」。
+	if _, err := a.inboundService.GetInbound(id); err != nil {
+		jsonMsg(c, "获取域名榜单", err)
+		return
+	}
+	result, err := a.domainStatService.TopDomains(id, service.TopDomainRange(form.Range), form.Limit, time.Now())
+	if err != nil {
+		jsonMsg(c, "获取域名榜单", err)
 		return
 	}
 	jsonObj(c, result, nil)
