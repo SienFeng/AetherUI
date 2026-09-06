@@ -180,7 +180,7 @@ func TestParseMeterTagRejectsMalformed(t *testing.T) {
 		"a-ui-meter--x.com",      // id 为空
 		"a-ui-meter-x-y.com",     // id 不是数字
 		"a-ui-meter-0-x.com",     // id 必须为正：0 不是任何入站
-		"a-ui-meter--1-x.com",    // 负数 id
+		"a-ui-meter--1-x.com",    // 同上：首字符就是分隔符，切出来的 id 仍是空串
 	}
 	for _, tag := range bad {
 		if _, _, ok := ParseMeterTag(tag); ok {
@@ -479,6 +479,11 @@ func setupMeterPoolTest(t *testing.T) {
 	if err := database.InitTrafficDB(filepath.Join(dir, "traffic.db")); err != nil {
 		t.Fatalf("InitTrafficDB: %v", err)
 	}
+	// 用量库句柄是包级变量，会跨用例残留——而且 SQLite 在文件被 t.TempDir
+	// 清掉之后仍能通过已打开的 fd 读到旧数据。计量池就在这个库里，不清空的话
+	// 本用例写进池的行会漏进 routing_inject_test.go 的用例，让 Inject 生成出
+	// 无从解释的计量出站，把既有断言打成随机失败。
+	t.Cleanup(database.ResetTrafficDBForTest)
 }
 
 // putPoolRow 直接写一行池记录，绕过重算逻辑，专测读取与清理。
@@ -1351,8 +1356,11 @@ func TestRecomputeRetiresZeroByteDomainAndCoolsItDown(t *testing.T) {
 	putDomainStat(t, in.Id, "zero.com", base.Add(-time.Hour).Unix(), 100, 0, 0)
 
 	svc := &MeterPoolService{}
-	// 每轮相隔一小时，跨过最小驻留期后连续三轮零字节即退场。
-	for i := 0; i < meterProbeGiveUpRounds; i++ {
+	// 第 0 轮是「进池」，那一轮不产生零轮计数；零轮计数从其后每一轮开始 +1，
+	// 所以跑满 meterProbeGiveUpRounds(3) 需要 base+1h / +2h / +3h 三轮，
+	// 退场发生在 base+3h —— 一共 4 轮。
+	rounds := meterProbeGiveUpRounds + 1
+	for i := 0; i < rounds; i++ {
 		if _, err := svc.Recompute(base.Add(time.Duration(i) * time.Hour)); err != nil {
 			t.Fatalf("第 %d 轮 Recompute: %v", i, err)
 		}
@@ -1361,12 +1369,12 @@ func TestRecomputeRetiresZeroByteDomainAndCoolsItDown(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("池行 %d 条，期望 1（退场后仍保留行以记住冷却时刻）：%+v", len(rows), rows)
 	}
-	wantCooldown := base.Add(time.Duration(meterProbeGiveUpRounds-1) * time.Hour).Add(meterCooldown).Unix()
+	wantCooldown := base.Add(time.Duration(rounds-1) * time.Hour).Add(meterCooldown).Unix()
 	if rows[0].CooldownUntil != wantCooldown {
 		t.Errorf("CooldownUntil = %d，期望 %d", rows[0].CooldownUntil, wantCooldown)
 	}
 	// 冷却中的行不参与生成。
-	entries, err := svc.Pool(base.Add(time.Duration(meterProbeGiveUpRounds) * time.Hour))
+	entries, err := svc.Pool(base.Add(time.Duration(rounds) * time.Hour))
 	if err != nil {
 		t.Fatalf("Pool: %v", err)
 	}
@@ -2014,7 +2022,9 @@ EOF
 - `web/service/domain_stat_test.go` 的 `setupDomainStatTest`
 - `web/service/sharing_test.go` 里那个 `InitTrafficDB` 所在的 helper
 - `web/service/traffic_history_test.go` 里那个 `InitTrafficDB` 所在的 helper
-- `web/service/meter_pool_test.go` 的 `setupMeterPoolTest`
+
+（`web/service/meter_pool_test.go` 的 `setupMeterPoolTest` 在 Task 2 创建时
+就已经带上这一行，这里不用再动。）
 
 Run: `go test ./web/service/ -count=1`
 Expected: PASS（这一步不该改变任何行为，只是让句柄的生命周期与测试对齐）
@@ -2024,7 +2034,7 @@ Expected: PASS（这一步不该改变任何行为，只是让句柄的生命周
 ```bash
 git status --porcelain
 git add web/service/domain_stat_test.go web/service/sharing_test.go \
-        web/service/traffic_history_test.go web/service/meter_pool_test.go
+        web/service/traffic_history_test.go
 git commit -m "$(cat <<'EOF'
 test: 用量库句柄随测试结束一起清空
 
