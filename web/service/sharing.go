@@ -76,9 +76,7 @@ func (s *SharingService) Sample(now time.Time) error {
 			continue
 		}
 		for _, e := range onlineTrackerInstance.snapshotIdle(in.Port, noLocate, idle) {
-			// 只收实质活跃的来源。Idle 表示连接还在但这段时间没有任何
-			// 字节往来——纯扫描、失败握手不产生字节增长，天然被挡在外面。
-			if e.Idle {
+			if !sharingObservable(e) {
 				continue
 			}
 			obs = append(obs, sharingObservation{
@@ -105,6 +103,19 @@ func (s *SharingService) Sample(now time.Time) error {
 		}
 		return nil
 	})
+}
+
+// sharingObservable 判断一条在线明细是否算作「实质活跃」，可以计入共享
+// 检测的采样。
+//
+//   - Idle 表示连接还在但这段时间没有任何字节往来——纯扫描、失败握手
+//     不产生字节增长，天然被挡在外面。
+//   - Blocked 是另一条必须挡的路径：snapshotAt 会为「已被并发限制拒绝、
+//     连接已断干净」的来源补造条目，让管理员看得见是谁在被挡，而那种
+//     条目只设 Blocked、Idle 是零值 false。它们一个字节都没传过，计进来
+//     会凭空抬高活跃时长、污染地区建议。
+func sharingObservable(e OnlineIP) bool {
+	return !e.Idle && !e.Blocked
 }
 
 // provinceOf 返回主判定省份，查不到时返回空串。
@@ -190,6 +201,10 @@ func (s *SharingService) PruneOrphans() (int64, error) {
 //
 // 必须在删除入站时调用，理由见 PruneOrphans。
 func (s *SharingService) DeleteByInbound(inboundId int) error {
+	// 先清内存再删库。反过来的话，两步之间如果正好跨小时，rolloverLocked
+	// 会把残量重新写回一批刚被删掉的行。
+	sharingAccumulatorInstance.forget(inboundId)
+
 	db := database.GetTrafficDB()
 	if db == nil {
 		return nil
@@ -276,7 +291,7 @@ func (s *SharingService) Detail(inboundId int, now time.Time) (*SharingDetail, e
 	if inboundId <= 0 {
 		return nil, common.NewError("入站 id 非法:", inboundId)
 	}
-	windowRows, err := s.windowRows(inboundId, sharingWindowDays, now)
+	statRows, err := s.windowRows(inboundId, sharingWindowDays, now)
 	if err != nil {
 		return nil, err
 	}
@@ -292,8 +307,8 @@ func (s *SharingService) Detail(inboundId int, now time.Time) (*SharingDetail, e
 	}
 
 	detail := &SharingDetail{
-		Stat:          computeCoexist(windowRows),
-		Suggestion:    suggestRegions(windowRows),
+		Stat:          computeCoexist(statRows),
+		Suggestion:    suggestRegions(statRows),
 		Hours:         []SharingDetailHour{},
 		WindowDays:    sharingWindowDays,
 		RetentionDays: sharingRetentionDays,

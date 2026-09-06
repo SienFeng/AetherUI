@@ -44,6 +44,12 @@ func (s CoexistStat) Flagged() bool { return s.Hours >= coexistDisplayMinHours }
 // 「窗口内去重活跃 IP 数」这类指标，而正常用户 7 天十几个 IP、横跨 2~3 个省
 // 是常态，误报率高到没法用。见设计文档 §9。
 func computeCoexist(rows []model.InboundIPHour) CoexistStat {
+	// 没有数据不等于「归属地库未加载」。不挡住的话空输入会因为 hasProvince
+	// 为 false 而被报成降级口径，界面上显示一条与事实无关的告警。
+	if len(rows) == 0 {
+		return CoexistStat{}
+	}
+
 	hasProvince := false
 	for _, r := range rows {
 		if r.Province != "" {
@@ -136,7 +142,12 @@ func suggestRegions(rows []model.InboundIPHour) RegionSuggestion {
 		total += r.ActiveSeconds
 	}
 	if total == 0 {
-		return RegionSuggestion{}
+		// 返回非 nil 的空切片而不是零值 RegionSuggestion{}：零值的字段是
+		// nil 切片，序列化成 JSON 的 null，而前端对 suggestion.suggested
+		// 取 .length 会抛 TypeError。这条路径的触发条件（窗口内所有行的
+		// Province 都为空）恰好就是 CoexistStat.ByIP 为真的定义，也就是
+		// 说降级形态下点开明细必然踩中。
+		return RegionSuggestion{Suggested: []string{}, Coexisting: []string{}}
 	}
 
 	type entry struct {

@@ -71,6 +71,16 @@ func TestCoexistCountsOnlySimultaneousProvinces(t *testing.T) {
 	}
 }
 
+func TestCoexistEmptyInputIsNotReportedAsDegraded(t *testing.T) {
+	stat := computeCoexist(nil)
+	if stat.ByIP {
+		t.Error("没有数据不该被报成「降级为 IP 口径」——那会让界面显示一条与事实无关的归属地库告警")
+	}
+	if stat.Hours != 0 {
+		t.Errorf("Hours = %v, want 0", stat.Hours)
+	}
+}
+
 func TestCoexistReportsProvincesSorted(t *testing.T) {
 	const h = 3600
 	rows := []model.InboundIPHour{
@@ -183,5 +193,12 @@ func TestSuggestRegionsEmptyWhenNoProvinceAtAll(t *testing.T) {
 	got := suggestRegions(rows)
 	if len(got.Suggested) != 0 || len(got.Coexisting) != 0 {
 		t.Errorf("全未知时应给空建议, got %+v", got)
+	}
+	// 必须是非 nil 的空切片：nil 会序列化成 JSON 的 null，前端对它取
+	// .length 直接抛 TypeError，而这条路径正是降级形态（ByIP）的必经之路。
+	// 只断言 len 的话 nil 和空切片都能过，防不住这个 bug。
+	if got.Suggested == nil || got.Coexisting == nil {
+		t.Errorf("空建议必须是非 nil 切片，否则序列化成 null: Suggested=%#v Coexisting=%#v",
+			got.Suggested, got.Coexisting)
 	}
 }

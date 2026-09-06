@@ -220,7 +220,7 @@
                                         。点击查看明细。
                                     </template>
                                     <a-tag color="orange" style="cursor: pointer"
-                                           @click="sharingModal.show(dbInbound)">
+                                           @click.stop="showSharing(dbInbound)">
                                         并存 [[ coexistOf(dbInbound.id).hours ]]h /
                                         <template v-if="coexistOf(dbInbound.id).byIp">
                                             [[ coexistOf(dbInbound.id).ips ]] IP
@@ -453,6 +453,15 @@
                 if (msg.success) {
                     this.coexistMap = msg.obj || {};
                 }
+            },
+            // 包一层方法而不是在模板里直接写 sharingModal.show(...)：
+            // sharingModal 是另一个 Vue 根实例脚本里的顶层 const，不在本实例
+            // 的 data 上。模板里直接引用它靠的是渲染函数 with(this){} 找不到
+            // 名字后回落到全局作用域——这只在生产版 Vue 下成立，换成开发版
+            // 后 initProxy 的 has 陷阱会让它直接抛错。同文件的 showAccessLog
+            // 就是包成方法的。
+            showSharing(dbInbound) {
+                sharingModal.show(dbInbound);
             },
             setInbounds(dbInbounds) {
                 this.inbounds.splice(0);

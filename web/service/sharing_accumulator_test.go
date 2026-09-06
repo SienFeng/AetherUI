@@ -56,9 +56,9 @@ func TestAccumulatorFlushesCompletedHourOnRollover(t *testing.T) {
 	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 
-	a.observe(h10, oneObs(), 30)                        // 30
-	a.observe(h10.Add(30*time.Second), oneObs(), 30)    // 60，落库
-	a.observe(h10.Add(60*time.Second), oneObs(), 30)    // 90，未落库
+	a.observe(h10, oneObs(), 30)                     // 30
+	a.observe(h10.Add(30*time.Second), oneObs(), 30) // 60，落库
+	a.observe(h10.Add(60*time.Second), oneObs(), 30) // 90，未落库
 
 	got := a.observe(h11, oneObs(), 30)
 	if len(got) != 1 {
@@ -120,5 +120,42 @@ func TestAccumulatorCapDoesNotEvictExistingSources(t *testing.T) {
 	}
 	if !found {
 		t.Error("真实用户被扫描流量挤掉了")
+	}
+}
+
+// 删除入站必须连内存累计一起清掉。只删库的话，rolloverLocked 会在下一次
+// 跨小时把残量重新 upsert 回去，而 SQLite 复用自增 id 会让这批复活的行
+// 绑到下一个建出来的入站上——那时引用不再悬空，孤儿兜底也拦不住。
+func TestAccumulatorForgetDropsInboundBeforeRollover(t *testing.T) {
+	a := newSharingAccumulator()
+	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	obs := []sharingObservation{
+		{InboundId: 1, IP: "1.1.1.1", Province: "江苏"},
+		{InboundId: 2, IP: "2.2.2.2", Province: "上海"},
+	}
+
+	// 攒到 90 秒：60 秒时落过一次，剩下的 30 秒还挂在内存里。
+	a.observe(h10, obs, 30)
+	a.observe(h10.Add(30*time.Second), obs, 30)
+	a.observe(h10.Add(60*time.Second), obs, 30)
+
+	a.forget(1)
+
+	got := a.observe(h11, nil, 30)
+	for _, f := range got {
+		if f.InboundId == 1 {
+			t.Errorf("已删除的入站 1 在跨小时时又被写回: %+v", f)
+		}
+	}
+	// 没被 forget 的入站 2 仍应正常收尾，证明 forget 没有误伤别人。
+	found := false
+	for _, f := range got {
+		if f.InboundId == 2 && f.ActiveSeconds == 90 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("入站 2 的收尾写入被误删了, got %+v", got)
 	}
 }

@@ -87,6 +87,9 @@
         hours: [],
         windowDays: 7,
         retentionDays: 30,
+        // 请求序号：连续打开两个入站时，先发的那个若后到，结果必须丢弃，
+        // 否则会把甲的统计与建议挂在乙的标题下。
+        reqSeq: 0,
         columns: [
             { title: '时段', align: 'left', width: 160, scopedSlots: { customRender: 'label' } },
             { title: '同时活跃的来源', align: 'left', scopedSlots: { customRender: 'entries' } },
@@ -102,12 +105,21 @@
         },
 
         async show(dbInbound) {
+            const seq = ++this.reqSeq;
             this.inboundId = dbInbound.id;
             this.title = '共享检测 - ' + dbInbound.remark;
+            // 全部状态都要重置，不能只重置 hours：请求失败时若 stat 与
+            // suggestion 还留着上一个入站的值，界面会把甲的并存省份和地区
+            // 建议挂在乙的标题下，而「填入地区限制」会用新的 inboundId 配
+            // 旧的建议，把甲的省份填进乙的入站——保存时省份名都合法，配置
+            // 正常下发，没有任何一层会报错。
+            this.stat = { hours: 0, provinces: [], byIp: false, ips: 0 };
+            this.suggestion = { suggested: [], coexisting: [] };
             this.hours = [];
             this.visible = true;
+
             const msg = await HttpUtil.post('/aui/inbound/sharing/detail/' + dbInbound.id);
-            if (!msg.success) {
+            if (seq !== this.reqSeq || !msg.success) {
                 return;
             }
             this.stat = msg.obj.stat;

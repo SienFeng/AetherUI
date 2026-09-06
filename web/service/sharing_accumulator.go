@@ -62,10 +62,17 @@ type sharingAccumulator struct {
 	mu    sync.Mutex
 	hour  int64
 	cells map[sharingKey]*sharingCell
+
+	// cappedWarned 记录本小时已经为哪些入站打过上限告警。
+	//
+	// 不去重的话，一次分布式扫描会让每条被挡下的观测各打一行、每轮采样
+	// 重复一遍（500 个来源 ≈ 4 万行/小时），把面板自己的日志一起挤进
+	// journald 的限流窗口——而这是一个未认证的远端就能触发的放大。
+	cappedWarned map[int]int
 }
 
 func newSharingAccumulator() *sharingAccumulator {
-	return &sharingAccumulator{cells: map[sharingKey]*sharingCell{}}
+	return &sharingAccumulator{cells: map[sharingKey]*sharingCell{}, cappedWarned: map[int]int{}}
 }
 
 // observe 记一轮采样：obs 里的每个 IP 都算作在本轮的 step 秒内持续活跃。
@@ -92,8 +99,10 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 			// 上限只挡新来源，已在累计的继续累计——否则一次扫描就能把
 			// 真实用户从表里挤掉。
 			if perInbound[o.InboundId] >= sharingMaxRowsPerHour {
-				logger.Warningf("入站 %v 本小时来源 IP 已达 %v 个上限，忽略 %v",
-					o.InboundId, sharingMaxRowsPerHour, o.IP)
+				// 不在这里逐条打日志：每 30 秒一轮采样、一次分布式扫描能
+				// 让这条 continue 命中几百次，日志汇总留给 rolloverLocked
+				// 在跨小时时一次性打印。
+				a.cappedWarned[o.InboundId]++
 				continue
 			}
 			cell = &sharingCell{province: o.Province}
@@ -141,7 +150,34 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 		}
 		return out[i].IP < out[j].IP
 	})
+
+	// 每个入站每小时最多打一条汇总告警，而不是每条被挡下的观测各打一行——
+	// 遍历 map 打日志是可以的，日志行之间没有顺序契约，不产生任何返回值
+	// 里的数组顺序。
+	for inboundId, ignored := range a.cappedWarned {
+		logger.Warningf("入站 %v 本小时来源 IP 超过 %v 个上限，忽略了 %v 条观测",
+			inboundId, sharingMaxRowsPerHour, ignored)
+	}
+	a.cappedWarned = map[int]int{}
+
 	a.cells = map[sharingKey]*sharingCell{}
 	a.hour = newHour
 	return out
+}
+
+// forget 丢掉某入站在内存里的全部累计。
+//
+// 必须在删除入站时调用：只删库不清内存的话，rolloverLocked 会在下一次
+// 跨小时时把残量重新 upsert 回去，而 PruneOrphans 每小时才跑一次。
+// SQLite 会复用被删除的自增 id，那批复活的行会绑到下一个建出来的入站上，
+// 那时引用不再悬空，兜底清理也拦不住它们。
+func (a *sharingAccumulator) forget(inboundId int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for key := range a.cells {
+		if key.inboundId == inboundId {
+			delete(a.cells, key)
+		}
+	}
 }

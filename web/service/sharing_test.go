@@ -79,6 +79,30 @@ func TestUpsertIPHourKeepsDistinctHoursSeparate(t *testing.T) {
 	}
 }
 
+// 被并发限制拒绝、连接已断干净的来源不算实质活跃：snapshotAt 会为它补造
+// 一条只设 Blocked（Idle 是零值 false）的条目，让管理员在在线明细里看得
+// 见是谁被挡；这类来源一个字节都没传过，计入会凭空抬高活跃时长、污染
+// 地区建议。
+func TestSharingObservableExcludesIdleAndBlocked(t *testing.T) {
+	cases := []struct {
+		name string
+		e    OnlineIP
+		want bool
+	}{
+		{"正常活跃", OnlineIP{Idle: false, Blocked: false}, true},
+		{"闲置", OnlineIP{Idle: true, Blocked: false}, false},
+		{"被并发限制拒绝、连接已断（Idle 为零值 false）", OnlineIP{Idle: false, Blocked: true}, false},
+		{"闲置且被拒绝", OnlineIP{Idle: true, Blocked: true}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sharingObservable(c.e); got != c.want {
+				t.Errorf("sharingObservable(%+v) = %v, want %v", c.e, got, c.want)
+			}
+		})
+	}
+}
+
 // 库没打开时静默返回：面板启动时 InitTrafficDB 失败就是这个状态，
 // 共享检测不可用不该让采样任务每 30 秒报一次错。
 func TestSampleReturnsNilWhenTrafficDBUnavailable(t *testing.T) {
