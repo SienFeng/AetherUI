@@ -204,6 +204,11 @@ func InitTrafficDB(dbPath string) error {
 	if err := tdb.AutoMigrate(&model.TrafficBucket{}); err != nil {
 		return err
 	}
+	// 共享检测的小时桶与用量桶同库：分库理由相同（高频写入不该抢主库
+	// 那把写锁），再单开一个库只是多一个要初始化、要清理、要判空的句柄。
+	if err := tdb.AutoMigrate(&model.InboundIPHour{}); err != nil {
+		return err
+	}
 	trafficDB = tdb
 	return nil
 }
