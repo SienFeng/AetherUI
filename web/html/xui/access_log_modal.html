@@ -100,9 +100,27 @@
                     <a-radio-button value="7d">7 天</a-radio-button>
                     <a-radio-button value="15d">15 天</a-radio-button>
                 </a-radio-group>
-                <span style="margin-left: 12px; color: rgba(0,0,0,.45)">
-                    统计的是<b>连接次数</b>，不是流量——上传大文件往往只有很少几条长连接，未必排在前面。
-                </span>
+                <a-radio-group v-if="accessLogModal.topMetered" style="margin-left: 12px"
+                               :value="accessLogModal.topOrder" size="small"
+                               @change="e => accessLogModal.switchOrder(e.target.value)">
+                    <a-radio-button value="count">按次数</a-radio-button>
+                    <a-radio-button value="up">按上传</a-radio-button>
+                    <a-radio-button value="down">按下载</a-radio-button>
+                </a-radio-group>
+            </div>
+            <div v-if="!accessLogModal.topMetered" style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
+                统计的是<b>连接次数</b>，不是流量——上传大文件往往只有很少几条长连接，未必排在前面。
+            </div>
+            <div v-else style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
+                <div v-if="accessLogModal.topCoverageText">[[ accessLogModal.topCoverageText ]]</div>
+                <div>
+                    字节数只统计<b>走直连出去</b>的流量：被你自己的分流规则带走（走出站节点或被封禁）的部分不在其中。
+                    计量的域名集合每小时自动调整一次，刚上线时排序主要来自访问次数，运行一段时间后才由实测流量主导。
+                </div>
+                <div>
+                    「访问次数」按<b>连接建立</b>时刻归类，「上传/下载」按<b>流量发生</b>时刻归类，
+                    所以一条跨越整点的长连接可能出现在「0 次访问、却有几个 GB」的行里。
+                </div>
             </div>
             <a-table :columns="accessLogModal.topColumns" :data-source="accessLogModal.topList"
                      :row-key="row => row.domain" size="small" :loading="accessLogModal.topLoading"
@@ -113,6 +131,12 @@
                 </template>
                 <template slot="domain" slot-scope="text, row">
                     <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
+                </template>
+                <template slot="up" slot-scope="text, row">
+                    [[ sizeFormat(row.up) ]]
+                </template>
+                <template slot="down" slot-scope="text, row">
+                    [[ sizeFormat(row.down) ]]
                 </template>
             </a-table>
         </a-tab-pane>
@@ -164,18 +188,18 @@
         // 「只想看明细」的那次打开多发一个请求。
         tab: 'detail',
         topRange: '24h',
+        // topOrder 只在服务端报告 metered 为真时才可能不是 count：没有字节数据
+        // 时按上传排序会得到一张全 0 的表，比不给这个选项更让人困惑。
+        topOrder: 'count',
         topList: [],
         topLoading: false,
         topLoaded: false,
-        topColumns: [{
-            title: "#", align: 'center', width: 60,
-            scopedSlots: { customRender: 'rank' },
-        }, {
-            title: "域名", align: 'left',
-            scopedSlots: { customRender: 'domain' },
-        }, {
-            title: "访问次数", align: 'right', width: 120, dataIndex: "count",
-        }],
+        // topMetered 由服务端给出（该入站是否有域名正在被计量）。为假时必须
+        // 整列隐藏字节列——显示一列恒为 0 的「上传」会被理解成「他没上传过」，
+        // 比不显示更糟。
+        topMetered: false,
+        topCoverageText: '',
+        topColumns: [],
 
         show({ dbInbound, ip }) {
             this.inboundId = dbInbound.id;
@@ -189,6 +213,10 @@
             this.tab = 'detail';
             this.topList = [];
             this.topLoaded = false;
+            this.topOrder = 'count';
+            this.topMetered = false;
+            this.topCoverageText = '';
+            this.rebuildTopColumns();
             this.visible = true;
             this.load();
             this.loadSources();
@@ -293,10 +321,50 @@
             this.topRange = range;
             this.loadTop();
         },
+        switchOrder(order) {
+            this.topOrder = order;
+            this.loadTop();
+        },
+        // 列按 metered 现算而不是写死：ant-design-vue 的 columns 是普通数组，
+        // 而这个弹窗的状态挂在一个纯对象上（不是 Vue 实例），用不了 computed。
+        rebuildTopColumns() {
+            const columns = [{
+                title: "#", align: 'center', width: 60,
+                scopedSlots: { customRender: 'rank' },
+            }, {
+                title: "域名", align: 'left',
+                scopedSlots: { customRender: 'domain' },
+            }, {
+                title: "访问次数", align: 'right', width: 110, dataIndex: "count",
+            }];
+            if (this.topMetered) {
+                columns.push({
+                    title: "上传", align: 'right', width: 110,
+                    scopedSlots: { customRender: 'up' },
+                }, {
+                    title: "下载", align: 'right', width: 110,
+                    scopedSlots: { customRender: 'down' },
+                });
+            }
+            this.topColumns = columns;
+        },
+        // 覆盖度必须如实说成「约」：入站计的是客户端与面板之间的加密流，
+        // 出站计的是面板与目标之间的流，两者相差一层协议开销，比值结构性地
+        // 小于 100%。服务端给不出比值（该周期没有任何流量）时整行不显示，
+        // 显示 0% 会被理解成「一点都没归因到」，那是另一回事。
+        formatCoverage(coverage) {
+            if (!coverage || coverage.ratio === null || coverage.ratio === undefined) {
+                return '';
+            }
+            const percent = Math.round(coverage.ratio * 100);
+            return `本周期该用户约 ${percent}% 的流量已归因到具体域名（`
+                + `${sizeFormat(coverage.meteredBytes)} / ${sizeFormat(coverage.totalBytes)}）。`;
+        },
         async loadTop() {
             this.topLoading = true;
             const msg = await HttpUtil.post(`/aui/inbound/topDomains/${this.inboundId}`, {
                 range: this.topRange,
+                orderBy: this.topOrder,
                 limit: 20,
             });
             this.topLoading = false;
@@ -304,7 +372,13 @@
                 return;
             }
             this.topList = msg.obj.list || [];
+            // 一律回显服务端给出的实际生效值：档位与排序维度的回落规则只有
+            // 服务端那一处，前端自己猜会和它漂移。
             this.topRange = msg.obj.range;
+            this.topOrder = msg.obj.orderBy || 'count';
+            this.topMetered = !!msg.obj.metered;
+            this.topCoverageText = this.formatCoverage(msg.obj.coverage);
+            this.rebuildTopColumns();
             this.topLoaded = true;
         },
         // 点榜单里的域名 = 切回明细并按它过滤。榜单回答「主要在访问什么」，
