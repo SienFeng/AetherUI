@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -149,17 +150,17 @@ func TestAggregateSkipsUnknownInbound(t *testing.T) {
 // access_log 的自增 id 会被复用：GORM 的 sqlite 驱动对 primaryKey;autoIncrement
 // 生成的是裸 rowid 别名，没有 AUTOINCREMENT。AccessLogCleanupJob 不看访问日志
 // 开关、无条件按保留期删行，管理员关闭访问日志超过保留期再打开、或手工清库，
-// 都会让整张表清空、新行的 id 从 1 重新开始，而位点还停在被清空前的高位。
-// 不处理的话 Where("id > 位点") 从此恒为空，聚合永久停摆且没有任何一行日志
-// （DomainStatJob 只在 n>0 时才打日志）。
+// 都会让整张表清空、新行的 id 从 1 重新开始。
 //
-// 这条测试守住 Aggregate 里自愈逻辑的场景①（三种场景之一，与
+// 位点现在以 (LastLogTime, LastLogId) 为复合序、Time 为主序，这个场景不再
+// 需要任何自愈或回退逻辑：清空后新写入的 d.com，不管它复用到的 id 是几，
+// 只要它的 Time 晚于位点记录的 Time，就会被 Where(time > 位点时间 OR ...)
+// 正常读到——这条测试与
 // TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete、
-// TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData 合起来才是完整的
-// 回归覆盖）：清空后确实有新数据落地，自愈必须靠 LastLogTime（而不是比较
-// id）识别出"位点已失效"并正确接上这条新数据——早期实现把位点直接归零或
-// 对齐到清空后的 max(id)，都无法同时满足这条与另外两条测试，具体反例见
-// 上面两条测试的注释。
+// TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData、
+// TestAggregateHandlesNewDataExceedingReleasedIdRange 合起来覆盖了 id 复用
+// 的几种典型场景，均无需特殊处理即可正确工作（函数名仍保留"Recovers"是
+// 因为它描述的运维场景没变，不是因为代码里还有一段"恢复"逻辑）。
 func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31010, "甲")
@@ -212,10 +213,10 @@ func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
 
 	n, err = svc.Aggregate()
 	if err != nil {
-		t.Fatalf("自愈这一轮 Aggregate: %v", err)
+		t.Fatalf("清空后 Aggregate: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("自愈后消费了 %d 条，期望 1（清空后新写的那一条）：位点没有被正确回退重新聚合", n)
+		t.Errorf("清空后消费了 %d 条，期望 1（清空后新写的那一条）：Time 主序应该正常读到它", n)
 	}
 	hours := listDomainStats(t, model.GranularityHour)
 	counts := make(map[string]int64, len(hours))
@@ -226,7 +227,7 @@ func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
 		t.Errorf("d.com 计数 = %d，期望 1", counts["d.com"])
 	}
 	// domain_stat 与 access_log 是两张独立的表，清空 access_log 不影响
-	// 已经聚合完的历史桶——自愈逻辑只回退位点，不会动 domain_stat。
+	// 已经聚合完的历史桶——位点只往前走，不会动 domain_stat。
 	for _, dom := range []string{"a.com", "b.com", "c.com"} {
 		if counts[dom] != 1 {
 			t.Errorf("清空前的历史桶 %s = %d，期望保留为 1", dom, counts[dom])
@@ -243,17 +244,14 @@ func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
 	}
 }
 
-// 场景②：删除入站导致的部分删除，删除后没有任何新数据落地。自愈判据若只看
-// max(id) 与位点的大小关系，会把这种情形和场景①（整表清空 + 有新数据）误判
-// 成一回事，进而把位点回退、让删除前就已经聚合过的另一个入站的历史行被重新
-// 读一遍，产生静默的虚高计数——这条测试复现该场景：入站 A 先写（占低位
-// id、时间早），入站 B 后写（占高位 id、时间晚）；聚合一次；只删 B 的访问
-// 日志（真实路径：InboundService.DelInbound → AccessLogService.
-// DeleteByInbound），A 的行原封不动、表没有清空；不写任何新数据，直接再聚合
-// 一次——A 的计数必须原样不变。用 LastLogTime 判断"库里还有没有比上次聚合
-// 更晚的记录"能正确处理这个场景：A 剩下的那一行时间不晚于上次聚合时记录的
-// LastLogTime（它在删除前就已经被聚合过），自愈逻辑据此判断位点仍然有效，
-// 不会触发回退。
+// 场景②：删除入站导致的部分删除，删除后没有任何新数据落地——这条测试复现
+// 该场景：入站 A 先写（占低位 id、时间早），入站 B 后写（占高位 id、时间
+// 晚）；聚合一次；只删 B 的访问日志（真实路径：InboundService.DelInbound →
+// AccessLogService.DeleteByInbound），A 的行原封不动、表没有清空；不写任何
+// 新数据，直接再聚合一次——A 的计数必须原样不变。位点以 (LastLogTime,
+// LastLogId) 为复合序、Time 为主序，天然处理好这个场景：A 剩下的那一行
+// 时间不晚于位点记录的 Time（它在删除前就已经被聚合过），Where 子句
+// 自然把它排除在外，不需要任何专门的判断逻辑。
 func TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31012, "甲")
@@ -295,23 +293,29 @@ func TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete(t *testing.T) {
 		t.Fatalf("DeleteByInbound: %v", err)
 	}
 
-	// 不写任何新数据，直接再聚合一次：Where(id > 位点) 读到空，触发自愈判断。
+	// 不写任何新数据，直接再聚合一次：Where 子句应该读到空（A 剩下的那一行
+	// Time 不晚于位点），无需任何特殊处理。
 	if _, err := svc.Aggregate(); err != nil {
 		t.Fatalf("第二次 Aggregate: %v", err)
 	}
 	after := sumByDomain(listDomainStats(t, model.GranularityHour))
 	if after["a.example"] != 1 {
-		t.Errorf("删除 B 后再次聚合，a.example 计数 = %d，期望仍为 1（自愈逻辑不应把 A 的历史行重新聚合一遍）", after["a.example"])
+		t.Errorf("删除 B 后再次聚合，a.example 计数 = %d，期望仍为 1（不应把 A 的历史行重新聚合一遍）", after["a.example"])
 	}
 }
 
-// 场景③（混合场景，旧判据完全抓不到的盲区）：删除入站腾出的高位 id 之后，
-// 又有新数据落回同一段 id 区间。此时 max(id) 可能被新数据重新顶回原位点
-// 附近甚至以上，仅比较 max(id) 与位点大小连"位点已失效"都判断不出来，新
-// 数据会被永久跳过且没有任何报错。这条测试复现它：入站 A 先写（占低位
-// id），入站 B 后写（占高位 id）；聚合一次；删除 B 的访问日志（不清空表）；
-// 新入站 C 紧接着写入，其记录复用了刚被删除、原本属于 B 的那几个 id；再聚合
-// 一次——C 的新数据必须被聚合到，且 A 的历史计数不能被重复累加。
+// 场景③（混合场景）：删除入站腾出的高位 id 之后，又有新数据落回同一段 id
+// 区间，且新数据量与被释放的 id 数相等——这条测试复现它：入站 A 先写（占
+// 低位 id），入站 B 后写（占高位 id）；聚合一次；删除 B 的访问日志（不清空
+// 表）；新入站 C 紧接着写入 3 条，其记录复用了刚被删除、原本属于 B 的那几个
+// id；再聚合一次——C 的新数据必须被聚合到，且 A 的历史计数不能被重复累加。
+// 位点以 Time 为主序之后，C 的新数据能不能被读到只取决于它的 Time 是否晚于
+// 位点，与它拿到的 id 是多少完全无关，因此天然正确。新数据量**超过**被
+// 释放的 id 数、导致新行的 id 反超旧位点这个更极端的子场景，见
+// TestAggregateHandlesNewDataExceedingReleasedIdRange——那条测试对应的是旧
+// 方案（按 id 判断是否需要自愈）完全检测不到、新数据永久丢失且无任何报错
+// 的真实缺陷；这里的场景③（新旧数量相等）用旧方案则表现为"自愈能检测到、
+// 但归零会导致 A 被重复计数"。两条测试合起来才是完整的覆盖。
 func TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31014, "甲")
@@ -374,14 +378,101 @@ func TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData(t *testing.T) {
 		t.Errorf("c.example 计数 = %d，期望 3（复用旧 id 区间的新数据必须被聚合，不能因为 id 没超过旧位点而被永久跳过）", after["c.example"])
 	}
 	if after["a.example"] != 1 {
-		t.Errorf("a.example 计数 = %d，期望仍为 1（不能因为自愈把删除前的历史行重新聚合一遍）", after["a.example"])
+		t.Errorf("a.example 计数 = %d，期望仍为 1（不能把删除前的历史行重新聚合一遍）", after["a.example"])
+	}
+}
+
+// 缺陷场景（前三轮实现全部漏掉的格子）：删掉高位 id 之后，新数据量**超过**
+// 被释放的 id 数，导致新行的 id 反超旧位点。旧方案（不论是"空批次时归零"
+// 还是"空批次时对齐到 max(id)"）都是靠 Where(id > 位点) 读到空批次才触发
+// 自愈判断的；这里新行的 id 直接越过了旧位点，Where(id > 位点) 天然读到
+// 非空结果，自愈分支根本不会被触发——那些 id 落在 (被释放前的 max(id),
+// 旧位点] 区间内的新数据会被永久跳过，且没有任何日志、任何报错。
+//
+// 位点以 Time 为主序之后，这个格子天然不成立：读取条件不再包含任何形式的
+// "id > 位点"比较，新数据能不能被读到只取决于它的 Time 是否晚于位点。
+func TestAggregateHandlesNewDataExceedingReleasedIdRange(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31018, "甲")
+	other := mkTrafficInbound(t, 31019, "乙")
+	third := mkTrafficInbound(t, 31020, "丙")
+	tA := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	tB := tA.Add(time.Minute)
+	tD := tB.Add(time.Hour)
+
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: tA, SourceIP: "1.2.3.4", Network: "tcp", Target: "a.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store A: %v", err)
+	}
+	// B 写 3 条，占用紧接着 A 之后的 3 个 id。
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: tB, SourceIP: "5.6.7.8", Network: "tcp", Target: "b.example:443", Inbound: other.Tag, Route: "direct", Accepted: true},
+		{Time: tB, SourceIP: "5.6.7.8", Network: "tcp", Target: "b.example:443", Inbound: other.Tag, Route: "direct", Accepted: true},
+		{Time: tB, SourceIP: "5.6.7.8", Network: "tcp", Target: "b.example:443", Inbound: other.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store B: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	if _, err := svc.Aggregate(); err != nil {
+		t.Fatalf("第一次 Aggregate: %v", err)
+	}
+	sumByDomain := func(rows []model.DomainStat) map[string]int64 {
+		m := make(map[string]int64, len(rows))
+		for _, r := range rows {
+			m[r.Domain] += r.Count
+		}
+		return m
+	}
+	before := sumByDomain(listDomainStats(t, model.GranularityHour))
+	if before["a.example"] != 1 || before["b.example"] != 3 {
+		t.Fatalf("第一次聚合后 = %+v，期望 a.example=1 b.example=3", before)
+	}
+
+	// 删除 B 的 3 条，腾出 3 个 id（表不清空，A 的行原封不动）。
+	if err := (&AccessLogService{}).DeleteByInbound(other.Id); err != nil {
+		t.Fatalf("DeleteByInbound: %v", err)
+	}
+
+	// 新入站 D 紧接着写入 5 条——比被释放的 3 个 id 多，前 3 条复用 B 空出
+	// 的 id，后 2 条的 id 会反超旧位点（旧位点 = A 的 1 条 + B 的 3 条 = 4；
+	// D 的 5 条会拿到 id 2~6，其中 5、6 超过了旧位点 4）。这正是旧方案
+	// （仅靠 id > 位点 判断要不要触发自愈）检测不到的那个格子。
+	entries := make([]accesslog.Entry, 0, 5)
+	for i := 0; i < 5; i++ {
+		entries = append(entries, accesslog.Entry{
+			Time: tD, SourceIP: "9.9.9.9", Network: "tcp", Target: "d.example:443",
+			Inbound: third.Tag, Route: "direct", Accepted: true,
+		})
+	}
+	if _, err := (&AccessLogService{}).Store(entries); err != nil {
+		t.Fatalf("Store D: %v", err)
+	}
+	var maxId, releasedTop int64
+	if err := database.GetAccessLogDB().Model(&model.AccessLog{}).Select("COALESCE(MAX(id), 0)").Scan(&maxId).Error; err != nil {
+		t.Fatal(err)
+	}
+	releasedTop = 4 // 旧位点：A(1) + B(2,3,4) 里最大的那个
+	if maxId <= releasedTop {
+		t.Fatalf("测试前提不成立：D 写入后 max(id)=%d，应严格大于旧位点 %d 才能触发缺陷场景", maxId, releasedTop)
+	}
+
+	if _, err := svc.Aggregate(); err != nil {
+		t.Fatalf("第二次 Aggregate: %v", err)
+	}
+	after := sumByDomain(listDomainStats(t, model.GranularityHour))
+	if after["d.example"] != 5 {
+		t.Errorf("d.example 计数 = %d，期望 5（新行的 id 反超旧位点，也必须一条不少地被聚合到）", after["d.example"])
+	}
+	if after["a.example"] != 1 {
+		t.Errorf("a.example 计数 = %d，期望仍为 1（不能把删除前的历史行重新聚合一遍）", after["a.example"])
 	}
 }
 
 // 边界①：首次运行、access_log 完全为空。cursor 与 LastLogTime 都是零值，
-// Where(id > 0) 直接读到空，落进自愈分支；此时 time > 0 在空表上同样查不到
-// 任何行，minId=0，正常结束。这条测试钉住这个边界不 panic、不误报警告、
-// 也不写出任何脏位点——不需要任何特判，但值得有一条测试守着。
+// Where(time > 0 OR (time = 0 AND id > 0)) 在空表上查不到任何行，正常
+// 结束，不需要任何特判。这条测试钉住这个边界不 panic、不写出任何脏位点。
 func TestAggregateNoOpOnEmptyAccessLog(t *testing.T) {
 	setupDomainStatTest(t)
 	n, err := (&DomainStatService{}).Aggregate()
@@ -396,11 +487,18 @@ func TestAggregateNoOpOnEmptyAccessLog(t *testing.T) {
 	}
 }
 
-// 边界②：AutoMigrate 给旧位点行加 LastLogTime 列后的状态——LastLogId 已经是
-// 一个真实的历史位点，LastLogTime 却是零值（列刚加上，这一行从未跑过带新
-// 判据的聚合）。若不特判，Where(time > 0) 会命中全表，把这个本来有效的位点
-// 误判成失效并回退到 0，导致早已聚合过的历史数据被重新聚合一遍、计数翻倍。
-func TestAggregateTreatsMigratedZeroLastLogTimeAsValid(t *testing.T) {
+// 边界②（迁移）：AutoMigrate 给旧位点行加 LastLogTime 列后的状态——
+// LastLogId 已经是一个真实的历史位点，LastLogTime 却是零值（列刚加上，这
+// 一行从未跑过带新判据的聚合）。若不处理，Where(time > 0) 会命中全表，把
+// 升级前已经聚合过的历史数据重新聚合一遍、计数翻倍——这是"重复计入"，比
+// "漏一段历史"严重得多。
+//
+// 处理方式是"从现在开始，不补算历史"：检测到这个组合时，把位点对齐到当前
+// access_log 里 (time, id) 最大的那一行，而不是简单地"当作有效、什么都不
+// 做"（那样虽然这次调用不会出错，但位点仍然停留在缺 Time 的状态，st.
+// LastLogTime 依旧是 0，下一次调用还要再检测一遍，且一旦后续代码路径改变
+// 判断顺序就可能重新暴露"time > 0 命中全表"这个洞——不如直接把它修好）。
+func TestAggregateMigrationAlignsToLatestExistingRowWithoutReaggregating(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31017, "甲")
 	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
@@ -425,16 +523,225 @@ func TestAggregateTreatsMigratedZeroLastLogTimeAsValid(t *testing.T) {
 		t.Fatalf("写迁移后的旧位点: %v", err)
 	}
 
-	n, err := (&DomainStatService{}).Aggregate()
+	svc := &DomainStatService{}
+	n, err := svc.Aggregate()
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("消费了 %d 条，期望 0（位点应被当作仍然有效，不触发自愈）", n)
+		t.Errorf("消费了 %d 条，期望 0（升级前的历史不应被重新聚合）", n)
 	}
 	hours := listDomainStats(t, model.GranularityHour)
 	if len(hours) != 1 || hours[0].Count != 2 {
-		t.Errorf("聚合后 = %+v，期望恰好一行 old.example/2（不应被自愈逻辑重新聚合一遍）", hours)
+		t.Errorf("聚合后 = %+v，期望恰好一行 old.example/2（不应被重新聚合一遍）", hours)
+	}
+
+	// 位点必须被真正对齐、往前推进，不能只是"这次调用没出错"：写一条更晚
+	// 的新数据，验证下一次 Aggregate 能正常接上它，证明修复后的位点是可用
+	// 的，不是每次调用都要重新检测这个迁移分支。
+	later := at.Add(time.Hour)
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: later, SourceIP: "1.2.3.4", Network: "tcp", Target: "new.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（新数据）: %v", err)
+	}
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第二次 Aggregate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("第二次消费了 %d 条，期望 1（迁移修复后的位点应能正常接上新数据）", n)
+	}
+	counts := make(map[string]int64)
+	for _, h := range listDomainStats(t, model.GranularityHour) {
+		counts[h.Domain] += h.Count
+	}
+	if counts["old.example"] != 2 {
+		t.Errorf("old.example 计数 = %d，期望仍为 2", counts["old.example"])
+	}
+	if counts["new.example"] != 1 {
+		t.Errorf("new.example 计数 = %d，期望 1", counts["new.example"])
+	}
+}
+
+// 边界③（表当前为空时的迁移）：LastLogTime==0 且 LastLogId>0，但此刻
+// access_log 恰好是空的（比如迁移前的历史后来又被保留期清理掉了）。这时
+// "对齐到当前最新一行"取不到任何行，退化成对齐到 (0, 0)——等价于一次全新
+// 安装，之后任何新数据的 Time 都大于 0，会被正常读到，不需要特殊处理。
+func TestAggregateMigrationWithEmptyAccessLogResetsCleanly(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31021, "甲")
+	tdb := database.GetTrafficDB()
+	// 只写迁移后的脏位点，access_log 里什么都不写——模拟历史数据后来被
+	// 保留期清理掉、只剩一个悬空位点的情形。
+	if err := tdb.Create(&model.DomainStatCursor{Id: 1, LastLogId: 999, LastLogTime: 0}).Error; err != nil {
+		t.Fatalf("写迁移后的旧位点: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	n, err := svc.Aggregate()
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("消费了 %d 条，期望 0（access_log 为空，无可聚合）", n)
+	}
+
+	// 之后正常写入的新数据必须能被读到，证明位点被正确重置为 (0, 0) 而不是
+	// 停留在无法再被任何后续数据超越的脏值上。
+	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: at, SourceIP: "1.2.3.4", Network: "tcp", Target: "fresh.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第二次 Aggregate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("第二次消费了 %d 条，期望 1", n)
+	}
+}
+
+// 时钟回拨：AccessLog.Time 是 xray 写日志行时的系统墙钟，NTP 步进、DST
+// 秋季回拨（每年一次）都可能让它在同一批甚至前后两批之间倒退。这条测试
+// 验证残留取舍成立的两个方向：①同一批内 Time 非单调也不会导致任何行被
+// 重复计数；②真的发生跳过时（后写入的一行 Time 反而更早），后果是这一行
+// 永久不被计入（榜单少一段数据），而不是任何形式的重复计数——方向落在
+// 安全侧，这是本项目一贯的取舍（"宁可漏读也不能重复计入"）。
+func TestAggregateClockRollbackSkipsRatherThanDoubleCounts(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31022, "甲")
+	tLater := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	tEarlier := tLater.Add(-time.Hour) // 模拟回拨前后的两个读数
+
+	// 先写一条"较晚"时间的记录（id 更小），再写一条"较早"时间的记录
+	// （id 更大）——id 恒定递增反映的是插入顺序，与 Time 的先后无关，这正
+	// 是时钟回拨会制造出的现象：插入顺序在后的一行，Time 反而更早。
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: tLater, SourceIP: "1.2.3.4", Network: "tcp", Target: "late.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（较晚时间，较小 id）: %v", err)
+	}
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: tEarlier, SourceIP: "1.2.3.4", Network: "tcp", Target: "early.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（较早时间，较大 id，模拟回拨）: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	// 两条记录在同一批里被一起读到（远小于 domainStatBatchSize），
+	// ORDER BY time asc, id asc 会把 early.example 排在 late.example 前面，
+	// 但两条都在这一批内，聚合时不区分顺序，两个域名都应该被正确计入恰好
+	// 一次。
+	n, err := svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第一次 Aggregate: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("第一次消费了 %d 条，期望 2", n)
+	}
+	counts := func() map[string]int64 {
+		m := make(map[string]int64)
+		for _, h := range listDomainStats(t, model.GranularityHour) {
+			m[h.Domain] += h.Count
+		}
+		return m
+	}
+	got := counts()
+	if got["late.example"] != 1 || got["early.example"] != 1 {
+		t.Fatalf("第一次聚合后 = %+v，期望 late.example=1 early.example=1（批内乱序不应导致任何一条被漏记或重复）", got)
+	}
+
+	// 幂等性：位点应该已经推进到这一批里 (time, id) 复合序最大的那一行
+	// （late.example，因为它的 Time 更晚），再跑一次不应该重复计入任何一条。
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第二次 Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("第二次消费了 %d 条，期望 0（位点应已推进，不应重复读取）", n)
+	}
+
+	// 现在模拟"位点已经推进之后，又有一条 Time 更早的记录姗姗来迟"——
+	// 这是残留取舍要覆盖的情形：这条记录会被永久跳过，而不是被重复计入
+	// 任何域名。
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: tEarlier, SourceIP: "1.2.3.4", Network: "tcp", Target: "missed.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（位点推进后姗姗来迟的旧时间记录）: %v", err)
+	}
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第三次 Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("第三次消费了 %d 条，期望 0（这条记录的 Time 早于位点，应被跳过而不是读到）", n)
+	}
+	got = counts()
+	if got["missed.example"] != 0 {
+		t.Errorf("missed.example 计数 = %d，期望 0（应被永久跳过，不应出现在榜单里）", got["missed.example"])
+	}
+	// 最关键的断言：跳过绝不能表现成任何已有域名被重复计数。
+	if got["late.example"] != 1 || got["early.example"] != 1 {
+		t.Errorf("既有域名计数变成了 %+v，期望仍是 late.example=1 early.example=1（跳过不能以任何形式表现成重复计数）", got)
+	}
+}
+
+// 批次截断点恰好落在同一毫秒的多条记录中间：domainStatBatchSize 一轮最多读
+// 20000 行，这里故意写 20500 条完全同一毫秒的记录，逼第一轮读到的 20000 条
+// 里最后一条与第 20001 条共享同一个 Time 值，位点的 (time, id) 尾数只能靠
+// id 区分。这条测试验证这种情况下不会漏读也不会重读——原理与标准的 keyset
+// 分页（seek method）一致：位点是 (Time, Id) 复合序，Where 子句严格排除
+// 「<= 位点」的行，只要 id 在同一毫秒内保持唯一，续轮查询就能精确从截断点
+// 后一条继续，不依赖 batch 是否恰好落在一个新毫秒的开头。
+//
+// 这条测试比较慢（写 20500 行、跑多轮聚合），但仍在几百毫秒量级，作为正式
+// 回归测试保留是划算的——这个格子在设计讨论里被专门点名"要单独看"。
+func TestAggregateHandlesBatchBoundaryMidMillisecond(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31023, "甲")
+	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+
+	const n = domainStatBatchSize + 500
+	entries := make([]accesslog.Entry, 0, n)
+	for i := 0; i < n; i++ {
+		entries = append(entries, accesslog.Entry{
+			Time: at, SourceIP: "1.2.3.4", Network: "tcp",
+			Target:  fmt.Sprintf("d%d.example:443", i),
+			Inbound: in.Tag, Route: "direct", Accepted: true,
+		})
+	}
+	if _, err := (&AccessLogService{}).Store(entries); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	total := 0
+	// domainStatMaxRounds=20 轮足够消化 20500 条（两轮：20000 + 500），这里
+	// 多留几轮余量，读到 0 就提前退出。
+	for i := 0; i < 5; i++ {
+		got, err := svc.Aggregate()
+		if err != nil {
+			t.Fatalf("Aggregate 第 %d 次: %v", i, err)
+		}
+		total += got
+		if got == 0 {
+			break
+		}
+	}
+	if total != n {
+		t.Fatalf("总共消费了 %d 条，期望 %d（跨批次边界不能漏读）", total, n)
+	}
+	rows := listDomainStats(t, model.GranularityHour)
+	if len(rows) != n {
+		t.Fatalf("domain_stat 行数 = %d，期望 %d 个不同域名各一行", len(rows), n)
+	}
+	for _, r := range rows {
+		if r.Count != 1 {
+			t.Fatalf("域名 %s 计数 = %d，期望 1（不能因跨批次边界被重复计入）", r.Domain, r.Count)
+		}
 	}
 }
 

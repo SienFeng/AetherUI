@@ -174,65 +174,109 @@ type DomainStatCursor struct {
 端口、证书路径一起遭殃。一个纯内部的聚合位点不值得付这个代价——与
 `2026-09-05-panel-version-update-design.md` 决定「版本缓存不落库」是同一个判断。
 
-**位点主体用 id 而不是时间戳。** `AccessLogService.Query` 已经依赖 `id desc` 保证翻页稳定（同一毫秒内多条记录
-靠 id 定序），`Where("id > 位点")` 也比按时间窗重算简单直接。
+**位点是 `(LastLogTime, LastLogId)` 的复合序，`LastLogTime` 是主序，`LastLogId` 只用来打破
+同一毫秒内多条记录的并列。** 这个设计经过了三轮被真实反例推翻的迭代，记录下来是为了不要在
+将来重新犯同一类错误：
 
-**但光有 id 不够——`access_log` 的自增 id 是可以被复用的 rowid，不是真正单调的序列。**
-这是本节最早的版本里被证伪的一条前提（当时写的是「id 单调递增，位点只会补算不会跳过」），
-记录下来是为了不要在将来重新犯同一个错误：GORM 的 sqlite 驱动对 `primaryKey;autoIncrement`
-生成的是裸 `integer`（rowid 别名），**没有** `AUTOINCREMENT`，新行的 id 恒为**当前表内
-`max(rowid) + 1`**。`access_log` 的保留期清理（`AccessLogCleanupJob`，不看访问日志开关）、
-`AccessLogService.DeleteByInbound`（接在 `InboundService.DelInbound`）、`PruneOrphans` 都会删行；
-只要被删掉的行占据了当时最高的那批 id（哪怕只是部分删除、表并未清空），后续新写入的行就会
-复用比位点更小的 id。此时单靠「当前 id 集合 + 旧位点」无法分辨一行现存的低位 id 记录，
-到底是**删除前就已经聚合过的历史行**（重读会静默虚高）还是**删除后落进同一 id 区间的全新
-数据**（跳过会静默漏数）——这两种情况甚至可能在同一次位点失效里同时出现（先删掉高位 id，
-又有新数据写回同一区间），那种混合场景下连"位点已经失效"这件事本身，光比较 `max(id)`
-与位点都判断不出来，因为新数据可能又把 `max(id)` 顶回位点以上。
+1. **v1「id 单调递增，位点只会补算不会跳过」**——假前提。`access_log` 的自增 id 是可以被
+   复用的 rowid，不是真正单调的序列：GORM 的 sqlite 驱动对 `primaryKey;autoIncrement`
+   生成的是裸 `integer`（rowid 别名），**没有** `AUTOINCREMENT`，新行的 id 恒为**当前表内
+   `max(rowid) + 1`**。`access_log` 的保留期清理（`AccessLogCleanupJob`，不看访问日志
+   开关）、`AccessLogService.DeleteByInbound`（接在 `InboundService.DelInbound`）、
+   `PruneOrphans` 都会删行，只要被删掉的行占据了当时最高的那批 id（哪怕只是部分删除、
+   表并未清空），后续新写入的行就会复用比位点更小的 id，`Where(id > 位点)` 从此再也读不到
+   这批新数据——**位点失效不一定表现为空批次**，只要新增行数没有超过被释放的 id 数，
+   `id > 位点` 依然会读到非空结果（哪怕结果里混着一批本该被排除的新数据也不例外），
+   这一点直到 v3 才被真正证伪（见下方"缺陷"表）。
+2. **v2「空批次时把位点归零重来」**——修了 v1 的停摆问题，但引入了新的错误：部分删除场景
+   下，`id > 位点` 读到空批次，归零后下一轮会把删除前就已经聚合过的、另一个未被删除的入站
+   的历史行重新读一遍，产生静默的虚高计数。
+3. **v3「空批次时对齐到当前 `max(id)`」**——修了 v2 的虚高问题（不再归零、只对齐到当前
+   实际存在的最大 id），但被证明在**这一版本最初要解决的场景**（整表清空后有新数据落地）
+   下同样会出错：自愈检测发生的时刻，新数据往往已经落地在表里，此时查到的 `max(id)`
+   已经包含了这条从未被聚合过的新数据，对齐到它等于直接把这条数据标记成"已处理"，
+   永久跳过、不留任何痕迹。用两组互相矛盾的回归测试交叉验证过：`0` 和 `max(id)` 这两个
+   候选值，没有一个能同时满足"整表清空 + 有新数据"与"部分删除 + 无新数据"这两类场景。
+   根因是 `access_log` 的自增 id 一旦被复用，同一个 id 值在不同时刻可能对应完全不同的
+   逻辑行，仅凭"当前 id 集合 + 旧位点"这两个都基于 id 的信息，无法可靠区分。
 
-**`LastLogTime` 就是为堵上这个盲区而加的。** `AccessLog.Time` 是写入时刻，只会随时间推进，
-不会因为删除而倒退或复用；`Aggregate` 每次成功聚合一批之后，把这批里最后一条记录（`logs` 按
-`id asc` 读出，最后一条就是这批的最大 id）的 `Time` 和 `LastLogId` 一起落库。自愈时不再问
-"当前 `max(id)` 比位点小吗"，改问一个 id 回答不了的问题——**"库里还有没有比我上次聚合的
-那一刻更晚的记录，却没被 `id > 位点` 读到？"**：
+**v4（当前版本）不再试图找到"正确的 id 候选值"，而是换掉判据本身**：`AccessLog.Time` 是
+写入时刻，删除任何行都不会改变其余行的 `Time`，因此以 `Time` 为位点主序之后，"id 是否
+失效"这个问题不再存在。查询条件从 `Where(id > 位点)` 换成：
 
 ```sql
-SELECT COALESCE(MIN(id), 0) FROM access_logs WHERE time > ?   -- LastLogTime
+WHERE time > ? OR (time = ? AND id > ?)   -- ?, ?, ? = LastLogTime, LastLogTime, LastLogId
+ORDER BY time ASC, id ASC
+LIMIT ?
 ```
 
-- 返回 `min_id > 0`：确实存在更晚的记录没被读到，说明 id 已经不再单调，把位点回退到
-  `min_id - 1`，在本次调用内 `continue` 重试。
-- 返回 `0`：没有更晚的记录，位点仍然有效，正常返回，**不动位点**——这一条对「部分删除、
-  之后没有新数据」这种场景至关重要：删除前已经聚合过的那些历史行，它们的 `Time` 不会晚于
-  `LastLogTime`，不会被误判成"更晚的记录"，从而避免被重新聚合一遍。
+推进逻辑也随之简化：本批（已按 `time asc, id asc` 排序）**最后一条**的 `(Time, Id)` 就是
+新位点——排序键与位点字段完全对应，不再需要额外遍历取 max，也不再需要任何自愈或回退逻辑：
+新行不管实际拿到的 id 是多少，只要写入时刻在位点之后就会被读到。`id` 退化成只在同一毫秒内
+排序用的次要字段（同一毫秒内 id 复用的概率可以忽略）。
 
-四个场景的推演（回归测试逐条对应）：
+四个场景在 v4 下全部自然成立，不需要任何专门代码路径处理：
 
-| 场景 | 现象 | 新判据下的结果 |
+| 场景 | 现象 | v4 下的结果 |
 |---|---|---|
-| ① 整表清空后有新数据落地 | 位点 3，新行 id=1 | `time > t3` 命中新行，位点回退到 0，读到并聚合 ✓（`TestAggregateRecoversAfterAccessLogIdsReset`） |
-| ② 部分删除（删掉高位 id），之后无新数据 | 位点 6，剩 1-3 | `time > t6` 无匹配，位点不动，不重读 ✓（`TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete`） |
-| ③ 混合：删掉高位 id 后又有新数据复用同一段 id 区间 | 位点 6，删后又写出 4/5/6，`max(id)` 被顶回 6 | 光比 `max(id)` 与位点**连触发都不会触发**，新数据永久跳过；`time > t6` 仍能命中新行（它们的 Time 更晚），位点回退到 3，正确读到 4/5/6 ✓（`TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData`） |
-| ④ 正常空闲，无新数据 | 位点 6，无变化 | `time > t6` 无匹配，不触发 ✓ |
+| ① 整表清空后有新数据落地 | 位点 (t3, 3)，新行 time=t_after > t3、id=1（复用） | `time > t3` 直接命中，与 id 无关，正确聚合（`TestAggregateRecoversAfterAccessLogIdsReset`） |
+| ② 部分删除（删掉高位 id），之后无新数据 | 位点 (t6, 6)，剩下的行 time ≤ t6 | 剩下的行不满足 `time > t6`，也不满足 `time = t6 且 id > 6`，不重读（`TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete`） |
+| ③ 混合：删掉高位 id 后又有新数据复用同一段 id 区间（数量相等） | 位点 (t6, 6)，新数据 time=t_new > t6，id 复用为 4/5/6 | `time > t6` 直接命中，与新数据的 id 是否"反超"位点无关（`TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData`） |
+| ③′ 混合，且新数据量**超过**被释放的 id 数（新行的 id 反超旧位点） | 位点 (t6, 6)，新数据 5 条 time=t_new > t6，id 复用为 2~6，其中 5、6 反超了旧位点 4（B 实际只释放了 3 个 id） | v1~v3（凡是靠比较 id 判断是否需要处理）**完全检测不到**这个场景：`id > 6` 天然非空（因为 id=6 存在于新数据里），自愈分支根本不会触发，(2,3,4] 区间的新数据永久跳过、无任何日志。v4 与 id 无关，全部正确聚合（`TestAggregateHandlesNewDataExceedingReleasedIdRange`） |
 
-场景③是旧判据（不论是"归零"还是"对齐到 `max(id)`"）完全抓不到的盲区，这也是为什么必须换掉
-判据本身、而不是在同一个判据里换一个候选值——`0` 和 `max(id)` 两个值都无法同时满足场景①
-与场景②，这一点在实现过程中被两组互相矛盾的测试结果实证过。
+场景③′是本设计从 v1 到 v3 全部漏掉的格子——前三版都只在"空批次"这个信号上做文章，而这个
+场景根本不会产生空批次。这也是为什么 v4 换掉的是判据本身，而不是在同一个判据里换一个候选
+值：只要还在比较任何形式的 id，就无法同时满足场景②与场景③′。
 
-**两个边界**：
+**残留代价（刻意接受，不做补偿）：系统时钟回拨。** `AccessLog.Time` 是 xray 写日志行时的
+系统墙钟，NTP 步进、DST 秋季回拨（每年一次）都可能让它在同一批、甚至前后两批之间倒退。
+回拨期间写入的日志，其 `Time` 小于当时的位点时间，会被这个查询条件永久跳过。后果是**榜单
+少一段数据，不会重复计数**——方向落在安全侧，与本项目其它地方"宁可漏读也不能重复计入"的
+取舍一致。同一批内 Time 非单调（比如 id 更小的行反而 Time 更晚）不会导致任何重复计数，
+因为同一批内的行不区分顺序、逐条计入一次；只有当"更早时刻的记录"是在位点已经推进到"更晚
+时刻"**之后**才姗姗来迟时，才会被跳过。回归测试见
+`TestAggregateClockRollbackSkipsRatherThanDoubleCounts`。
 
-- **首次运行**（`LastLogId=0`、`LastLogTime=0`）：若 `access_log` 已有数据，`Where(id > 0)`
-  直接读到，走不到自愈分支；若为空，`time > 0` 在空表上同样查不到行，`min_id=0`，正常结束。
-  不需要特判，回归测试见 `TestAggregateNoOpOnEmptyAccessLog`。
-- **`LastLogTime == 0` 但 `LastLogId > 0`**：这是 `AutoMigrate` 给已存在的位点行加
-  `LastLogTime` 列之后的状态——这一行从未跑过带新判据的聚合，列刚被加上时是零值。
-  若不特判，`time > 0` 会命中全表，把这个本来有效的位点误判成失效、回退到 0，导致早已
-  聚合过的历史数据被重新聚合一遍。加一条保护：这种组合下当作位点仍然有效，直接返回，不查
-  `time`、不动位点。正常运行时 `LastLogTime` 恒大于 0（真实的 Unix 毫秒时间戳），这个保护
-  不会误伤。回归测试见 `TestAggregateTreatsMigratedZeroLastLogTimeAsValid`。
+**批次截断（`domainStatBatchSize`）与同一毫秒内的多条记录：** 若某一轮读到的 20000 条恰好
+在某个毫秒的中间被截断，下一轮的 `Where(time = 位点时间 AND id > 位点id)` 能精确从截断点
+后一条继续——这就是标准的 keyset 分页（seek method），`id` 只要在同一毫秒内保持唯一
+（access_log 主键本身保证这一点），跨批次边界既不会漏读也不会重读。回归测试见
+`TestAggregateHandlesBatchBoundaryMidMillisecond`（故意写 20500 条同一毫秒的记录逼出
+这个边界）。
 
-`saveDomainStatCursor` 现在必须同时写 `LastLogId` 与 `LastLogTime`：只推进 id 不更新 Time，
-会让下一次自愈判断用一个过时的时间边界去比较，把本该判定为"仍然有效"的位点误判成失效。
+**迁移：** `LastLogTime` 是这一版本新加的列，`AutoMigrate` 给已存在的位点行加这一列时，
+该列是零值，但 `LastLogId` 已经是一个真实的历史位点。若不处理，`time > 0` 会命中全表，
+把升级前已经聚合过的历史数据重新聚合一遍、计数翻倍——这是"重复计入"，比"漏一段历史"
+严重得多。处理方式是"从现在开始，不补算历史"：`Aggregate` 检测到「`LastLogTime == 0` 且
+`LastLogId > 0`」这个只可能来自升级的组合时，把位点对齐到当前 `access_log` 里 `(time, id)`
+最大的那一行（表当前为空就对齐到 `(0, 0)`，等同一次全新安装），跳过升级前的全部积压，
+并记一条 `logger.Warning` 说明发生了什么。宁可欠一段历史数据，也不能让 `time > 0` 命中
+全表、把升级前的数据重复计入。回归测试见
+`TestAggregateMigrationAlignsToLatestExistingRowWithoutReaggregating`（表非空）与
+`TestAggregateMigrationWithEmptyAccessLogResetsCleanly`（表恰好为空）。
+
+`saveDomainStatCursor` 必须同时写 `LastLogId` 与 `LastLogTime`：只推进其中一个，会让下一次
+查询的 `(time, id)` 复合序出现缺口或矛盾。
+
+**已知的性能代价，尚未解决：** `EXPLAIN QUERY PLAN` 实测（`AccessLog.Time` 有单列索引
+`idx_access_logs_time`）显示，`WHERE time > ? OR (time = ? AND id > ?)` 这个 OR 条件让
+SQLite 放弃了对 `time > ?` 的定位式 `SEARCH`，退化成 `SCAN TABLE access_logs USING INDEX
+idx_access_logs_time`——按索引顺序**从头**扫描、逐行用 WHERE 过滤，而不是直接跳到位点
+附近开始读。对照组：单独的 `WHERE time > ?`（没有 OR 那半句）能拿到
+`SEARCH ... (time>?)`；改动前的 `WHERE id > ?` 能拿到
+`SEARCH ... USING INTEGER PRIMARY KEY (rowid>?)`。也就是说，新方案在**每一次**
+`Aggregate` 调用里，代价都从"扫描新增的那一小段"变成了"扫描位点之前的全部历史"——
+`accessLogRetentionDays` 上限 365 天，对高流量的面板这个差距会持续放大。
+
+实测过两种能恢复 `SEARCH`（定位式访问）的写法：单独加一个 `(time, id)` 复合索引**不能**
+解决问题（OR 条件本身让查询规划器放弃了定位式访问，索引换了也一样，仍是 `SCAN`）；把 OR
+拆成 `UNION ALL` 两个子查询（`time > ?` 与 `time = ? AND id > ?`，各自都能用索引做
+`SEARCH`）**可以**解决，`EXPLAIN QUERY PLAN` 显示两个分支分别是
+`SEARCH ... USING INDEX idx_access_logs_time (time>?)` 与
+`SEARCH ... USING INDEX idx_access_logs_time_id (time=? AND id>?)`，外层是
+`MERGE (UNION ALL)`。这个方案需要新增一个 `(time, id)` 复合索引，且要把 GORM 里那句
+`Where` 换成一条手写的 `UNION ALL` 查询——比当前实现复杂，本轮未采纳，留给后续视线上
+性能压力再决定是否切换。
 
 ## 5. 第一期：Top 访问次数榜
 
@@ -258,11 +302,14 @@ SELECT COALESCE(MIN(id), 0) FROM access_logs WHERE time > ?   -- LastLogTime
 
 一轮的动作：
 
-1. 读位点 `LastLogId`。
-2. 从访问日志库取 `id > LastLogId` 的行，按 id 升序，单轮最多 20000 行，防止一次把大量数据读进内存。
+1. 读位点 `(LastLogTime, LastLogId)`。
+2. 从访问日志库取 `time > LastLogTime OR (time = LastLogTime AND id > LastLogId)` 的行，
+   按 `time asc, id asc` 排序，单轮最多 20000 行，防止一次把大量数据读进内存（§4.3 有
+   这个位点为什么以 time 为主序、以及为什么不能只用 id 的完整推演）。
 3. 逐行归并域名，按 `(inbound_id, domain, hour_bucket)` 与 `(inbound_id, domain, day_bucket)` 在内存里累加。
 4. 用 upsert（`ON CONFLICT ... DO UPDATE SET count = count + excluded.count`）写回。
-5. 位点推进到本轮最大 id。**位点必须在写回成功之后才推进**，否则一次写失败会永久丢掉那一段。
+5. 位点推进到本轮最后一条（按 `time asc, id asc` 排序后的最后一条）的 `(Time, Id)`。
+   **位点必须在写回成功之后才推进**，否则一次写失败会永久丢掉那一段。
 6. 本轮读满 20000 行说明还有积压，**在同一次 `Run` 里继续下一轮**，直到某轮读不满或累计达到 20 轮
    （40 万行）为止。不这么做的话，首次启用时库里已有的几十万条积压在 10 分钟一轮、一轮两万行的节奏下
    要跑几个小时才追平，而这段时间里榜单是残缺的；20 轮的上限则防止单次 `Run` 长时间占住 CPU 与日志库。
@@ -480,7 +527,7 @@ POST /aui/inbound/topDomains/:id
 | 两期共用一张 `DomainStat` | 第一期不返工，第二期只补两列 |
 | 归并到注册域名（eTLD+1） | 契合管理员心智；一条 `domain:` 规则覆盖全部子域名 |
 | 位点存独立单行表，不进 settings | 新增设置项要改 5 处，漏一处整个保存配置接口失败 |
-| 位点用 access_log 的 id | 停机再久只是补算，不重复不跳过 |
+| 位点以 access_log 的 Time 为主序、id 只做同毫秒内排序 | 单靠 id 无法区分「已聚合的历史行」与「复用了同一 id 的新数据」（§4.3 完整推演），Time 不受行删除影响 |
 | 复用现有两个分时桶保留期设置 | 语义一致（都是分时桶），且避开新增设置项的代价 |
 | 计量 tag 内嵌域名，不用槽位序号 | 消掉槽位复用导致的归因错乱 |
 | 不生成无 domain 条件的兜底规则 | 会让 `ipRuleResolveDomain` 的第二遍规则永不发生，IP 规则静默失效 |
@@ -521,7 +568,9 @@ POST /aui/inbound/topDomains/:id
 第一期：
 
 - 域名归并的表驱动测试：普通域名、多级子域名、IP 字面量（v4/v6）、公共后缀本身（`com`）、空串。
-- 聚合的位点语义：写失败不推进位点；重复跑一轮不重复累加；停机后补算。
+- 聚合的位点语义：写失败不推进位点；重复跑一轮不重复累加；停机后补算；access_log 的 id
+  被删除/复用（整表清空、部分删除、部分删除后新数据反超旧位点、批次边界落在同一毫秒中间、
+  时钟回拨、AutoMigrate 迁移）等场景下不漏数也不重复计数，完整推演与回归测试对应关系见 §4.3。
 - 时区对齐：与 `TrafficBucket` 同一套断言。
 - 删除入站连带清理 + `PruneOrphans` 兜底（守 SQLite id 复用）。
 - 清理必须带 granularity（构造小时桶与日桶，断言清理小时桶后日桶还在）。

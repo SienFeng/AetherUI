@@ -70,67 +70,50 @@ func (s *DomainStatService) Aggregate() (int, error) {
 		if err != nil {
 			return total, err
 		}
+
+		// 迁移处理，只在每次 Aggregate 调用的第一轮检查一次：LastLogTime
+		// 是本次改动新加的列，AutoMigrate 给已存在的位点行加这一列时，
+		// LastLogId 已经是一段真实的历史位点，LastLogTime 却是零值。下面
+		// Where 子句一旦以 time > 0 去比较，会命中全表，把升级前已经聚合
+		// 过的全部历史重新聚合一遍、计数静默翻倍——这比"漏一段历史"严重
+		// 得多，所以处理方式是"从现在开始，不补算历史"：把位点直接对齐到
+		// 当前 access_log 里 (time, id) 最大的那一行（表当前为空就对齐到
+		// (0, 0)，等同全新安装），跳过升级前的全部积压，宁可欠一段数据
+		// 也不能重复计入。修正后 LastLogTime 恒大于 0（或连同 LastLogId
+		// 一起归零），这个分支往后不会再触发。
+		if round == 0 && cursor.LastLogTime == 0 && cursor.LastLogId > 0 {
+			var latest model.AccessLog
+			err := adb.Model(&model.AccessLog{}).
+				Order("time desc, id desc").
+				First(&latest).Error
+			if err != nil && err != gorm.ErrRecordNotFound {
+				return total, err
+			}
+			logger.Warningf("域名统计位点(id=%d)是升级前的旧位点、缺少写入时间，已对齐到当前最新的访问日志(time=%d, id=%d)——升级前的历史不再补算", cursor.LastLogId, latest.Time, latest.Id)
+			if err := saveDomainStatCursor(tdb, latest.Id, latest.Time); err != nil {
+				return total, err
+			}
+			cursor.LastLogId = latest.Id
+			cursor.LastLogTime = latest.Time
+		}
+
+		// 位点是 (LastLogTime, LastLogId) 的复合序，time 为主序、id 只用来
+		// 打破同一毫秒内的并列——理由见 DomainStatCursor 上方的注释：
+		// access_log 的自增 id 是可复用的 rowid，删除/清空都会让它倒退或
+		// 原地复用，而 time 是写入时刻，删除任何行都不会改变其余行的
+		// time，因此以 time 为主序之后，"id 是否失效"这件事不再存在，
+		// 不需要任何自愈或回退逻辑。
 		var logs []model.AccessLog
 		err = adb.Model(&model.AccessLog{}).
-			Where("id > ?", cursor.LastLogId).
-			Order("id asc").
+			Where("time > ? OR (time = ? AND id > ?)", cursor.LastLogTime, cursor.LastLogTime, cursor.LastLogId).
+			Order("time asc, id asc").
 			Limit(domainStatBatchSize).
 			Find(&logs).Error
 		if err != nil {
 			return total, err
 		}
 		if len(logs) == 0 {
-			// 空批次通常就是「已追平」，直接返回。但位点可能已经失效——
-			// access_log 的自增 id 是 GORM sqlite 驱动生成的裸 rowid 别名，
-			// 没有 AUTOINCREMENT，新行的 id 恒为「当前表内 max(rowid) + 1」；
-			// 删除入站（InboundService.DelInbound → AccessLogService.
-			// DeleteByInbound）、孤儿清理（PruneOrphans）、保留期清理都会
-			// 删行，一旦删掉的行恰好占据当时最高的那批 id（甚至表被整个
-			// 清空），后续新写入的行就会复用比位点更小的 id。
-			//
-			// 单靠"当前 id 集合 + 旧位点"区分不出这两种情况：一行 id 较小
-			// 的记录，可能是删除前就已经聚合过的历史行（不能重读，否则
-			// 静默虚高），也可能是删除/清空后落进同一 id 区间的全新数据
-			// （不能跳过，否则静默漏数）。且这两种情况可能在同一次位点
-			// 失效里同时出现（先删掉高位 id，又有新数据写回同一区间）——
-			// 光比较 max(id) 与位点，在这种混合场景下甚至连"位点已失效"
-			// 都判断不出来，因为新数据可能又把 max(id) 顶回位点以上。
-			//
-			// Time 不会有这个问题：它是写入时刻，只会随时间向前推进，不因
-			// 删除而倒退或复用。于是可以问一个 id 回答不了的问题——"库里
-			// 还有没有比我上次聚合的那一刻更晚的记录，却没被 id > 位点
-			// 读到？"：LastLogTime 是上次成功聚合的那一批里最后一条记录
-			// 的 Time；如果存在 Time > LastLogTime 的行，它一定是位点失效
-			// 之后才落地的新数据（不可能是旧数据，旧数据的 Time 不会超过
-			// 上次聚合时的最晚时刻），把位点回退到它前一个 id、在本轮内
-			// 重试即可正确接上，不必再关心这行数据当前的 id 是大是小。
-			//
-			// AutoMigrate 给旧位点行加这一列时，LastLogTime 会是零值——
-			// 若不特判，Where(time > 0) 会命中全表，把位点误判成失效并打回
-			// 一个远早于当前进度的位置，导致早已聚合过的历史数据被重新
-			// 聚合一遍。正常运行时 LastLogTime 恒大于 0（真实的 Unix 毫秒
-			// 时间戳），只有这种"列刚被加上、还没跑过一轮真实聚合"的位点
-			// 才会是 0 且 LastLogId 已经 > 0，这个组合足以识别出这个状态，
-			// 当作位点仍然有效处理。
-			if cursor.LastLogTime == 0 && cursor.LastLogId > 0 {
-				return total, nil
-			}
-			var minId int64
-			if err := adb.Model(&model.AccessLog{}).
-				Where("time > ?", cursor.LastLogTime).
-				Select("COALESCE(MIN(id), 0)").
-				Scan(&minId).Error; err != nil {
-				return total, err
-			}
-			if minId == 0 {
-				return total, nil
-			}
-			newCursor := minId - 1
-			logger.Warningf("域名统计位点(%d)已失效（库里存在比上次聚合更晚、却没被读到的记录），已回退到 %d 重新聚合", cursor.LastLogId, newCursor)
-			if err := saveDomainStatCursor(tdb, newCursor, cursor.LastLogTime); err != nil {
-				return total, err
-			}
-			continue
+			return total, nil
 		}
 
 		// 先在内存里按 (粒度, 入站, 域名, 桶) 聚合，再逐条 UPSERT。
@@ -142,12 +125,8 @@ func (s *DomainStatService) Aggregate() (int, error) {
 			start int64
 		}
 		counts := make(map[key]int64, len(logs))
-		maxId := cursor.LastLogId
 		for i := range logs {
 			row := &logs[i]
-			if row.Id > maxId {
-				maxId = row.Id
-			}
 			// inbound_id = 0 是写入时就没匹配上任何入站的记录（api 入站
 			// 就是这样）；已被删除的入站同样跳过——它的桶马上要被清掉。
 			if row.InboundId == 0 || !validId[row.InboundId] {
@@ -162,9 +141,12 @@ func (s *DomainStatService) Aggregate() (int, error) {
 			counts[key{model.GranularityHour, row.InboundId, dom, model.AlignHour(at, loc)}]++
 			counts[key{model.GranularityDay, row.InboundId, dom, model.AlignDay(at, loc)}]++
 		}
-		// logs 按 id asc 读出，最后一条就是 maxId 对应的那条——它的 Time
-		// 随位点一起落库，供下一次自愈判断使用。
-		maxTime := logs[len(logs)-1].Time
+		// logs 按 (time asc, id asc) 读出，最后一条天然就是这批里 (time, id)
+		// 复合序最大的那条——不需要再遍历一遍取 max，这也是新方案比旧方案
+		// （按 id asc 读出、却要把其中某一条的 Time 单独当 max 用）更可靠的
+		// 地方：排序键与位点字段完全对应，不存在"假设 Time 与 id 同序"这类
+		// 需要额外证明的前提。
+		last := logs[len(logs)-1]
 
 		// 整轮包进一个事务：GORM 的 SkipDefaultTransaction 默认为 false，
 		// 不包的话每条 UPSERT 自带一次 BEGIN/COMMIT，几百次提交对 SQLite
@@ -176,7 +158,7 @@ func (s *DomainStatService) Aggregate() (int, error) {
 					return err
 				}
 			}
-			return saveDomainStatCursor(tx, maxId, maxTime)
+			return saveDomainStatCursor(tx, last.Id, last.Time)
 		})
 		if err != nil {
 			return total, err
@@ -223,10 +205,10 @@ func loadDomainStatCursor(db *gorm.DB) (model.DomainStatCursor, error) {
 	return c, nil
 }
 
-// saveDomainStatCursor 把位点推进到 lastLogId，并同时记下这一条记录的
-// Time（lastLogTime）——自愈逻辑要靠它判断"位点是否失效"，见 Aggregate
-// 里的注释。两者必须一起写：只推 id 不更新 Time 会让自愈判据用一个过时的
-// 时间边界去比较，把本该判定为"仍然有效"的位点误判成失效。
+// saveDomainStatCursor 把位点推进到 (lastLogId, lastLogTime)。位点以
+// lastLogTime 为主序、lastLogId 只在同一毫秒内当次序用（见 Aggregate 里
+// 查询条件上方的注释），两者必须一起写：只推 id 不更新 time，或只推 time
+// 不更新 id，都会让下一次查询的 (time, id) 复合序出现缺口或矛盾。
 func saveDomainStatCursor(db *gorm.DB, lastLogId, lastLogTime int64) error {
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "id"}},

@@ -50,28 +50,40 @@ type DomainStat struct {
 // 会让整个保存配置接口失败，端口、证书路径一起遭殃。一个纯内部的位点不值得
 // 付这个代价。
 //
-// 位点主体用 access_log 的自增 id 而不是时间戳：AccessLogService.Query 本来
-// 就依赖 id 定序保证翻页稳定，Where("id > 位点") 也比按时间窗重算简单直接。
-// 但 id 不是自己就能说明一切——GORM 的 sqlite 驱动对 primaryKey;autoIncrement
-// 生成的是裸 rowid 别名，没有 AUTOINCREMENT，新行的 id 恒为「当前表内
-// max(rowid) + 1」：删除入站（AccessLogService.DeleteByInbound）、孤儿清理、
-// 保留期清理都会删行，一旦删掉的行占据了当时最高的那批 id，后续新写入的行
-// 就会复用比位点更小的 id，单靠 id 无法分辨一行现存的低位 id 记录，究竟是
-// 删除前就已经聚合过的历史行，还是删除后落进同一 id 区间的全新数据。
+// 位点是 (LastLogTime, LastLogId) 的复合序，**LastLogTime 是主序，LastLogId
+// 只用来打破同一毫秒内多条记录的并列**——这个顺序不能反。
 //
-// LastLogTime 就是为此而加的：记上次成功聚合那一批里最后一条记录的
-// AccessLog.Time（毫秒，同单位）。Time 是写入时刻，只会随时间推进，不因
-// 删除而倒退或复用，因此可以拿它问一个 id 回答不了的问题——「库里还有没有
-// 比我上次聚合的那一刻更晚的记录，却没被 id > 位点 读到？」——
-// DomainStatService.Aggregate 里的自愈逻辑正是靠这个判据检测位点是否失效
-// 并回退重新聚合，见该函数注释；只看 max(id) 与位点比较这条已经证明过是
-// 假前提（部分删除后又有新数据落回同一 id 区间的混合场景下，max(id) 可能
-// 又被顶回位点以上，连"位点已失效"都判断不出来）。
+// access_log 的自增 id 是可复用的 rowid：GORM 的 sqlite 驱动对
+// primaryKey;autoIncrement 生成的是裸 rowid 别名，没有 AUTOINCREMENT，新行的
+// id 恒为「当前表内 max(rowid) + 1」。删除入站（AccessLogService.
+// DeleteByInbound）、孤儿清理、保留期清理都会删行，一旦删掉的行占据了当时
+// 最高的那批 id（甚至表被整个清空），后续新写入的行就会复用比旧位点更小的
+// id——这意味着单靠 id 无法把它当成一个只增不减的序列来定位点：本项目在
+// 这条路上先后试过「id 单调递增」「失效必然表现为 id>位点 读到空批次、此时
+// 归零重来」「同样在空批次时对齐到 max(id)」三版实现，都被真实复现的反例
+// 推翻——最后一版的反例最关键：删除入站腾出高位 id 之后，如果之后一段时间
+// 内新写入的行数超过被释放的 id 数，新行的 id 会重新越过旧位点，
+// Where(id > 位点) 会直接读到非空批次，连「位点已经失效」这件事都不会被
+// 触发检测，这批新数据就此永久跳过且没有任何日志。
 //
-// AutoMigrate 给已存在的位点行加这一列时，LastLogTime 会是零值——自愈逻辑
-// 对「LastLogTime 为 0 但 LastLogId 已经 > 0」这个组合做了特判，当作位点
-// 仍然有效，否则会把这个从未跑过新判据的旧位点误判成失效、回退到 0 重新
-// 聚合已经聚合过的全部历史数据。
+// AccessLog.Time 则没有这个问题：它是写入时刻，删除任何行都不会改变其余
+// 行的 Time。以 Time 为位点主序之后，「id 是否失效」这个问题本身就不再
+// 存在——查询条件变成 Where(time > 位点时间 OR (time = 位点时间 AND
+// id > 位点id))，新行不管实际拿到的 id 是多少，只要写入时刻在位点之后就
+// 会被读到，不需要任何自愈或回退逻辑；LastLogId 退化成只在同一毫秒内排序
+// 用的次要字段（同一毫秒内 id 复用的概率可以忽略）。
+//
+// 残留代价（刻意接受，不做补偿）：系统时钟回拨（NTP 步进、DST 秋季回拨，
+// 每年一次）期间写入的日志，其 Time 小于当时的位点时间，会被这个查询条件
+// 永久跳过。后果是榜单少一段数据，方向是**漏数而不是重复计数**，落在安全
+// 侧——这与本文件其它地方「宁可漏读也不能重复计入」的取舍一致。
+//
+// 迁移：AutoMigrate 给已存在的位点行加 LastLogTime 这一列时，该列是零值，
+// 但 LastLogId 已经是一个真实的历史位点。DomainStatService.Aggregate 检测
+// 到「LastLogTime 为 0 且 LastLogId > 0」这个只可能来自升级的组合时，把位点
+// 对齐到当前 access_log 里 (time, id) 最大的那一行，跳过升级前的全部积压——
+// 宁可欠一段历史数据，也不能让 time > 0 命中全表、把升级前已经聚合过的
+// 数据重新聚合一遍。
 type DomainStatCursor struct {
 	Id          int `gorm:"primaryKey"`
 	LastLogId   int64
