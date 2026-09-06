@@ -5,87 +5,118 @@
              message="访问日志未开启"
              description="请到「面板设置 → 访问日志」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
     </a-alert>
-    <a-row :gutter="8" style="margin-bottom: 12px">
-        <a-col :span="8">
-            <a-input v-model.trim="accessLogModal.ip" placeholder="按来源 IP 过滤" allow-clear
-                     @pressEnter="accessLogModal.search()"></a-input>
-        </a-col>
-        <a-col :span="8">
-            <a-input v-model.trim="accessLogModal.key" placeholder="按目标关键字过滤，如 google" allow-clear
-                     @pressEnter="accessLogModal.search()"></a-input>
-        </a-col>
-        <a-col :span="8">
-            <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
-            <span style="margin-left: 12px; white-space: nowrap">
-                <a-switch size="small" :checked="accessLogModal.autoRefresh"
-                          @change="on => accessLogModal.toggleAutoRefresh(on)"></a-switch>
-                <span style="margin-left: 6px; color: rgba(0,0,0,.65)">自动刷新</span>
-                <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: rgba(0,0,0,.45)">
-                    <a-tooltip v-if="accessLogModal.refreshError">
-                        <template slot="title">[[ accessLogModal.refreshError ]]</template>
-                        <span style="color: #f5222d; cursor: help">出错</span>
-                    </a-tooltip>
-                    <a-tooltip v-else-if="accessLogModal.page > 1">
-                        <template slot="title">
-                            自动刷新只在第一页生效：新记录会不断把列表往下顶，翻着页刷新会让你正在看的行漂走。
-                            回到第一页即自动恢复。
-                        </template>
-                        <span style="cursor: help">已暂停（第 [[ accessLogModal.page ]] 页）</span>
-                    </a-tooltip>
-                    <span v-else>每 5 秒</span>
+    <a-tabs :active-key="accessLogModal.tab" @change="k => accessLogModal.switchTab(k)">
+        <a-tab-pane key="detail" tab="明细">
+        <a-row :gutter="8" style="margin-bottom: 12px">
+            <a-col :span="8">
+                <a-input v-model.trim="accessLogModal.ip" placeholder="按来源 IP 过滤" allow-clear
+                         @pressEnter="accessLogModal.search()"></a-input>
+            </a-col>
+            <a-col :span="8">
+                <a-input v-model.trim="accessLogModal.key" placeholder="按目标关键字过滤，如 google" allow-clear
+                         @pressEnter="accessLogModal.search()"></a-input>
+            </a-col>
+            <a-col :span="8">
+                <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
+                <span style="margin-left: 12px; white-space: nowrap">
+                    <a-switch size="small" :checked="accessLogModal.autoRefresh"
+                              @change="on => accessLogModal.toggleAutoRefresh(on)"></a-switch>
+                    <span style="margin-left: 6px; color: rgba(0,0,0,.65)">自动刷新</span>
+                    <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: rgba(0,0,0,.45)">
+                        <a-tooltip v-if="accessLogModal.refreshError">
+                            <template slot="title">[[ accessLogModal.refreshError ]]</template>
+                            <span style="color: #f5222d; cursor: help">出错</span>
+                        </a-tooltip>
+                        <a-tooltip v-else-if="accessLogModal.page > 1">
+                            <template slot="title">
+                                自动刷新只在第一页生效：新记录会不断把列表往下顶，翻着页刷新会让你正在看的行漂走。
+                                回到第一页即自动恢复。
+                            </template>
+                            <span style="cursor: help">已暂停（第 [[ accessLogModal.page ]] 页）</span>
+                        </a-tooltip>
+                        <span v-else>每 5 秒</span>
+                    </span>
                 </span>
-            </span>
-        </a-col>
-    </a-row>
-    <div v-if="accessLogModal.sources.length" style="margin-bottom: 12px">
-        <span style="color: rgba(0,0,0,.45); margin-right: 8px">近期来源：</span>
-        <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
-            <template slot="title">
-                [[ src.location || '归属地未知' ]]<template v-if="src.locationAlt">（另一个源认为是 [[ src.locationAlt ]]）</template><br>
-                最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
+            </a-col>
+        </a-row>
+        <div v-if="accessLogModal.sources.length" style="margin-bottom: 12px">
+            <span style="color: rgba(0,0,0,.45); margin-right: 8px">近期来源：</span>
+            <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
+                <template slot="title">
+                    [[ src.location || '归属地未知' ]]<template v-if="src.locationAlt">（另一个源认为是 [[ src.locationAlt ]]）</template><br>
+                    最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
+                </template>
+                <a-tag style="cursor: pointer; margin-bottom: 4px"
+                       :color="accessLogModal.ip === src.ip ? 'blue' : ''"
+                       @click="accessLogModal.pickSource(src.ip)">
+                    [[ src.ip ]]<span style="opacity: .6"> · [[ src.count ]]</span>
+                </a-tag>
+            </a-tooltip>
+            <a-tag v-if="accessLogModal.ip" style="cursor: pointer; margin-bottom: 4px"
+                   @click="accessLogModal.pickSource('')">显示全部</a-tag>
+        </div>
+        <a-table :columns="accessLogModal.columns" :data-source="accessLogModal.list"
+                 :row-key="row => row.id" size="small" :loading="accessLogModal.loading"
+                 :pagination="{
+                    current: accessLogModal.page,
+                    pageSize: accessLogModal.pageSize,
+                    total: accessLogModal.total,
+                    showTotal: total => '共 ' + total + ' 条'
+                 }"
+                 :locale="{ emptyText: '没有符合条件的记录' }"
+                 @change="p => accessLogModal.goto(p.current)">
+            <template slot="time" slot-scope="text, row">
+                [[ DateUtil.formatMillis(row.time) ]]
             </template>
-            <a-tag style="cursor: pointer; margin-bottom: 4px"
-                   :color="accessLogModal.ip === src.ip ? 'blue' : ''"
-                   @click="accessLogModal.pickSource(src.ip)">
-                [[ src.ip ]]<span style="opacity: .6"> · [[ src.count ]]</span>
-            </a-tag>
-        </a-tooltip>
-        <a-tag v-if="accessLogModal.ip" style="cursor: pointer; margin-bottom: 4px"
-               @click="accessLogModal.pickSource('')">显示全部</a-tag>
-    </div>
-    <a-table :columns="accessLogModal.columns" :data-source="accessLogModal.list"
-             :row-key="row => row.id" size="small" :loading="accessLogModal.loading"
-             :pagination="{
-                current: accessLogModal.page,
-                pageSize: accessLogModal.pageSize,
-                total: accessLogModal.total,
-                showTotal: total => '共 ' + total + ' 条'
-             }"
-             :locale="{ emptyText: '没有符合条件的记录' }"
-             @change="p => accessLogModal.goto(p.current)">
-        <template slot="time" slot-scope="text, row">
-            [[ DateUtil.formatMillis(row.time) ]]
-        </template>
-        <template slot="location" slot-scope="text, row">
-            <a-tooltip v-if="row.locationAlt">
-                <template slot="title">另一个源认为是 [[ row.locationAlt ]]</template>
-                <span style="border-bottom: 1px dashed rgba(0,0,0,.25)">[[ row.location ]]</span>
-            </a-tooltip>
-            <span v-else-if="row.location">[[ row.location ]]</span>
-            <span v-else style="color: rgba(0,0,0,.25)">-</span>
-        </template>
-        <template slot="target" slot-scope="text, row">
-            <a-tag v-if="row.network" color="blue">[[ row.network ]]</a-tag>
-            [[ row.target ]]
-        </template>
-        <template slot="route" slot-scope="text, row">
-            <a-tooltip v-if="row.route">
-                <template slot="title">[[ routeTip(row.route) ]]</template>
-                <a-tag :color="routeColor(row.route)">[[ routeLabel(row.route) ]]</a-tag>
-            </a-tooltip>
-            <a-tag v-else>-</a-tag>
-        </template>
-    </a-table>
+            <template slot="location" slot-scope="text, row">
+                <a-tooltip v-if="row.locationAlt">
+                    <template slot="title">另一个源认为是 [[ row.locationAlt ]]</template>
+                    <span style="border-bottom: 1px dashed rgba(0,0,0,.25)">[[ row.location ]]</span>
+                </a-tooltip>
+                <span v-else-if="row.location">[[ row.location ]]</span>
+                <span v-else style="color: rgba(0,0,0,.25)">-</span>
+            </template>
+            <template slot="target" slot-scope="text, row">
+                <a-tag v-if="row.network" color="blue">[[ row.network ]]</a-tag>
+                [[ row.target ]]
+            </template>
+            <template slot="route" slot-scope="text, row">
+                <a-tooltip v-if="row.route">
+                    <template slot="title">[[ routeTip(row.route) ]]</template>
+                    <a-tag :color="routeColor(row.route)">[[ routeLabel(row.route) ]]</a-tag>
+                </a-tooltip>
+                <a-tag v-else>-</a-tag>
+            </template>
+        </a-table>
+        </a-tab-pane>
+        <a-tab-pane key="top" tab="Top 域名">
+            <div style="margin-bottom: 12px">
+                <a-radio-group :value="accessLogModal.topRange" size="small" button-style="solid"
+                               @change="e => accessLogModal.switchRange(e.target.value)">
+                    <a-radio-button value="1h">1 小时</a-radio-button>
+                    <a-radio-button value="6h">6 小时</a-radio-button>
+                    <a-radio-button value="12h">12 小时</a-radio-button>
+                    <a-radio-button value="24h">24 小时</a-radio-button>
+                    <a-radio-button value="7d">7 天</a-radio-button>
+                    <a-radio-button value="15d">15 天</a-radio-button>
+                </a-radio-group>
+                <span style="margin-left: 12px; color: rgba(0,0,0,.45)">
+                    统计的是<b>连接次数</b>，不是流量——上传大文件往往只有很少几条长连接，未必排在前面。
+                </span>
+            </div>
+            <a-table :columns="accessLogModal.topColumns" :data-source="accessLogModal.topList"
+                     :row-key="row => row.domain" size="small" :loading="accessLogModal.topLoading"
+                     :pagination="false"
+                     :locale="{ emptyText: '这个周期内没有统计数据' }">
+                <template slot="rank" slot-scope="text, row, index">
+                    [[ index + 1 ]]
+                </template>
+                <template slot="domain" slot-scope="text, row">
+                    <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
+                </template>
+            </a-table>
+        </a-tab-pane>
+    </a-tabs>
 </a-modal>
 <script>
     const accessLogModal = {
@@ -102,10 +133,11 @@
         pageSize: 20,
         total: 0,
         list: [],
-        // 自动刷新默认关：这个弹窗有两类用法——排查「他现在在访问什么」时
-        // 自动刷新有用，复盘「他昨天访问过什么」时它纯属干扰，还会把带关键字
-        // 那次全表扫描反复跑。默认开着等于替管理员选了其中一种。
-        autoRefresh: false,
+        // 自动刷新默认开：这个弹窗的主要用法是盯「他现在在访问什么」，
+        // 默认关意味着每次打开都要先点一下开关。复盘「他昨天访问过什么」
+        // 时它确实是干扰，但那时把开关关掉即可，而且状态会跨弹窗保留。
+        // 它本来就只在第一页生效（见 tick），翻页复盘时自动暂停。
+        autoRefresh: true,
         timer: null,
         refreshError: '',
         // 上一次手工查询实际生效的筛选条件。自动刷新用它而不是输入框的当前值：
@@ -128,6 +160,22 @@
             title: "走的路由", align: 'center', width: 140,
             scopedSlots: { customRender: 'route' },
         }],
+        // tab 与榜单状态。榜单与明细各自独立加载：切到榜单再拉，不给
+        // 「只想看明细」的那次打开多发一个请求。
+        tab: 'detail',
+        topRange: '24h',
+        topList: [],
+        topLoading: false,
+        topLoaded: false,
+        topColumns: [{
+            title: "#", align: 'center', width: 60,
+            scopedSlots: { customRender: 'rank' },
+        }, {
+            title: "域名", align: 'left',
+            scopedSlots: { customRender: 'domain' },
+        }, {
+            title: "访问次数", align: 'right', width: 120, dataIndex: "count",
+        }],
 
         show({ dbInbound, ip }) {
             this.inboundId = dbInbound.id;
@@ -138,6 +186,9 @@
             this.list = [];
             this.total = 0;
             this.sources = [];
+            this.tab = 'detail';
+            this.topList = [];
+            this.topLoaded = false;
             this.visible = true;
             this.load();
             this.loadSources();
@@ -227,6 +278,40 @@
                 this.page = obj.page;
                 this.pageSize = obj.pageSize;
             }
+        },
+        switchTab(key) {
+            // tab 用 :active-key 单向绑定，这里是它唯一的写入点。
+            this.tab = key;
+            // 首次切到榜单才加载。已经加载过的不重复拉——档位没变时数据
+            // 至多也就 10 分钟一变（聚合任务的周期）。
+            if (key === 'top' && !this.topLoaded) {
+                this.loadTop();
+            }
+        },
+        switchRange(range) {
+            this.topRange = range;
+            this.loadTop();
+        },
+        async loadTop() {
+            this.topLoading = true;
+            const msg = await HttpUtil.post(`/aui/inbound/topDomains/${this.inboundId}`, {
+                range: this.topRange,
+                limit: 20,
+            });
+            this.topLoading = false;
+            if (!msg.success) {
+                return;
+            }
+            this.topList = msg.obj.list || [];
+            this.topRange = msg.obj.range;
+            this.topLoaded = true;
+        },
+        // 点榜单里的域名 = 切回明细并按它过滤。榜单回答「主要在访问什么」，
+        // 明细回答「具体哪几次、从哪个 IP」，两步之间不该让管理员手工重打一遍。
+        drillDown(domain) {
+            this.tab = 'detail';
+            this.key = domain;
+            this.search();
         },
         toggleAutoRefresh(on) {
             this.autoRefresh = on;
