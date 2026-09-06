@@ -334,6 +334,9 @@ func (s *Server) startTask() {
 	// 每小时按保留期清理访问日志
 	s.cron.AddJob("@every 1h", job.NewAccessLogCleanupJob())
 
+	// 域名统计聚合。见 DomainStatJob 里关于周期的说明。
+	s.cron.AddJob("@every 10m", job.NewDomainStatJob())
+
 	// 每小时按各自的保留期清理用量历史
 	s.cron.AddJob("@every 1h", job.NewTrafficCleanupJob())
 
