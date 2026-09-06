@@ -2,6 +2,8 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
+	"time"
 
 	"a-ui/database/model"
 	"a-ui/logger"
@@ -24,7 +26,25 @@ type RoutingInjector struct {
 }
 
 func (s *RoutingInjector) Inject(cfg *xray.Config) error {
+	inbounds, err := s.inboundService.GetAllInbounds()
+	if err != nil {
+		return err
+	}
+	inboundTagById := enabledInboundTags(inbounds)
+
+	// 计量池：出站与规则必须用同一份，理由见 filterMeterPool。
+	// 用量库不可用时 Pool 返回空，整个计量功能自动停用，配置照常生成。
+	meterPool, err := (&MeterPoolService{}).Pool(time.Now())
+	if err != nil {
+		return err
+	}
+	meterPool = filterMeterPool(meterPool, inboundTagById)
+
 	outbounds, usableOutboundTags, defaultOutboundTag, err := s.buildOutbounds(cfg.OutboundConfigs)
+	if err != nil {
+		return err
+	}
+	outbounds, meterPool, err = appendMeterOutbounds(outbounds, meterPool)
 	if err != nil {
 		return err
 	}
@@ -34,7 +54,7 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encodedOutbounds)
 
-	blockRules, routeRules, err := s.buildRules(usableOutboundTags, defaultOutboundTag)
+	blockRules, routeRules, err := s.buildRules(inboundTagById, usableOutboundTags, defaultOutboundTag)
 	if err != nil {
 		return err
 	}
@@ -53,17 +73,12 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if err != nil {
 		return err
 	}
-	// 地区规则排在本项目生成的其余规则之前。这是对「一律 append 到末尾」
-	// 的一处受控例外：模板原有的安全规则仍保持更高优先级，但地区限制属于
-	// 准入判定，逻辑上必须先于任何分流决策。排在分流之后的话，非允许地区的
-	// 用户访问被分流的域名时会先命中分流规则走代理出站，限制被静默绕过。
-	rules = append(rules, geoRules...)
-	rules = append(rules, blockRules...)
-	rules = append(rules, routeRules...)
-	routing["rules"] = rules
 
 	// 开关为 0 时【不碰】domainStrategy：模板里管理员可能手写过它，
 	// 覆盖成默认值是在他不知情时改变分流行为。升级后行为零变化也靠这一条。
+	//
+	// 这一段必须排在计量规则之前：计量规则的形态取决于核心会不会在路由匹配期
+	// 解析域名，判据正是这里写完之后的最终 domainStrategy。
 	resolveDomain, err := s.settingService.GetIPRuleResolveDomain()
 	if err != nil {
 		return err
@@ -71,6 +86,21 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if resolveDomain {
 		routing["domainStrategy"] = "IPIfNonMatch"
 	}
+	meterRules := buildMeterRules(meterPool, inboundTagById,
+		meterRuleNeedsIPGuard(routing["domainStrategy"]))
+
+	// 地区规则排在本项目生成的其余规则之前。这是对「一律 append 到末尾」
+	// 的一处受控例外：模板原有的安全规则仍保持更高优先级，但地区限制属于
+	// 准入判定，逻辑上必须先于任何分流决策。排在分流之后的话，非允许地区的
+	// 用户访问被分流的域名时会先命中分流规则走代理出站，限制被静默绕过。
+	//
+	// 计量规则永远在最末：只有「本来会走默认出站」的流量才进计量，已被管理员
+	// 规则命中的流量完全不受影响。
+	rules = append(rules, geoRules...)
+	rules = append(rules, blockRules...)
+	rules = append(rules, routeRules...)
+	rules = append(rules, meterRules...)
+	routing["rules"] = rules
 
 	encodedRouting, err := json.Marshal(routing)
 	if err != nil {
@@ -119,6 +149,136 @@ func tagDefaultOutbound(outbounds []any) string {
 	}
 	ob["tag"] = model.DefaultOutboundTag
 	return model.DefaultOutboundTag
+}
+
+// enabledInboundTags 返回启用入站的 id -> tag。
+//
+// 提到 Inject 里算一次再往下传，是因为计量规则与分流规则都要用它。
+// 各自再查一次 GetAllInbounds 的话，每次配置生成就要多读一遍带着
+// settings/streamSettings/sniffing 这些 JSON 大字段的整张表。
+func enabledInboundTags(inbounds []*model.Inbound) map[int]string {
+	byId := make(map[int]string, len(inbounds))
+	for _, in := range inbounds {
+		if in.Enable {
+			byId[in.Id] = in.Tag
+		}
+	}
+	return byId
+}
+
+// filterMeterPool 剔除指向已停用或已删除入站的池行。
+//
+// 出站与规则必须消费**同一份**过滤后的列表：只过滤一侧会留下没有规则引用
+// 的孤儿出站（无害但无意义），或者引用不存在出站的悬空规则——后者危险得多，
+// xray 对悬空 outboundTag 不报错，运行时静默回落默认出站。
+func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEntry {
+	out := make([]MeterEntry, 0, len(pool))
+	for _, e := range pool {
+		if _, ok := inboundTagById[e.InboundId]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// appendMeterOutbounds 给池里每个 (入站, 域名) 追加一个默认出站的深拷贝，
+// 返回新的出站数组与**实际写进配置的**池条目。
+//
+// 第二个返回值是关键，与 buildOutbounds 返回 usableOutboundTags 是同一个
+// 道理：调用方必须只为实际写进配置的那些条目生成规则，否则会形成悬空
+// outboundTag，而 xray 对此不报错、静默回落默认出站。
+//
+// 深拷贝走 JSON 往返：浅拷贝会共享 settings 那个 map，DNSInjector 给计量
+// 出站写 domainStrategy 时会同时写进默认出站（或者反过来），两者再也分不开。
+//
+// 拿不到可复制的默认出站时整个放弃计量并记 Warning，而不是退而求其次自己
+// 造一个 freedom：默认出站是管理员可以改的（换协议、加 sendThrough），
+// 造一个假的等于让被计量的流量走上一条与其它直连流量不同的路径。
+func appendMeterOutbounds(outbounds []any, pool []MeterEntry) ([]any, []MeterEntry, error) {
+	if len(pool) == 0 {
+		return outbounds, nil, nil
+	}
+	if len(outbounds) == 0 {
+		logger.Warning("生成配置里没有出站，本次不生成计量出站；域名榜单的字节列会保持为空")
+		return outbounds, nil, nil
+	}
+	base, ok := outbounds[0].(map[string]any)
+	if !ok || base == nil {
+		logger.Warning("模板首位出站不是一个对象，本次不生成计量出站；域名榜单的字节列会保持为空")
+		return outbounds, nil, nil
+	}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, e := range pool {
+		var clone map[string]any
+		if err := json.Unmarshal(encoded, &clone); err != nil {
+			return nil, nil, err
+		}
+		clone["tag"] = model.MeterTag(e.InboundId, e.Domain)
+		outbounds = append(outbounds, clone)
+	}
+	return outbounds, pool, nil
+}
+
+// meterRuleNeedsIPGuard 判断计量规则要不要带 ip 守卫。
+//
+// 守卫是 ip: ["0.0.0.0/0", "::/0"]：匹配任意 IP，但**要求目标已经有 IP**。
+// 域名目标在第一遍匹配时没有 IP，规则整条不命中；第二遍挂上 DNS 客户端、
+// 解析出 IP 之后守卫恒真。于是所有既有的 ip 条件规则（它们都排在计量规则
+// 之前）在第二遍照常拿到它们本来的机会。
+//
+// 不加守卫的后果在真实 xray 上实测复现过（spec §6.1 用例 A）：计量规则在
+// 第一遍命中，第二遍永远不发生，模板自带的 geoip:private 与管理员所有 CIDR
+// 规则对池内域名——恰恰是流量最大的那批——静默失效。
+//
+// 判据必须与 xray 自己的解析完全一致：infra/conf/router.go 的
+// getDomainStrategy 就是 strings.ToLower 之后 switch ipifnonmatch /
+// ipondemand，其余一律 AsIs。判错的两种后果不对称：该带没带是上面那个安全
+// 问题，不该带却带了只是计量空转（用例 D），所以无法识别的值一律按
+// 「不解析」处理，落在后者。
+func meterRuleNeedsIPGuard(strategy any) bool {
+	s, ok := strategy.(string)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(s) {
+	case "ipifnonmatch", "ipondemand":
+		return true
+	default:
+		return false
+	}
+}
+
+// buildMeterRules 生成计量规则。调用方必须把它们追加在所有其它规则之后。
+//
+// 这里刻意把 domain 与 ip 并进同一条规则，看上去违反了「绝不把两类条件并进
+// 同一条（那是 AND）」那条不变量——必须解释清楚，否则将来一定会有人来「修」它。
+// 那条不变量约束的是**管理员表达的**规则：管理员说「这批域名**或**这批 IP 走
+// B」，写成一条就变成 AND、几乎永不命中。这里的 AND 是刻意要的——「域名是 X
+// **且** 目标已经解析出 IP」，第二个合取项不是匹配条件，是一个遍次闸门。
+// buildRule 生成管理员规则时仍然严格拆成两条，一个字节都不改。
+func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard bool) []any {
+	rules := make([]any, 0, len(pool))
+	for _, e := range pool {
+		// pool 已由 filterMeterPool 过滤过，这里必然取得到。
+		tag := inboundTagById[e.InboundId]
+		rule := map[string]any{
+			"type":       "field",
+			"inboundTag": []string{tag},
+			// 一律带显式 domain: 前缀。含点的裸串在 xray 里是子串匹配
+			//（infra/conf/router.go:175 的 defaultType 是 Domain_Substr），
+			// doubleclick.net 会命中 notdoubleclick.net.evil。
+			"domain":      []string{"domain:" + e.Domain},
+			"outboundTag": model.MeterTag(e.InboundId, e.Domain),
+		}
+		if guard {
+			rule["ip"] = []string{"0.0.0.0/0", "::/0"}
+		}
+		rules = append(rules, rule)
+	}
+	return rules
 }
 
 func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, string, error) {
@@ -181,7 +341,11 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 // 对等的分流动作，都只是「把命中的流量送到某个出站」，谁在前由管理员设的
 // 优先级决定。只有 block 需要单独提前，那是硬约束：违规域名的封禁不能被
 // 任何一条分流规则绕过。
-func (s *RoutingInjector) buildRules(outboundTagById map[int]string, defaultOutboundTag string) ([]any, []any, error) {
+func (s *RoutingInjector) buildRules(
+	inboundTagById map[int]string,
+	outboundTagById map[int]string,
+	defaultOutboundTag string,
+) ([]any, []any, error) {
 	rules, err := s.ruleService.GetEnabled()
 	if err != nil {
 		return nil, nil, err
@@ -189,18 +353,8 @@ func (s *RoutingInjector) buildRules(outboundTagById map[int]string, defaultOutb
 	if len(rules) == 0 {
 		return nil, nil, nil
 	}
-
-	inbounds, err := s.inboundService.GetAllInbounds()
-	if err != nil {
-		return nil, nil, err
-	}
-	inboundTagById := make(map[int]string, len(inbounds))
-	for _, in := range inbounds {
-		if in.Enable {
-			inboundTagById[in.Id] = in.Tag
-		}
-	}
-
+	// inboundTagById 由 Inject 算好传进来：计量规则也要用它，各自查一次
+	// GetAllInbounds 会让每次配置生成多读一遍带 JSON 大字段的整张表。
 	blockRules := make([]any, 0)
 	routeRules := make([]any, 0)
 	for _, rule := range rules {
