@@ -145,3 +145,123 @@ func TestAggregateSkipsUnknownInbound(t *testing.T) {
 		t.Errorf("写入了 %d 行，期望 0: %+v", len(rows), rows)
 	}
 }
+
+func TestTopDomainsOrdersByCountWithinRange(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31003, "甲")
+	other := mkTrafficInbound(t, 31004, "乙")
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tdb := database.GetTrafficDB()
+	// 三个域名落在最近 3 小时；一个落在 30 小时前（1h/6h 档不该看到它）。
+	write := func(inboundId int, dom string, hoursAgo int, count int64) {
+		t.Helper()
+		start := model.AlignHour(now.Add(-time.Duration(hoursAgo)*time.Hour), loc)
+		if err := upsertDomainStat(tdb, model.GranularityHour, inboundId, dom, start, count); err != nil {
+			t.Fatalf("写桶: %v", err)
+		}
+	}
+	write(in.Id, "speedtest.net", 0, 5)
+	write(in.Id, "doubleclick.net", 1, 9)
+	write(in.Id, "cnzz.com", 2, 7)
+	write(in.Id, "old.example", 30, 100)
+	write(other.Id, "notmine.com", 0, 999)
+
+	svc := &DomainStatService{}
+	res, err := svc.TopDomains(in.Id, TopRange6h, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if res.Metered {
+		t.Error("第一期不该声称有计量数据")
+	}
+	got := make([]string, 0, len(res.List))
+	for _, r := range res.List {
+		got = append(got, r.Domain)
+	}
+	want := []string{"doubleclick.net", "cnzz.com", "speedtest.net"}
+	if len(got) != len(want) {
+		t.Fatalf("返回 %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("返回 %v，期望 %v（按次数降序）", got, want)
+		}
+	}
+	if res.List[0].Count != 9 {
+		t.Errorf("首位次数 = %d，期望 9", res.List[0].Count)
+	}
+}
+
+// 1h 档只看当前这一个小时桶；6h 档要把更早的桶算进来。
+// 边界算错的表征只是"数字偏小"，没有任何一层会报错。
+func TestTopDomainsRespectsRangeBoundary(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31005, "甲")
+	now := time.Date(2026, 9, 6, 12, 30, 0, 0, time.UTC)
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	tdb := database.GetTrafficDB()
+	cur := model.AlignHour(now, loc)
+	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "a.com", cur, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "b.com", cur-3600, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &DomainStatService{}
+	res, err := svc.TopDomains(in.Id, TopRange1h, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if len(res.List) != 1 || res.List[0].Domain != "a.com" {
+		t.Errorf("1h 档返回 %+v，期望只有 a.com", res.List)
+	}
+	res, err = svc.TopDomains(in.Id, TopRange6h, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if len(res.List) != 2 {
+		t.Errorf("6h 档返回 %d 条，期望 2", len(res.List))
+	}
+}
+
+// 7d / 15d 走日桶。走错粒度会把两级数据混在一起加倍计数。
+func TestTopDomainsUsesDayBucketsForLongRanges(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31006, "甲")
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	tdb := database.GetTrafficDB()
+	day := model.AlignDay(now, loc)
+	if err := upsertDomainStat(tdb, model.GranularityDay, in.Id, "d.com", day, 42); err != nil {
+		t.Fatal(err)
+	}
+	// 同一天的小时桶：如果查询粒度写错，这 7 会被一起加进来变成 49。
+	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "d.com", model.AlignHour(now, loc), 7); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange7d, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if len(res.List) != 1 || res.List[0].Count != 42 {
+		t.Errorf("返回 %+v，期望恰好一条 count=42", res.List)
+	}
+}
+
+func TestTopDomainsRejectsUnknownRange(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31007, "甲")
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopDomainRange("99h"), 10, time.Now())
+	if err != nil {
+		t.Fatalf("非法档位不该报错，应回落默认: %v", err)
+	}
+	if res.Range != string(TopRange24h) {
+		t.Errorf("回落到 %q，期望 %q", res.Range, TopRange24h)
+	}
+}

@@ -174,3 +174,112 @@ func saveDomainStatCursor(db *gorm.DB, lastLogId int64) error {
 		DoUpdates: clause.AssignmentColumns([]string{"last_log_id"}),
 	}).Create(&model.DomainStatCursor{Id: 1, LastLogId: lastLogId}).Error
 }
+
+// TopDomainRange 是榜单的时间档位。
+type TopDomainRange string
+
+const (
+	TopRange1h  TopDomainRange = "1h"
+	TopRange6h  TopDomainRange = "6h"
+	TopRange12h TopDomainRange = "12h"
+	TopRange24h TopDomainRange = "24h"
+	TopRange7d  TopDomainRange = "7d"
+	TopRange15d TopDomainRange = "15d"
+)
+
+// TopDomainRow 是榜单里的一行。
+//
+// Up/Down 在第一期恒为 0，前端靠 TopDomainResult.Metered 决定是否显示这两列——
+// 显示一列恒为 0 的「上传」会被当成「他没上传过」，比不显示更糟。
+type TopDomainRow struct {
+	Domain string `json:"domain"`
+	Count  int64  `json:"count"`
+	Up     int64  `json:"up"`
+	Down   int64  `json:"down"`
+}
+
+// TopDomainResult 是榜单接口的返回体。
+type TopDomainResult struct {
+	// Metered 为 false 表示这批数据只有访问次数，没有字节数。第二期上线后
+	// 才为 true。
+	Metered bool           `json:"metered"`
+	Range   string         `json:"range"` // 实际生效的档位，前端据此回显
+	Limit   int            `json:"limit"`
+	List    []TopDomainRow `json:"list"`
+}
+
+// topRangeSpec 把档位翻译成（粒度, 回溯时长）。未知档位回落 24h——
+// 这是个展示接口，一个拼错的参数不该变成报错弹窗。
+func topRangeSpec(r TopDomainRange) (model.TrafficGranularity, time.Duration, TopDomainRange) {
+	switch r {
+	case TopRange1h:
+		return model.GranularityHour, time.Hour, r
+	case TopRange6h:
+		return model.GranularityHour, 6 * time.Hour, r
+	case TopRange12h:
+		return model.GranularityHour, 12 * time.Hour, r
+	case TopRange24h:
+		return model.GranularityHour, 24 * time.Hour, r
+	case TopRange7d:
+		return model.GranularityDay, 7 * 24 * time.Hour, r
+	case TopRange15d:
+		return model.GranularityDay, 15 * 24 * time.Hour, r
+	default:
+		return model.GranularityHour, 24 * time.Hour, TopRange24h
+	}
+}
+
+// TopDomains 返回某入站在给定档位内访问次数最多的域名。
+//
+// 起点按面板时区对齐后回溯，与用量图的刻度算法一致：不对齐的话，
+// 「最近 24 小时」的起点会落在某个小时的中间，而桶是整点的，边界那一桶
+// 要么整个漏掉要么整个算进来，取决于当前分钟数——同一个查询在一小时内
+// 会给出两种结果。
+func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit int, now time.Time) (*TopDomainResult, error) {
+	g, back, effective := topRangeSpec(r)
+	if limit <= 0 {
+		limit = 10
+	}
+	result := &TopDomainResult{
+		Metered: false, // 第二期上线后改为真实的计量状态
+		Range:   string(effective),
+		Limit:   limit,
+		List:    make([]TopDomainRow, 0, limit), // 不能给前端 null
+	}
+	db := database.GetTrafficDB()
+	if db == nil {
+		return result, nil
+	}
+	loc, err := s.settingService.GetTimeLocation()
+	if err != nil {
+		return nil, err
+	}
+	var since int64
+	if g == model.GranularityHour {
+		since = model.AlignHour(now.Add(-back), loc)
+	} else {
+		since = model.AlignDay(now.Add(-back), loc)
+	}
+
+	var rows []TopDomainRow
+	err = db.Model(&model.DomainStat{}).
+		Select("domain, sum(count) as count, sum(up) as up, sum(down) as down").
+		// since 已经是整点/整日对齐的桶起点，与 back 恰好相差整数个桶；
+		// 用 ">=" 会把 since 自身那一桶也算进来，让「1h」档实际囊括当前
+		// 与上一个小时共两个桶。改用 ">" 排除 since 自身，"Nh"/"Nd" 档
+		// 才会恰好对应 N 个桶（当前桶 + 前面 N-1 个）。
+		Where("granularity = ? and inbound_id = ? and bucket_start > ?", g, inboundId, since).
+		Group("domain").
+		// 次数相同时按域名字典序兜底，让同一份数据每次返回的顺序一致——
+		// 顺序抖动会让自动刷新时榜单里的行无端跳动。
+		Order("count desc, domain asc").
+		Limit(limit).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	if rows != nil {
+		result.List = rows
+	}
+	return result, nil
+}
