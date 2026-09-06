@@ -322,6 +322,12 @@ func (s *Server) startTask() {
 	// 不做任何系统调用，所以常态下的开销只是一次极小的查库。
 	s.cron.AddJob("@every 1s", job.NewConcurrencyJob())
 
+	// 每 30 秒采一次活跃来源 IP 供共享检测使用。刻意不复用并发判定那次
+	// 采样：Enforce 在无人设并发额度时一次系统调用都不做，挂在它后面
+	// 会让检测在默认配置下静默失效。间隔必须与 service.sharingSampleStep
+	// 一致，累加器按它折算活跃时长。
+	s.cron.AddJob("@every 30s", job.NewSharingSampleJob())
+
 	// 每 5 秒把 xray 写下的访问日志读进独立的库；关闭时直接返回
 	s.cron.AddJob("@every 5s", job.NewAccessLogCollectJob())
 
