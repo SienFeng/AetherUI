@@ -86,7 +86,8 @@ go mod tidy && go vet ./...
 
 - `CheckXrayRunningJob`（30s）— 连续 2 次检测到未运行才置重启标志，避开重启窗口。
 - `XrayTrafficJob`（10s，启动后延迟 5s 注册）— 拉取流量并按 tag 累加到 Inbound 的 up/down（`reset=true`，xray 侧计数清零）。
-- `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。
+- `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。**停用原因要分开记**：`DisableInvalidInbounds` 拆成两条 UPDATE，超流量那条额外写 `disabled_by_traffic = true`，到期那条不写；顺序不能反，两者同时成立时先执行的到期那条已经把 `enable` 置 false，超流量那条的 `enable = true` 条件不再匹配，于是「过期」这个更强的停用理由胜出，该入站不会在下一个重置周期自己活过来。
+- `TrafficResetJob`（1h）— 见「流量自动重置」一节。
 - `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（`entity.AllSetting.SubscriptionUpdateTime`），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
 另有两个在 controller 里注册的任务：`ServerController` 每 2 秒刷新系统状态（前端 3 分钟无请求即停刷）、`InboundController` 的重启消费任务。
@@ -276,6 +277,27 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
 
+## 流量自动重置
+
+每个入站可以选一种重置周期，到点把 `up`/`down` 清零（`web/service/traffic_reset.go`、`web/job/traffic_reset_job.go`）。`model.Inbound` 为此加了三列，默认值全是零值，所以 **AutoMigrate 给老库加上它们之后，没有任何入站会被清零——升级后行为零变化**。
+
+- `TrafficResetMode` — `TrafficResetOff`(0) / `TrafficResetMonthly`(1，每月 1 号) / `TrafficResetBillCycle`(2，按订阅周期)。
+- `DisabledByTraffic` — 标记「这次停用是因超流量」，写入方只有 `DisableInvalidInbounds`（置 true）、`UpdateInbound`/`RenewInbound`/一次成功的重新启用（置 false）。
+- `LastResetAt` — 上一次清零对应的**周期时刻**，不是执行时刻。
+
+后两列 `json` 与 `form` 标签都是 `"-"`：**它们是服务端状态，既不下发给前端也不接受前端提交**。让浏览器能改 `DisabledByTraffic`，一个被管理员手动停用的入站就能被伪造成「因超流量停用」、下个周期自己活过来；能改 `LastResetAt`，把它置 0 就能让下一轮任务立刻清一次流量、绕过流量配额。两条绑定路径各有一条回归测试（`web/controller/inbound_traffic_reset_test.go`）。注意 `web/inbound_model_test.go` 的既有不变量要求 `model.Inbound` 的每个 json 字段在 `models.js` 的 `DBInbound` 里有同名属性——标成 `json:"-"` 正是让它跳过这两列的方式，**不要为了让那条测试通过而把它们加进前端模型**。
+
+四条不变量：
+
+- **判定用「上次重置时刻 vs 本周期重置时刻」，不是「今天是不是重置日」。** 任务每小时跑一次，重置日当天不会重复清零；面板停机几天后重启，第一次跑会把漏掉的那一次补上。
+- **订阅日在运行时从 `ExpiryTime` 推导，不存快照**（`resetDayFor`）。按 30 天续期会让到期日往后漂，存了快照的话重置日不会跟着变，而「订阅周期」这个名字要求它跟着变。代价是重置日与到期日绑定，分不开。
+- **日号超过当月天数时取当月最后一天**（`monthlyInstant`）。31 号订阅的用户在二月，`time.Date` 会把 2 月 31 日归一成 3 月 3 日，重置时刻悄悄跑到下个月，表征只是「某几个月不清零」，没有任何一层会报错。同理回退一个月**不能用 `AddDate(0,-1,0)`**：它作用在已经钳制过的 4 月 30 日上会回到 3 月 30 日，而正确答案是 3 月 31 日（`previousMonth` 显式回退）。
+- **切换模式时把 `LastResetAt` 顶到当前**（`UpdateInbound`）。否则从「按订阅周期(28 号)」改到「每月 1 号」会立刻触发一次计划外的清零：上次重置停在 8/28，而 9/1 这个新周期点已经过去。模式没变则不顶，否则每编辑一次入站就把周期往后推一次，重置永远轮不到。
+
+「按订阅周期」+ 无到期时间是非法组合，`checkTrafficResetMode` 在 `AddInbound`/`UpdateInbound` 两处都拒绝——存下来静默地永不生效比报错难查得多。前端会在到期时间为空时禁掉那个选项并给出提示，但**那不是防线**，请求可以直接构造。执行期还有第二道：`resetDayFor` 返回 `false` 时整条跳过并记 `logger.Warning`，挡住直接改库或将来某条新写入路径留下的脏数据。
+
+只有**重新启用**才置重启标志（`TrafficResetJob`）：单纯清零 `up`/`down` 不进 xray 配置，白置标志只会让那个 10 秒的消费任务空跑一次。重置也不影响用量图表——历史桶记的是「某小时用了多少」，与累计计数器语义无关（见下一节）。
+
 ## 用量历史与图表
 
 入站列表的展开行、系统状态页底部各有一张分时用量图。设计文档在 `docs/superpowers/specs/2026-09-04-traffic-history-design.md`。
@@ -412,6 +434,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
 - **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题。`web/html_test.go` 的 `TestAllTemplatesParse` 走同样的遍历但不忽略错误，改完模板跑它即可。
 - **Vue 指令写在根元素之外是死代码，且完全静默。** Vue 2 只编译 `el` 指向的那棵子树。分流页的三个 `<a-modal>` 曾整块落在 `<a-layout id="app">` 之后——页面渲染完全正常、数据也照常加载，但所有「添加 / 编辑」按钮点了毫无反应（`visible = true` 改的是没有任何绑定的数据），控制台不报任何错。弹窗要么留在 `#app` 内，要么照 `inbound_modal.html` 的做法给它自己的根元素和 `new Vue({el:'#xxx'})`。`web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 对所有顶层页面守这条不变量（用 `golang.org/x/net/html` 解析渲染结果，比对 `v-*` / `@*` / `:*` 属性的位置）。
+- **ws 入站的「接收 PROXY protocol」（`acceptProxyProtocol`）开错方向是静默的。** 它让入站从连接开头读一段 PROXY protocol 头以拿到真实客户端 IP，只在本入站确实由 VLESS/Trojan 的 fallback（`xver=1/2`）或支持 PROXY protocol 的反代转发时才能开；直连的客户端不发这段头，核心会一直等、握手失败，而 `run -test` 照样 `Configuration OK`、面板照样 `running`。键名和层级同样没有保护——`infra/conf` 从不调用 `DisallowUnknownFields`，写错就是纯装饰。两条测试成对守着：`xray.TestWsAcceptProxyProtocolIsReadByCore` 钉「核心读得到」（`infra/conf.WebSocketConfig`，会在核心升级换掉解析器时变红），`web.TestWsStreamSettingsEmitsAcceptProxyProtocol` 钉「前端确实发出这个键」。
 - **`a-tabs` 的非活动面板仍在 DOM 里**，只是被隐藏。写选择器或做页面自动化时必须限定到 `.ant-tabs-tabpane-active`，否则会命中隐藏面板里的同名元素。
 - **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
