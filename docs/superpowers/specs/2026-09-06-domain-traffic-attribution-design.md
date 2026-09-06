@@ -258,25 +258,26 @@ LIMIT ?
 `saveDomainStatCursor` 必须同时写 `LastLogId` 与 `LastLogTime`：只推进其中一个，会让下一次
 查询的 `(time, id)` 复合序出现缺口或矛盾。
 
-**已知的性能代价，尚未解决：** `EXPLAIN QUERY PLAN` 实测（`AccessLog.Time` 有单列索引
-`idx_access_logs_time`）显示，`WHERE time > ? OR (time = ? AND id > ?)` 这个 OR 条件让
-SQLite 放弃了对 `time > ?` 的定位式 `SEARCH`，退化成 `SCAN TABLE access_logs USING INDEX
-idx_access_logs_time`——按索引顺序**从头**扫描、逐行用 WHERE 过滤，而不是直接跳到位点
-附近开始读。对照组：单独的 `WHERE time > ?`（没有 OR 那半句）能拿到
-`SEARCH ... (time>?)`；改动前的 `WHERE id > ?` 能拿到
-`SEARCH ... USING INTEGER PRIMARY KEY (rowid>?)`。也就是说，新方案在**每一次**
-`Aggregate` 调用里，代价都从"扫描新增的那一小段"变成了"扫描位点之前的全部历史"——
-`accessLogRetentionDays` 上限 365 天，对高流量的面板这个差距会持续放大。
+**性能特征（实测确认）：** 这条查询**走的是定位式索引访问**。`EXPLAIN QUERY PLAN` 显示
+`SEARCH TABLE access_logs USING INDEX idx_access_logs_time (time>?)`，不是扫描全表。
+代价与**位点之后的新增行数**成正比，不是与历史行数成正比。
 
-实测过两种能恢复 `SEARCH`（定位式访问）的写法：单独加一个 `(time, id)` 复合索引**不能**
-解决问题（OR 条件本身让查询规划器放弃了定位式访问，索引换了也一样，仍是 `SCAN`）；把 OR
-拆成 `UNION ALL` 两个子查询（`time > ?` 与 `time = ? AND id > ?`，各自都能用索引做
-`SEARCH`）**可以**解决，`EXPLAIN QUERY PLAN` 显示两个分支分别是
-`SEARCH ... USING INDEX idx_access_logs_time (time>?)` 与
-`SEARCH ... USING INDEX idx_access_logs_time_id (time=? AND id>?)`，外层是
-`MERGE (UNION ALL)`。这个方案需要新增一个 `(time, id)` 复合索引，且要把 GORM 里那句
-`Where` 换成一条手写的 `UNION ALL` 查询——比当前实现复杂，本轮未采纳，留给后续视线上
-性能压力再决定是否切换。
+实测数据（5 万行表，`idx_access_logs_time` 单列索引，`AccessLog.Time` 有 GORM 自动建的索引）：
+- 位点在稳态（新增 19 行待聚合）：查询返回 19 行，耗时 1.5~2ms
+- 位点=0（匹配全表 20000 行，跳过已清理的那 30000 行）：查询返回 20000 行，耗时 45~49ms
+
+两种情况耗时差异约 30 倍。若真是从头扫描全部 5 万行，这两种情况都应耗时相当，不会出现量级差异。
+
+独立验证：用生产代码路径复核（`database.InitAccessLogDB` 建库、GORM `DryRun` 取生产查询原文、
+mattn cgo 驱动执行 `EXPLAIN QUERY PLAN`），12 种组合（3 个位点 × `ANALYZE` 前/后/加复合索引）
+**全部**得到相同的查询计划：`SEARCH ... USING INDEX idx_access_logs_time (time>?)`。
+
+**不需要拆成 `UNION ALL`，也不需要加 `(time, id)` 复合索引。** 实测确认 `(time, id)` 复合索引对
+查询计划和耗时都没有影响——没有必要，但也无害。
+
+本项目此前曾有一次探针测量得出与上述结论相反的结果（`SCAN`），但用生产代码路径复核没能复现。
+判断查询计划时应当以真实 schema + 真实数据量 + 生产查询原文为准，并优先用耗时/扫描行数这类
+**行为证据**佐证，而不是只看计划文本。
 
 ## 5. 第一期：Top 访问次数榜
 
