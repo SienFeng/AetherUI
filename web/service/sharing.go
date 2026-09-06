@@ -148,3 +148,50 @@ func upsertIPHour(db *gorm.DB, f sharingFlush) error {
 		DoUpdates: clause.AssignmentColumns([]string{"province", "active_seconds"}),
 	}).Create(row).Error
 }
+
+// Cleanup 删除早于保留期的行，返回删除行数。
+//
+// 条件只有 hour_start 一个——这张表只有一种粒度，不存在 TrafficBucket 那个
+// 「不带 granularity 就会把日桶一起删掉」的坑。
+func (s *SharingService) Cleanup(now time.Time) (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return 0, nil
+	}
+	cutoff := now.Add(-time.Duration(sharingRetentionDays) * 24 * time.Hour).Unix()
+	result := db.Where("hour_start < ?", cutoff).Delete(&model.InboundIPHour{})
+	return result.RowsAffected, result.Error
+}
+
+// PruneOrphans 删除已不存在的入站遗留的行，返回删除行数。
+//
+// 这是第二道防线，兜住 DelInbound 里那次删除失败或漏调的情况。两道都要有：
+// SQLite 会复用被删除的自增 id，残留的行会绑到下一个建出来的入站上，那时
+// 引用不再悬空，界面会渲染得非常合理，只是显示的是别人的并存记录。
+func (s *SharingService) PruneOrphans() (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return 0, nil
+	}
+	var ids []int
+	if err := database.GetDB().Model(model.Inbound{}).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	tx := db.Where("inbound_id != 0")
+	if len(ids) > 0 {
+		tx = tx.Where("inbound_id not in ?", ids)
+	}
+	result := tx.Delete(&model.InboundIPHour{})
+	return result.RowsAffected, result.Error
+}
+
+// DeleteByInbound 删除某入站的全部并存记录。
+//
+// 必须在删除入站时调用，理由见 PruneOrphans。
+func (s *SharingService) DeleteByInbound(inboundId int) error {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return nil
+	}
+	return db.Where("inbound_id = ?", inboundId).Delete(&model.InboundIPHour{}).Error
+}

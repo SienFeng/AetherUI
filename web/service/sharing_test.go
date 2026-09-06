@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -85,5 +86,102 @@ func TestSampleReturnsNilWhenTrafficDBUnavailable(t *testing.T) {
 	svc := SharingService{}
 	if err := svc.Sample(time.Now()); err != nil {
 		t.Errorf("库不可用时 Sample 应返回 nil, got %v", err)
+	}
+}
+
+func mkSharingInbound(t *testing.T, port int, remark string) *model.Inbound {
+	t.Helper()
+	in := &model.Inbound{
+		UserId: 1, Port: port, Protocol: model.VLESS,
+		Tag:      fmt.Sprintf("inbound-%v", port),
+		Remark:   remark,
+		Enable:   true,
+		Settings: "{}", StreamSettings: "{}", Sniffing: "{}",
+	}
+	if err := database.GetDB().Create(in).Error; err != nil {
+		t.Fatalf("创建入站: %v", err)
+	}
+	return in
+}
+
+func TestCleanupDropsOnlyExpiredRows(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	fresh := now.Add(-24 * time.Hour)
+	stale := now.Add(-(sharingRetentionDays + 1) * 24 * time.Hour)
+	for _, at := range []time.Time{fresh, stale} {
+		f := sharingFlush{
+			InboundId: 1, IP: "1.1.1.1", Province: "江苏",
+			HourStart: model.AlignHourUTC(at), ActiveSeconds: 60,
+		}
+		if err := upsertIPHour(db, f); err != nil {
+			t.Fatalf("写入: %v", err)
+		}
+	}
+
+	svc := SharingService{}
+	deleted, err := svc.Cleanup(now)
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("删除 %v 行, want 1", deleted)
+	}
+	rows := listIPHours(t)
+	if len(rows) != 1 || rows[0].HourStart != model.AlignHourUTC(fresh) {
+		t.Errorf("剩余行 = %+v, want 只剩窗口内那一行", rows)
+	}
+}
+
+// SQLite 会复用被删除的自增 id。残留的行会绑到下一个建出来的入站上，那时
+// 引用不再悬空，界面会渲染得非常合理——只是显示的是别人的并存记录。
+// 这一道必须在 DelInbound 里同步做，不能只靠每小时一次的兜底。
+func TestDelInboundRemovesItsSharingRows(t *testing.T) {
+	setupSharingTest(t)
+	in := mkSharingInbound(t, 31001, "甲")
+	db := database.GetTrafficDB()
+	f := sharingFlush{
+		InboundId: in.Id, IP: "1.1.1.1", Province: "江苏",
+		HourStart: 3600, ActiveSeconds: 60,
+	}
+	if err := upsertIPHour(db, f); err != nil {
+		t.Fatalf("写入: %v", err)
+	}
+
+	if err := (&InboundService{}).DelInbound(in.Id); err != nil {
+		t.Fatalf("DelInbound: %v", err)
+	}
+	if got := len(listIPHours(t)); got != 0 {
+		t.Errorf("删除入站后残留 %v 行并存记录", got)
+	}
+}
+
+func TestPruneOrphansRemovesRowsOfDeletedInbounds(t *testing.T) {
+	setupSharingTest(t)
+	in := mkSharingInbound(t, 31002, "甲")
+	db := database.GetTrafficDB()
+	for _, id := range []int{in.Id, in.Id + 999} { // 后者是不存在的入站
+		f := sharingFlush{
+			InboundId: id, IP: "1.1.1.1", Province: "江苏",
+			HourStart: 3600, ActiveSeconds: 60,
+		}
+		if err := upsertIPHour(db, f); err != nil {
+			t.Fatalf("写入: %v", err)
+		}
+	}
+
+	svc := SharingService{}
+	pruned, err := svc.PruneOrphans()
+	if err != nil {
+		t.Fatalf("PruneOrphans: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("清理 %v 行, want 1", pruned)
+	}
+	rows := listIPHours(t)
+	if len(rows) != 1 || rows[0].InboundId != in.Id {
+		t.Errorf("剩余行 = %+v, want 只剩存在的那个入站", rows)
 	}
 }

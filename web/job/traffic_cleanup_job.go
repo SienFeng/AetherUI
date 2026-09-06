@@ -17,6 +17,7 @@ import (
 type TrafficCleanupJob struct {
 	trafficService service.TrafficHistoryService
 	settingService service.SettingService
+	sharingService service.SharingService
 }
 
 func NewTrafficCleanupJob() *TrafficCleanupJob {
@@ -43,6 +44,20 @@ func (j *TrafficCleanupJob) Run() {
 		logger.Warning("清理过期用量每日数据失败:", err)
 	} else if deleted > 0 {
 		logger.Debugf("清理了 %v 条过期用量每日数据", deleted)
+	}
+
+	// 共享检测的行与用量桶同库，清理挂在同一个任务里：再开一个每小时任务
+	// 只是多一份注册与一份 panic 面。保留期是常量，不读设置。
+	if deleted, err := j.sharingService.Cleanup(now); err != nil {
+		logger.Warning("清理过期共享检测记录失败:", err)
+	} else if deleted > 0 {
+		logger.Debugf("清理了 %v 条过期共享检测记录", deleted)
+	}
+
+	if pruned, err := j.sharingService.PruneOrphans(); err != nil {
+		logger.Warning("清理孤儿共享检测记录失败:", err)
+	} else if pruned > 0 {
+		logger.Warningf("清理了 %v 条已删除入站遗留的共享检测记录", pruned)
 	}
 
 	if pruned, err := j.trafficService.PruneOrphans(); err != nil {
