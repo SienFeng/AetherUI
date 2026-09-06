@@ -243,15 +243,21 @@ func TestSummaryIgnoresRowsOutsideWindow(t *testing.T) {
 	in := mkSharingInbound(t, 31012, "旧数据")
 	db := database.GetTrafficDB()
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	old := now.Add(-(sharingWindowDays + 1) * 24 * time.Hour)
 
-	for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
-		f := sharingFlush{
-			InboundId: in.Id, IP: ip, Province: province,
-			HourStart: model.AlignHourUTC(old), ActiveSeconds: 3600,
-		}
-		if err := upsertIPHour(db, f); err != nil {
-			t.Fatalf("写入: %v", err)
+	// 并存小时数必须造足显示下限。只造一个的话，即使 Summary 错用了保留期
+	// 天数、把窗口外的行读了进来，Hours=1 仍低于下限、Flagged() 仍是 false，
+	// 测试照样通过——那就探测不到「两个窗口常量混用」这个最容易犯的错误。
+	base := now.Add(-(sharingWindowDays + 1) * 24 * time.Hour)
+	for i := 0; i < coexistDisplayMinHours; i++ {
+		at := base.Add(-time.Duration(i) * time.Hour)
+		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
+			f := sharingFlush{
+				InboundId: in.Id, IP: ip, Province: province,
+				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
+			}
+			if err := upsertIPHour(db, f); err != nil {
+				t.Fatalf("写入: %v", err)
+			}
 		}
 	}
 
@@ -262,5 +268,88 @@ func TestSummaryIgnoresRowsOutsideWindow(t *testing.T) {
 	}
 	if _, ok := got[in.Id]; ok {
 		t.Error("窗口外的行不该参与判定")
+	}
+}
+
+// windowRows 把 0 当作「读全部入站」的哨兵值，那是给 Summary 用的内部约定。
+// Detail 必须在入口挡住非正 id，否则 /sharing/detail/0 会静默返回跨所有
+// 入站聚合出来的统计与建议。
+func TestDetailRejectsNonPositiveInboundId(t *testing.T) {
+	setupSharingTest(t)
+	svc := SharingService{}
+	if _, err := svc.Detail(0, time.Now()); err == nil {
+		t.Error("Detail(0) 应当报错：0 是 windowRows「读全部入站」的哨兵值，放行会静默返回跨入站的聚合数据")
+	}
+}
+
+// Detail 的 Stat/Suggestion 用判定窗口（sharingWindowDays），Hours 明细回溯
+// 用保留期（sharingRetentionDays）——这是本任务最容易混用、且混用后不会有
+// 任何报错的一处。这条测试一次钉住三处：两个窗口分别生效、Hours 倒序、
+// 只列发生过并存的小时。
+func TestDetailUsesWindowForStatAndRetentionForHours(t *testing.T) {
+	setupSharingTest(t)
+	in := mkSharingInbound(t, 31013, "明细")
+	db := database.GetTrafficDB()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	writeCoexistHour := func(at time.Time) {
+		t.Helper()
+		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
+			f := sharingFlush{
+				InboundId: in.Id, IP: ip, Province: province,
+				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
+			}
+			if err := upsertIPHour(db, f); err != nil {
+				t.Fatalf("写入: %v", err)
+			}
+		}
+	}
+
+	inWindowA := now.Add(-2 * time.Hour)
+	inWindowB := now.Add(-1 * time.Hour)
+	writeCoexistHour(inWindowA)
+	writeCoexistHour(inWindowB)
+
+	// 窗口外、保留期内：不该进 Stat，但该进 Hours 明细。
+	// 这一条是「Stat 用判定窗口、Hours 用保留期」的分界证据。
+	outOfWindow := now.Add(-(sharingWindowDays + 1) * 24 * time.Hour)
+	writeCoexistHour(outOfWindow)
+
+	// 保留期外：两边都不该有。
+	outOfRetention := now.Add(-(sharingRetentionDays + 1) * 24 * time.Hour)
+	writeCoexistHour(outOfRetention)
+
+	// 只有单省活跃的一个小时：不构成并存，不该出现在 Hours 里。
+	solo := sharingFlush{
+		InboundId: in.Id, IP: "3.3.3.3", Province: "江苏",
+		HourStart: model.AlignHourUTC(now.Add(-3 * time.Hour)), ActiveSeconds: 3600,
+	}
+	if err := upsertIPHour(db, solo); err != nil {
+		t.Fatalf("写入: %v", err)
+	}
+
+	svc := SharingService{}
+	got, err := svc.Detail(in.Id, now)
+	if err != nil {
+		t.Fatalf("Detail: %v", err)
+	}
+
+	// Stat 只数判定窗口内的并存小时：两个。若误用保留期会变成三个。
+	if got.Stat.Hours != 2 {
+		t.Errorf("Stat.Hours = %v, want 2（只数判定窗口内的）", got.Stat.Hours)
+	}
+	// Hours 回溯到保留期：三个（窗口内 2 + 窗口外保留期内 1），
+	// 不含保留期外那个，也不含只有单省的那个小时。
+	if len(got.Hours) != 3 {
+		t.Fatalf("len(Hours) = %v, want 3（回溯到保留期、剔除保留期外与非并存小时）", len(got.Hours))
+	}
+	// 最近的排最前。
+	if got.Hours[0].HourStart != model.AlignHourUTC(inWindowB) {
+		t.Errorf("Hours[0].HourStart = %v, want 最近的 %v",
+			got.Hours[0].HourStart, model.AlignHourUTC(inWindowB))
+	}
+	if got.Hours[len(got.Hours)-1].HourStart != model.AlignHourUTC(outOfWindow) {
+		t.Errorf("Hours 末位 = %v, want 最旧的 %v",
+			got.Hours[len(got.Hours)-1].HourStart, model.AlignHourUTC(outOfWindow))
 	}
 }

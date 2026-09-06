@@ -9,6 +9,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/util/common"
 	"a-ui/util/netdiag"
 )
 
@@ -266,7 +267,15 @@ func (s *SharingService) Summary(now time.Time) (map[int]CoexistStat, error) {
 }
 
 // Detail 返回某入站的明细：判定窗口内的统计与建议，加上保留期内的并存时段。
+//
+// inboundId 必须为正：windowRows 把 0 当作「读全部入站」的哨兵值，那是给
+// Summary 用的内部约定。不挡住的话，一个 /sharing/detail/0 的请求会静默
+// 返回跨所有入站聚合出来的统计与建议，而界面上看不出任何异常——与本项目
+// 一贯要防的「哨兵值让范围被静默放大」是同一类缺陷。
 func (s *SharingService) Detail(inboundId int, now time.Time) (*SharingDetail, error) {
+	if inboundId <= 0 {
+		return nil, common.NewError("入站 id 非法:", inboundId)
+	}
 	windowRows, err := s.windowRows(inboundId, sharingWindowDays, now)
 	if err != nil {
 		return nil, err
