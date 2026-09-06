@@ -157,6 +157,9 @@
                             <a-card hoverable>
                                 <div slot="title">
                                     <a-button type="primary" icon="plus" @click="openNode()">添加出站节点</a-button>
+                                    <a-button icon="thunderbolt" style="margin-left:8px"
+                                              :loading="probingAll" :disabled="nodes.length === 0"
+                                              @click="probeAll()">全部测试</a-button>
                                     <a-button icon="download" style="margin-left:8px"
                                               @click="confirmExport('outbounds')">导出</a-button>
                                     <a-button icon="upload" style="margin-left:8px"
@@ -170,6 +173,26 @@
                                     </template>
                                     <template slot="protocol" slot-scope="text, node">
                                         <a-tag color="blue">[[ node.protocol ]]</a-tag>
+                                    </template>
+                                    <!-- 连通性测试只说明「面板这台机器能不能经这个节点出网」，
+                                         不代表任何一条分流规则真的会把流量送到这里——规则是否
+                                         命中取决于域名组、入站选择与 sniffing，那由规则列表
+                                         自己的警告图标负责。措辞不要越过这条边界。 -->
+                                    <template slot="probe" slot-scope="text, node">
+                                        <a-spin v-if="node.probing" size="small"></a-spin>
+                                        <a-tag v-else-if="!node.probe">未测试</a-tag>
+                                        <a-tooltip v-else-if="node.probe.status === 'ok'"
+                                                   :title="'测试于 ' + probeTime(node.probe)">
+                                            <a-tag color="green">[[ node.probe.latencyMs ]] ms</a-tag>
+                                        </a-tooltip>
+                                        <a-tooltip v-else
+                                                   :title="node.probe.error + '（' + probeTime(node.probe) + '）'">
+                                            <a-tag :color="node.probe.status === 'fail' ? 'red' : 'orange'">
+                                                [[ node.probe.status === 'fail' ? '不通' : '无法测试' ]]
+                                            </a-tag>
+                                        </a-tooltip>
+                                        <a v-if="!node.probing" style="margin-left: 4px"
+                                           @click="probeNode(node)">测试</a>
                                     </template>
                                     <template slot="enable" slot-scope="text, node">
                                         <a-switch :checked="node.enable"
@@ -558,6 +581,9 @@
         el: '#app',
         data: {
             spinning: false,
+            // probingAll 只驱动「全部测试」按钮的 loading；每一行自己的
+            // 转圈由 node.probing 控制，两者互不替代。
+            probingAll: false,
             groups: [],
             nodes: [],
             rules: [],
@@ -573,6 +599,7 @@
                 { title: '备注', dataIndex: 'remark', width: 160 },
                 { title: 'tag', width: 200, scopedSlots: { customRender: 'tag' } },
                 { title: '协议', width: 100, scopedSlots: { customRender: 'protocol' } },
+                { title: '连通性', width: 180, scopedSlots: { customRender: 'probe' } },
                 { title: '启用', width: 80, scopedSlots: { customRender: 'enable' } },
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
@@ -713,6 +740,49 @@
             nodeName(id) {
                 const n = this.nodes.find(x => x.id === id);
                 return n ? n.remark : '(已删除)';
+            },
+            // checkedAt 是 unix 秒，relativeTime 收的是毫秒。
+            probeTime(probe) {
+                if (!probe || !probe.checkedAt) return '';
+                return this.relativeTime(probe.checkedAt * 1000);
+            },
+            // 单个节点的连通性测试。不走 this.post：那个 helper 会点亮整页的
+            // 遮罩式 loading，而一次测试要起一个临时 xray 子进程并真实出网，
+            // 可能挂十几秒，整页转圈会让人以为面板卡死了。
+            async probeNode(node) {
+                if (node.probing) return;
+                node.probing = true;
+                try {
+                    const msg = await HttpUtil.post('aui/routing/outbound/probe/' + node.id);
+                    if (msg.success) {
+                        // 链路不通也是一个成功的响应，obj 里带着 status=fail。
+                        node.probe = msg.obj;
+                    }
+                } finally {
+                    node.probing = false;
+                }
+            },
+            async probeAll() {
+                if (this.probingAll) return;
+                this.probingAll = true;
+                try {
+                    // 服务端的全局并发上限是 3，前端按同样的宽度分批发起：
+                    // 一次把 N 个请求全丢出去的话，长时间挂起的连接会占满
+                    // 浏览器对同域的连接数，页面上其它请求会一起被堵住。
+                    const queue = this.nodes.slice();
+                    const width = Math.min(3, queue.length);
+                    const workers = [];
+                    for (let i = 0; i < width; i++) {
+                        workers.push((async () => {
+                            while (queue.length > 0) {
+                                await this.probeNode(queue.shift());
+                            }
+                        })());
+                    }
+                    await Promise.all(workers);
+                } finally {
+                    this.probingAll = false;
+                }
             },
             inboundName(id) {
                 if (!id) return '所有用户';

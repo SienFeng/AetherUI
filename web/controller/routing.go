@@ -179,6 +179,7 @@ type RoutingController struct {
 	ruleService        service.RoutingRuleService
 	xrayService        service.XrayService
 	portableService    service.RoutingPortableService
+	probeService       service.ProbeService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -204,6 +205,7 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	ob.POST("/update/:id", a.updateOutbound)
 	ob.POST("/del/:id", a.delOutbound)
 	ob.POST("/parse", a.parseOutboundLink)
+	ob.POST("/probe/:id", a.probeOutbound)
 
 	rl := g.Group("/rule")
 	rl.POST("/list", a.listRules)
@@ -460,13 +462,46 @@ func (a *RoutingController) delDomainGroup(c *gin.Context) {
 
 // 出站节点
 
+// outboundSummary 是列表项：节点本身的字段被匿名嵌入并提升到顶层，
+// 前端拿到的仍是原来那个形状，只多一个 probe 字段。
+type outboundSummary struct {
+	*model.OutboundNode
+	// Probe 为 nil 表示未测试过、结果已过期，或该 id 上缓存的是别的节点
+	// 留下的旧结果（SQLite 会复用自增 id，ProbeService 按 tag 挡住了它）。
+	Probe *service.ProbeResult `json:"probe"`
+}
+
 func (a *RoutingController) listOutbounds(c *gin.Context) {
 	nodes, err := a.outboundService.GetAll()
 	if err != nil {
 		jsonMsg(c, "获取出站节点", err)
 		return
 	}
-	jsonObj(c, nodes, nil)
+	probes := a.probeService.ResultsFor(nodes)
+	summaries := make([]*outboundSummary, 0, len(nodes))
+	for _, node := range nodes {
+		summaries = append(summaries, &outboundSummary{OutboundNode: node, Probe: probes[node.Id]})
+	}
+	jsonObj(c, summaries, nil)
+}
+
+// probeOutbound 同步跑一次连通性测试。耗时可达十几秒（起一个临时 xray
+// 子进程并真实出网），前端逐个节点调用，不提供批量接口——批量交给前端
+// 并发发起，进度才能逐行点亮，服务端也不必再维护一份任务状态。
+func (a *RoutingController) probeOutbound(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "测试出站节点", err)
+		return
+	}
+	result, err := a.probeService.Probe(id)
+	if err != nil {
+		jsonMsg(c, "测试出站节点", err)
+		return
+	}
+	// 链路不通是一个正常的测试结果，不是接口错误：这里一律走成功响应，
+	// 由前端按 status 渲染绿灯还是红灯。
+	jsonObj(c, result, nil)
 }
 
 func (a *RoutingController) addOutbound(c *gin.Context) {

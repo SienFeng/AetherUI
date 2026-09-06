@@ -165,6 +165,9 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 		if p, ok := ob["protocol"].(string); ok && p != "" {
 			old.Protocol = p
 		}
+		// 配置换了，上一次的探测结果就不再是对当前配置的判断了。留着它，
+		// 一个刚被改错的节点会继续顶着上一次的绿灯。只改备注时不必丢弃。
+		(&ProbeService{}).Forget(old.Id)
 	}
 	old.Remark = node.Remark
 	old.Enable = node.Enable
@@ -178,5 +181,11 @@ func (s *OutboundNodeService) Del(id int) error {
 		return err
 	}
 	db := database.GetDB()
-	return db.Delete(model.OutboundNode{}, id).Error
+	if err := db.Delete(model.OutboundNode{}, id).Error; err != nil {
+		return err
+	}
+	// 连带丢弃探测结果。SQLite 会复用自增 id，残留条目会占着内存直到过期，
+	// 而缓存里那份 tag 校验只在「新节点恰好拿到同一个 id」时才用得上。
+	(&ProbeService{}).Forget(id)
+	return nil
 }

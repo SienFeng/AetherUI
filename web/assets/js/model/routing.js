@@ -76,17 +76,29 @@ class DomainGroup {
 }
 
 class OutboundNode {
-    constructor(id = 0, tag = "", remark = "", protocol = "", config = "", enable = true) {
+    constructor(id = 0, tag = "", remark = "", protocol = "", config = "", enable = true, probe = null) {
         this.id = id;
         this.tag = tag;
         this.remark = remark;
         this.protocol = protocol;
         this.config = config;
         this.enable = enable;
+        // probe 是服务端缓存的上一次连通性测试结果，形如
+        // {status: 'ok'|'fail'|'unavailable', latencyMs, error, checkedAt}；
+        // null 表示未测试过、结果已过期，或该 id 上的旧结果因 tag 对不上
+        // 被服务端丢弃（SQLite 会复用自增 id）。
+        //
+        // 这两个字段必须在构造函数里显式声明：fromJson 只搬构造函数认识的
+        // 字段，漏掉就会把服务端返回的结果静默丢掉；而 Vue 2 也侦测不到
+        // 后加的属性，测试完那一列不会重新渲染。
+        this.probe = probe;
+        // probing 是纯前端状态，标记这一行正在测试中，不来自服务端。
+        this.probing = false;
     }
 
     static fromJson(json = {}) {
-        return new OutboundNode(json.id, json.tag, json.remark, json.protocol, json.config, json.enable);
+        return new OutboundNode(json.id, json.tag, json.remark, json.protocol,
+            json.config, json.enable, json.probe);
     }
 }
 
