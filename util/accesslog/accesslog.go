@@ -78,7 +78,7 @@ func ParseLine(line string, loc *time.Location) (Entry, bool) {
 
 	network, targetAddr := splitNetworkPrefix(target)
 	_, sourceAddr := splitNetworkPrefix(source)
-	sourceIP, ok := hostOf(sourceAddr)
+	sourceIP, ok := HostOf(sourceAddr)
 	if !ok {
 		return Entry{}, false
 	}
@@ -116,9 +116,9 @@ func splitNetworkPrefix(s string) (network, addr string) {
 	return "", s
 }
 
-// hostOf 去掉地址末尾的端口，并剥掉 IPv6 的方括号——留着方括号会和
+// HostOf 去掉地址末尾的端口，并剥掉 IPv6 的方括号——留着方括号会和
 // 在线明细里的 IP 对不上。
-func hostOf(addr string) (string, bool) {
+func HostOf(addr string) (string, bool) {
 	if addr == "" {
 		return "", false
 	}
