@@ -88,7 +88,7 @@ InboundIPHour
   InboundId      int     索引，与 TrafficBucket 同样按 id 存（tag 会随端口变化）
   IP             string
   Province       string  空串表示归属地未知（IPv6 / 库未加载 / 库中查无此段）
-  HourStart      int64   UTC 整点毫秒
+  HourStart      int64   UTC 整点的 Unix 秒（与 TrafficBucket.BucketStart 同单位）
   ActiveSeconds  int
   唯一索引 (InboundId, IP, HourStart)
 ```
