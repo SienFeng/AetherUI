@@ -19,6 +19,7 @@ type TrafficCleanupJob struct {
 	settingService    service.SettingService
 	sharingService    service.SharingService
 	domainStatService service.DomainStatService
+	meterPoolService  service.MeterPoolService
 }
 
 func NewTrafficCleanupJob() *TrafficCleanupJob {
@@ -89,5 +90,12 @@ func (j *TrafficCleanupJob) Run() {
 		logger.Warning("清理孤儿域名统计失败:", err)
 	} else if pruned > 0 {
 		logger.Warningf("清理了 %v 条已删除入站遗留的域名统计", pruned)
+	}
+
+	// 计量池与域名统计同库，孤儿清理挂在同一个任务里，理由同上。
+	if pruned, err := j.meterPoolService.PruneOrphans(); err != nil {
+		logger.Warning("清理孤儿计量池记录失败:", err)
+	} else if pruned > 0 {
+		logger.Warningf("清理了 %v 条已删除入站遗留的计量池记录", pruned)
 	}
 }

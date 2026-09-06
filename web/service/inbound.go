@@ -164,6 +164,12 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := (&DomainStatService{}).DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的域名统计失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 计量池同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
+	// 入站会继承上一个用户的计量域名，生成出一批指向别人域名的计量出站与
+	// 规则。失败只告警不阻断，理由同上，残留由每小时一次的 PruneOrphans 兜底。
+	if err := (&MeterPoolService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的计量池失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 共享检测的并存记录同样按入站 id 存，同样会被 id 复用坑到：不清的话
 	// 下一个建出来的入站会继承上一个用户的并存记录，被标成「疑似共享」。
 	// 失败只告警不阻断，理由同上，残留由每小时一次的 PruneOrphans 兜底。
