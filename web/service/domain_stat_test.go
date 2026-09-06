@@ -297,3 +297,68 @@ func TestTopDomainsRejectsUnknownRange(t *testing.T) {
 		t.Errorf("回落到 %q，期望 %q", res.Range, TopRange24h)
 	}
 }
+
+// 清理条件必须带 granularity：不带的话一次「清理小时桶」会把同样早于该
+// 时刻的日桶一起删掉，15 天榜单静默变空。
+func TestCleanupOnlyTouchesGivenGranularity(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31008, "甲")
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	tdb := database.GetTrafficDB()
+	old := now.Add(-60 * 24 * time.Hour)
+	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "a.com", model.AlignHour(old, loc), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertDomainStat(tdb, model.GranularityDay, in.Id, "a.com", model.AlignDay(old, loc), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &DomainStatService{}
+	deleted, err := svc.Cleanup(model.GranularityHour, 30, now)
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("删了 %d 行，期望 1", deleted)
+	}
+	if rows := listDomainStats(t, model.GranularityDay); len(rows) != 1 {
+		t.Errorf("日桶被误删：剩 %d 行，期望 1", len(rows))
+	}
+}
+
+// SQLite 会复用被删除的自增 id：不清掉的话，下一个建出来的入站会看到
+// 上一个用户访问过哪些网站，而且引用不再悬空，任何跳过式的防线都拦不住。
+func TestDeleteByInboundAndPruneOrphans(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31009, "甲")
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	tdb := database.GetTrafficDB()
+	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "a.com", model.AlignHour(now, loc), 1); err != nil {
+		t.Fatal(err)
+	}
+	// 一个库里根本不存在的入站 id：模拟 DelInbound 那次清理失败留下的残留。
+	if err := upsertDomainStat(tdb, model.GranularityHour, 99999, "b.com", model.AlignHour(now, loc), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &DomainStatService{}
+	if err := svc.DeleteByInbound(in.Id); err != nil {
+		t.Fatalf("DeleteByInbound: %v", err)
+	}
+	rows := listDomainStats(t, model.GranularityHour)
+	if len(rows) != 1 || rows[0].Domain != "b.com" {
+		t.Fatalf("DeleteByInbound 后剩 %+v，期望只剩孤儿行 b.com", rows)
+	}
+	pruned, err := svc.PruneOrphans()
+	if err != nil {
+		t.Fatalf("PruneOrphans: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("清了 %d 行孤儿，期望 1", pruned)
+	}
+	if rows := listDomainStats(t, model.GranularityHour); len(rows) != 0 {
+		t.Errorf("仍剩 %d 行", len(rows))
+	}
+}

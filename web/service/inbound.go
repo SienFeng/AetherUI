@@ -158,6 +158,12 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := (&TrafficHistoryService{}).DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的用量历史失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 域名统计同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来
+	// 的入站会看到上一个用户访问过哪些网站。失败只告警不阻断，理由同上，
+	// 残留由每小时一次的 PruneOrphans 兜底。
+	if err := (&DomainStatService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的域名统计失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 共享检测的并存记录同样按入站 id 存，同样会被 id 复用坑到：不清的话
 	// 下一个建出来的入站会继承上一个用户的并存记录，被标成「疑似共享」。
 	// 失败只告警不阻断，理由同上，残留由每小时一次的 PruneOrphans 兜底。
