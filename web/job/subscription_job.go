@@ -20,6 +20,16 @@ func NewSubscriptionJob() *SubscriptionJob {
 }
 
 func (j *SubscriptionJob) Run() {
+	// 孤儿兜底：DomainGroupService.Del 已在正常路径上连带删了订阅结果行，
+	// 这里挡的是手工改库和 Del 中途失败。SQLite 会复用被删除的自增 id，
+	// 残留行会绑到下一个新建的域名组上，让它莫名其妙带着别人的订阅内容参与
+	// 分流——而引用不再悬空，生成期的跳过防线拦不住。
+	if pruned, err := j.domainGroupService.PruneSubscriptionOrphans(); err != nil {
+		logger.Warning("prune orphan domain group subscriptions err:", err)
+	} else if pruned > 0 {
+		logger.Warningf("清理了 %v 条已删除域名组遗留的订阅结果", pruned)
+	}
+
 	count, err := j.domainGroupService.RefreshDue()
 	if err != nil {
 		logger.Warning("refresh domain group subscriptions err:", err)

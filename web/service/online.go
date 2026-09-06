@@ -508,6 +508,13 @@ type OnlineCount struct {
 	Count     int    `json:"count"`
 	Supported bool   `json:"supported"`
 	Reason    string `json:"reason"`
+
+	// UpSpeed/DownSpeed 是该入站上所有在线来源的实时速率之和（B/s），
+	// 也就是展开行里每台设备那两个数字的合计。与 Count 同一条铁律：
+	// Supported 为 false 时它们恒为 0，界面必须显示 Reason 而不是 0 B/s——
+	// 把「读不到连接表」渲染成「一点流量都没有」比不显示更糟。
+	UpSpeed   int64 `json:"upSpeed"`
+	DownSpeed int64 `json:"downSpeed"`
 }
 
 // countLive 统计在线设备数：还有活连接的来源 IP 个数。一个 IP 视为一台设备，
@@ -529,6 +536,25 @@ func countLive(list []OnlineIP) int {
 		}
 	}
 	return n
+}
+
+// sumLiveSpeed 汇总某入站上所有在线来源的实时速率（B/s）。
+//
+// 口径与 countLive 严格一致——只算还有活连接的来源。Conns == 0 的条目是
+// 超额被拒 / 被封禁后连接已断干净、仅为界面展示保留的历史记录，它们的速率
+// 字段恒为零值，算不算进来结果都一样；仍然显式排除，是为了让「在线 N 台」
+// 与「合计多少 B/s」这两列出自同一条判据，而不是依赖另一处实现的零值巧合。
+//
+// 速率本身由 onlineTracker.update 每轮重算：某个来源这一轮没有字节往来时
+// 它会被写成 0，不会留着上一轮的值，所以这里直接求和不需要再判新鲜度。
+func sumLiveSpeed(list []OnlineIP) (up, down int64) {
+	for _, e := range list {
+		if e.Conns > 0 {
+			up += e.UpSpeed
+			down += e.DownSpeed
+		}
+	}
+	return up, down
 }
 
 // countabilityOf 判断某入站的在线设备数能不能数出来，数不出来时给出原因。
@@ -577,10 +603,17 @@ func (s *OnlineService) CountAll(userId int) ([]OnlineCount, error) {
 			}
 			sampled = true
 		}
+		// 只取一次快照，在同一份 list 上同时算设备数与速率合计：snapshotAt
+		// 会遍历全表并排序，取两次既是白做一遍，也让两列有落在不同瞬间的
+		// 可能——「在线 0 台」配上一个非零速率会让人以为哪里坏了。
+		list := onlineTrackerInstance.snapshot(inbound.Port, noLocate)
+		up, down := sumLiveSpeed(list)
 		counts = append(counts, OnlineCount{
 			InboundId: inbound.Id,
 			Supported: true,
-			Count:     countLive(onlineTrackerInstance.snapshot(inbound.Port, noLocate)),
+			Count:     countLive(list),
+			UpSpeed:   up,
+			DownSpeed: down,
 		})
 	}
 	return counts, nil

@@ -98,6 +98,9 @@ func initRouting() error {
 	if err := db.AutoMigrate(&model.DomainGroup{}); err != nil {
 		return err
 	}
+	if err := db.AutoMigrate(&model.DomainGroupSubscription{}); err != nil {
+		return err
+	}
 	if err := db.AutoMigrate(&model.OutboundNode{}); err != nil {
 		return err
 	}

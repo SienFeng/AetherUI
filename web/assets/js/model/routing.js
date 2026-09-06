@@ -1,12 +1,34 @@
 const RULE_ACTION = {
     PROXY: "proxy",
     BLOCK: "block",
+    // 走 xray 的默认出站，也就是从部署面板的这台机器本机直接出去。
+    // 与 model.ActionDirect 对应，那里有它为什么不等于「没有这条规则」的说明。
+    DIRECT: "direct",
 };
 
 const ACTION_LABEL = {
-    proxy: "走节点",
+    proxy: "代理",
     block: "阻断",
+    direct: "直连",
 };
+
+// parseSubscribeUrls 与后端 service.ParseSubscribeURLs 同语义：换行分隔、
+// 去空白、按首次出现去重。
+//
+// 两边必须保持一致，否则界面上「这个组有没有订阅」的判断会和实际拉取行为
+// 对不上——比如一个只填了空白行的组，界面显示「等待首次拉取」而后端根本
+// 不会去拉它。
+function parseSubscribeUrls(raw) {
+    const seen = new Set();
+    const out = [];
+    for (const line of (raw || "").split("\n")) {
+        const item = line.trim();
+        if (!item || seen.has(item)) continue;
+        seen.add(item);
+        out.push(item);
+    }
+    return out;
+}
 
 // 列表接口返回的是摘要：域名组挂上订阅后可能有几万条域名，
 // 全量传给前端既没意义，渲染几万个 tag 还会卡死浏览器。
@@ -35,8 +57,13 @@ class DomainGroup {
         return new DomainGroup(json);
     }
 
+    // subscribeUrl 存的是换行分隔的多个地址，单个地址时就是它本身。
+    get subscribeUrls() {
+        return parseSubscribeUrls(this.subscribeUrl);
+    }
+
     get subscribed() {
-        return this.subscribeUrl !== "";
+        return this.subscribeUrls.length > 0;
     }
 
     // 订阅状态：未订阅 / 失败 / 等待首次拉取 / 成功

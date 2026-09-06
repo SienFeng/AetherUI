@@ -546,3 +546,76 @@ func TestGetAccessLogsResolvesSourceLocation(t *testing.T) {
 		}
 	}
 }
+
+// SkipTotal 让自动刷新跳过那次昂贵的 COUNT(*)：列表照常返回，Total 恒为 0。
+//
+// 这条同时钉住两侧：跳过时 total 必须是 0（前端据此知道「本次没统计」，
+// 沿用上一次手工查询的值），列表必须一条不少（跳过的只是计数，不是查询）。
+func TestQuerySkipTotalReturnsRowsWithoutCounting(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50001)
+	s := AccessLogService{}
+	var entries []accesslog.Entry
+	for i := 0; i < 5; i++ {
+		entries = append(entries, entryAt(in.Tag, "1.1.1.1", "a.com:443", int64(1000+i)))
+	}
+	if _, err := s.Store(entries); err != nil {
+		t.Fatal(err)
+	}
+
+	counted, total, err := s.Query(AccessLogQuery{InboundId: in.Id, Page: 1, PageSize: 3})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if total != 5 {
+		t.Fatalf("对照组 total = %d，期望 5", total)
+	}
+
+	skipped, total, err := s.Query(AccessLogQuery{InboundId: in.Id, Page: 1, PageSize: 3, SkipTotal: true})
+	if err != nil {
+		t.Fatalf("Query(SkipTotal): %v", err)
+	}
+	if total != 0 {
+		t.Errorf("SkipTotal 时 total = %d，期望 0", total)
+	}
+	if len(skipped) != len(counted) {
+		t.Fatalf("SkipTotal 返回 %d 条，期望与对照组一致的 %d 条", len(skipped), len(counted))
+	}
+	for i := range skipped {
+		if skipped[i].Id != counted[i].Id {
+			t.Fatalf("第 %d 条 id = %d，期望 %d：跳过计数不该改变结果集", i, skipped[i].Id, counted[i].Id)
+		}
+	}
+}
+
+// 带关键字过滤时 COUNT(*) 是全表扫描的 LIKE，正是自动刷新最该跳过的那一次。
+// 跳过之后过滤本身必须照常生效——别把「不数了」做成「不筛了」。
+func TestQuerySkipTotalStillAppliesFilters(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50001)
+	s := AccessLogService{}
+	if _, err := s.Store([]accesslog.Entry{
+		entryAt(in.Tag, "1.1.1.1", "google.com:443", 1000),
+		entryAt(in.Tag, "1.1.1.1", "example.com:443", 1001),
+		entryAt(in.Tag, "2.2.2.2", "google.com:443", 1002),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, total, err := s.Query(AccessLogQuery{
+		InboundId: in.Id, SourceIP: "1.1.1.1", Keyword: "google",
+		Page: 1, PageSize: 50, SkipTotal: true,
+	})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("SkipTotal 时 total = %d，期望 0", total)
+	}
+	if len(list) != 1 {
+		t.Fatalf("返回 %d 条，期望 1（来源与关键字两个条件都要生效）", len(list))
+	}
+	if list[0].Target != "google.com:443" {
+		t.Errorf("命中的是 %q", list[0].Target)
+	}
+}

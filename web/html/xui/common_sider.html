@@ -37,7 +37,10 @@
 
 
 {{define "commonSider"}}
-<a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0">
+<!-- width 收窄到 160（antd 默认 200）：菜单项最长四个字，160 装得下，
+     腾出来的宽度留给入站列表——那张表的列已经排到十四列。布局是 flex，
+     内容区会自动变宽，没有任何一处硬编码过侧栏宽度。 -->
+<a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0" :width="160">
     <a-menu theme="dark" mode="inline" :selected-keys="['{{ .request_uri }}']"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}

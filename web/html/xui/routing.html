@@ -125,6 +125,11 @@
                                              跳过的是 IP-ASN、SRC-IP-CIDR、进程/UA 这些没法忠实翻译的。 -->
                                         <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
                                             <a-tag color="green">[[ relativeTime(group.lastUpdatedAt) ]]</a-tag>
+                                            <!-- 多地址时报个数：合并后只剩一个时间戳，不说明来源有几个的话，
+                                                 管理员无从知道这条绿标签背后其实有好几个地址在拉。 -->
+                                            <span v-if="group.subscribeUrls.length > 1" style="color: #888;">
+                                                · [[ group.subscribeUrls.length ]] 个地址
+                                            </span>
                                         </a-tooltip>
                                     </template>
                                     <template slot="action" slot-scope="text, group">
@@ -231,6 +236,7 @@
                                     </template>
                                     <template slot="target" slot-scope="text, rule">
                                         <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
+                                        <a-tag v-else-if="rule.action === 'direct'" color="green">直连</a-tag>
                                         <a-tag v-else :color="nodeMissing(rule.outboundId) ? 'red' : 'blue'">
                                             [[ nodeName(rule.outboundId) ]]
                                         </a-tag>
@@ -294,15 +300,47 @@
                 </div>
             </a-form-item>
             <a-form-item label="订阅地址">
-                <a-input v-model="groupModal.subscribeUrl"
-                         placeholder="留空表示不订阅，例如 https://example.com/rules.list"></a-input>
+                <!-- 数组元素用 :value + @change 而不是 v-model="arr[i]"：Vue 2 对
+                     数组下标赋值不是响应式的，v-model 编译出来正是那种赋值，
+                     输入框会看着能打字、数据却没变。 -->
+                <div v-for="(u, i) in groupModal.subscribeUrls" :key="i" style="margin-bottom: 8px;">
+                    <div style="display: flex;">
+                        <a-input :value="u" @change="e => setSubscribeUrl(i, e.target.value)"
+                                 placeholder="留空表示不订阅，例如 https://example.com/rules.list"></a-input>
+                        <a-button v-if="groupModal.subscribeUrls.length > 1" icon="minus" style="margin-left: 8px;"
+                                  @click="removeSubscribeUrl(i)"></a-button>
+                    </div>
+                    <!-- 逐地址状态。一个地址失败时它上一次的内容仍在参与分流，
+                         必须把「正在用什么时候拉到的内容」写出来，否则管理员只
+                         看到一个红字，不知道现在生效的到底是什么。 -->
+                    <div v-if="subscribeStateOf(u)" style="font-size: 12px; margin-top: 2px;">
+                        <span v-if="subscribeStateOf(u).lastError" style="color: #f5222d;">
+                            拉取失败：[[ subscribeStateOf(u).lastError ]]
+                            <span v-if="subscribeStateOf(u).lastUpdatedAt" style="color: #888;">
+                                —— 仍在使用 [[ relativeTime(subscribeStateOf(u).lastUpdatedAt) ]]拉到的
+                                域名 [[ subscribeStateOf(u).domainCount ]] 条 / IP 段 [[ subscribeStateOf(u).cidrCount ]] 条
+                            </span>
+                        </span>
+                        <span v-else-if="subscribeStateOf(u).lastUpdatedAt" style="color: #888;">
+                            [[ relativeTime(subscribeStateOf(u).lastUpdatedAt) ]] ·
+                            域名 [[ subscribeStateOf(u).domainCount ]] 条 / IP 段 [[ subscribeStateOf(u).cidrCount ]] 条
+                        </span>
+                        <span v-else style="color: #faad14;">等待首次拉取</span>
+                    </div>
+                </div>
+                <a-button type="dashed" size="small" icon="plus"
+                          :disabled="groupModal.subscribeUrls.length >= 10"
+                          @click="addSubscribeUrl">添加订阅地址</a-button>
                 <div style="color: #888; font-size: 12px; margin-top: 4px;">
                     支持 Surge/Clash 规则集、纯域名列表与纯 IP 列表。
                     IP-CIDR / IP-CIDR6 / GEOIP 会进 IP 段；IP-ASN、SRC-IP-CIDR 等无法忠实翻译的规则会被忽略。
                     保存后由定时任务拉取，或在列表里点「立即更新」。
+                    可填多个地址（最多 10 个），它们的内容会合并去重成这一个组。
+                    每个地址相互独立：<b>某个地址拉取失败时保留它上一次的内容，其余地址照常更新到最新</b>，
+                    失败原因显示在该地址下方。今天已经拉成功的地址不会被重复拉取，失败的那个每 10 分钟自动重试。
                 </div>
             </a-form-item>
-            <a-form-item v-if="groupModal.subscribeUrl" label="订阅内容">
+            <a-form-item v-if="groupModal.subscribeUrls.some(u => u.trim())" label="订阅内容">
                 <a-alert v-if="groupModal.lastError" type="error" :message="groupModal.lastError" show-icon
                          style="margin-bottom: 8px;"></a-alert>
                 <a-alert v-else-if="!groupModal.lastUpdatedAt" type="warning" show-icon
@@ -455,9 +493,14 @@
             </a-form-item>
             <a-form-item label="动作">
                 <a-radio-group v-model="ruleModal.rule.action">
-                    <a-radio value="proxy">走节点</a-radio>
+                    <a-radio value="direct">直连（本机出网）</a-radio>
+                    <a-radio value="proxy">代理（走节点）</a-radio>
                     <a-radio value="block">阻断（黑洞）</a-radio>
                 </a-radio-group>
+                <div style="color: rgba(0,0,0,.45); font-size: 12px; line-height: 1.6">
+                    直连即从这台机器本机出网，不经过任何出站节点。它不等于「不写这条规则」：
+                    显式的直连规则会先命中，从而挡住后面那些本该把这批目标代理出去的规则。
+                </div>
             </a-form-item>
             <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
                 <a-select v-model="ruleModal.rule.outboundId" style="width: 100%;">
@@ -543,9 +586,10 @@
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
             groupModal: {
-                visible: false, id: 0, remark: '', domains: '', cidrs: '', subscribeUrl: '',
+                visible: false, id: 0, remark: '', domains: '', cidrs: '', subscribeUrls: [''],
                 subscribedPreview: [], subscribedCount: 0, lastError: '', lastSkipped: 0, lastUpdatedAt: 0,
                 subscribedCidrPreview: [], subscribedCidrCount: 0,
+                subscriptionStates: [],
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '', groupFilter: '' },
@@ -675,12 +719,33 @@
                 const i = this.inbounds.find(x => x.id === id);
                 return i ? (i.remark || i.tag) : '(已删除)';
             },
+            // 按地址原文查状态。管理员刚改过的地址查不到任何状态，这是对的：
+            // 那是一个还没拉过的新地址，显示旧地址的状态会彻底误导人。
+            subscribeStateOf(url) {
+                const key = (url || '').trim();
+                if (!key) return null;
+                return this.groupModal.subscriptionStates.find(x => x.url === key) || null;
+            },
+            addSubscribeUrl() {
+                this.groupModal.subscribeUrls.push('');
+            },
+            removeSubscribeUrl(i) {
+                this.groupModal.subscribeUrls.splice(i, 1);
+                if (!this.groupModal.subscribeUrls.length) {
+                    this.groupModal.subscribeUrls.push('');
+                }
+            },
+            setSubscribeUrl(i, v) {
+                // $set 而不是下标赋值：见模板里那段注释。
+                this.$set(this.groupModal.subscribeUrls, i, v);
+            },
             async openGroup(group) {
                 this.groupModal.id = group ? group.id : 0;
                 this.groupModal.remark = group ? group.remark : '';
                 this.groupModal.domains = '';
                 this.groupModal.cidrs = '';
-                this.groupModal.subscribeUrl = '';
+                this.groupModal.subscribeUrls = [''];
+                this.groupModal.subscriptionStates = [];
                 this.groupModal.subscribedPreview = [];
                 this.groupModal.subscribedCount = 0;
                 this.groupModal.subscribedCidrPreview = [];
@@ -694,7 +759,10 @@
                     const d = msg.obj;
                     this.groupModal.domains = d.domains || '';
                     this.groupModal.cidrs = d.cidrs || '';
-                    this.groupModal.subscribeUrl = d.subscribeUrl || '';
+                    // 至少留一个空输入框，否则未订阅的组打开后连个可填的地方都没有。
+                    const urls = parseSubscribeUrls(d.subscribeUrl);
+                    this.groupModal.subscribeUrls = urls.length ? urls : [''];
+                    this.groupModal.subscriptionStates = d.subscriptionStates || [];
                     this.groupModal.subscribedPreview = d.subscribedPreview || [];
                     this.groupModal.subscribedCount = d.subscribedCount || 0;
                     this.groupModal.subscribedCidrPreview = d.subscribedCidrPreview || [];
@@ -710,7 +778,11 @@
                     remark: this.groupModal.remark,
                     domains: this.groupModal.domains,
                     cidrs: this.groupModal.cidrs,
-                    subscribeUrl: this.groupModal.subscribeUrl,
+                    // 空行在这里就滤掉：后端的 ParseSubscribeURLs 同样会滤，
+                    // 但提交体里带着空行会让 updateFieldsFor 的字符串比较判成
+                    // 「地址变了」，白白清空一次订阅内容、触发一次重新拉取。
+                    subscribeUrl: this.groupModal.subscribeUrls
+                        .map(u => u.trim()).filter(Boolean).join('\n'),
                 };
                 const url = this.groupModal.id
                     ? 'aui/routing/domain-group/update/' + this.groupModal.id

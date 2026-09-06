@@ -4,6 +4,18 @@ package model
 const (
 	ActionProxy = "proxy"
 	ActionBlock = "block"
+	// ActionDirect 让命中的流量走 xray 的默认出站，也就是从部署面板的这台
+	// 机器本机直接出去，不经过任何出站节点。
+	//
+	// 它与「这条规则不存在」的结果看起来相同——未命中任何规则的流量本来就
+	// 走默认出站——但两者不是一回事：显式的直连规则会在更靠前的位置命中，
+	// 从而挡住后面那些本该把这批目标代理出去的规则。这正是它存在的意义。
+	//
+	// 这个巧合另有一个好处：回退到不认识 direct 的旧版本二进制时，buildRule
+	// 的 default 分支会把这条规则整条丢弃并记 Warning，流量退回默认出站，
+	// 与规则本来的意图一致。落在「分流范围缩小」这条安全侧，不会产生一条
+	// 谁都没要求过的行为。
+	ActionDirect = "direct"
 )
 
 // 生成的出站 tag 一律带此前缀，与用户手写模板的 tag 隔离。
@@ -65,6 +77,47 @@ type DomainGroup struct {
 	LastError string `json:"lastError" form:"lastError"`
 	// LastSkipped 是上一次成功解析时跳过的非域名规则条数（IP-CIDR 等）。
 	LastSkipped int `json:"lastSkipped" form:"lastSkipped"`
+}
+
+// DomainGroupSubscription 是一个域名组下**单个订阅地址**上一次成功拉取的结果。
+//
+// 存在的理由只有一条：让「某个地址拉取失败时保留它上一次的内容，其余地址照常
+// 更新到最新」成为可能。DomainGroup 上的 SubscribedDomains/SubscribedCidrs 是
+// 所有地址合并后的最终结果，生成期直接用它；合并之后就分不清哪一条来自哪个
+// 地址了，因此必须在这里按地址留一份原始结果。
+//
+// 不把这些内容塞进 DomainGroup 的新列，是因为单个订阅可达十几万条（生产实例
+// 实测 +111226），而 DomainGroupService.GetAll 会把所有组的所有列读进内存——
+// 光是判断「该不该更新」就会拖起几十 MB。独立成表后按 group_id 精确查。
+//
+// 内容列（Domains/Cidrs）不参与导出：导出文件本来就不带订阅内容，
+// 见 PortableDomainGroup。
+type DomainGroupSubscription struct {
+	Id int `json:"id" gorm:"primaryKey;autoIncrement"`
+	// GroupId 是外键，指向 DomainGroup.Id。
+	//
+	// **SQLite 会复用被删除的自增 id**，所以 DomainGroupService.Del 必须连带
+	// 删除这里的行，另有 PruneOrphans 兜底：残留的行会绑到下一个新建的域名组
+	// 上，那个组会莫名其妙带着别人的订阅内容参与分流，而引用不再悬空，
+	// 任何一层「跳过不存在的引用」的防线都拦不住它。
+	GroupId int `json:"groupId" gorm:"index:idx_dgs_group_url,unique,priority:1"`
+	// Url 是这一行对应的订阅地址原文，与 DomainGroup.SubscribeUrl 里的某一行
+	// 逐字节相等。(GroupId, Url) 唯一。
+	Url string `json:"url" gorm:"index:idx_dgs_group_url,unique,priority:2"`
+
+	// Domains / Cidrs 是这个地址上一次**成功**拉取并解析出的结果，JSON 字符串
+	// 数组。拉取失败时原样保留——这正是本表存在的目的。
+	Domains string `json:"domains"`
+	Cidrs   string `json:"cidrs"`
+
+	// LastUpdatedAt 是这个地址上一次成功拉取的时刻，Unix 毫秒。0 表示从未成功过。
+	// 调度按地址各判一次（见 RefreshDue）：今天已经拉成功的地址不会被反复重拉，
+	// 失败的那个则每 10 分钟重试一次。
+	LastUpdatedAt int64 `json:"lastUpdatedAt"`
+	// LastError 是这个地址上一次尝试的失败原因，成功时清空。
+	LastError string `json:"lastError"`
+	// LastSkipped 是这个地址上一次成功解析时跳过的无法忠实翻译的规则条数。
+	LastSkipped int `json:"lastSkipped"`
 }
 
 // OutboundNode 是一个落地代理服务器。

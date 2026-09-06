@@ -35,6 +35,16 @@ type Options struct {
 	Check bool
 }
 
+// DefaultDNSServers 是新装面板的开箱 DNS 解析器，换行分隔，行序即 xray 的
+// 查询顺序。
+//
+// 两条都用 DoH，且是 IP 型端点：xray 不必先解析域名就能连上解析器，不存在
+// 鸡生蛋的问题；云服务商的解析器从此也看不到用户访问了哪些域名。scheme 必须
+// 是 app/dns/nameserver.go 那张分派表认识的形式，https:// 在表内——
+// udp:// tls:// quic:// 与「IP:端口」看着天经地义，实际会让整个 DNS 设置
+// 空转或让 xray 拒绝启动，见 entity.dnsServerSchemes。
+const DefaultDNSServers = "https://8.8.8.8/dns-query\nhttps://1.1.1.1/dns-query"
+
 type Result struct {
 	Mode     string `json:"mode"`
 	PanelURL string `json:"panelUrl"`
@@ -120,6 +130,26 @@ func Run(opts Options) (*Result, error) {
 	if opts.KeyFile != "" {
 		if err := s.SetDefaultKeyFile(opts.KeyFile); err != nil {
 			return nil, fmt.Errorf("写入默认密钥路径失败: %w", err)
+		}
+	}
+
+	// 分流开箱默认：IP 分流规则也匹配域名目标 + 加密 DNS。只在这里显式落库，
+	// 不动 defaultValueMap——那张表给的是「从未写过这个 key 时读到什么」，
+	// 也就是存量部署升级后的取值，改它会让老面板里从未点过「保存配置」的
+	// 那些静默启用 DoH 与 IPIfNonMatch，并因配置变化触发一次 xray 重启。
+	//
+	// -force 时不写：那条路径是 install.sh --wizard-only（a-ui 菜单「配置
+	// 域名与伪装站」）重跑向导，面板此前已被配置过、多半已经跑了一段时间，
+	// 这两项的当前值属于管理员的既有选择。向导问的是域名和伪装站，顺手改掉
+	// 解析路径是夹带修改，而且完全静默——没人会想到重配域名会动 DNS。代价
+	// 是从旧版本升级上来、又重跑过向导的机器拿不到这两个默认值，那和「存量
+	// 部署零变化」是同一件事，管理员去设置页打开即可。
+	if !opts.Force {
+		if err := s.SetIPRuleResolveDomain(true); err != nil {
+			return nil, fmt.Errorf("写入 IP 规则匹配域名目标开关失败: %w", err)
+		}
+		if err := s.SetDNSServers(DefaultDNSServers); err != nil {
+			return nil, fmt.Errorf("写入默认 DNS 服务器失败: %w", err)
 		}
 	}
 

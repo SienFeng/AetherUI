@@ -63,7 +63,7 @@
 <!--                        <a-input v-model="searchKey" placeholder="搜索" autofocus style="max-width: 300px"></a-input>-->
                         <a-table :columns="columns" :row-key="dbInbound => dbInbound.id"
                                  :data-source="dbInbounds"
-                                 :loading="spinning" :scroll="{ x: 1240 }"
+                                 :loading="spinning" :scroll="{ x: 1360 }"
                                  :pagination="false"
                                  :expanded-row-keys="expandedKeys"
                                  :expand-row-by-click="true"
@@ -245,6 +245,23 @@
                                     <a-tag style="cursor: help">—</a-tag>
                                 </a-tooltip>
                             </template>
+                            <template slot="speed" slot-scope="text, dbInbound">
+                                <template v-if="onlineCountOf(dbInbound.id).supported">
+                                    <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
+                                        <a-tag color="green">↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s</a-tag>
+                                        <a-tag color="blue">↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s</a-tag>
+                                    </template>
+                                    <!-- 都是 0 时收成一个朴素标签，与「在线」列同一套视觉逻辑：
+                                         一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉真正在跑的那几行。 -->
+                                    <a-tag v-else>0</a-tag>
+                                </template>
+                                <a-tooltip v-else>
+                                    <!-- 与「在线」列同一条铁律：读不到连接表时显示「—」，
+                                         绝不能把「看不到」渲染成「一点流量都没有」。 -->
+                                    <template slot="title">[[ onlineCountOf(dbInbound.id).reason ]]</template>
+                                    <a-tag style="cursor: help">—</a-tag>
+                                </a-tooltip>
+                            </template>
                             <template slot="concurrency" slot-scope="text, dbInbound">
                                 <a-tag v-if="dbInbound.concurrencyLimit > 0" color="orange">
                                     [[ dbInbound.concurrencyLimit ]] IP
@@ -344,6 +361,13 @@
         width: 80,
         scopedSlots: { customRender: 'online' },
     }, {
+        // 紧挨「在线」：两列出自同一次连接表快照，放在一起管理员才能一眼
+        // 对上「几台设备」和「它们合计跑多快」。
+        title: "实时↑|↓",
+        align: 'center',
+        width: 120,
+        scopedSlots: { customRender: 'speed' },
+    }, {
         title: "并发",
         align: 'center',
         width: 80,
@@ -398,7 +422,7 @@
 
     // 「在线设备」列首次拉到数据之前的占位。不能直接显示 0——「还没数出来」
     // 与「没人在线」是两回事，与展开行同一条口径。
-    const emptyOnlineCount = { supported: false, count: 0, reason: '正在读取连接表...' };
+    const emptyOnlineCount = { supported: false, count: 0, upSpeed: 0, downSpeed: 0, reason: '正在读取连接表...' };
 
     // Chart 实例不放进 Vue 的 data：它是个庞大的对象，做成响应式既没有
     // 意义，还会拖慢每一次重绘。
@@ -622,7 +646,7 @@
             },
             onlineCountOf(id) {
                 if (this.onlineCountError) {
-                    return { supported: false, count: 0, reason: this.onlineCountError };
+                    return { supported: false, count: 0, upSpeed: 0, downSpeed: 0, reason: this.onlineCountError };
                 }
                 return this.onlineCounts[id] || emptyOnlineCount;
             },

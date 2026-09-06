@@ -250,6 +250,8 @@ func (a *InboundController) getAccessLogs(c *gin.Context) {
 		Key      string `form:"key"`
 		Page     int    `form:"page"`
 		PageSize int    `form:"pageSize"`
+		// 自动刷新走这条路径，跳过昂贵的总数统计，见 AccessLogQuery.SkipTotal。
+		SkipTotal bool `form:"skipTotal"`
 	}{}
 	if err := c.ShouldBind(&form); err != nil {
 		jsonMsg(c, "获取访问日志", err)
@@ -261,6 +263,7 @@ func (a *InboundController) getAccessLogs(c *gin.Context) {
 		Keyword:   form.Key,
 		Page:      form.Page,
 		PageSize:  form.PageSize,
+		SkipTotal: form.SkipTotal,
 	})
 	if err != nil {
 		jsonMsg(c, "获取访问日志", err)

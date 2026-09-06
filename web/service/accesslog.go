@@ -83,6 +83,17 @@ type AccessLogQuery struct {
 	Keyword   string
 	Page      int
 	PageSize  int
+
+	// SkipTotal 让本次查询不统计总条数，Total 原样返回 0。
+	//
+	// 给自动刷新用：那条路径每几秒重跑一次同一个查询，而 Count 是其中最贵的
+	// 一步——带关键字时条件是 target LIKE '%kw%'，走不了索引，是一次全表扫描，
+	// 而访问日志按保留期能攒到百万行。它对「看最新几条」又毫无用处：自动刷新
+	// 只在第一页生效，页码和页大小都不会变。
+	//
+	// 调用方必须知道 Total == 0 在这里表示「没统计」而不是「没有记录」，
+	// 因此前端在这条路径上不更新分页总数，沿用上一次手工查询的值。
+	SkipTotal bool
 }
 
 const (
@@ -119,7 +130,9 @@ type AccessLogRow struct {
 type AccessLogResult struct {
 	// Enabled 为 false 时列表多半是空的，界面要提示去设置里打开，
 	// 而不是让管理员以为这个人没访问过任何网站。
-	Enabled  bool           `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// Total 在 AccessLogQuery.SkipTotal 为真时恒为 0，表示「本次没统计」，
+	// 不是「一条都没有」。见那个字段的说明。
 	Total    int64          `json:"total"`
 	Page     int            `json:"page"`
 	PageSize int            `json:"pageSize"`
@@ -231,8 +244,10 @@ func (s *AccessLogService) Query(q AccessLogQuery) ([]model.AccessLog, int64, er
 	}
 
 	var total int64
-	if err := tx.Count(&total).Error; err != nil {
-		return nil, 0, err
+	if !q.SkipTotal {
+		if err := tx.Count(&total).Error; err != nil {
+			return nil, 0, err
+		}
 	}
 
 	q.Normalize()

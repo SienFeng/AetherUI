@@ -407,15 +407,21 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 	cases := []struct {
 		name string
 		rule *model.RoutingRule
+		// defaultTag 是「默认出站实际生效的 tag」，只有 ActionDirect 用得上。
+		defaultTag string
 	}{
-		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock}},
-		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{emptyGroup.Id}), Action: model.ActionBlock}},
-		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), InboundIds: "[999]", Action: model.ActionBlock}},
-		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionProxy, OutboundId: 999}},
-		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: "definitely-not-an-action"}},
+		{"域名组不存在", &model.RoutingRule{DomainGroupId: 999, DomainGroupIds: mustEncodeGroupIds(t, []int{999}), Action: model.ActionBlock}, model.DefaultOutboundTag},
+		{"域名列表为空", &model.RoutingRule{DomainGroupId: emptyGroup.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{emptyGroup.Id}), Action: model.ActionBlock}, model.DefaultOutboundTag},
+		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), InboundIds: "[999]", Action: model.ActionBlock}, model.DefaultOutboundTag},
+		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionProxy, OutboundId: 999}, model.DefaultOutboundTag},
+		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: "definitely-not-an-action"}, model.DefaultOutboundTag},
+		// 直连规则也要守这条防线：悬空 outboundTag 在这里「碰巧」也会回落到
+		// 默认出站、结果与预期一致，正因如此更要挡——破一次例，「绝不输出
+		// 悬空引用」就从不变量降级成了建议。
+		{"直连但配置里没有默认出站", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionDirect}, ""},
 	}
 	for _, tc := range cases {
-		generated, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{})
+		generated, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{}, tc.defaultTag)
 		if generated != nil {
 			t.Errorf("%s: expected the rule to be skipped, got %v", tc.name, generated)
 		}
@@ -1189,5 +1195,111 @@ func TestInjectWritesDomainStrategyWhenEnabled(t *testing.T) {
 	}
 	if routing["domainStrategy"] != "IPIfNonMatch" {
 		t.Errorf("domainStrategy = %v, want IPIfNonMatch", routing["domainStrategy"])
+	}
+}
+
+// 直连规则要指向 xray 的默认出站（模板首位那个 freedom），也就是从这台机器
+// 本机出网。
+func TestInjectDirectRulePointsAtDefaultOutbound(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "国内直连")
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action: model.ActionDirect, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	last := rules[len(rules)-1]
+	if last["outboundTag"] != model.DefaultOutboundTag {
+		t.Errorf("direct rule outboundTag = %v, want %s", last["outboundTag"], model.DefaultOutboundTag)
+	}
+	// 指向的必须是真实存在于配置里的出站，不能是悬空引用——xray 对悬空
+	// outboundTag 不报错，只会静默回落默认出站，那样这个错误永远不会暴露。
+	obs := decodeOutbounds(t, cfg)
+	if obs[0]["tag"] != model.DefaultOutboundTag {
+		t.Fatalf("默认出站的 tag = %v，直连规则引用的是一个不存在的出站", obs[0]["tag"])
+	}
+}
+
+// 管理员手写模板给首位出站起过名字时，直连规则必须引用他起的那个名字。
+//
+// 这里正是硬编码 model.DefaultOutboundTag 会出事的地方，而且是最隐蔽的一种：
+// 悬空 outboundTag 在 xray 里会静默回落默认出站——恰好就是直连，结果看起来
+// 完全正确，于是这个错误既不会被发现也不会被修，直到某天模板的默认出站不再
+// 是 freedom。
+func TestInjectDirectRuleFollowsRenamedDefaultOutbound(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "国内直连")
+	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
+		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action: model.ActionDirect, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	cfg := &xray.Config{}
+	tmpl := `{
+	  "outbounds": [
+	    {"protocol":"freedom","settings":{},"tag":"my-direct"},
+	    {"protocol":"blackhole","settings":{},"tag":"blocked"}
+	  ],
+	  "routing": {"rules": []}
+	}`
+	if err := json.Unmarshal([]byte(tmpl), cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	rules := decodeRules(t, cfg)
+	if len(rules) != 1 {
+		t.Fatalf("rule count = %d, want 1", len(rules))
+	}
+	if rules[0]["outboundTag"] != "my-direct" {
+		t.Errorf("direct rule outboundTag = %v, want my-direct（默认出站实际生效的 tag）",
+			rules[0]["outboundTag"])
+	}
+}
+
+// block 必须排在 direct 之前，理由与它排在 proxy 之前完全相同：违规域名的
+// 封禁是硬约束，不能被任何一条分流规则绕过——直连也是一种分流去向。
+func TestInjectBlockRulesComeBeforeDirectRules(t *testing.T) {
+	setupDB(t)
+	banned := newTestGroup(t, "违规域名")
+	cn := newTestGroup(t, "国内直连")
+	rs := RoutingRuleService{}
+	// 直连规则先插入且 priority 更小，以证明排序不是靠插入顺序或 priority
+	if err := rs.Add(&model.RoutingRule{
+		DomainGroupId: cn.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{cn.Id}),
+		Action: model.ActionDirect, Priority: 1, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add direct rule: %v", err)
+	}
+	if err := rs.Add(&model.RoutingRule{
+		DomainGroupId: banned.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{banned.Id}),
+		Action: model.ActionBlock, Priority: 99, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add block rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 3 {
+		t.Fatalf("rule count = %d, want 3", len(rules))
+	}
+	if rules[1]["outboundTag"] != model.BlockOutboundTag {
+		t.Errorf("rules[1] = %v, want the block rule (block must outrank direct)", rules[1])
+	}
+	if rules[2]["outboundTag"] != model.DefaultOutboundTag {
+		t.Errorf("rules[2] = %v, want the direct rule", rules[2])
 	}
 }

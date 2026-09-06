@@ -548,12 +548,14 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 				continue
 			}
 		}
-		if item.SubscribeUrl != "" {
-			if err := ValidateSubscribeURL(item.SubscribeUrl); err != nil {
-				report.DomainGroups.Failed++
-				report.fail("域名组「%s」的订阅地址非法：%v", item.Remark, err)
-				continue
-			}
+		// 换行分隔的多个地址逐个校验；空值表示不订阅，ValidateSubscribeURLs
+		// 自己放行。旧面板读到多行的 subscribeUrl 时，它的单地址版
+		// ValidateSubscribeURL 会因为 url.Parse 拒绝控制字符而报错、整组导入
+		// 失败并写进报告——明确拒绝而不是静默产生一个拉不动的订阅组。
+		if err := ValidateSubscribeURLs(item.SubscribeUrl); err != nil {
+			report.DomainGroups.Failed++
+			report.fail("域名组「%s」的订阅地址非法：%v", item.Remark, err)
+			continue
 		}
 		// LastUpdatedAt 留 0：ShouldUpdateNow 对 0 直接返回 true，
 		// SubscriptionJob（每 10 分钟）会自动补上首次拉取。这里不同步拉，
@@ -570,7 +572,7 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 		byRemark[item.Remark] = true
 		report.DomainGroups.Created++
 		changed = true
-		if item.SubscribeUrl != "" {
+		if len(ParseSubscribeURLs(item.SubscribeUrl)) > 0 {
 			subscribedCount++
 		}
 	}

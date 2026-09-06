@@ -68,6 +68,11 @@ func (s *RoutingRuleService) validate(rule *model.RoutingRule) error {
 	switch rule.Action {
 	case model.ActionBlock:
 		return nil
+	case model.ActionDirect:
+		// 直连不引用任何出站节点，OutboundId 在这条路径上没有意义，
+		// 不校验也不要求清零：CheckOutboundRefs 只数 action = proxy 的行，
+		// 一条从代理改成直连的规则不会再挡住那个节点的删除。
+		return nil
 	case model.ActionProxy:
 		if rule.OutboundId <= 0 {
 			return common.NewError("走节点的规则必须指定出站节点")

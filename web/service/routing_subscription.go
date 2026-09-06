@@ -224,6 +224,55 @@ const (
 // 只限制 scheme。不拦内网地址：本面板是单管理员系统，管理员本就有 shell 级
 // 权限，拦截 SSRF 换不来实际的安全收益，却会挡住「订阅局域网里自建的列表」
 // 这种合理用法。
+// maxSubscribeURLs 是一个域名组能配的订阅地址上限。
+//
+// 每个地址各有一次最长 subscriptionTimeout 的 HTTP 请求，而整个订阅子系统由
+// subscriptionMu 串行化：地址数量直接乘进「一轮刷新最坏要占用多久那把锁」。
+// 10 个已经远超实际需要（真实场景是 1~3 个），再多多半是贴错了内容。
+const maxSubscribeURLs = 10
+
+// ParseSubscribeURLs 把 DomainGroup.SubscribeUrl 里换行分隔的多个地址切出来，
+// 去掉空白行、按首次出现去重。
+//
+// 存成换行分隔的字符串而不是 JSON 数组，是为了让单地址组的值与多地址功能
+// 上线前**逐字节相同**：老数据一行都不用迁移，回退到旧版本二进制时单地址组
+// 照常工作（旧代码把整个字段当一个 URL 用，而它确实就是一个 URL）。多地址组
+// 在旧版本上会拉取失败并走 recordFailure，保留上一次的内容——陈旧但不为空，
+// 落在安全侧。
+//
+// 顺序即合并顺序，是「生成逐字节确定」的一部分：调用方按这个顺序逐个拉取，
+// 再按同样的顺序交给 MergeDomains。
+func ParseSubscribeURLs(raw string) []string {
+	seen := make(map[string]bool)
+	out := make([]string, 0, 2)
+	for _, line := range strings.Split(raw, "\n") {
+		item := strings.TrimSpace(line)
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
+	}
+	return out
+}
+
+// ValidateSubscribeURLs 逐个校验换行分隔的订阅地址。
+//
+// 一个地址都没有是合法的，表示这个组不订阅——空值必须放行，否则所有不订阅的
+// 域名组都保存不了。
+func ValidateSubscribeURLs(raw string) error {
+	urls := ParseSubscribeURLs(raw)
+	if len(urls) > maxSubscribeURLs {
+		return common.NewError("订阅地址最多", maxSubscribeURLs, "个，当前", len(urls), "个")
+	}
+	for _, u := range urls {
+		if err := ValidateSubscribeURL(u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func ValidateSubscribeURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {

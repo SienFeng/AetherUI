@@ -24,7 +24,7 @@ type RoutingInjector struct {
 }
 
 func (s *RoutingInjector) Inject(cfg *xray.Config) error {
-	outbounds, usableOutboundTags, err := s.buildOutbounds(cfg.OutboundConfigs)
+	outbounds, usableOutboundTags, defaultOutboundTag, err := s.buildOutbounds(cfg.OutboundConfigs)
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encodedOutbounds)
 
-	blockRules, proxyRules, err := s.buildRules(usableOutboundTags)
+	blockRules, routeRules, err := s.buildRules(usableOutboundTags, defaultOutboundTag)
 	if err != nil {
 		return err
 	}
@@ -59,7 +59,7 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	// 用户访问被分流的域名时会先命中分流规则走代理出站，限制被静默绕过。
 	rules = append(rules, geoRules...)
 	rules = append(rules, blockRules...)
-	rules = append(rules, proxyRules...)
+	rules = append(rules, routeRules...)
 	routing["rules"] = rules
 
 	// 开关为 0 时【不碰】domainStrategy：模板里管理员可能手写过它，
@@ -80,7 +80,8 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	return nil
 }
 
-// buildOutbounds 返回注入后的出站数组，以及「实际写入了配置的」节点 id -> tag 映射。
+// buildOutbounds 返回注入后的出站数组、「实际写入了配置的」节点 id -> tag 映射，
+// 以及默认出站实际生效的 tag（供 ActionDirect 的规则引用，理由见 tagDefaultOutbound）。
 //
 // 第二个返回值是关键：buildRules 必须只认这些 tag。一个 Config 损坏而被跳过的节点，
 // 如果其 tag 仍被规则引用，就会形成悬空 outboundTag —— 而 xray 对此不报错，运行时
@@ -98,32 +99,40 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 //
 // 只作用于模板里已有的出站，必须在 append 生成的出站之前调用：那些出站自带
 // tag，补上去会造成重复。
-func tagDefaultOutbound(outbounds []any) {
+//
+// 返回实际生效的那个 tag（补上去的，或者模板里原本就有的），空串表示模板里
+// 压根没有可引用的默认出站。ActionDirect 的规则要引用它，**必须用这个返回值
+// 而不是硬编码 model.DefaultOutboundTag**：管理员手写模板给首个出站起过名字
+// 时上面那条早退分支会原样保留，硬编码就会发出一个悬空 outboundTag。那种
+// 情况下 xray 不报错、运行时静默回落默认出站——结果碰巧还是直连，于是这个
+// 错误既不会被发现也不会被修，直到某天默认出站不再是 freedom。
+func tagDefaultOutbound(outbounds []any) string {
 	if len(outbounds) == 0 {
-		return
+		return ""
 	}
 	ob, ok := outbounds[0].(map[string]any)
 	if !ok || ob == nil {
-		return
+		return ""
 	}
 	if tag, ok := ob["tag"].(string); ok && tag != "" {
-		return
+		return tag
 	}
 	ob["tag"] = model.DefaultOutboundTag
+	return model.DefaultOutboundTag
 }
 
-func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, error) {
+func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, string, error) {
 	outbounds := make([]any, 0)
 	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &outbounds); err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 	}
-	tagDefaultOutbound(outbounds)
+	defaultTag := tagDefaultOutbound(outbounds)
 
 	nodes, err := s.outboundService.GetEnabled()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	usable := make(map[int]string, len(nodes))
 	for _, node := range nodes {
@@ -163,10 +172,16 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 		"protocol": "blackhole",
 		"settings": map[string]any{},
 	})
-	return outbounds, usable, nil
+	return outbounds, usable, defaultTag, nil
 }
 
-func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []any, error) {
+// buildRules 返回两组规则：block 的一组必须整体排在另一组之前（见 Inject）。
+//
+// 第二组把 proxy 与 direct 混在一起，按 priority asc, id asc 排序——它们是
+// 对等的分流动作，都只是「把命中的流量送到某个出站」，谁在前由管理员设的
+// 优先级决定。只有 block 需要单独提前，那是硬约束：违规域名的封禁不能被
+// 任何一条分流规则绕过。
+func (s *RoutingInjector) buildRules(outboundTagById map[int]string, defaultOutboundTag string) ([]any, []any, error) {
 	rules, err := s.ruleService.GetEnabled()
 	if err != nil {
 		return nil, nil, err
@@ -187,9 +202,9 @@ func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []a
 	}
 
 	blockRules := make([]any, 0)
-	proxyRules := make([]any, 0)
+	routeRules := make([]any, 0)
 	for _, rule := range rules {
-		generated, isBlock, skip := s.buildRule(rule, inboundTagById, outboundTagById)
+		generated, isBlock, skip := s.buildRule(rule, inboundTagById, outboundTagById, defaultOutboundTag)
 		if skip != nil {
 			// 设计 §5.3 接受这道防线的理由是「宁可规则不生效，用户能察觉」。
 			// 跳过若不记日志，用户其实察觉不到：规则表照常渲染，生成的配置里
@@ -204,11 +219,11 @@ func (s *RoutingInjector) buildRules(outboundTagById map[int]string) ([]any, []a
 			if isBlock {
 				blockRules = append(blockRules, g)
 			} else {
-				proxyRules = append(proxyRules, g)
+				routeRules = append(routeRules, g)
 			}
 		}
 	}
-	return blockRules, proxyRules, nil
+	return blockRules, routeRules, nil
 }
 
 // buildRule 生成 0~2 条 xray 规则，或说明为什么必须整条丢弃。
@@ -233,6 +248,7 @@ func (s *RoutingInjector) buildRule(
 	rule *model.RoutingRule,
 	inboundTagById map[int]string,
 	outboundTagById map[int]string,
+	defaultOutboundTag string,
 ) ([]map[string]any, bool, error) {
 	groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds)
 	if err != nil {
@@ -358,6 +374,18 @@ func (s *RoutingInjector) buildRule(
 				rule.OutboundId)
 		}
 		outboundTag = tag
+	case model.ActionDirect:
+		// 引用默认出站实际生效的 tag，绝不硬编码 model.DefaultOutboundTag。
+		//
+		// 取不到就整条丢弃，哪怕悬空引用在这里「碰巧」也会回落到默认出站、
+		// 结果与预期一致：那是同一份不变量（绝不输出悬空 outboundTag）在
+		// 唯一一处后果不严重的地方，破一次例就等于把它降级成建议。而且
+		// 一旦模板的默认出站不再是 freedom，这个巧合会当场变成静默错误。
+		if defaultOutboundTag == "" {
+			return nil, false, common.NewError("模板里没有可引用的默认出站，直连规则无法生成, rule id:",
+				rule.Id)
+		}
+		outboundTag = defaultOutboundTag
 	default:
 		return nil, false, common.NewError("未知的动作:", rule.Action)
 	}

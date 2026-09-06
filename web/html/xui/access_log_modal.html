@@ -10,12 +10,31 @@
             <a-input v-model.trim="accessLogModal.ip" placeholder="按来源 IP 过滤" allow-clear
                      @pressEnter="accessLogModal.search()"></a-input>
         </a-col>
-        <a-col :span="10">
+        <a-col :span="8">
             <a-input v-model.trim="accessLogModal.key" placeholder="按目标关键字过滤，如 google" allow-clear
                      @pressEnter="accessLogModal.search()"></a-input>
         </a-col>
-        <a-col :span="6">
+        <a-col :span="8">
             <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
+            <span style="margin-left: 12px; white-space: nowrap">
+                <a-switch size="small" :checked="accessLogModal.autoRefresh"
+                          @change="on => accessLogModal.toggleAutoRefresh(on)"></a-switch>
+                <span style="margin-left: 6px; color: rgba(0,0,0,.65)">自动刷新</span>
+                <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: rgba(0,0,0,.45)">
+                    <a-tooltip v-if="accessLogModal.refreshError">
+                        <template slot="title">[[ accessLogModal.refreshError ]]</template>
+                        <span style="color: #f5222d; cursor: help">出错</span>
+                    </a-tooltip>
+                    <a-tooltip v-else-if="accessLogModal.page > 1">
+                        <template slot="title">
+                            自动刷新只在第一页生效：新记录会不断把列表往下顶，翻着页刷新会让你正在看的行漂走。
+                            回到第一页即自动恢复。
+                        </template>
+                        <span style="cursor: help">已暂停（第 [[ accessLogModal.page ]] 页）</span>
+                    </a-tooltip>
+                    <span v-else>每 5 秒</span>
+                </span>
+            </span>
         </a-col>
     </a-row>
     <div v-if="accessLogModal.sources.length" style="margin-bottom: 12px">
@@ -83,6 +102,18 @@
         pageSize: 20,
         total: 0,
         list: [],
+        // 自动刷新默认关：这个弹窗有两类用法——排查「他现在在访问什么」时
+        // 自动刷新有用，复盘「他昨天访问过什么」时它纯属干扰，还会把带关键字
+        // 那次全表扫描反复跑。默认开着等于替管理员选了其中一种。
+        autoRefresh: false,
+        timer: null,
+        refreshError: '',
+        // 上一次手工查询实际生效的筛选条件。自动刷新用它而不是输入框的当前值：
+        // ip / key 是 v-model 实时绑定的，管理员刚敲下「49.90」还没输完，下一轮
+        // 自动刷新就会拿这半截条件去查，列表当场变空——他没点过查询，却看到
+        // 结果变了。
+        appliedIp: '',
+        appliedKey: '',
         columns: [{
             title: "时间", align: 'center', width: 160,
             scopedSlots: { customRender: 'time' },
@@ -110,6 +141,9 @@
             this.visible = true;
             this.load();
             this.loadSources();
+            // 自动刷新的开关状态跨弹窗保留（管理员开过一次就是想一直这么看），
+            // 所以每次打开都要按当前状态重新起定时器。
+            this.syncTimer();
         },
         // 点标签即按该来源过滤；再点一次「显示全部」清掉过滤。
         pickSource(ip) {
@@ -126,6 +160,7 @@
         close() {
             this.visible = false;
             this.list = [];
+            this.syncTimer();
         },
         search() {
             this.page = 1;
@@ -135,25 +170,100 @@
             this.page = page;
             this.load();
         },
-        async load() {
-            this.loading = true;
-            const msg = await HttpUtil.post(`/aui/inbound/accessLogs/${this.inboundId}`, {
-                ip: this.ip,
-                key: this.key,
+        // silent 为真时这是一次自动刷新：不转 loading 圈（每 5 秒闪一次很烦）、
+        // 不弹全局错误提示、不动分页总数。
+        async load({ silent = false } = {}) {
+            const url = `/aui/inbound/accessLogs/${this.inboundId}`;
+            if (!silent) {
+                // 手工查询这一刻，输入框里的值才成为「生效条件」。
+                this.appliedIp = this.ip;
+                this.appliedKey = this.key;
+            }
+            const body = {
+                ip: this.appliedIp,
+                key: this.appliedKey,
                 page: this.page,
                 pageSize: this.pageSize,
-            });
-            this.loading = false;
-            if (!msg.success) {
+                // 跳过 SELECT COUNT(*)：那是这个查询里最贵的一步（带关键字时是
+                // 全表扫描的 LIKE '%kw%'），而自动刷新只在第一页跑，页码和页大小
+                // 都不会变，总数对它毫无用处。见 AccessLogQuery.SkipTotal。
+                skipTotal: silent,
+            };
+
+            let obj;
+            if (silent) {
+                // 不走 HttpUtil：它每次失败都会弹一条全局提示，5 秒一条很快
+                // 就能把屏幕刷满。错误就地显示在开关旁边，与 inbounds.html 的
+                // loadOnlineCounts 同一套做法。
+                try {
+                    const resp = await axios.post(url, body);
+                    const data = resp.data;
+                    if (!data || !data.success) {
+                        this.refreshError = (data && data.msg) || '刷新失败';
+                        return;
+                    }
+                    this.refreshError = '';
+                    obj = data.obj;
+                } catch (e) {
+                    this.refreshError = e.toString();
+                    return;
+                }
+            } else {
+                this.loading = true;
+                const msg = await HttpUtil.post(url, body);
+                this.loading = false;
+                if (!msg.success) {
+                    return;
+                }
+                obj = msg.obj;
+            }
+
+            this.enabled = obj.enabled;
+            this.list = obj.list;
+            if (!silent) {
+                // total 在 skipTotal 那条路径上恒为 0，表示「本次没统计」而不是
+                // 「一条都没有」，照抄会让分页组件当场显示「共 0 条」。
+                this.total = obj.total;
+                this.page = obj.page;
+                this.pageSize = obj.pageSize;
+            }
+        },
+        toggleAutoRefresh(on) {
+            this.autoRefresh = on;
+            this.refreshError = '';
+            this.syncTimer();
+        },
+        // 定时器的唯一开关处，先清后设因而幂等：show / close / 切换开关都调它，
+        // 不这么做的话反复开关弹窗会叠出多个 interval，页面开几小时后请求频率
+        // 会翻好几倍——和展开行的 Chart 实例不销毁是同一类问题。
+        syncTimer() {
+            if (this.timer != null) {
+                clearInterval(this.timer);
+                this.timer = null;
+            }
+            if (this.autoRefresh && this.visible) {
+                this.timer = setInterval(() => this.tick(), ACCESS_LOG_REFRESH_MS);
+            }
+        },
+        tick() {
+            // 标签页切到后台就不发请求，切回来自动继续。定时器留着不清：
+            // 这里要的是「暂停」而不是「关闭」，管理员没做过任何操作。
+            if (document.hidden) {
                 return;
             }
-            this.enabled = msg.obj.enabled;
-            this.list = msg.obj.list;
-            this.total = msg.obj.total;
-            this.page = msg.obj.page;
-            this.pageSize = msg.obj.pageSize;
+            // 只在第一页刷新。翻页时新记录会不断把列表往下顶，正在看的那行
+            // 会漂走；回到第一页自动恢复，界面上有对应提示。
+            if (this.page !== 1) {
+                return;
+            }
+            this.load({ silent: true });
         },
     };
+
+    // 自动刷新周期。上限由后端决定：AccessLogCollectJob 是 @every 5s
+    // （web/web.go），日志最快也是 5 秒才进库一批，刷得更快只是反复
+    // 拿回同一批数据。
+    const ACCESS_LOG_REFRESH_MS = 5000;
 
     // 生成的出站 tag 一律带 a-ui- 前缀（model.OutboundTagPrefix），
     // 与用户手写模板里的 tag 隔离。
@@ -171,6 +281,14 @@
         delimiters: ['[[', ']]'],
         el: '#access-log-modal',
         data: { accessLogModal },
+        watch: {
+            // 弹窗是 v-model 绑定 visible 的，点右上角 X 或点遮罩关闭时都不会
+            // 走 close()。只有这个 watch 能保证定时器一定被清掉——否则弹窗关了
+            // 之后请求还在后台每 5 秒发一次，管理员完全看不到。
+            'accessLogModal.visible'() {
+                accessLogModal.syncTimer();
+            },
+        },
         methods: {
             routeColor(route) {
                 if (routeIsChained(route)) return 'orange';

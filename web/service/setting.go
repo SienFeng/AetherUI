@@ -489,6 +489,25 @@ func (s *SettingService) GetDNSServers() (string, error) {
 	return s.getString("dnsServers")
 }
 
+// SetIPRuleResolveDomain 写入是否允许 IP 分流规则匹配域名目标。
+//
+// SetDNSServers 同理。这两项唯一的写入方（除设置页外）是 a-ui bootstrap：
+// defaultValueMap 里它们仍是 0 / 空串，「升级后行为零变化」靠的正是那两个
+// 默认值不动——新装的开箱默认由安装流程显式落库，与默认值是两回事，
+// 改默认值会让存量部署里从未保存过配置的那些跟着变。
+func (s *SettingService) SetIPRuleResolveDomain(v bool) error {
+	n := 0
+	if v {
+		n = 1
+	}
+	return s.setInt("ipRuleResolveDomain", n)
+}
+
+// SetDNSServers 写入 DNS 服务器列表原文（换行分隔）。
+func (s *SettingService) SetDNSServers(v string) error {
+	return s.setString("dnsServers", v)
+}
+
 // GetAccessLogRetentionDays 返回访问日志保留天数。
 func (s *SettingService) GetAccessLogRetentionDays() (int, error) {
 	return s.getInt("accessLogRetentionDays")

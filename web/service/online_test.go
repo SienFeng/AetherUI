@@ -514,3 +514,75 @@ func TestCountabilityDistinguishesUnknownFromZero(t *testing.T) {
 		t.Errorf("tcp 入站 ok = %v reason = %q，期望可观测", ok, reason)
 	}
 }
+
+// 入站列表那一列要的是「这个节点下所有设备合计跑多快」，也就是展开行里
+// 每台设备那两个数字之和。这条从真实的两次采样走完整条链路，钉住的正是
+// 这个等式——只对着构造出来的 []OnlineIP 求和，测不到 update 那一步。
+func TestSumLiveSpeedEqualsSumOfPerDeviceSpeeds(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{
+		conn(1, testPort, "1.1.1.1", 0, 0),
+		conn(2, testPort, "2.2.2.2", 0, 0),
+	}, testPorts, now)
+
+	// 2 秒后：1.1.1.1 上行 2000 下行 4000，2.2.2.2 上行 1000 下行 6000。
+	later := now.Add(2 * time.Second)
+	tk.update([]netdiag.Conn{
+		conn(1, testPort, "1.1.1.1", 2000, 4000),
+		conn(2, testPort, "2.2.2.2", 1000, 6000),
+	}, testPorts, later)
+
+	list := tk.snapshot(testPort, noLocation)
+	if len(list) != 2 {
+		t.Fatalf("期望 2 个来源，实际 %d", len(list))
+	}
+
+	var wantUp, wantDown int64
+	for _, e := range list {
+		wantUp += e.UpSpeed
+		wantDown += e.DownSpeed
+	}
+	up, down := sumLiveSpeed(list)
+	if up != wantUp || down != wantDown {
+		t.Fatalf("合计速率 = %d/%d，期望 %d/%d（各设备之和）", up, down, wantUp, wantDown)
+	}
+	// 2 秒窗口：(2000+1000)/2 = 1500，(4000+6000)/2 = 5000。
+	if up != 1500 || down != 5000 {
+		t.Errorf("合计速率 = %d/%d B/s，期望 1500/5000", up, down)
+	}
+}
+
+// 与 countLive 同一条口径：连接已断干净、仅为界面展示保留的历史条目不计入。
+//
+// 它们的速率字段本来就是零值，算不算结果都一样——这条测试钉的是「两列出自
+// 同一条判据」，将来谁给历史条目补上残留速率时，这里会先红。
+func TestSumLiveSpeedSkipsEntriesWithoutConnections(t *testing.T) {
+	list := []OnlineIP{
+		{IP: "1.1.1.1", Conns: 2, UpSpeed: 100, DownSpeed: 200},
+		{IP: "2.2.2.2", Conns: 0, Blocked: true, UpSpeed: 999, DownSpeed: 999},
+		{IP: "3.3.3.3", Conns: 0, Banned: true, UpSpeed: 999, DownSpeed: 999},
+	}
+	up, down := sumLiveSpeed(list)
+	if up != 100 || down != 200 {
+		t.Errorf("合计速率 = %d/%d，期望 100/200：连接已断干净的历史条目不该计入", up, down)
+	}
+	if n := countLive(list); n != 1 {
+		t.Errorf("在线设备数 = %d，期望 1；两列口径若不一致，界面会出现「0 台设备」配非零速率", n)
+	}
+}
+
+// 首次采样没有基准，速率一律为 0——此时合计也必须是 0，不能出现
+// 「刚打开页面就显示一个凭空来的速率」。
+func TestSumLiveSpeedIsZeroOnFirstSample(t *testing.T) {
+	tk := newOnlineTracker()
+	tk.update([]netdiag.Conn{
+		conn(1, testPort, "1.1.1.1", 5_000_000, 9_000_000),
+	}, testPorts, time.Unix(1000, 0))
+
+	up, down := sumLiveSpeed(tk.snapshot(testPort, noLocation))
+	if up != 0 || down != 0 {
+		t.Errorf("首次采样合计速率 = %d/%d，期望 0/0", up, down)
+	}
+}

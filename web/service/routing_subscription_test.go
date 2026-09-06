@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -809,4 +810,273 @@ func TestParseSubscriptionDedupesCidrs(t *testing.T) {
 	if len(cidrs) != 1 {
 		t.Errorf("cidrs = %v, want 1 entry", cidrs)
 	}
+}
+
+func TestParseSubscribeURLs(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"空值", "", nil},
+		{"只有空白", "  \n\t\n ", nil},
+		{"单个地址与本功能上线前一致", "https://a.com/x", []string{"https://a.com/x"}},
+		{"多行去空白", " https://a.com/x \n\nhttps://b.com/y\n", []string{"https://a.com/x", "https://b.com/y"}},
+		{"重复地址按首次出现去重", "https://a.com/x\nhttps://b.com/y\nhttps://a.com/x",
+			[]string{"https://a.com/x", "https://b.com/y"}},
+	}
+	for _, tc := range cases {
+		got := ParseSubscribeURLs(tc.raw)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: 解析出 %v，期望 %v", tc.name, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: 第 %d 个 = %q，期望 %q（顺序即合并顺序，不能重排）",
+					tc.name, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestValidateSubscribeURLs(t *testing.T) {
+	// 空值必须放行：它表示这个组不订阅，拒绝的话所有不订阅的域名组都保存不了。
+	if err := ValidateSubscribeURLs(""); err != nil {
+		t.Errorf("空值应放行: %v", err)
+	}
+	if err := ValidateSubscribeURLs("https://a.com/x\nhttps://b.com/y"); err != nil {
+		t.Errorf("两个合法地址应放行: %v", err)
+	}
+	// 任何一行非法都要拒绝，不能只看第一行。
+	if err := ValidateSubscribeURLs("https://a.com/x\nftp://b.com/y"); err == nil {
+		t.Error("第二行是 ftp://，应被拒绝")
+	}
+	var many []string
+	for i := 0; i <= maxSubscribeURLs; i++ {
+		many = append(many, "https://a.com/"+strconv.Itoa(i))
+	}
+	if err := ValidateSubscribeURLs(strings.Join(many, "\n")); err == nil {
+		t.Errorf("超过 %d 个地址应被拒绝", maxSubscribeURLs)
+	}
+}
+
+// 多个地址的内容合并成一份，按地址顺序有序去重。
+func TestRefreshMergesAllSubscribeURLs(t *testing.T) {
+	setupDB(t)
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\nIP-CIDR,1.1.1.0/24,no-resolve\n"))
+	}))
+	defer a.Close()
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// qq.com 与 a 重复，必须去重且只保留首次出现
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\nDOMAIN-SUFFIX,taobao.com\n"))
+	}))
+	defer b.Close()
+
+	group := &model.DomainGroup{
+		Remark: "国内", Domains: "[]", SubscribeUrl: a.URL + "\n" + b.URL,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	got, err := s.Get(group.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	domains, err := DecodeSubscribedDomains(got.SubscribedDomains)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedDomains: %v", err)
+	}
+	want := []string{"domain:qq.com", "domain:taobao.com"}
+	if len(domains) != len(want) {
+		t.Fatalf("domains = %v，期望 %v", domains, want)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Errorf("domains[%d] = %q，期望 %q（按地址顺序合并，去重保留首次出现）",
+				i, domains[i], want[i])
+		}
+	}
+	cidrs, err := DecodeSubscribedCidrs(got.SubscribedCidrs)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedCidrs: %v", err)
+	}
+	if len(cidrs) != 1 || cidrs[0] != "1.1.1.0/24" {
+		t.Errorf("cidrs = %v，期望 [1.1.1.0/24]（只有第一个地址给了 IP 段）", cidrs)
+	}
+	if got.LastError != "" {
+		t.Errorf("LastError = %q, want empty", got.LastError)
+	}
+}
+
+// 一个地址失败时，它上一次的内容原样保留并继续参与合并；其余地址照常更新到
+// 最新。这是「每个地址相互独立」的核心语义，也是本功能全部的存在理由。
+//
+// 做不到这一点的实现只有两种退化形态，都更糟：整次不写（失败地址拖住所有人），
+// 或者只写成功地址的内容（失败地址上一次的内容被清空，合并结果可能因此变空，
+// buildRule 跳过整条规则，流量静默退回直连）。
+func TestRefreshKeepsFailedURLContentAndUpdatesOthers(t *testing.T) {
+	setupDB(t)
+	aBody := "DOMAIN-SUFFIX,a1.com\n"
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(aBody))
+	}))
+	defer a.Close()
+	bFails := false
+	b := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bFails {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte("DOMAIN-SUFFIX,b.com\n"))
+	}))
+	defer b.Close()
+
+	group := &model.DomainGroup{Remark: "混合", Domains: "[]", SubscribeUrl: a.URL + "\n" + b.URL}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	s := &DomainGroupService{}
+
+	// 第一轮：两个地址都成功，各自的内容都进了合并结果。
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("首次 Refresh: %v", err)
+	}
+	if got := mustSubscribedDomains(t, s, group.Id); !reflect.DeepEqual(got, []string{"domain:a1.com", "domain:b.com"}) {
+		t.Fatalf("首次合并结果 = %v，期望 [domain:a1.com domain:b.com]", got)
+	}
+
+	// 第二轮：a 换了内容，b 挂了。
+	aBody = "DOMAIN-SUFFIX,a2.com\n"
+	bFails = true
+	err := s.Refresh(group.Id)
+	if err == nil {
+		t.Fatal("有地址失败时必须如实返回错误，否则管理员会以为这次刷新完全成功")
+	}
+	if !strings.Contains(err.Error(), b.URL) {
+		t.Errorf("错误里应点名失败的地址 %s，实际 %q", b.URL, err.Error())
+	}
+
+	got := mustSubscribedDomains(t, s, group.Id)
+	want := []string{"domain:a2.com", "domain:b.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("合并结果 = %v，期望 %v：a 应更新到最新，b 应保留上一次的内容", got, want)
+	}
+
+	// b 自己那一行：内容原样保留，LastUpdatedAt 不推进，只记 LastError。
+	states, err := s.subscriptionStates(group.Id)
+	if err != nil {
+		t.Fatalf("subscriptionStates: %v", err)
+	}
+	bs := states[b.URL]
+	if bs == nil {
+		t.Fatal("b 的状态行不见了")
+	}
+	if bs.Domains != `["domain:b.com"]` {
+		t.Errorf("b.Domains = %q，失败不该动它的内容", bs.Domains)
+	}
+	if bs.LastError == "" {
+		t.Error("b.LastError 应记下这次的失败原因")
+	}
+	as := states[a.URL]
+	if as == nil || as.LastError != "" {
+		t.Errorf("a 这次成功了，它的 LastError 必须被清掉，实际 %+v", as)
+	}
+	if as.LastUpdatedAt <= bs.LastUpdatedAt {
+		t.Errorf("a 的 LastUpdatedAt(%d) 应晚于 b 的(%d)：只有 a 这次拉成功了",
+			as.LastUpdatedAt, bs.LastUpdatedAt)
+	}
+}
+
+// 所有地址都失败且都没有历史内容时，绝不写回——那会把上一次的合并结果清空，
+// buildRule 因「域名组为空」跳过整条规则，流量静默退回直连。
+//
+// 这是「每个地址独立」下唯一一处仍然整次不写的地方。
+func TestRefreshWritesNothingWhenAllURLsFail(t *testing.T) {
+	setupDB(t)
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	group := &model.DomainGroup{
+		Remark: "国内", Domains: "[]", SubscribeUrl: bad.URL,
+		SubscribedDomains: `["domain:old.com"]`,
+		SubscribedCidrs:   `["9.9.9.0/24"]`,
+		LastUpdatedAt:     1234,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err == nil {
+		t.Fatal("地址返回 500，Refresh 必须报错")
+	}
+	got, err := s.Get(group.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.SubscribedDomains != `["domain:old.com"]` {
+		t.Errorf("SubscribedDomains = %q，必须原样保留", got.SubscribedDomains)
+	}
+	if got.SubscribedCidrs != `["9.9.9.0/24"]` {
+		t.Errorf("SubscribedCidrs = %q，必须原样保留", got.SubscribedCidrs)
+	}
+	if got.LastUpdatedAt != 1234 {
+		t.Errorf("LastUpdatedAt = %d，失败不该推进它", got.LastUpdatedAt)
+	}
+}
+
+// 删除域名组必须连带删掉它的订阅结果行。
+//
+// SQLite 会复用被删除的自增 id：残留的行会绑到下一个新建的组上，那个组会莫名
+// 其妙带着别人的订阅内容参与分流，而引用不再悬空，生成期那道「跳过不存在的
+// 引用」的防线拦不住它。
+func TestDelDomainGroupDeletesItsSubscriptionRows(t *testing.T) {
+	setupDB(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("DOMAIN-SUFFIX,qq.com\n"))
+	}))
+	defer srv.Close()
+
+	s := &DomainGroupService{}
+	group := &model.DomainGroup{Remark: "国内", Domains: "[]", SubscribeUrl: srv.URL}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	oldId := group.Id
+	if err := s.Del(oldId); err != nil {
+		t.Fatalf("Del: %v", err)
+	}
+
+	states, err := s.subscriptionStates(oldId)
+	if err != nil {
+		t.Fatalf("subscriptionStates: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("删组后还剩 %d 行订阅结果，SQLite 复用 id 时它们会绑到下一个新建的组上", len(states))
+	}
+}
+
+func mustSubscribedDomains(t *testing.T, s *DomainGroupService, groupId int) []string {
+	t.Helper()
+	g, err := s.Get(groupId)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	list, err := DecodeSubscribedDomains(g.SubscribedDomains)
+	if err != nil {
+		t.Fatalf("DecodeSubscribedDomains: %v", err)
+	}
+	return list
 }

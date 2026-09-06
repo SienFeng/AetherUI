@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/util/common"
 	"a-ui/util/link"
 	"a-ui/web/service"
@@ -76,6 +77,9 @@ type domainGroupDetail struct {
 	LastUpdatedAt         int64    `json:"lastUpdatedAt"`
 	LastError             string   `json:"lastError"`
 	LastSkipped           int      `json:"lastSkipped"`
+	// SubscriptionStates 按订阅地址逐个给出状态，顺序与 SubscribeUrl 里的行序
+	// 一致，前端据此在每个输入框下面显示这一行是成功还是失败。
+	SubscriptionStates []service.SubscriptionState `json:"subscriptionStates"`
 }
 
 type routingRuleForm struct {
@@ -282,6 +286,13 @@ func (a *RoutingController) detailDomainGroup(c *gin.Context) {
 	if len(cidrPreview) > subscribedPreviewLimit {
 		cidrPreview = cidrPreview[:subscribedPreviewLimit]
 	}
+	// 取不到只当作没有：这是展示路径，为了逐地址状态让整个编辑弹窗打不开
+	// 是本末倒置。
+	states, err := a.domainGroupService.SubscriptionStates(group)
+	if err != nil {
+		logger.Warning("读取订阅地址状态失败, group:", group.Id, "err:", err)
+		states = []service.SubscriptionState{}
+	}
 	jsonObj(c, &domainGroupDetail{
 		Id:                    group.Id,
 		Remark:                group.Remark,
@@ -295,6 +306,7 @@ func (a *RoutingController) detailDomainGroup(c *gin.Context) {
 		LastUpdatedAt:         group.LastUpdatedAt,
 		LastError:             group.LastError,
 		LastSkipped:           group.LastSkipped,
+		SubscriptionStates:    states,
 	}, nil)
 }
 
@@ -366,8 +378,9 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 	if form.SubscribeUrl != nil {
 		subscribeUrl = *form.SubscribeUrl
 	}
-	if subscribeUrl != "" {
-		if err := service.ValidateSubscribeURL(subscribeUrl); err != nil {
+	{
+		// ValidateSubscribeURLs 自己容忍空值（表示不订阅），不必再判一次。
+		if err := service.ValidateSubscribeURLs(subscribeUrl); err != nil {
 			jsonMsg(c, "添加域名组", err)
 			return
 		}
@@ -416,8 +429,9 @@ func (a *RoutingController) updateDomainGroup(c *gin.Context) {
 	if form.SubscribeUrl != nil {
 		subscribeUrl = *form.SubscribeUrl
 	}
-	if subscribeUrl != "" {
-		if err := service.ValidateSubscribeURL(subscribeUrl); err != nil {
+	{
+		// ValidateSubscribeURLs 自己容忍空值（表示不订阅），不必再判一次。
+		if err := service.ValidateSubscribeURLs(subscribeUrl); err != nil {
 			jsonMsg(c, "修改域名组", err)
 			return
 		}

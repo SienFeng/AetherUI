@@ -819,3 +819,41 @@ func TestUpdateClearsLegacyDomainGroupId(t *testing.T) {
 			got.DomainGroupId)
 	}
 }
+
+// 直连规则不引用任何出站节点，OutboundId 在这条路径上没有意义，
+// 不该被要求填写。
+func TestAddDirectRuleNeedsNoOutbound(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "国内直连")
+	s := RoutingRuleService{}
+	if err := s.Add(&model.RoutingRule{
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action: model.ActionDirect, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+}
+
+// 一条从代理改成直连的规则，不该再挡住那个出站节点的删除：它已经不引用
+// 那个节点了。CheckOutboundRefs 只数 action = proxy 的行，这条钉住这一点，
+// 免得将来有人把条件放宽成「只看 outbound_id」——残留的 OutboundId 会让
+// 一个早已没人引用的节点永远删不掉，而界面上找不到任何引用它的规则。
+func TestCheckOutboundRefsIgnoresDirectRules(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "国内直连")
+	node, err := (&OutboundNodeService{}).AddFromLink("socks5://1.2.3.4:1080", "hk")
+	if err != nil {
+		t.Fatalf("AddFromLink: %v", err)
+	}
+	s := RoutingRuleService{}
+	// OutboundId 照原样残留，模拟管理员把一条代理规则改成了直连
+	if err := s.Add(&model.RoutingRule{
+		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action: model.ActionDirect, OutboundId: node.Id, Enable: true,
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.CheckOutboundRefs(node.Id); err != nil {
+		t.Errorf("直连规则不该算作对出站节点的引用: %v", err)
+	}
+}

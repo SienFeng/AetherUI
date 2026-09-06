@@ -62,7 +62,7 @@ go mod tidy && go vet ./...
 
 - `web/controller/` — 只做参数绑定、鉴权（`BaseController.checkLogin`）和 `jsonMsg/jsonObj` 响应包装（`web/controller/util.go`）。
 - `web/service/` — 业务逻辑，所有 service 都是**无状态空结构体**，按值嵌入使用；跨请求状态（xray 进程 `p`、`isNeedXrayRestart`）是包级变量。
-- `database/model/` — 主库早已不止 3 张表：`model.go` 的 User/Inbound/Setting 之外，还有 `routing.go` 的 DomainGroup/OutboundNode/RoutingRule 与 `ipban.go` 的 IPBan，共 7 张表。另有两张表各自落在**独立库**里——访问日志 `AccessLog`（`accesslog.go`，`database.InitAccessLogDB`）与用量历史 `TrafficBucket`（`traffic.go`，`database.InitTrafficDB`）——理由见「用量历史与图表」一节：高频写入不该和面板的普通操作抢主库那把 SQLite 写锁。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
+- `database/model/` — 主库早已不止 3 张表：`model.go` 的 User/Inbound/Setting 之外，还有 `routing.go` 的 DomainGroup/DomainGroupSubscription/OutboundNode/RoutingRule 与 `ipban.go` 的 IPBan，共 8 张表。另有两张表各自落在**独立库**里——访问日志 `AccessLog`（`accesslog.go`，`database.InitAccessLogDB`）与用量历史 `TrafficBucket`（`traffic.go`，`database.InitTrafficDB`）——理由见「用量历史与图表」一节：高频写入不该和面板的普通操作抢主库那把 SQLite 写锁。Inbound 把 xray 的 `settings`/`streamSettings`/`sniffing` 原样存为 JSON 字符串，Go 侧不解析结构，由前端 `web/assets/js/model/xray.js` 负责建模。
 
 路由树：`basePath` → `/`（登录）、`/server/*`（状态、xray 版本管理）、`/aui/*`（需登录，下挂 `/aui/inbound/*` 与 `/aui/setting/*`）。
 
@@ -114,8 +114,8 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 
 分流子系统用到的两个 key：
 
-- **`ipRuleResolveDomain`**（int，默认 0）——为 1 时注入器往 `routing` 里写 `domainStrategy: "IPIfNonMatch"`，**覆盖模板里管理员可能手写过的那一项**；为 0 时压根不碰它（升级后行为零变化靠这一条）。打开它有两个不在开关名字里的后果：每条未命中的连接多一次本机解析；模板里那条 `geoip:private → blocked` 会**开始对域名目标生效**。
-- **`dnsServers`**（string，默认 ""，换行分隔）——非空即启用 `DNSInjector`。这一项的实现踩过一个必须原样记住的坑，它是本子系统失败模式的原型：**`domainStrategy` 要写进 freedom 出站的 `settings` 里，不是写在出站对象上**。出站对象对应 `infra/conf.OutboundDetourConfig`，其完整字段集是 `protocol/sendThrough/tag/settings/streamSettings/proxySettings/mux/targetStrategy`（`infra/conf/xray.go:213-222`），根本没有 `domainStrategy`；而 `infra/conf` 从不调用 `DisallowUnknownFields`，写错层级**不会有任何报错**——`run -test` 照样 `Configuration OK`，面板照样 `running`，freedom 停在 `AsIs`，整个 DNS 功能变成纯装饰。另外三条：只用 `UseIP*`，绝不用 `ForceIP*`（`transport/internet/config.go:13`；`ForceIP` 下解析失败会变成连接失败，`UseIP` 只记日志并回落按域名直连，这一条把「DNS 配错 = 全员断网」整个消掉）；`localhost` 永远补在列表**末位**，解析器全挂时退化成系统解析而不是断网；**任何时候都不往 `xrayTemplateConfig` 回写**，注入只发生在生成期。白名单为什么恰好是那几个 scheme，见「已知偏差与注意事项」。
+- **`ipRuleResolveDomain`**（int，默认 0）——为 1 时注入器往 `routing` 里写 `domainStrategy: "IPIfNonMatch"`，**覆盖模板里管理员可能手写过的那一项**；为 0 时压根不碰它（升级后行为零变化靠这一条）。**这个 0 是给存量部署的，不是新装的开箱状态**：`bootstrap.Run` 会给新装的面板显式写 1（连同下面的 `dnsServers`），要改新装默认值改那里，别改 `defaultValueMap`——改了默认值，存量部署里从未点过「保存配置」的那些会跟着静默变。打开它有两个不在开关名字里的后果：每条未命中的连接多一次本机解析；模板里那条 `geoip:private → blocked` 会**开始对域名目标生效**。
+- **`dnsServers`**（string，默认 ""，换行分隔）——非空即启用 `DNSInjector`。默认值同上是给存量部署的，新装由 `bootstrap.Run` 写入 `bootstrap.DefaultDNSServers`（8.8.8.8 与 1.1.1.1 的 DoH）。这一项的实现踩过一个必须原样记住的坑，它是本子系统失败模式的原型：**`domainStrategy` 要写进 freedom 出站的 `settings` 里，不是写在出站对象上**。出站对象对应 `infra/conf.OutboundDetourConfig`，其完整字段集是 `protocol/sendThrough/tag/settings/streamSettings/proxySettings/mux/targetStrategy`（`infra/conf/xray.go:213-222`），根本没有 `domainStrategy`；而 `infra/conf` 从不调用 `DisallowUnknownFields`，写错层级**不会有任何报错**——`run -test` 照样 `Configuration OK`，面板照样 `running`，freedom 停在 `AsIs`，整个 DNS 功能变成纯装饰。另外三条：只用 `UseIP*`，绝不用 `ForceIP*`（`transport/internet/config.go:13`；`ForceIP` 下解析失败会变成连接失败，`UseIP` 只记日志并回落按域名直连，这一条把「DNS 配错 = 全员断网」整个消掉）；`localhost` 永远补在列表**末位**，解析器全挂时退化成系统解析而不是断网；**任何时候都不往 `xrayTemplateConfig` 回写**，注入只发生在生成期。白名单为什么恰好是那几个 scheme，见「已知偏差与注意事项」。
 
 保存设置时除了 `entity.CheckValid` 的语法校验，还会对**会进入 xray 配置的项**（`dnsServers` / `ipRuleResolveDomain`）跑一遍真实 xray（`ValidateSettings`，`web/service/routing_validate.go`，与出站/入站/域名同一套 fail open 边界）。候选值由 `apply` 回调自己贴到完整配置上，不能指望 `GetXrayConfig()`——它读的是库里的旧值，「清空 `dnsServers`」这一次保存尤其会去校验一份根本不会下发的配置。`xrayTemplateConfig` **不**走这一步：换模板要让整条生成链按新模板重跑，而那需要再造一条与 `GetXrayConfig` 平行的生成链，两条一旦漂移，「校验通过的配置」与「真正下发的配置」就不是同一份，比不校验更危险。
 
@@ -133,21 +133,22 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 
 ### 数据模型（`database/model/routing.go`）
 
-三张表，规则是一条把前两者连起来的连线：
+四张表，规则是一条把域名组与出站连起来的连线，另一张挂在域名组下存每个订阅地址各自的结果：
 
 ```
 DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + Cidrs(JSON 字符串数组) + 订阅五件套（见下）+ SubscribedCidrs
 OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
-RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数组) → Action(proxy|block) + OutboundId + Priority + Enable
+RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数组) → Action(direct|proxy|block) + OutboundId + Priority + Enable
 ```
 
 「域名组」这个名字已经不准确了：它同时装域名和 IP 段，一个组可以只有 IP 段。
 
 **「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
 
-`DomainGroup` 的订阅五件套——`SubscribeUrl` / `SubscribedDomains` / `LastUpdatedAt` / `LastError` / `LastSkipped`——支撑域名组订阅更新（`web/service/routing_domain.go`、`routing_subscription.go`，`SubscriptionJob`）。两条不变量：
+`DomainGroup` 的订阅五件套——`SubscribeUrl` / `SubscribedDomains` / `LastUpdatedAt` / `LastError` / `LastSkipped`——支撑域名组订阅更新（`web/service/routing_domain.go`、`routing_subscription.go`，`SubscriptionJob`）。**`SubscribeUrl` 存的是换行分隔的多个地址**（`ParseSubscribeURLs`，去空白、按首次出现去重，上限 10 个；顺序即合并顺序，是「生成逐字节确定」的一部分）。存成换行字符串而不是 JSON 数组，是为了让单地址组的值与多地址上线前**逐字节相同**：老数据一行都不用迁，回退到旧二进制时单地址组照常工作（旧代码把整个字段当一个 URL 用，而它确实就是一个 URL），多地址组则会拉取失败并走 `recordFailure` 保留上一次的内容——陈旧但不为空，落在安全侧。三条不变量：
 
 - **`Domains`（手工）与 `SubscribedDomains`（订阅）物理隔离，各自只有一个写入方。** 管理员编辑表单只写 `Domains`；`SubscriptionJob`/「立即更新」只写 `SubscribedDomains` 及其伴随的 `LastUpdatedAt`/`LastError`/`LastSkipped`。`buildRule` 用 `MergeDomains(manual, subscribed)` 在生成期合并两者（手工在前、订阅在后，保留首次出现），任何一侧都不会覆盖另一侧。
+- **多个订阅地址各自独立：某个地址拉取失败时保留它上一次的内容并继续参与合并，其余地址照常更新到最新。** 这正是 `DomainGroupSubscription`（`database/model/routing.go`）存在的**唯一**理由——`DomainGroup.SubscribedDomains`/`SubscribedCidrs` 是所有地址合并后的最终结果，生成期直接用它，但合并之后就分不清哪一条来自哪个地址了，因此必须按地址另留一份原始结果。内容不塞进 `DomainGroup` 的新列，是因为单个订阅可达十几万条而 `GetAll` 会把所有列读进内存，光判断「该不该更新」就会拖起几十 MB。**校验（`ValidateDomains`/`ValidateCidrs`）必须逐个地址做**，放到合并之后的话，一个地址的坏内容会让整份合并结果被判非法、其余地址跟着写不进去——那就退回成「全有或全无」了。**调度也按地址各判一次**（`RefreshDue` 逐个 `ShouldUpdateNow`）：用组级 `LastUpdatedAt` 判只能二选一——取最近一次成功就是「一个地址成功了，失败的那个今天不再重试」，取最早一次就是「有个地址一直失败，其余地址每 10 分钟被白拉一遍」。不在本轮 targets 里的地址直接用历史结果参与合并，合并结果因此逐字节不变，`Config.Equals` 判定无变化，不会白重启一次 xray。**`DomainGroupService.Del` 必须连带删除该组的订阅结果行，且顺序是先删子行再删组**（另有 `PruneSubscriptionOrphans` 在 `SubscriptionJob` 里兜底）：SQLite 会复用被删除的自增 id，残留行会绑到下一个新建的组上，让它莫名其妙带着别人的订阅内容参与分流，而引用不再悬空，生成期那道跳过防线拦不住。唯一仍然「整次不写」的例外是**合并结果两侧都空**（所有地址都失败且都没有历史内容），理由见下一条。
 - **拉取失败保留上一次成功的数据，绝不清空。** 清空 `SubscribedDomains` 会让合并结果可能变空，`buildRule` 因「域名组为空」跳过整条规则——本该走指定节点或被封禁的流量静默退回直连，比规则单纯不生效更危险。同理，写回成功结果时要带 `subscribe_url` 相等的条件（compare-and-set）：拉取耗时可达 30s、批量刷新可达分钟级，这期间管理员可能已经把订阅地址改成了别的，不加条件的话旧地址拉到的内容会被当成新地址的结果写回，界面显示「刚刚更新」但域名其实是错的。
 
 `Cidrs`（手工 IP 段）与 `SubscribedCidrs`（订阅 IP 段）是**第二对物理隔离、各自单写入方**的列，规则与上面那对完全相同。三条不变量：
@@ -207,7 +208,9 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 ### 配置注入的四条不变量（`web/service/routing_inject.go`）
 
 1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
-2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。**数组顺序仍然成立，但它不再等于「block 一定先命中」**：开了 `ipRuleResolveDomain` 之后 xray 走两遍规则（`app/router/router.go:245-273`）——第一遍不带 DNS 客户端，域名条件能命中、IP 条件对域名目标必然不命中；只有整个第一遍都没命中才解析域名再走第二遍。于是一条用域名表达的 proxy 规则会在**第一遍**命中并短路掉一条只能在第二遍才可能命中的、用 CIDR 表达的 block 规则。**一条写成 IP 段的封禁，是可以被一条写成域名的分流规则绕过的。**代码里没有任何办法修正它（要修正就得让注入器知道哪条域名规则可能解析到哪个 IP），所以只能写下来。
+2. **block 规则排在其余规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。`proxy` 与 `direct` 同属第二组、按 `priority asc, id asc` 混排——它们是对等的分流动作，都只是「把命中的流量送到某个出站」，谁在前由管理员设的优先级决定；只有 block 需要单独提前。**数组顺序仍然成立，但它不再等于「block 一定先命中」**：开了 `ipRuleResolveDomain` 之后 xray 走两遍规则（`app/router/router.go:245-273`）——第一遍不带 DNS 客户端，域名条件能命中、IP 条件对域名目标必然不命中；只有整个第一遍都没命中才解析域名再走第二遍。于是一条用域名表达的 proxy 规则会在**第一遍**命中并短路掉一条只能在第二遍才可能命中的、用 CIDR 表达的 block 规则。**一条写成 IP 段的封禁，是可以被一条写成域名的分流规则绕过的。**代码里没有任何办法修正它（要修正就得让注入器知道哪条域名规则可能解析到哪个 IP），所以只能写下来。
+`direct` 动作（「直连」，从部署面板的这台机器本机出网）引用的是**默认出站实际生效的 tag**，由 `tagDefaultOutbound` 返回、逐层传到 `buildRule`，**绝不硬编码 `model.DefaultOutboundTag`**：管理员手写模板给首个出站起过名字时那个函数会原样保留，硬编码就发出一个悬空 `outboundTag`。这是「绝不输出悬空引用」这条不变量唯一一处**破例也看不出后果**的地方——xray 对悬空 tag 静默回落默认出站，恰好就是直连，结果完全正确，于是错误既不会被发现也不会被修，直到某天模板的默认出站不再是 freedom。取不到默认出站时整条规则丢弃并记 Warning，不退而求其次。回退到不认识 `direct` 的旧二进制时，`buildRule` 的 `default` 分支会整条丢弃它并记 Warning，流量退回默认出站——与规则本来的意图一致，落在「分流范围缩小」这条安全侧。
+
 3. **绝不输出条件残缺的规则**（见上）。**一条数据库规则产出 0~2 条 xray 规则：域名一条、IP 一条，顺序固定 domain 在前、ip 在后。**绝不把两类条件并进同一条（那是 AND，见上表），也绝不发出 `ip: []`。两侧都空才整条丢弃——所以一个纯 IP 组照常生成规则，界面上任何「域名为空 = 规则不生效」的镜像都是错的（`web/html/xui/routing.html` 的 `groupEffective` / `ruleHasDomains` 守着这一点）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。入站条件同理：`buildRule` 会剔除已删除/已禁用的入站，**剔完为空则整条丢弃**，绝不输出空的 `inboundTag`；只剔掉一部分时规则照常生成，被剔掉的记 `logger.Warning`。
 4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
 
@@ -352,9 +355,9 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 ### `a-ui bootstrap` 是脚本写库的唯一入口
 
-安装脚本不直接碰 SQLite。所有落库动作（`webListen`/`webPort`/`webBasePath`/三个 `defaultXxx`、REALITY 模式下的入站）都经 `bootstrap.Run`（`bootstrap/bootstrap.go`），理由和「域名分流管理」里入站必须走 `ValidateInboundReplacing` 是同一个：脚本手拼的 JSON 没有任何校验，写错只会在下次重启 xray 时静默失效，而 `bootstrap` 建 REALITY 入站时走的是 `InboundService.AddInbound`，能拿到真实 xray 的校验与「域名分流管理」同一套 fail-open 策略。**不打印节点分享链接**——链接生成逻辑只存在于前端 `xray.js` 的 `genVLESSLink`，Go 侧重新实现一份必然与之漂移，节点由管理员在面板里创建后随时可复制。
+安装脚本不直接碰 SQLite。所有落库动作（`webListen`/`webPort`/`webBasePath`/三个 `defaultXxx`/分流开箱默认 `ipRuleResolveDomain`+`dnsServers`、REALITY 模式下的入站）都经 `bootstrap.Run`（`bootstrap/bootstrap.go`），理由和「域名分流管理」里入站必须走 `ValidateInboundReplacing` 是同一个：脚本手拼的 JSON 没有任何校验，写错只会在下次重启 xray 时静默失效，而 `bootstrap` 建 REALITY 入站时走的是 `InboundService.AddInbound`，能拿到真实 xray 的校验与「域名分流管理」同一套 fail-open 策略。**不打印节点分享链接**——链接生成逻辑只存在于前端 `xray.js` 的 `genVLESSLink`，Go 侧重新实现一份必然与之漂移，节点由管理员在面板里创建后随时可复制。
 
-`bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会 `rm -rf /usr/local/a-ui/` 重新解压，`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。
+`bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会 `rm -rf /usr/local/a-ui/` 重新解压，`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。**`-force` 是唯一不写分流开箱默认（`ipRuleResolveDomain`/`dnsServers`）的分支**：那条路径上面板此前已被配置过、多半跑了一段时间，这两项的当前值属于管理员的既有选择，而向导问的是域名和伪装站，顺手改掉解析路径是静默的夹带修改。代价是从旧版本升级上来、又重跑过向导的机器拿不到这两个默认值——那和「存量部署零变化」是同一件事。
 
 ### 失败不锁面板
 

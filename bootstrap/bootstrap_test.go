@@ -251,3 +251,102 @@ func TestRunRealityModeKeepsWebTLS(t *testing.T) {
 		t.Fatalf("webKeyFile 不应被 mode=reality 触碰，实际 %q", v)
 	}
 }
+
+// 新装面板的开箱默认：IP 分流规则也匹配域名目标 + 加密 DNS。
+//
+// 前半段的断言不是凑数：defaultValueMap 里这两项必须保持 0 / 空串，
+// 存量部署「升级后行为零变化」全靠它。一旦有人为了省事把默认值改掉，
+// 老面板里从未点过「保存配置」的那些会跟着静默启用 DoH 与 IPIfNonMatch，
+// 这条测试的前半段会先红。
+func TestRunWritesRoutingDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"caddy", Options{Mode: "caddy", Domain: "example.com", BasePath: "/Ab3xK9pQ/",
+			Listen: "127.0.0.1", Port: 54321}},
+		{"reality", Options{Mode: "reality", RealityDest: "www.microsoft.com:443",
+			BasePath: "/Ab3xK9pQ/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDB(t)
+			s := service.SettingService{}
+
+			if v, _ := s.GetIPRuleResolveDomain(); v {
+				t.Fatal("defaultValueMap 里 ipRuleResolveDomain 必须仍是 0")
+			}
+			if v, _ := s.GetDNSServers(); v != "" {
+				t.Fatalf("defaultValueMap 里 dnsServers 必须仍是空串，实际 %q", v)
+			}
+
+			if _, err := Run(tc.opts); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if v, _ := s.GetIPRuleResolveDomain(); !v {
+				t.Error("新装应打开「IP 规则匹配域名目标」")
+			}
+			if v, _ := s.GetDNSServers(); v != DefaultDNSServers {
+				t.Errorf("dnsServers 期望 %q，实际 %q", DefaultDNSServers, v)
+			}
+		})
+	}
+}
+
+// 写进去的默认值必须能原样通过设置页的校验。
+//
+// checkDNSServer 拒绝的写法（udp:// tls:// quic:// IP:端口、裸域名）在 xray
+// 那边要么静默空转要么拒绝启动，把其中之一写成新装默认，管理员第一次打开
+// 设置页点「保存配置」就会失败——而且报错只指向 DNS，端口、证书路径等一切
+// 无关字段会一起保存不了。
+func TestRoutingDefaultsPassSettingValidation(t *testing.T) {
+	setupDB(t)
+
+	if _, err := Run(Options{Mode: "caddy", Domain: "example.com",
+		BasePath: "/Ab3xK9pQ/", Listen: "127.0.0.1", Port: 54321}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	all, err := (&service.SettingService{}).GetAllSetting()
+	if err != nil {
+		t.Fatalf("GetAllSetting: %v", err)
+	}
+	if err := all.CheckValid(); err != nil {
+		t.Fatalf("新装默认设置未通过校验: %v", err)
+	}
+}
+
+// -force 是 install.sh --wizard-only（a-ui 菜单「配置域名与伪装站」）重跑
+// 向导的路径，面板此前已经被配置过。向导问的是域名和伪装站，不能顺手把
+// 管理员自己调过的解析路径改回默认——那是静默的夹带修改。
+func TestRunForceKeepsExistingRoutingDefaults(t *testing.T) {
+	setupDB(t)
+
+	first := Options{Mode: "caddy", Domain: "example.com", BasePath: "/first/",
+		Listen: "127.0.0.1", Port: 54321}
+	if _, err := Run(first); err != nil {
+		t.Fatalf("首次 Run: %v", err)
+	}
+
+	s := service.SettingService{}
+	if err := s.SetDNSServers("https://9.9.9.9/dns-query"); err != nil {
+		t.Fatalf("SetDNSServers: %v", err)
+	}
+	if err := s.SetIPRuleResolveDomain(false); err != nil {
+		t.Fatalf("SetIPRuleResolveDomain: %v", err)
+	}
+
+	second := first
+	second.BasePath = "/second/"
+	second.Force = true
+	if _, err := Run(second); err != nil {
+		t.Fatalf("force Run: %v", err)
+	}
+
+	if v, _ := s.GetDNSServers(); v != "https://9.9.9.9/dns-query" {
+		t.Errorf("dnsServers 被向导覆盖了，实际 %q", v)
+	}
+	if v, _ := s.GetIPRuleResolveDomain(); v {
+		t.Error("ipRuleResolveDomain 被向导覆盖了")
+	}
+}
