@@ -268,6 +268,11 @@ func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	if err := (&TrafficHistoryService{}).Record(traffics, time.Now()); err != nil {
 		logger.Warning("记录用量历史失败:", err)
 	}
+	// 计量出站的字节同样来自这一次拉取（reset=true 已经清零 xray 侧计数器，
+	// 另起一次独立拉取会让两条链路互相偷数据）。失败只告警不阻断，理由同上。
+	if err := (&DomainStatService{}).RecordMetered(traffics, time.Now()); err != nil {
+		logger.Warning("记录域名计量流量失败:", err)
+	}
 	db := database.GetDB()
 	db = db.Model(model.Inbound{})
 	tx := db.Begin()
