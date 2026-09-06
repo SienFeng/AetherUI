@@ -1,6 +1,6 @@
 {{define "accessLogModal"}}
 <a-modal id="access-log-modal" v-model="accessLogModal.visible" :title="accessLogModal.title"
-         :closable="true" :mask-closable="true" width="900px" :footer="null">
+         :closable="true" :mask-closable="true" width="1100px" :footer="null">
     <a-alert v-if="!accessLogModal.enabled" type="warning" show-icon style="margin-bottom: 12px"
              message="访问日志未开启"
              description="请到「面板设置 → 访问日志」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
@@ -47,6 +47,14 @@
         <template slot="time" slot-scope="text, row">
             [[ DateUtil.formatMillis(row.time) ]]
         </template>
+        <template slot="location" slot-scope="text, row">
+            <a-tooltip v-if="row.locationAlt">
+                <template slot="title">另一个源认为是 [[ row.locationAlt ]]</template>
+                <span style="border-bottom: 1px dashed rgba(0,0,0,.25)">[[ row.location ]]</span>
+            </a-tooltip>
+            <span v-else-if="row.location">[[ row.location ]]</span>
+            <span v-else style="color: rgba(0,0,0,.25)">-</span>
+        </template>
         <template slot="target" slot-scope="text, row">
             <a-tag v-if="row.network" color="blue">[[ row.network ]]</a-tag>
             [[ row.target ]]
@@ -80,6 +88,9 @@
             scopedSlots: { customRender: 'time' },
         }, {
             title: "来源 IP", align: 'center', width: 130, dataIndex: "sourceIp",
+        }, {
+            title: "归属地", align: 'center', width: 170,
+            scopedSlots: { customRender: 'location' },
         }, {
             title: "访问目标", align: 'left', scopedSlots: { customRender: 'target' },
         }, {

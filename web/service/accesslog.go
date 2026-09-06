@@ -101,15 +101,29 @@ func (q *AccessLogQuery) Normalize() {
 	}
 }
 
+// AccessLogRow 是一条带归属地的访问记录。
+//
+// 归属地在查询时判定而不落库：库里已有的历史记录因此立刻都有归属地，IP 库
+// 更新之后旧记录的判定也跟着变准，而且与「近期来源」气泡、在线明细共用
+// locateWithIPDB，三处不会给出对不上的结论。代价是没法用 SQL 按地区筛选。
+//
+// 内嵌 model.AccessLog 而不是逐字段复制：JSON 形状原样不变，前端现有的
+// row.time / row.sourceIp / row.target 等绑定一个都不用改。
+type AccessLogRow struct {
+	model.AccessLog
+	Location    string `json:"location"`
+	LocationAlt string `json:"locationAlt"`
+}
+
 // AccessLogResult 是查询接口的返回体。
 type AccessLogResult struct {
 	// Enabled 为 false 时列表多半是空的，界面要提示去设置里打开，
 	// 而不是让管理员以为这个人没访问过任何网站。
-	Enabled  bool              `json:"enabled"`
-	Total    int64             `json:"total"`
-	Page     int               `json:"page"`
-	PageSize int               `json:"pageSize"`
-	List     []model.AccessLog `json:"list"`
+	Enabled  bool           `json:"enabled"`
+	Total    int64          `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"pageSize"`
+	List     []AccessLogRow `json:"list"`
 }
 
 type AccessLogService struct {
@@ -180,16 +194,26 @@ func (s *AccessLogService) GetAccessLogs(q AccessLogQuery) (*AccessLogResult, er
 	if err != nil {
 		return nil, err
 	}
-	if list == nil {
-		// 前端直接拿去渲染表格，不能给 null。
-		list = []model.AccessLog{}
+	// 一页里往往反复出现同一个来源 IP（一个客户端刷一屏是常态），按 IP
+	// 记忆化，免得对同一个地址重复做几十次二分查找。
+	type located struct{ primary, alt string }
+	seen := make(map[string]located, len(list))
+	// make 而不是 var：前端直接拿去渲染表格，不能给 null。
+	rows := make([]AccessLogRow, 0, len(list))
+	for _, r := range list {
+		loc, ok := seen[r.SourceIP]
+		if !ok {
+			loc.primary, loc.alt = locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
+			seen[r.SourceIP] = loc
+		}
+		rows = append(rows, AccessLogRow{AccessLog: r, Location: loc.primary, LocationAlt: loc.alt})
 	}
 	return &AccessLogResult{
 		Enabled:  enabled,
 		Total:    total,
 		Page:     q.Page,
 		PageSize: q.PageSize,
-		List:     list,
+		List:     rows,
 	}, nil
 }
 

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"a-ui/database/model"
 	"a-ui/util/accesslog"
 	"a-ui/xray"
 )
@@ -127,7 +126,7 @@ func TestAccessLogPipelineAgainstRealXray(t *testing.T) {
 	if result.Total == 0 {
 		t.Fatal("入库后查不到记录，tag 到 inbound id 的解析可能不对")
 	}
-	var row model.AccessLog
+	var row AccessLogRow
 	for _, r := range result.List {
 		if strings.HasPrefix(r.Target, "127.0.0.1:") {
 			row = r

@@ -501,3 +501,48 @@ func TestRecentSourcesRespectsLimit(t *testing.T) {
 		t.Errorf("截断后 = %+v, want 最近的 10.0.0.8/7/6", got)
 	}
 }
+
+// 访问日志列表要能看出来源 IP 是哪里的。
+//
+// 归属地在查询时判定、不落库：库里已有的历史记录因此立刻都有归属地，IP 库
+// 更新之后旧记录的判定也跟着变准，且与「近期来源」气泡、在线明细共用
+// locateWithIPDB，三处永远给出同一个字符串。
+func TestGetAccessLogsResolvesSourceLocation(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50001)
+
+	// 一份已知内容的离线库：1.0.1.0/22 → 中国 福建省 福州市，3.0.0.0/8 → United States。
+	path := filepath.Join(t.TempDir(), "ipdb.dat")
+	db := seedDatabaseAt(t, path, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	useTestSources(t, []ipdbSource{urlSource("test", path, "")})
+	(&IPDBService{}).setDB("test", db)
+
+	s := AccessLogService{}
+	_, err := s.Store([]accesslog.Entry{
+		entryAt(in.Tag, "1.0.1.1", "cn.example.com:443", 1000),
+		entryAt(in.Tag, "3.0.0.1", "us.example.com:443", 1001),
+		entryAt(in.Tag, "192.0.2.1", "nowhere.example.com:443", 1002),
+	})
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	result, err := s.GetAccessLogs(AccessLogQuery{InboundId: in.Id, Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("GetAccessLogs: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range result.List {
+		got[r.SourceIP] = r.Location
+	}
+	for _, tc := range []struct{ ip, want string }{
+		{"1.0.1.1", "中国 福建省 福州市"},
+		{"3.0.0.1", "United States"},
+		// 库里没收录的段只能留空。编一个「未知」出来会和真判定的行在表格里等重。
+		{"192.0.2.1", ""},
+	} {
+		if got[tc.ip] != tc.want {
+			t.Errorf("%v 的归属地 = %q，期望 %q", tc.ip, got[tc.ip], tc.want)
+		}
+	}
+}
