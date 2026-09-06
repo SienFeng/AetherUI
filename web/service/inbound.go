@@ -85,6 +85,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	if err := normalizeInboundRegions(inbound); err != nil {
 		return err
 	}
+	if err := checkTrafficResetMode(inbound); err != nil {
+		return err
+	}
 	exist, err := s.checkPortExist(inbound.Port, 0)
 	if err != nil {
 		return err
@@ -179,6 +182,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	if err := normalizeInboundRegions(inbound); err != nil {
 		return err
 	}
+	if err := checkTrafficResetMode(inbound); err != nil {
+		return err
+	}
 	exist, err := s.checkPortExist(inbound.Port, inbound.Id)
 	if err != nil {
 		return err
@@ -201,6 +207,19 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	oldInbound.Regions = inbound.Regions
 	oldInbound.UpMbit = inbound.UpMbit
 	oldInbound.DownMbit = inbound.DownMbit
+	// 管理员碰过这条记录，「因超流量被自动停用」的理由就不再成立。不清的话，
+	// 一个被手动停用的入站会在下一个重置周期自己活过来，而面板不会有任何提示。
+	oldInbound.DisabledByTraffic = false
+	// 切换重置周期时把时刻顶到当前，避免改一次设置就立刻触发一次计划外的
+	// 清零：从「按订阅周期(28 号)」改到「每月 1 号」时，上次重置停在 8/28，
+	// 而 9/1 这个新周期点已经过去，任务下一轮就会马上清一次。首次开启同理
+	// ——那时 LastResetAt 还是 0，本周期的重置时刻必然在过去。
+	//
+	// 模式没变则不顶：每编辑一次入站就把周期往后推一次的话，重置永远轮不到。
+	if oldInbound.TrafficResetMode != inbound.TrafficResetMode {
+		oldInbound.LastResetAt = time.Now().Unix() * 1000
+	}
+	oldInbound.TrafficResetMode = inbound.TrafficResetMode
 	oldInbound.Listen = inbound.Listen
 	oldInbound.Port = inbound.Port
 	oldInbound.Protocol = inbound.Protocol
@@ -255,13 +274,31 @@ func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	return
 }
 
+// DisableInvalidInbounds 停用已超流量或已到期的入站，返回被停用的条数。
+//
+// 拆成两条语句而不是原来那一条带 OR 的：只有「因超流量被停用」的入站该在
+// 下一个流量重置周期被自动拉回来（见 ResetDueTraffic），所以停用原因必须
+// 落到 disabled_by_traffic 上。
+//
+// 顺序不能反。两者同时成立时，先执行的到期那条已经把 enable 置为 false，
+// 超流量那条的 enable = true 条件不再匹配、标记也就不会打上——于是「过期」
+// 这个更强的停用理由胜出，该入站不会在下一个周期自己活过来。
 func (s *InboundService) DisableInvalidInbounds() (int64, error) {
 	db := database.GetDB()
 	now := time.Now().Unix() * 1000
-	result := db.Model(model.Inbound{}).
-		Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ?", now, true).
-		Update("enable", false)
-	err := result.Error
-	count := result.RowsAffected
-	return count, err
+
+	expired := db.Model(model.Inbound{}).
+		Where("expiry_time > 0 and expiry_time <= ? and enable = ?", now, true).
+		UpdateColumns(map[string]any{"enable": false})
+	if expired.Error != nil {
+		return 0, expired.Error
+	}
+
+	overQuota := db.Model(model.Inbound{}).
+		Where("total > 0 and up + down >= total and enable = ?", true).
+		UpdateColumns(map[string]any{"enable": false, "disabled_by_traffic": true})
+	if overQuota.Error != nil {
+		return expired.RowsAffected, overQuota.Error
+	}
+	return expired.RowsAffected + overQuota.RowsAffected, nil
 }

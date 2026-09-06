@@ -331,6 +331,10 @@ func (s *Server) startTask() {
 	// 每小时按各自的保留期清理用量历史
 	s.cron.AddJob("@every 1h", job.NewTrafficCleanupJob())
 
+	// 每小时检查一次有没有入站到了流量重置日；没人设重置日时只做一次带
+	// where 的查询就返回
+	s.cron.AddJob("@every 1h", job.NewTrafficResetJob())
+
 	// 每 10 秒对齐一次端口限速规则；没人配限速时不碰 tc
 	s.cron.AddJob("@every 10s", job.NewShapingJob())
 

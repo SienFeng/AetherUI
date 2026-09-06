@@ -1,3 +1,11 @@
+// 流量自动清零的周期，与 database/model/model.go 的同名常量一一对应。
+const TRAFFIC_RESET_MODE = {
+    OFF: 0,
+    MONTHLY: 1,
+    BILL_CYCLE: 2,
+};
+Object.freeze(TRAFFIC_RESET_MODE);
+
 class User {
 
     constructor() {
@@ -37,6 +45,9 @@ class DBInbound {
         this.enable = true;
         this.expiryTime = 0;
         this.concurrencyLimit = 0;
+        // ObjectUtil.cloneProps 只克隆目标已有的 key，这里不列的话服务端
+        // 返回的值会被直接丢弃，选择器永远停在「不重置」。
+        this.trafficResetMode = TRAFFIC_RESET_MODE.OFF;
         this.regions = "[]";
         this.upMbit = 0;
         this.downMbit = 0;

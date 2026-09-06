@@ -158,6 +158,44 @@
                 </a-form-item>
             </a-col>
         </a-row>
+        <a-row :gutter="16">
+            <a-col :span="24">
+                <a-form-item>
+                    <span slot="label">
+                        流量自动重置
+                        <a-tooltip>
+                            <template slot="title">
+                                到点把「已用流量」清零，按面板时区的 00:00 计。<br/>
+                                「按订阅周期」取到期时间那一天的日号，每月同一天重置<br/>
+                                （3 月 28 日到期就是每月 28 号），该日在当月不存在时<br/>
+                                按当月最后一天算；需要先设置到期时间。<br/>
+                                因跑满流量被自动停用的节点会在清零时一并重新启用；<br/>
+                                手动停用的和已到期的不受影响。<br/>
+                                只清已用流量，不影响用量图表的历史曲线。
+                            </template>
+                            <a-icon type="question-circle" theme="filled"></a-icon>
+                        </a-tooltip>
+                    </span>
+                    <a-radio-group v-model="dbInbound.trafficResetMode" button-style="solid">
+                        <a-radio-button :value="TRAFFIC_RESET_MODE.OFF">不重置</a-radio-button>
+                        <a-radio-button :value="TRAFFIC_RESET_MODE.MONTHLY">每月 1 号</a-radio-button>
+                        <a-radio-button :value="TRAFFIC_RESET_MODE.BILL_CYCLE"
+                                        :disabled="!dbInbound.expiryTime">按订阅周期</a-radio-button>
+                    </a-radio-group>
+                </a-form-item>
+            </a-col>
+        </a-row>
+        <!-- 到期时间被清空、而模式还停在「按订阅周期」时，保存会被后端拒绝。
+             这里提前说明，免得管理员对着一个只写「需要先设置到期时间」的
+             报错去找原因。 -->
+        <a-row v-if="dbInbound.trafficResetMode === TRAFFIC_RESET_MODE.BILL_CYCLE && !dbInbound.expiryTime">
+            <a-col :span="24">
+                <a-alert type="warning" show-icon
+                         message="「按订阅周期」需要到期时间"
+                         description="当前没有设置到期时间，就没有订阅周期可依据。请先填到期时间，或改选「每月 1 号」/「不重置」——否则保存会被拒绝。">
+                </a-alert>
+            </a-col>
+        </a-row>
     </a-form>
 </a-card>
 

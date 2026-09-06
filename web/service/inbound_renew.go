@@ -63,7 +63,10 @@ func (s *InboundService) RenewInbound(id, days int, expiryTime int64) error {
 		newExpiry = renewedExpiry(inbound.ExpiryTime, now, days)
 	}
 
-	fields := map[string]any{"expiry_time": newExpiry}
+	// 与 UpdateInbound 同一条规则：管理员手工碰过这条记录，「因超流量被自动
+	// 停用」的理由就不再成立。续到过去（等价于立即停用）也要清——否则这条
+	// 规则要靠 ResetDueTraffic 里的「已过期」再兜一层，而两者说的是同一件事。
+	fields := map[string]any{"expiry_time": newExpiry, "disabled_by_traffic": false}
 	// 只有确实续到了未来才重新启用并清零流量。把到期时间手动设到过去等价于
 	// 「立即停用」，此时重新启用毫无意义：CheckInboundJob 30 秒后会再把它停用，
 	// 中间还白白触发一次 xray 重启。
