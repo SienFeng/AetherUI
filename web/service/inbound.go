@@ -164,6 +164,12 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := (&DomainStatService{}).DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的域名统计失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 计量池同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
+	// 入站会继承上一个用户的计量域名，生成出一批指向别人域名的计量出站与
+	// 规则。失败只告警不阻断，理由同上，残留由每小时一次的 PruneOrphans 兜底。
+	if err := (&MeterPoolService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的计量池失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 共享检测的并存记录同样按入站 id 存，同样会被 id 复用坑到：不清的话
 	// 下一个建出来的入站会继承上一个用户的并存记录，被标成「疑似共享」。
 	// 失败只告警不阻断，理由同上，残留由每小时一次的 PruneOrphans 兜底。
@@ -261,6 +267,11 @@ func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	// 累加的后果（用户超额不被停用）比图上少一段曲线严重得多。
 	if err := (&TrafficHistoryService{}).Record(traffics, time.Now()); err != nil {
 		logger.Warning("记录用量历史失败:", err)
+	}
+	// 计量出站的字节同样来自这一次拉取（reset=true 已经清零 xray 侧计数器，
+	// 另起一次独立拉取会让两条链路互相偷数据）。失败只告警不阻断，理由同上。
+	if err := (&DomainStatService{}).RecordMetered(traffics, time.Now()); err != nil {
+		logger.Warning("记录域名计量流量失败:", err)
 	}
 	db := database.GetDB()
 	db = db.Model(model.Inbound{})

@@ -34,13 +34,15 @@ const (
 // 「block」（含 Block/BLOCK/block!/" block "，SlugRemark 会把它们归一到同一个
 // slug）会让 SuggestTag 生成 a-ui-block，与注入器始终注入的黑洞出站撞名，
 // xray 报 "existing tag found" 并拒绝启动——全员断网，而面板首页仍显示 running。
+// 计量出站（a-ui-meter-*）同理：备注写成「meter-3-x.com」就可能撞上。
 //
-// 三个消费点都只认这一个判定，将来新增保留 tag 只需改这里：
+// 四个消费点都只认这一个判定，将来新增保留 tag 只需改这里：
 // 分配端 OutboundNodeService.allocTag（不分配出去）、
 // 生成端 RoutingInjector.buildOutbounds（修复前的脏数据不写进配置）、
-// 校验端 removeOutboundByTag（校验时绝不把注入器的黑洞出站当成旧版本摘掉）。
+// 校验端 removeOutboundByTag（校验时绝不把注入器的黑洞出站当成旧版本摘掉）、
+// 导入端 routing_portable.go（导入文件里的保留 tag 一律拒绝落库）。
 func IsReservedTag(tag string) bool {
-	return tag == BlockOutboundTag || tag == DefaultOutboundTag
+	return tag == BlockOutboundTag || tag == DefaultOutboundTag || IsMeterTag(tag)
 }
 
 // DomainGroup 是一批可复用的域名集合。

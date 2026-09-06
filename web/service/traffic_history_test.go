@@ -22,6 +22,10 @@ func setupTrafficTest(t *testing.T) {
 	if err := database.InitTrafficDB(filepath.Join(dir, "traffic.db")); err != nil {
 		t.Fatalf("InitTrafficDB: %v", err)
 	}
+	// 用量库句柄是包级变量，会跨用例残留——SQLite 在文件被 t.TempDir 清掉
+	// 之后仍能通过已打开的 fd 读到旧数据。计量池就在这个库里，不清空的话
+	// 本用例写进池的行会漏进分流注入器的测试，把断言打成随机失败。
+	t.Cleanup(database.ResetTrafficDBForTest)
 }
 
 func mkTrafficInbound(t *testing.T, port int, remark string) *model.Inbound {

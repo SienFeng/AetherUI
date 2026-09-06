@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"a-ui/database"
 	"a-ui/database/model"
 )
 
@@ -246,5 +247,38 @@ func TestAddRejectsTagCollidingWithATemplateOutbound(t *testing.T) {
 	}
 	if _, err := (&OutboundNodeService{}).AddFromLink("socks5://1.2.3.4:1080", "hk"); err == nil {
 		t.Error("a tag colliding with an outbound already in the template must be rejected")
+	}
+}
+
+func TestAllocTagNeverReturnsReservedTag(t *testing.T) {
+	setupDB(t)
+	svc := &OutboundNodeService{}
+
+	// 一、精确匹配的保留 tag（a-ui-block）靠追加序号后缀就能逃出去，
+	// 所以备注写成「block」照常能建节点——这条钉住既有行为不被改坏。
+	node, err := svc.AddFromLink("socks5://1.2.3.4:1080", "block")
+	if err != nil {
+		t.Fatalf("备注 block 应当能分配到 tag: %v", err)
+	}
+	if model.IsReservedTag(node.Tag) {
+		t.Fatalf("分配出的 tag = %q，落在保留命名空间里", node.Tag)
+	}
+
+	// 二、计量 tag 是**前缀**保留的，追加任何后缀仍带着前缀，逃不出去，
+	// 于是 allocTag 会拒绝分配。这是刻意接受的 fail-close：宁可报一个
+	// 可操作的错让管理员换备注，也不在分配端新增一条逃逸路径——这个
+	// 子系统上一次事故就来自分配端多了一条没想清楚的路径。
+	if _, err := svc.AddFromLink("socks5://1.2.3.4:1081", "meter-3-x.com"); err == nil {
+		t.Fatal("备注 meter-3-x.com 应当被拒绝分配，实际成功了")
+	}
+	// 拒绝之后库里不能留下半个节点：persist 先 allocTag 再写库，
+	// allocTag 只读不写，这一条钉住那个顺序不被改反。
+	var count int64
+	if err := database.GetDB().Model(model.OutboundNode{}).
+		Where("remark = ?", "meter-3-x.com").Count(&count).Error; err != nil {
+		t.Fatalf("查询节点: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("被拒绝的备注留下了 %d 个节点，期望 0", count)
 	}
 }

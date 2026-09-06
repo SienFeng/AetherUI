@@ -290,8 +290,9 @@ func (a *InboundController) getTopDomains(c *gin.Context) {
 	// getTrafficHistory 上方的注释）。form tag 留着只是与既有接口保持一致，
 	// 并不是它在起作用。
 	form := struct {
-		Range string `form:"range"`
-		Limit int    `form:"limit"`
+		Range   string `form:"range"`
+		OrderBy string `form:"orderBy"`
+		Limit   int    `form:"limit"`
 	}{}
 	if err := c.ShouldBind(&form); err != nil {
 		jsonMsg(c, "获取域名榜单", err)
@@ -303,7 +304,10 @@ func (a *InboundController) getTopDomains(c *gin.Context) {
 	if form.Limit <= 0 || form.Limit > 50 {
 		form.Limit = 10
 	}
-	result, err := a.domainStatService.TopDomains(id, service.TopDomainRange(form.Range), form.Limit, time.Now())
+	// orderBy 的非法值由 service 的 normalizeTopOrder 回落，这里不重复一层
+	// 校验——回落规则只有一处，界面回显的也是 service 给出的实际生效值。
+	result, err := a.domainStatService.TopDomains(id, service.TopDomainRange(form.Range),
+		service.TopDomainOrder(form.OrderBy), form.Limit, time.Now())
 	if err != nil {
 		jsonMsg(c, "获取域名榜单", err)
 		return

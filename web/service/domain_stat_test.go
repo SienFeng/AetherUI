@@ -26,6 +26,10 @@ func setupDomainStatTest(t *testing.T) {
 	if err := database.InitTrafficDB(filepath.Join(dir, "traffic.db")); err != nil {
 		t.Fatalf("InitTrafficDB: %v", err)
 	}
+	// 用量库句柄是包级变量，会跨用例残留——SQLite 在文件被 t.TempDir 清掉
+	// 之后仍能通过已打开的 fd 读到旧数据。计量池就在这个库里，不清空的话
+	// 本用例写进池的行会漏进分流注入器的测试，把断言打成随机失败。
+	t.Cleanup(database.ResetTrafficDBForTest)
 }
 
 // listDomainStats 返回某粒度下的全部行，顺序确定，便于逐行断言。
@@ -837,7 +841,7 @@ func TestTopDomainsOrdersByCountWithinRange(t *testing.T) {
 	write(other.Id, "notmine.com", 0, 999)
 
 	svc := &DomainStatService{}
-	res, err := svc.TopDomains(in.Id, TopRange6h, 10, now)
+	res, err := svc.TopDomains(in.Id, TopRange6h, TopOrderCount, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -894,7 +898,7 @@ func TestTopDomainsSumsAcrossBuckets(t *testing.T) {
 	// b.com：单个桶 9 次，任何一个 a.com 的桶单看都比它小。
 	write("b.com", 0, 9)
 
-	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange6h, 10, now)
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange6h, TopOrderCount, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -959,7 +963,7 @@ func TestTopDomainsRespectsRangeBoundary(t *testing.T) {
 	// since = AlignHour(now-1h) = cur-3600，">=" 命中 cur-3600 与 cur，
 	// 即 b.com 与 a.com；cur-3*3600（c.com）与 cur-7*3600（d.com）都更早，
 	// 被排除。
-	res, err := svc.TopDomains(in.Id, TopRange1h, 10, now)
+	res, err := svc.TopDomains(in.Id, TopRange1h, TopOrderCount, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -967,7 +971,7 @@ func TestTopDomainsRespectsRangeBoundary(t *testing.T) {
 
 	// since = cur-6*3600，命中前三个桶（a/b/c.com），cur-7*3600（d.com）
 	// 超出 6h 范围、必须被排除。
-	res, err = svc.TopDomains(in.Id, TopRange6h, 10, now)
+	res, err = svc.TopDomains(in.Id, TopRange6h, TopOrderCount, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -990,7 +994,7 @@ func TestTopDomainsUsesDayBucketsForLongRanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange7d, 10, now)
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange7d, TopOrderCount, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -1002,7 +1006,7 @@ func TestTopDomainsUsesDayBucketsForLongRanges(t *testing.T) {
 func TestTopDomainsRejectsUnknownRange(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31007, "甲")
-	res, err := (&DomainStatService{}).TopDomains(in.Id, TopDomainRange("99h"), 10, time.Now())
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopDomainRange("99h"), TopOrderCount, 10, time.Now())
 	if err != nil {
 		t.Fatalf("非法档位不该报错，应回落默认: %v", err)
 	}
@@ -1018,7 +1022,7 @@ func TestTopDomainsRejectsUnknownRange(t *testing.T) {
 func TestTopDomainsRejectsUnknownInbound(t *testing.T) {
 	setupDomainStatTest(t)
 	// 库里一个入站都没建，任意正数 id 都不存在。
-	_, err := (&DomainStatService{}).TopDomains(99999, TopRange24h, 10, time.Now())
+	_, err := (&DomainStatService{}).TopDomains(99999, TopRange24h, TopOrderCount, 10, time.Now())
 	if err == nil {
 		t.Fatal("不存在的入站应返回 error，实际未报错")
 	}

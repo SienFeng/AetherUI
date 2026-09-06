@@ -3,6 +3,8 @@ package service
 import (
 	"encoding/json"
 	"testing"
+
+	"a-ui/database/model"
 )
 
 // 不配置 = 一个字节都不改。升级后行为零变化靠的就是这一条。
@@ -183,5 +185,73 @@ func TestParseDNSServersTrimsAndDedupes(t *testing.T) {
 	got := ParseDNSServers("  1.1.1.1  \n\n1.1.1.1\n 8.8.8.8 \n")
 	if len(got) != 2 || got[0] != "1.1.1.1" || got[1] != "8.8.8.8" {
 		t.Errorf("got = %v, want [1.1.1.1 8.8.8.8]", got)
+	}
+}
+
+func TestDNSInjectorAlsoCoversMeterOutbounds(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32101)
+	putPoolRow(t, in.Id, "doubleclick.net", 0)
+	if err := (&SettingService{}).setString("dnsServers", "https://8.8.8.8/dns-query"); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	// 顺序不能反：routing 那一步会把整个 outbounds 数组反序列化再重新序列化，
+	// 反过来的话它会把 DNS 这一步写的键无声冲掉。
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("RoutingInjector.Inject: %v", err)
+	}
+	if err := (&DNSInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("DNSInjector.Inject: %v", err)
+	}
+
+	obs := decodeOutbounds(t, cfg)
+	meter := obs[len(obs)-1]
+	if !model.IsMeterTag(meter["tag"].(string)) {
+		t.Fatalf("最后一个出站 = %+v，期望是计量出站", meter)
+	}
+	settings, _ := meter["settings"].(map[string]any)
+	if settings == nil || settings["domainStrategy"] != "UseIP" {
+		t.Errorf("计量出站 settings = %v，期望带 domainStrategy=UseIP——"+
+			"不补的话被计量的直连流量会绕过内置 DNS，dns 段对它们完全空转，"+
+			"没有报错也没有日志", meter["settings"])
+	}
+	// 补完之后仍然必须与默认出站除 tag 外逐字节相同。
+	first := obs[0]
+	firstSettings, _ := first["settings"].(map[string]any)
+	if firstSettings["domainStrategy"] != settings["domainStrategy"] {
+		t.Errorf("计量出站与默认出站的 domainStrategy 不一致：%v vs %v",
+			settings["domainStrategy"], firstSettings["domainStrategy"])
+	}
+}
+
+func TestDNSInjectorSkipsMeterOutboundsWhenDefaultIsNotFreedom(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32102)
+	putPoolRow(t, in.Id, "doubleclick.net", 0)
+	if err := (&SettingService{}).setString("dnsServers", "1.1.1.1"); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	// 管理员把首位换成了别的协议：整个函数早退，计量出站也一同不写——
+	// 它们是副本，单独写一个默认出站没有的键，恰恰会打破「除 tag 外逐字节
+	// 相同」那条不变量。
+	cfg.OutboundConfigs = []byte(
+		`[{"protocol":"socks","tag":"我的上游","settings":{}},` +
+			`{"protocol":"blackhole","settings":{},"tag":"blocked"}]`)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("RoutingInjector.Inject: %v", err)
+	}
+	if err := (&DNSInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("DNSInjector.Inject: %v", err)
+	}
+	obs := decodeOutbounds(t, cfg)
+	meter := obs[len(obs)-1]
+	settings, _ := meter["settings"].(map[string]any)
+	if settings != nil {
+		if _, ok := settings["domainStrategy"]; ok {
+			t.Error("首位不是 freedom 时不该给计量出站写 domainStrategy")
+		}
 	}
 }

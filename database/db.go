@@ -220,6 +220,11 @@ func InitTrafficDB(dbPath string) error {
 	if err := tdb.AutoMigrate(&model.DomainStatCursor{}); err != nil {
 		return err
 	}
+	// 计量池与域名统计同库：重算时要读 DomainStat 的聚合结果，生成期要读
+	// 池，两者始终一起用；孤儿清理也挂在同一个每小时任务里。
+	if err := tdb.AutoMigrate(&model.MeterDomain{}); err != nil {
+		return err
+	}
 	trafficDB = tdb
 	return nil
 }

@@ -97,6 +97,14 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		return nil, err
 	}
 
+	// 打开出站流量统计。没有它，计量出站的计数器根本不会被注册
+	//（见 injectOutboundStats 的注释）。与访问日志开关一样，改动会体现在
+	// 配置字节里，Config.Equals 能察觉；但 policy 段没有运行时重载接口，
+	// 所以升级后的第一次配置变更会触发一次整进程重启。
+	if err := injectOutboundStats(xrayConfig); err != nil {
+		return nil, err
+	}
+
 	return xrayConfig, nil
 }
 

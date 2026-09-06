@@ -46,3 +46,29 @@ func Registrable(target string) string {
 	}
 	return etld1
 }
+
+// IsRegistrable 判断 d 本身是不是一个注册域名（eTLD+1）。
+//
+// Registrable 对三类值是「原样返回、不丢弃」——IP 字面量、公共后缀本身
+// （"com"）、不含点的主机名（"localhost"）——因为访问次数照样要统计。但第二期
+// 的计量池必须把它们挡在外面：计量规则写的是 domain:<值>，而 domain:com 会
+// 命中全部 .com，把该入站几乎全部流量吸进一个计量出站；IP 字面量则需要 ip
+// 条件，domain 条件对它永不命中，白占一个池槽位。
+//
+// 判据是「EffectiveTLDPlusOne 成功且返回值等于输入」——只接受已经归并好的
+// 结果，不替调用方做归一化（转小写、剥末尾点在 Registrable 里已经做过）。
+func IsRegistrable(d string) bool {
+	if d == "" || net.ParseIP(d) != nil {
+		return false
+	}
+	// 大写会让 publicsuffix 在 ICANN 表里查不到后缀、回落成「未知 TLD」，
+	// 于是 EXAMPLE.COM 被当成合法注册域名放行。而这个函数是「什么能变成
+	// domain: 路由规则」的准入闸门——xray 只把目标域名转小写，不归一化配置
+	// 里的模式，domain:EXAMPLE.COM 是一条永不命中的哑规则且没有任何一层
+	// 会报错。归一化是 Registrable 的职责，这里只负责拒绝没归一化的输入。
+	if strings.ToLower(d) != d {
+		return false
+	}
+	etld1, err := publicsuffix.EffectiveTLDPlusOne(d)
+	return err == nil && etld1 == d
+}
