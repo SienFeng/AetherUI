@@ -701,3 +701,51 @@ func TestScheduledUpdateStopsRecheckingAfterNotModified(t *testing.T) {
 		t.Errorf("向上游发起了 %d 次请求，期望 1 次：304 之后当天不该反复重问", n)
 	}
 }
+
+// 界面必须能把「上游未变更」与「更新失败」区分开。
+//
+// 两者都不会改动库的生成时间：304 走 errIPDBNotModified 分支，下载失败走
+// continue，谁都不碰 builtAt。只看生成时间的话，一个正常工作了两天的面板
+// 与一个两天前就下载失败的面板长得完全一样，管理员只能猜。
+// 「上次向上游确认的时间」是唯一能分开这两种情形的信号——它只在成功或 304
+// 之后前进，所以必须出现在 Status 里。
+func TestStatusReportsLastCheckedAt(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "04:00")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	db := seedDatabaseAt(t, path, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))
+	url, _ := etagSource(t, ipdbSampleSource, `"v1"`)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+	svc.setDB("test", db)
+	ss := SettingService{}
+	if err := ss.setString("testEtag", `"v1"`); err != nil {
+		t.Fatalf("写入 ETag: %v", err)
+	}
+
+	at := time.Date(2026, 9, 3, 4, 0, 0, 0, time.UTC)
+	if updated, err := svc.RunScheduledUpdate(at); err != nil || updated != 0 {
+		t.Fatalf("定时更新 = (%d, %v)，期望上游未变更时不计入更新", updated, err)
+	}
+
+	status, err := svc.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(status.Sources) != 1 {
+		t.Fatalf("数据源个数 = %d，期望 1", len(status.Sources))
+	}
+	got := status.Sources[0]
+	if want := at.UnixMilli(); got.CheckedAt != want {
+		t.Errorf("CheckedAt = %d，期望 %d：上游未变更时生成时间不动，界面只能靠这个字段看出自动更新还在跑",
+			got.CheckedAt, want)
+	}
+	if want := db.BuiltAt().UnixMilli(); got.BuiltAt != want {
+		t.Errorf("BuiltAt = %d，期望 %d：304 不该改动生成时间", got.BuiltAt, want)
+	}
+}

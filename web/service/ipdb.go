@@ -483,6 +483,8 @@ type IPDBSourceStatus struct {
 	BuiltAt       int64  `json:"builtAt"`
 	SegmentCount  int    `json:"segmentCount"`
 	ProvinceCount int    `json:"provinceCount"`
+	// CheckedAt 是上次向上游确认成功的时刻（毫秒），0 表示从未确认过。
+	CheckedAt int64 `json:"checkedAt"`
 }
 
 // IPDBStatus 是整个归属地库子系统的状态。
@@ -503,6 +505,9 @@ func (s *IPDBService) Status() (*IPDBStatus, error) {
 			return nil, err
 		}
 		st := IPDBSourceStatus{Key: src.Key, Name: src.Name, Enabled: url != ""}
+		// 与库是否加载无关：库文件被删掉之后，上次确认时间仍是判断
+		// 「自动更新还在不在跑」的依据。
+		st.CheckedAt = s.lastCheckedAt(src)
 		if db := s.dbOf(src.Key); db != nil {
 			st.Loaded = true
 			st.BuiltAt = db.BuiltAt().UnixMilli()

@@ -111,7 +111,7 @@
                                                    desc="源数据约 25 MB，留空表示不启用。两个源不能都留空"
                                                    v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
                                 <setting-list-item type="text" title="每日更新时刻"
-                                                   desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新"
+                                                   desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
                                                    v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
@@ -245,8 +245,14 @@
                 if (!src.loaded) {
                     return '尚未下载，点击右侧「更新」获取';
                 }
-                return `生成于 ${DateUtil.formatMillis(src.builtAt)}，`
-                     + `收录 ${src.segmentCount} 个 IP 段、${src.provinceCount} 个省级地区`;
+                // 上游内容没变时不会重建库，「生成于」会一直停在旧日期，看起来像自动
+                // 更新坏掉了。「最近检查」只在更新成功或上游明确回 304 之后才前进，
+                // 是唯一能把「已是最新」与「更新失败」分开的信号，所以一并显示。
+                let desc = `生成于 ${DateUtil.formatMillis(src.builtAt)}，`;
+                if (src.checkedAt) {
+                    desc += `最近检查 ${DateUtil.formatMillis(src.checkedAt)}，`;
+                }
+                return desc + `收录 ${src.segmentCount} 个 IP 段、${src.provinceCount} 个省级地区`;
             },
             async getShapingStatus() {
                 const msg = await HttpUtil.post('/aui/setting/shapingStatus');
