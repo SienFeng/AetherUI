@@ -146,6 +146,97 @@ func TestAggregateSkipsUnknownInbound(t *testing.T) {
 	}
 }
 
+// access_log 的自增 id 会被复用：GORM 的 sqlite 驱动对 primaryKey;autoIncrement
+// 生成的是裸 rowid 别名，没有 AUTOINCREMENT。AccessLogCleanupJob 不看访问日志
+// 开关、无条件按保留期删行，管理员关闭访问日志超过保留期再打开、或手工清库，
+// 都会让整张表清空、新行的 id 从 1 重新开始，而位点还停在被清空前的高位。
+// 不处理的话 Where("id > 位点") 从此恒为空，聚合永久停摆且没有任何一行日志
+// （DomainStatJob 只在 n>0 时才打日志）。这条测试守住 Aggregate 里那段自愈
+// 逻辑：检测到 max(id) < 位点后把位点归零，在同一次调用内继续聚合，而不是
+// 永远卡住。
+func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31010, "甲")
+	before := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	// 清空前写三条，把位点推到 3，模拟一段真实的历史积累。
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: before, SourceIP: "1.2.3.4", Network: "tcp", Target: "a.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+		{Time: before, SourceIP: "1.2.3.4", Network: "tcp", Target: "b.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+		{Time: before, SourceIP: "1.2.3.4", Network: "tcp", Target: "c.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（清空前）: %v", err)
+	}
+	svc := &DomainStatService{}
+	n, err := svc.Aggregate()
+	if err != nil {
+		t.Fatalf("清空前 Aggregate: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("清空前消费了 %d 条，期望 3", n)
+	}
+
+	// 模拟 AccessLogCleanupJob：无条件按保留期清空整表（cutoff 设在全部
+	// 记录之后即可，不必关心访问日志开关——清理任务本来就不看它）。
+	if _, err := (&AccessLogService{}).Cleanup(1, before.Add(48*time.Hour)); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	var remaining int64
+	if err := database.GetAccessLogDB().Model(&model.AccessLog{}).Count(&remaining).Error; err != nil {
+		t.Fatalf("统计访问日志: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("清空后仍剩 %d 行访问日志，测试前提不成立", remaining)
+	}
+
+	// 清空后新写一条：SQLite 复用被删除的 rowid，这一条的 id 会是 1，
+	// 远小于清空前的位点 3。
+	after := before.Add(72 * time.Hour)
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: after, SourceIP: "1.2.3.4", Network: "tcp", Target: "d.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store（清空后）: %v", err)
+	}
+	var newId int64
+	if err := database.GetAccessLogDB().Model(&model.AccessLog{}).Select("id").Scan(&newId).Error; err != nil {
+		t.Fatalf("读新行 id: %v", err)
+	}
+	if newId != 1 {
+		t.Fatalf("清空后新行 id = %d，期望 1（前提：GORM 的 sqlite 驱动不生成 AUTOINCREMENT，此前提不成立则本测试的模拟场景失效）", newId)
+	}
+
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("自愈这一轮 Aggregate: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("自愈后消费了 %d 条，期望 1（清空后新写的那一条）：位点没有被正确归零重新聚合", n)
+	}
+	hours := listDomainStats(t, model.GranularityHour)
+	counts := make(map[string]int64, len(hours))
+	for _, h := range hours {
+		counts[h.Domain] += h.Count
+	}
+	if counts["d.com"] != 1 {
+		t.Errorf("d.com 计数 = %d，期望 1", counts["d.com"])
+	}
+	// domain_stat 与 access_log 是两张独立的表，清空 access_log 不影响
+	// 已经聚合完的历史桶——自愈逻辑必须只归零位点，绝不能动 domain_stat。
+	for _, dom := range []string{"a.com", "b.com", "c.com"} {
+		if counts[dom] != 1 {
+			t.Errorf("清空前的历史桶 %s = %d，期望保留为 1", dom, counts[dom])
+		}
+	}
+
+	// 位点应已推进到新表的 max(id)=1，再跑一次不应重复计入。
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第三次 Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("第三次消费了 %d 条，期望 0（位点应已推进到新表的 max id）", n)
+	}
+}
+
 func TestTopDomainsOrdersByCountWithinRange(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31003, "甲")
@@ -193,6 +284,53 @@ func TestTopDomainsOrdersByCountWithinRange(t *testing.T) {
 	}
 	if res.List[0].Count != 9 {
 		t.Errorf("首位次数 = %d，期望 9", res.List[0].Count)
+	}
+}
+
+// TopDomains 的查询用 sum(count) 把同一个域名跨多个桶的次数加起来，这是这条
+// 查询存在的唯一理由——但此前三条 TopDomains 测试里每个域名都只落在一个桶，
+// sum(count) 与裸列 count 取值恰好相同，把 SQL 里的 "sum(count) as count"
+// 改成 "count" 也能照样通过。这条测试专门构造「单桶名次」与「跨桶求和后的
+// 名次」相反的数据：A 域名分散在三个桶里各 5 次（合计 15），B 域名集中在
+// 单个桶里 9 次。只有真的执行了 sum() 才会让 A 排在 B 前面；只看任意单独
+// 一个桶都会是 B 更靠前（9 > 5）。同时这也顺带钉住了 GROUP BY 与 ORDER BY
+// 里 "count" 别名的解析：用错别名（比如引用了原始列而不是聚合结果）会让
+// 排序退回到单桶视角，同样会被这条断言抓到。
+func TestTopDomainsSumsAcrossBuckets(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31011, "甲")
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tdb := database.GetTrafficDB()
+	write := func(dom string, hoursAgo int, count int64) {
+		t.Helper()
+		start := model.AlignHour(now.Add(-time.Duration(hoursAgo)*time.Hour), loc)
+		if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, dom, start, count); err != nil {
+			t.Fatalf("写桶: %v", err)
+		}
+	}
+	// a.com：三个桶各 5 次，合计 15。
+	write("a.com", 0, 5)
+	write("a.com", 1, 5)
+	write("a.com", 2, 5)
+	// b.com：单个桶 9 次，任何一个 a.com 的桶单看都比它小。
+	write("b.com", 0, 9)
+
+	res, err := (&DomainStatService{}).TopDomains(in.Id, TopRange6h, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if len(res.List) != 2 {
+		t.Fatalf("返回 %+v，期望恰好两个域名", res.List)
+	}
+	if res.List[0].Domain != "a.com" || res.List[0].Count != 15 {
+		t.Errorf("首位 = %+v，期望 a.com/15（跨桶求和后应领先）", res.List[0])
+	}
+	if res.List[1].Domain != "b.com" || res.List[1].Count != 9 {
+		t.Errorf("次位 = %+v，期望 b.com/9", res.List[1])
 	}
 }
 
@@ -295,6 +433,19 @@ func TestTopDomainsRejectsUnknownRange(t *testing.T) {
 	}
 	if res.Range != string(TopRange24h) {
 		t.Errorf("回落到 %q，期望 %q", res.Range, TopRange24h)
+	}
+}
+
+// TopDomains 开头校验入站存在性，这是一次对外可见的契约变更（从「返回空
+// 榜单」改成「返回错误」）：不校验的话，一个库里不存在的入站 id 会返回一张
+// 空榜单，管理员会把它读成「这个人没访问过任何网站」，而不是「你查的这个
+// 入站根本不存在」——这条错误路径此前没有任何测试断言。
+func TestTopDomainsRejectsUnknownInbound(t *testing.T) {
+	setupDomainStatTest(t)
+	// 库里一个入站都没建，任意正数 id 都不存在。
+	_, err := (&DomainStatService{}).TopDomains(99999, TopRange24h, 10, time.Now())
+	if err == nil {
+		t.Fatal("不存在的入站应返回 error，实际未报错")
 	}
 }
 

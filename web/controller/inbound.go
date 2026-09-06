@@ -284,8 +284,11 @@ func (a *InboundController) getTopDomains(c *gin.Context) {
 		jsonMsg(c, "获取域名榜单", err)
 		return
 	}
-	// 与 getTrafficHistory 一样，前端 axios 实际发的是 JSON；form tag
-	// 在两种绑定下都能工作，与既有接口保持一致。
+	// 与 getTrafficHistory 一样，前端 axios 实际发的是 JSON，走的是 Gin 的
+	// JSON 绑定而不是 form 绑定；range/limit 能绑上是因为 struct 字段没写
+	// json tag 时 encoding/json 按大小写不敏感匹配字段名（详细机制见
+	// getTrafficHistory 上方的注释）。form tag 留着只是与既有接口保持一致，
+	// 并不是它在起作用。
 	form := struct {
 		Range string `form:"range"`
 		Limit int    `form:"limit"`

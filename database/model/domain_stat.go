@@ -24,12 +24,19 @@ type DomainStat struct {
 	// 引用不再悬空，任何「跳过悬空引用」式的防线都拦不住它。
 	InboundId int `json:"inboundId" gorm:"uniqueIndex:idx_domain_stat,priority:2"`
 
-	// Domain 是归并后的注册域名（util/domain.Registrable），IP 字面量原样。
-	Domain string `json:"domain" gorm:"uniqueIndex:idx_domain_stat,priority:3"`
-
 	// BucketStart 是桶起始时刻的 Unix **秒**，按面板设置的时区对齐（AlignHour）。
 	// 注意 AccessLog.Time 是**毫秒**，聚合时要转换。
-	BucketStart int64 `json:"t" gorm:"uniqueIndex:idx_domain_stat,priority:4"`
+	//
+	// 排在 Domain 之前（而不是 TrafficBucket 那种「domain 在前」的直觉顺序）：
+	// 榜单查询是 WHERE granularity=? AND inbound_id=? AND bucket_start>=? 再
+	// GROUP BY domain，范围条件排第 3 位才能走索引前缀——1h 档的选择性是
+	// 1/720，排在第 4 位时这个范围条件用不上索引，要扫掉该入站 30 天的
+	// 全部小时行。代价是 GROUP BY domain 需要一棵临时 B 树（这个列序下
+	// domain 不再自然有序），换来的扫描量节省远大于这棵临时树的开销。
+	BucketStart int64 `json:"t" gorm:"uniqueIndex:idx_domain_stat,priority:3"`
+
+	// Domain 是归并后的注册域名（util/domain.Registrable），IP 字面量原样。
+	Domain string `json:"domain" gorm:"uniqueIndex:idx_domain_stat,priority:4"`
 
 	Count int64 `json:"count"` // 连接次数
 	Up    int64 `json:"up"`    // 上传字节，第二期填
@@ -47,7 +54,13 @@ type DomainStat struct {
 // 本来就依赖这一点来保证翻页稳定），面板停机再久也只是补算，既不会重复计算
 // 也不会跳过；按时间窗重算则需要「重算最近 N 小时」的启发式，停机超过 N 小时
 // 就静默丢数据。
+//
+// 前提是 access_log 的自增 id 单调不回退——但 GORM 的 sqlite 驱动对
+// primaryKey;autoIncrement 生成的是裸 rowid 别名，没有 AUTOINCREMENT，表被
+// 清空后（保留期清理或手工删库）新行的 id 会从 1 重新开始。DomainStatService.
+// Aggregate 里有一段自愈逻辑检测并纠正这种情形（见该函数注释），否则位点会
+// 永久超前、聚合永久停摆。
 type DomainStatCursor struct {
-	Id        int   `gorm:"primaryKey"`
+	Id        int `gorm:"primaryKey"`
 	LastLogId int64
 }

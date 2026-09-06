@@ -9,6 +9,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/util/domain"
 )
 
@@ -79,7 +80,31 @@ func (s *DomainStatService) Aggregate() (int, error) {
 			return total, err
 		}
 		if len(logs) == 0 {
-			return total, nil
+			// 空批次通常就是「已追平」，直接返回。但 GORM 的 sqlite 驱动对
+			// primaryKey;autoIncrement 生成的是裸 rowid 别名，没有
+			// AUTOINCREMENT——access_log 被清空后（保留期清理不看访问日志
+			// 开关，关闭超过保留期或手工删库都会清空整表），新行的 id 会从
+			// 1 重新开始，而位点还停在被清空前的高位，Where("id > 位点")
+			// 从此恒为空，聚合永久停摆且没有任何一行日志（DomainStatJob
+			// 只在 n>0 时才打日志）。cursor > 0 时才值得多查一次 max(id)：
+			// max < cursor（含表空时 max 为 0）说明表确实被清空重排过，
+			// 而不是单纯追平；此时把位点归零并在本轮内重试而不是等下一个
+			// 10 分钟周期——问题已经查清，没有理由让榜单多空窗一轮。
+			if cursor == 0 {
+				return total, nil
+			}
+			var maxId int64
+			if err := adb.Model(&model.AccessLog{}).Select("COALESCE(MAX(id), 0)").Scan(&maxId).Error; err != nil {
+				return total, err
+			}
+			if maxId >= cursor {
+				return total, nil
+			}
+			logger.Warningf("域名统计位点(%d)超前于访问日志当前最大 id(%d)，访问日志疑似被清空过，位点已重置为 0", cursor, maxId)
+			if err := saveDomainStatCursor(tdb, 0); err != nil {
+				return total, err
+			}
+			continue
 		}
 
 		// 先在内存里按 (粒度, 入站, 域名, 桶) 聚合，再逐条 UPSERT。
@@ -235,10 +260,13 @@ func topRangeSpec(r TopDomainRange) (model.TrafficGranularity, time.Duration, To
 // 管理员会把它理解成「这个人没访问过任何网站」，而不是「你查的这个入站
 // 不存在」。
 //
-// 起点按面板时区对齐后回溯，与用量图的刻度算法一致：不对齐的话，
-// 「最近 24 小时」的起点会落在某个小时的中间，而桶是整点的，边界那一桶
-// 要么整个漏掉要么整个算进来，取决于当前分钟数——同一个查询在一小时内
-// 会给出两种结果。
+// 起点按面板时区对齐后回溯，用的是与用量图（TrafficHistoryService.buildSlots）
+// 相同的 AlignHour/AlignDay 对齐函数，但覆盖范围并不与它一致——见下面
+// Where 子句上的注释，这里的「24 小时」实际是 25 个小时桶，用量图的
+// 「24 小时」是恰好 24 个，两者刻意不同，不要把这句话理解成整体行为一致。
+// 不对齐的话，「最近 24 小时」的起点会落在某个小时的中间，而桶是整点的，
+// 边界那一桶要么整个漏掉要么整个算进来，取决于当前分钟数——同一个查询
+// 在一小时内会给出两种结果。
 func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit int, now time.Time) (*TopDomainResult, error) {
 	inboundService := InboundService{}
 	if _, err := inboundService.GetInbound(inboundId); err != nil {
@@ -278,7 +306,8 @@ func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit in
 		// 刚过时就只剩当前这一个几乎为空的桶——聚合任务 @every 10m，日志
 		// 还来不及聚合进去——榜单会在每小时开头都短暂显示"无数据"。这里
 		// 要的是排名，多覆盖半个桶几乎不改变谁在前面，覆盖不足却会让功能
-		// 每小时必崩一次，两害相权取范围略宽的这个。
+		// 每小时必崩一次，两害相权取范围略宽的这个。这条不止影响 1h 档：
+		// 所有档位都多覆盖一个桶，7d 实际是 8 个日桶、15d 是 16 个。
 		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
 		Group("domain").
 		// 次数相同时按域名字典序兜底，让同一份数据每次返回的顺序一致——

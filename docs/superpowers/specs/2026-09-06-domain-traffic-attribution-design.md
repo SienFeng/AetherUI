@@ -114,12 +114,12 @@ type DomainStat struct {
     // InboundId 而不是 tag：入站改端口 tag 就变，存 tag 会让历史在那一刻断掉。
     InboundId int `json:"inboundId" gorm:"uniqueIndex:idx_domain_stat,priority:2"`
 
-    // Domain 是归并后的注册域名（eTLD+1），IP 字面量目标原样保留。
-    Domain string `json:"domain" gorm:"uniqueIndex:idx_domain_stat,priority:3"`
-
     // BucketStart 是桶起始时刻的 **Unix 秒**，与 TrafficBucket 一致
     //（注意 AccessLog.Time 是毫秒，聚合时要转换）。按面板时区对齐。
-    BucketStart int64 `json:"t" gorm:"uniqueIndex:idx_domain_stat,priority:4"`
+    BucketStart int64 `json:"t" gorm:"uniqueIndex:idx_domain_stat,priority:3"`
+
+    // Domain 是归并后的注册域名（eTLD+1），IP 字面量目标原样保留。
+    Domain string `json:"domain" gorm:"uniqueIndex:idx_domain_stat,priority:4"`
 
     Count int64 `json:"count"` // 连接次数 —— 第一期写
     Up    int64 `json:"up"`    // 上传字节 —— 第二期写
@@ -127,9 +127,16 @@ type DomainStat struct {
 }
 ```
 
-唯一索引 `idx_domain_stat = (granularity, inbound_id, domain, bucket_start)`，
-字段顺序照抄 `TrafficBucket` 的 `idx_traffic_bucket`（granularity 在最前），
-榜单查询 `WHERE granularity=? AND inbound_id=? AND bucket_start>=?` 正好走这个索引的前缀。
+唯一索引 `idx_domain_stat = (granularity, inbound_id, bucket_start, domain)`。**没有**照抄
+`TrafficBucket` 的 `idx_traffic_bucket`（那个索引是 `domain` 在 `bucket_start` 之前）：
+榜单查询是 `WHERE granularity=? AND inbound_id=? AND bucket_start>=?` 再 `GROUP BY domain`，
+`bucket_start` 的范围条件必须排在等值条件之后、`domain` 之前才能走索引前缀——`EXPLAIN QUERY PLAN`
+实测确认，`bucket_start` 排第 4 位时这个范围条件用不上索引，1h 档查询要扫掉该入站 30 天的全部
+小时行（选择性只有 1/720）。代价是 `GROUP BY domain` 需要一棵临时 B 树（这个列序下 `domain` 不再
+自然有序，不能像 `TrafficBucket` 那样流式分组）——这是权衡后的取舍，省下的扫描量远大于多一棵
+临时 B 树的开销。`upsertDomainStat` 里 `clause.OnConflict` 的 `Columns` 顺序不需要跟着换：
+SQLite 的 `ON CONFLICT` 按列的**集合**匹配唯一索引，不要求顺序一致，`TestAggregateIsIdempotent`
+在改列序后原样通过验证了这一点。
 
 小时桶与日桶**各自独立累加**，日桶不由小时桶汇总而来——汇总方案要处理「小时桶已被清理但日桶还没算」的补算逻辑
 （与 `2026-09-04-traffic-history-design.md` 同一个判断）。
@@ -170,7 +177,19 @@ type DomainStatCursor struct {
 靠 id 定序），`Store` 是批量插入、id 单调递增。用 id 做位点意味着面板停机再久也只是补算，
 既不会重复计算也不会跳过；而按时间窗重算需要「重算最近 N 小时」的启发式，停机超过 N 小时就静默丢数据。
 
-`access_log` 的保留期清理会删掉旧行，位点只往前走，不受影响。
+**前提是 `access_log` 的 id 单调不回退，而这个前提在表被清空过之后不成立。**
+`access_log` 的保留期清理（`AccessLogCleanupJob`）不看访问日志开关，无条件按保留期删行；
+管理员关闭访问日志超过保留期再打开，或手工删库腾空间，都会让整张表清空。GORM 的 sqlite 驱动对
+`primaryKey;autoIncrement` 生成的是裸 `integer`（rowid 别名），**没有** `AUTOINCREMENT`，
+表清空后新行的 id 会从 1 重新开始，而位点还停在被清空前的高位——`Where("id > 位点")` 从此恒为空，
+聚合永久停摆且没有任何一行日志（`DomainStatJob` 只在消费条数 > 0 时才打日志）。原先这里写的
+「面板停机再久也只是补算，不会跳过」在这个前提被打破时不成立：不是补算延迟，而是永久停摆。
+
+`DomainStatService.Aggregate` 现在有一段自愈逻辑兜底这个情形：某一轮批次读到 0 行、且位点 > 0 时，
+额外查一次 `access_log` 的 `max(id)`；`max(id) < 位点`（含表空时 `max` 为 0）说明表确实被清空重排过，
+而不是单纯追平，此时把位点归零并在本次调用内重试，而不是等下一个 10 分钟周期。只在读到空批次那一轮
+多这一次查询，正常运行时每轮都读得到数据，没有额外开销。回归测试见
+`web/service/domain_stat_test.go` 的 `TestAggregateRecoversAfterAccessLogIdsReset`。
 
 ## 5. 第一期：Top 访问次数榜
 
