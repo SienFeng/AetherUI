@@ -947,3 +947,247 @@ func TestBuildRuleGenerationIsByteDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// 一个组同时有域名与 IP 时，必须生成两条独立的 xray 规则。
+//
+// 绝不能合成一条：同一条规则内的条件是 AND（app/router/config.go:33 的
+// BuildCondition + condition.go:35 的 ConditionChan.Apply），「这批域名或这批
+// IP 走 B」会变成「域名命中且解析出的 IP 也命中」，几乎永不命中，
+// 而 xray 返回 Configuration OK、面板首页照样显示 running。
+func TestBuildRuleSplitsDomainAndIP(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "混合", Domains: `["domain:openai.com"]`, Cidrs: `["1.2.3.0/24"]`,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want 3（模板 1 条 + 生成 2 条）: %v", len(rules), rules)
+	}
+	if _, ok := rules[1]["domain"]; !ok {
+		t.Errorf("rules[1] 应当带 domain 条件: %v", rules[1])
+	}
+	if _, ok := rules[2]["ip"]; !ok {
+		t.Errorf("rules[2] 应当带 ip 条件: %v", rules[2])
+	}
+}
+
+// 不变量 N1：任何一条生成的规则都不得同时含 domain 与 ip。
+func TestBuildRuleNeverCombinesDomainAndIP(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{
+		Remark: "混合", Domains: `["domain:openai.com"]`,
+		Cidrs: `["1.2.3.0/24","geoip:cn"]`,
+	}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	// 先确认真的生成了东西：不加这一条，生成若退化成「整条规则被跳过」，
+	// 下面的循环只会遍历模板自带的那条 api 规则，测试照样绿。
+	rules := decodeRules(t, cfg)
+	if len(rules) != 3 {
+		t.Fatalf("got %d rules, want 3（模板 1 条 + 生成 2 条）: %v", len(rules), rules)
+	}
+	for i, r := range rules {
+		_, hasDomain := r["domain"]
+		_, hasIP := r["ip"]
+		if hasDomain && hasIP {
+			t.Errorf("rules[%d] 同时带 domain 与 ip（AND 语义，几乎永不命中）: %v", i, r)
+		}
+	}
+}
+
+// 不变量 N2：绝不发出空的条件数组。空数组在 protobuf 里长度为 0，
+// 条件整个消失，规则退化成只由剩下的条件约束——范围被静默放大。
+func TestBuildRuleNeverEmitsEmptyConditionArray(t *testing.T) {
+	setupDB(t)
+	for _, f := range []struct {
+		remark  string
+		domains string
+		cidrs   string
+	}{
+		{"只有域名", `["domain:openai.com"]`, "[]"},
+		{"只有 IP", "[]", `["1.2.3.0/24"]`},
+	} {
+		t.Run(f.remark, func(t *testing.T) {
+			setupDB(t)
+			group := &model.DomainGroup{Remark: f.remark, Domains: f.domains, Cidrs: f.cidrs}
+			if err := database.GetDB().Save(group).Error; err != nil {
+				t.Fatalf("save group: %v", err)
+			}
+			rule := &model.RoutingRule{
+				DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+				Action:         model.ActionBlock, Enable: true,
+			}
+			if err := database.GetDB().Save(rule).Error; err != nil {
+				t.Fatalf("save rule: %v", err)
+			}
+			cfg := newTemplateConfig(t)
+			if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+				t.Fatalf("Inject: %v", err)
+			}
+			// 同上：没有这条计数，整条规则被跳过时循环无事可做，测试也绿。
+			rules := decodeRules(t, cfg)
+			if len(rules) != 2 {
+				t.Fatalf("got %d rules, want 2（模板 1 条 + 生成 1 条）: %v", len(rules), rules)
+			}
+			for i, r := range rules {
+				for _, key := range []string{"domain", "ip", "inboundTag"} {
+					v, ok := r[key]
+					if !ok {
+						continue
+					}
+					// 必须是 !isList：nil 切片会被 json.Marshal 成 null，
+					// 类型断言不成立，写成 isList && ... 时这条检查会被
+					// 静默跳过——而 inboundTag 恰恰是可能为 nil 的那一个
+					// （全局规则下 var inboundTags []string 从未被赋值）。
+					// 这个测试本身就是 N2 的绊线，绝不能靠「没看」通过。
+					list, isList := v.([]any)
+					if !isList || len(list) == 0 {
+						t.Errorf("rules[%d][%q] 是空数组: %v", i, key, r)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBuildRuleOnlyDomainsProducesOneRule(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{Remark: "只有域名", Domains: `["domain:openai.com"]`, Cidrs: "[]"}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 2 {
+		t.Fatalf("got %d rules, want 2（模板 1 条 + 生成 1 条）: %v", len(rules), rules)
+	}
+	if _, ok := rules[1]["ip"]; ok {
+		t.Errorf("组里没有 IP 段时不得生成 ip 规则: %v", rules[1])
+	}
+}
+
+func TestBuildRuleOnlyCidrsProducesOneRule(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{Remark: "只有 IP", Domains: "[]", Cidrs: `["1.2.3.0/24"]`}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 2 {
+		t.Fatalf("got %d rules, want 2（模板 1 条 + 生成 1 条）: %v", len(rules), rules)
+	}
+	if _, ok := rules[1]["domain"]; ok {
+		t.Errorf("组里没有域名时不得生成 domain 规则: %v", rules[1])
+	}
+}
+
+// 域名与 IP 两侧都空 → 整条丢弃。宁可规则不生效让管理员察觉，
+// 也绝不输出条件残缺的规则。
+//
+// 与既有的 TestBuildRuleSkipsWhenBothSourcesEmpty（:489，管的是「手工与订阅
+// 两个来源都空」）是不同的判定，名字刻意区分开。
+func TestBuildRuleSkipsWhenNeitherDomainsNorCidrs(t *testing.T) {
+	setupDB(t)
+	group := &model.DomainGroup{Remark: "全空", Domains: "[]", Cidrs: "[]"}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	rules := decodeRules(t, cfg)
+	if len(rules) != 1 {
+		t.Errorf("模板里那条 api 规则之外不应有别的: %v", rules)
+	}
+}
+
+// 默认关：升级后行为零变化，模板里没有 domainStrategy 就保持没有。
+func TestInjectLeavesDomainStrategyAloneByDefault(t *testing.T) {
+	setupDB(t)
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	var routing map[string]any
+	if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+		t.Fatalf("unmarshal routing: %v", err)
+	}
+	if _, ok := routing["domainStrategy"]; ok {
+		t.Errorf("domainStrategy must not be written when the switch is off: %v", routing)
+	}
+}
+
+func TestInjectWritesDomainStrategyWhenEnabled(t *testing.T) {
+	setupDB(t)
+	if err := (&SettingService{}).setInt("ipRuleResolveDomain", 1); err != nil {
+		t.Fatalf("setInt: %v", err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	var routing map[string]any
+	if err := json.Unmarshal(cfg.RouterConfig, &routing); err != nil {
+		t.Fatalf("unmarshal routing: %v", err)
+	}
+	if routing["domainStrategy"] != "IPIfNonMatch" {
+		t.Errorf("domainStrategy = %v, want IPIfNonMatch", routing["domainStrategy"])
+	}
+}

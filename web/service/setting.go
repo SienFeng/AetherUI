@@ -40,6 +40,8 @@ var defaultValueMap = map[string]string{
 	"trafficHourRetentionDays": "30",
 	"trafficDayRetentionDays":  "365",
 	"concurrencyIdleTimeout":   "120",
+	"ipRuleResolveDomain":      "0",
+	"dnsServers":               "",
 	"tcInterface":              "",
 	"defaultDomain":            "",
 	"defaultCertFile":          "",
@@ -467,6 +469,26 @@ func (s *SettingService) GetConcurrencyIdleTimeout() (int, error) {
 	return s.getInt("concurrencyIdleTimeout")
 }
 
+// GetIPRuleResolveDomain 报告是否允许 IP 分流规则匹配域名目标。
+//
+// 为真时生成期写 routing.domainStrategy = IPIfNonMatch，xray 会在第一遍
+// 全部规则都没命中时，把域名解析成 IP 再跑第二遍（app/router/router.go:261）。
+func (s *SettingService) GetIPRuleResolveDomain() (bool, error) {
+	v, err := s.getInt("ipRuleResolveDomain")
+	if err != nil {
+		return false, err
+	}
+	return v != 0, nil
+}
+
+// GetDNSServers 返回管理员配置的 DNS 服务器原文（换行分隔）。
+//
+// 空字符串表示不启用：此时 DNSInjector 一个字节都不改，xray 会用它自己的
+// 默认解析器 localdns（core/xray.go:216），即系统的 /etc/resolv.conf。
+func (s *SettingService) GetDNSServers() (string, error) {
+	return s.getString("dnsServers")
+}
+
 // GetAccessLogRetentionDays 返回访问日志保留天数。
 func (s *SettingService) GetAccessLogRetentionDays() (int, error) {
 	return s.getInt("accessLogRetentionDays")
@@ -492,6 +514,13 @@ func (s *SettingService) GetTCInterface() (string, error) {
 
 func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 	if err := allSetting.CheckValid(); err != nil {
+		return err
+	}
+	// CheckValid 只查得了语法。会进入 xray 配置的设置项还要过一遍真实 xray：
+	// 语法合法而 xray 拒绝启动的值确实存在（dnsServers 写成 IP:端口 就是），
+	// 而那种错误在保存这一刻是唯一看得见的时刻——之后只剩一次静默的重启失败。
+	// 与出站/入站/域名的校验同一套 fail open 边界，见 ValidateSettings。
+	if err := ValidateSettings(allSetting); err != nil {
 		return err
 	}
 

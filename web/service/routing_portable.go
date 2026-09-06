@@ -29,12 +29,17 @@ const (
 	ExportScopeRules        = "rules"
 )
 
-// PortableDomainGroup 不含 SubscribedDomains 与 LastUpdatedAt/LastError/
-// LastSkipped：前者单个组可达十几万条，后三者是本机这一次拉取的状态，
-// 搬到另一台机器毫无意义，还会让新机器显示一个假的「刚刚更新」。
+// PortableDomainGroup 不含 SubscribedDomains/SubscribedCidrs 与
+// LastUpdatedAt/LastError/LastSkipped：前两者单个组可达十几万条，后三者是
+// 本机这一次拉取的状态，搬到另一台机器毫无意义，还会让新机器显示一个假的
+// 「刚刚更新」。
 type PortableDomainGroup struct {
-	Remark       string   `json:"remark"`
-	Domains      []string `json:"domains"`
+	Remark  string   `json:"remark"`
+	Domains []string `json:"domains"`
+	// Cidrs 用值类型切片即可，不需要 PortableRule.InboundRefs 那种指针。
+	// 那里要区分「显式 []」与「字段缺失」，是因为 [] 有「对所有入站生效」的
+	// 特殊全局语义；这里的空与缺失都只表示「这个组没有 IP 段」，两者同义。
+	Cidrs        []string `json:"cidrs"`
 	SubscribeUrl string   `json:"subscribeUrl"`
 }
 
@@ -165,9 +170,19 @@ func (s *RoutingPortableService) Export(scope string) (*ExportFile, error) {
 			if manual == nil {
 				manual = []string{}
 			}
+			// 解码失败同样当作空列表，理由与域名侧完全相同：这个组本身已经
+			// 损坏，但备注和订阅地址仍值得导出。
+			manualCidrs, err := DecodeCidrs(g.Cidrs)
+			if err != nil {
+				manualCidrs = nil
+			}
+			if manualCidrs == nil {
+				manualCidrs = []string{}
+			}
 			f.DomainGroups = append(f.DomainGroups, PortableDomainGroup{
 				Remark:       g.Remark,
 				Domains:      manual,
+				Cidrs:        manualCidrs,
 				SubscribeUrl: g.SubscribeUrl,
 			})
 		}
@@ -511,6 +526,28 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 				continue
 			}
 		}
+		// 走与表单同一条校验路径。导入文件是不可信输入，与管理员在表单里
+		// 输入的东西同级。
+		encodedCidrs := "[]"
+		if len(item.Cidrs) > 0 {
+			list, err := ParseCidrs(strings.Join(item.Cidrs, "\n"))
+			if err != nil {
+				report.DomainGroups.Failed++
+				report.fail("域名组「%s」的 IP 段格式有误：%v", item.Remark, err)
+				continue
+			}
+			if err := ValidateCidrs(list); err != nil {
+				report.DomainGroups.Failed++
+				report.fail("域名组「%s」的 IP 段未通过校验：%v", item.Remark, err)
+				continue
+			}
+			encodedCidrs, err = EncodeCidrs(list)
+			if err != nil {
+				report.DomainGroups.Failed++
+				report.fail("域名组「%s」的 IP 段编码失败：%v", item.Remark, err)
+				continue
+			}
+		}
 		if item.SubscribeUrl != "" {
 			if err := ValidateSubscribeURL(item.SubscribeUrl); err != nil {
 				report.DomainGroups.Failed++
@@ -522,7 +559,8 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 		// SubscriptionJob（每 10 分钟）会自动补上首次拉取。这里不同步拉，
 		// 一个慢地址能把这个 HTTP 请求挂满 30 秒。
 		g := &model.DomainGroup{
-			Remark: item.Remark, Domains: encoded, SubscribeUrl: item.SubscribeUrl,
+			Remark: item.Remark, Domains: encoded, Cidrs: encodedCidrs,
+			SubscribeUrl: item.SubscribeUrl,
 		}
 		if err := s.domainGroupService.Add(g); err != nil {
 			report.DomainGroups.Failed++

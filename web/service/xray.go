@@ -18,6 +18,7 @@ type XrayService struct {
 	inboundService  InboundService
 	settingService  SettingService
 	routingInjector RoutingInjector
+	dnsInjector     DNSInjector
 }
 
 func (s *XrayService) IsXrayRunning() bool {
@@ -77,6 +78,12 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	}
 
 	if err := s.routingInjector.Inject(xrayConfig); err != nil {
+		return nil, err
+	}
+
+	// 必须排在 routingInjector 之后：那一步重写了整个 outbounds 数组，
+	// 本注入器要往它的首位加 domainStrategy。
+	if err := s.dnsInjector.Inject(xrayConfig); err != nil {
 		return nil, err
 	}
 

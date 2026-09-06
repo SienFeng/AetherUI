@@ -11,30 +11,35 @@ import (
 	"a-ui/util/common"
 )
 
-// 逐行解析，不做全局格式识别。Surge/Clash classical、Clash YAML、纯域名列表
-// 三种格式的行特征互不冲突，逐行判断比先猜格式更健壮：真实订阅文件里混着
-// 注释、YAML 头和规则行，全局识别一旦猜错就整份文件解析失败。
+// 逐行解析，不做全局格式识别。Surge/Clash classical、Clash YAML、纯域名列表、
+// 纯 IP 列表四种格式的行特征互不冲突，逐行判断比先猜格式更健壮：真实订阅
+// 文件里混着注释、YAML 头和规则行，全局识别一旦猜错就整份文件解析失败。
 //
-// 已知的非域名规则类型一律跳过并计数。不尝试翻译成 xray 的其他条件——
-// 域名组这个概念只承载域名，把 IP 规则塞进来需要动整个数据模型。
-// 实际遇到的规则类型：IP-CIDR、IP-CIDR6、IP-ASN、GEOIP、SRC-IP-CIDR、SRC-PORT、
-// DST-PORT、PROCESS-NAME、PROCESS-PATH、USER-AGENT、URL-REGEX、RULE-SET、SUB-DOMAIN、
-// DOMAIN-WILDCARD、AND、OR、NOT、PROTOCOL、NETWORK、IN-PORT。
+// 域名与 IP 分别收集：一个分流组同时承载两类条件，生成期各自成为一条独立的
+// xray 规则。不认识的规则类型一律跳过并计数，绝不猜测。
+//
+// 明确不翻译的两类：IP-ASN（xray 没有 ASN 匹配能力）、SRC-IP-CIDR（那是
+// source，按客户端 IP 匹配，塞进 ip 条件是语义错误）。
+// 其余仍会遇到的：SRC-PORT、DST-PORT、PROCESS-NAME、PROCESS-PATH、
+// USER-AGENT、URL-REGEX、RULE-SET、SUB-DOMAIN、DOMAIN-WILDCARD、AND、OR、
+// NOT、PROTOCOL、NETWORK、IN-PORT。
 
-// ParseSubscription 把订阅文件文本解析成 xray 域名语法。
-// 返回（域名列表, 跳过的非域名条数, 错误）。
+// ParseSubscription 把订阅文件文本解析成 xray 的域名与 IP 语法。
+// 返回（域名列表, IP 段列表, 跳过的条数, 错误）。
 //
-// 解析不出任何域名时返回错误而非空列表：调用方据此保留上一次成功的数据。
-// 若在这里返回空列表，上游改格式或 URL 失效返回 404 页面时，域名组会被清空，
+// 两侧都解析不出内容时返回错误而非空列表：调用方据此保留上一次成功的数据。
+// 若在这里返回空列表，上游改格式或 URL 失效返回 404 页面时，分流组会被清空，
 // 引用它的规则被 buildRule 跳过，流量静默退回直连。
-func ParseSubscription(raw string) ([]string, int, error) {
+func ParseSubscription(raw string) ([]string, []string, int, error) {
 	// 部分订阅源（尤其是 Windows 工具导出的）在文件开头带 UTF-8 BOM，
 	// 不去掉的话它会粘在第一行的规则类型前面，导致该行的 switch/前缀匹配
 	// 全部失配而被当成一条跳过的规则——只丢一行，不易察觉，但仍是数据损失。
 	raw = strings.TrimPrefix(raw, "\uFEFF")
 
 	domains := make([]string, 0, 256)
-	seen := make(map[string]bool, 256)
+	cidrs := make([]string, 0, 64)
+	seenDomain := make(map[string]bool, 256)
+	seenCidr := make(map[string]bool, 64)
 	skipped := 0
 
 	for _, line := range strings.Split(raw, "\n") {
@@ -52,28 +57,37 @@ func ParseSubscription(raw string) ([]string, int, error) {
 			item = strings.Trim(item, `'"`)
 		}
 
-		converted, ok := convertSubscriptionLine(item)
+		converted, isIP, ok := convertSubscriptionLine(item)
 		if !ok {
 			skipped++
 			continue
 		}
-		if seen[converted] {
+		if isIP {
+			if seenCidr[converted] {
+				continue
+			}
+			seenCidr[converted] = true
+			cidrs = append(cidrs, converted)
 			continue
 		}
-		seen[converted] = true
+		if seenDomain[converted] {
+			continue
+		}
+		seenDomain[converted] = true
 		domains = append(domains, converted)
 	}
 
-	if len(domains) == 0 {
-		return nil, skipped, common.NewError(
-			"订阅内容里没有解析出任何域名（跳过了", skipped, "条非域名规则）")
+	if len(domains) == 0 && len(cidrs) == 0 {
+		return nil, nil, skipped, common.NewError(
+			"订阅内容里没有解析出任何域名或 IP 段（跳过了", skipped, "条无法翻译的规则）")
 	}
-	return domains, skipped, nil
+	return domains, cidrs, skipped, nil
 }
 
-// convertSubscriptionLine 把一行转成 xray 域名语法。第二个返回值为 false
-// 表示这行应当被跳过并计数。
-func convertSubscriptionLine(item string) (string, bool) {
+// convertSubscriptionLine 把一行转成 xray 语法。
+// 第二个返回值为 true 表示它是 IP 段而非域名；第三个为 false 表示这行应当
+// 被跳过并计数。
+func convertSubscriptionLine(item string) (string, bool, bool) {
 	if idx := strings.Index(item, ","); idx > 0 {
 		ruleType := strings.ToUpper(strings.TrimSpace(item[:idx]))
 		rest := item[idx+1:]
@@ -85,26 +99,68 @@ func convertSubscriptionLine(item string) (string, bool) {
 
 		switch ruleType {
 		case "DOMAIN-SUFFIX":
-			return domainRule("domain:", value)
+			v, ok := domainRule("domain:", value)
+			return v, false, ok
 		case "DOMAIN":
-			return domainRule("full:", value)
+			v, ok := domainRule("full:", value)
+			return v, false, ok
 		case "DOMAIN-KEYWORD":
-			// xray 的裸域名就是子串匹配，与 DOMAIN-KEYWORD 语义一致。
-			// 会误伤（ads 命中 downloads.example.com），但那是这个规则类型
-			// 在 Shadowrocket/Clash 里的固有行为，不是本实现引入的偏差。
-			// 必须归一大小写：域名匹配大小写不敏感，未归一可能在 xray 里永不命中。
+			// xray 的 keyword: 就是子串匹配，与 DOMAIN-KEYWORD 语义一致。
+			// 会误伤（ads 命中 downloads.example.com），但那是这个规则类型在
+			// Shadowrocket/Clash 里的固有行为，不是本实现引入的偏差。
+			//
+			// 必须归一大小写：xray 只把目标域名转小写、不归一化配置里的模式
+			// （app/router/condition.go:59），大写关键词永不命中。
+			//
+			// 必须带显式前缀：手工录入路径（ParseDomains）存的是 keyword:xxx，
+			// 两条路径形态不一致的话 MergeDomains 按字符串去重，去不掉重复。
 			if !isValidKeyword(value) {
-				return "", false
+				return "", false, false
 			}
-			return strings.ToLower(value), true
+			return "keyword:" + strings.ToLower(value), false, true
+		case "IP-CIDR", "IP-CIDR6":
+			if !isValidCIDR(value) {
+				return "", false, false
+			}
+			return value, true, true
+		case "GEOIP":
+			// GEOIP,CN → geoip:cn。类别是否真的存在于机器上那份 geoip.dat，
+			// 交给 ValidateCidrs 的真实 xray 判定。
+			code := strings.ToLower(value)
+			if !isValidGeoCode(code) {
+				return "", false, false
+			}
+			return "geoip:" + code, true, true
 		default:
-			// 已知的非域名规则类型一律跳过，不认识的类型也一律跳过，绝不猜测
-			return "", false
+			// IP-ASN / SRC-IP-CIDR 等已知但无法忠实翻译的类型，以及一切
+			// 不认识的类型，一律跳过，绝不猜测
+			return "", false, false
 		}
+	}
+	// 无逗号：纯域名列表或纯 IP 列表。先试 IP——isValidDomain 明确拒绝 IP
+	// 字面量，所以顺序反了会让整份中国 IP 段列表被当成垃圾全部跳过。
+	if isValidCIDR(item) {
+		return item, true, true
 	}
 	// 纯域名列表：.example.com / +.example.com / *.example.com / example.com
 	// 这类列表的惯例是后缀匹配
-	return domainRule("domain:", item)
+	v, ok := domainRule("domain:", item)
+	return v, false, ok
+}
+
+// isValidGeoCode 只做防呆：geoip 的类别是字母数字短串（cn、private、
+// telegram），拦住带空格、斜杠、点的说明文字。
+func isValidGeoCode(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func domainRule(prefix, value string) (string, bool) {

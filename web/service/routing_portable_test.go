@@ -1308,3 +1308,76 @@ func TestExportSkipsRuleWhenEveryGroupIsDangling(t *testing.T) {
 		t.Errorf("一个组都不剩的规则必须整条跳过，实际导出 %+v", f.Rules)
 	}
 }
+
+// 手工录入的 IP 段与手工域名走同一条导出路径，往返后顺序与内容必须原样保留。
+func TestExportImportRoundTripsCidrs(t *testing.T) {
+	setupDB(t)
+	encodedCidrs, err := EncodeCidrs([]string{"1.2.3.0/24", "geoip:cn"})
+	if err != nil {
+		t.Fatalf("EncodeCidrs: %v", err)
+	}
+	if err := (&DomainGroupService{}).Add(&model.DomainGroup{
+		Remark: "g", Domains: `["domain:openai.com"]`, Cidrs: encodedCidrs,
+	}); err != nil {
+		t.Fatalf("add group: %v", err)
+	}
+	f, err := (&RoutingPortableService{}).Export(ExportScopeDomainGroups)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.DomainGroups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(f.DomainGroups))
+	}
+	got := f.DomainGroups[0].Cidrs
+	if len(got) != 2 || got[0] != "1.2.3.0/24" || got[1] != "geoip:cn" {
+		t.Errorf("cidrs = %v", got)
+	}
+}
+
+// 旧格式（没有 cidrs 字段）必须能导入，且行为与改动前一致：组落库后没有
+// 任何 IP 段，而不是导入失败或整体报错。
+func TestImportOldFormatWithoutCidrs(t *testing.T) {
+	setupDB(t)
+	// kind/version 是真实旧文件也会带的字段（导入侧对它们做硬校验），
+	// 唯独没有 cidrs 键——这正是升级前导出的文件的真实形态。
+	raw := `{"kind":"a-ui-routing-export","version":1,"scope":["domainGroups"],"domainGroups":[{"remark":"g","domains":["domain:openai.com"],"subscribeUrl":""}],"outbounds":[],"rules":[]}`
+	report, err := (&RoutingPortableService{}).Import(raw)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.DomainGroups.Created != 1 {
+		t.Fatalf("created = %d, want 1: %v", report.DomainGroups.Created, report.Messages)
+	}
+	g, err := (&DomainGroupService{}).GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	cidrs, err := DecodeCidrs(g[0].Cidrs)
+	if err != nil {
+		t.Fatalf("DecodeCidrs: %v", err)
+	}
+	if len(cidrs) != 0 {
+		t.Errorf("cidrs = %v, want empty", cidrs)
+	}
+}
+
+// 不导出订阅拉来的 IP 段：单个组可达十几万条，且它是本机这一次拉取的状态，
+// 搬过去会显示一个假的「刚刚更新」——与 TestExportOmitsSubscribedDomains 同理。
+func TestExportOmitsSubscribedCidrs(t *testing.T) {
+	setupDB(t)
+	if err := (&DomainGroupService{}).Add(&model.DomainGroup{
+		Remark: "g", Domains: "[]", Cidrs: "[]",
+		SubscribeUrl:    "https://example.com/x.list",
+		SubscribedCidrs: `["9.9.9.0/24"]`,
+	}); err != nil {
+		t.Fatalf("add group: %v", err)
+	}
+	f, err := (&RoutingPortableService{}).Export(ExportScopeDomainGroups)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	raw := exportJSON(t, f)
+	if strings.Contains(raw, "9.9.9.0/24") {
+		t.Errorf("export must not contain subscribed cidrs: %s", raw)
+	}
+}

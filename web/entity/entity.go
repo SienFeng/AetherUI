@@ -50,6 +50,10 @@ type AllSetting struct {
 	TrafficDayRetentionDays  int `json:"trafficDayRetentionDays" form:"trafficDayRetentionDays"`
 	ConcurrencyIdleTimeout   int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
+	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
+
+	DNSServers string `json:"dnsServers" form:"dnsServers"`
+
 	TCInterface string `json:"tcInterface" form:"tcInterface"`
 
 	DefaultDomain   string `json:"defaultDomain" form:"defaultDomain"`
@@ -65,6 +69,69 @@ func checkIPDBSourceUrl(label, raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return common.NewError(label+"必须是 http 或 https 开头的完整地址:", raw)
+	}
+	return nil
+}
+
+// dnsServerSchemes 是 xray 的 dns.servers 真正认识的地址前缀，一个不多一个不少。
+//
+// 名单直接抄自核心的分派表 app/dns/nameserver.go:53-76（NewServer）：只有
+// localhost（整串精确匹配）、下面这七个 scheme、fakedns 与裸 IP 目标会各自
+// 走到专门的解析器实现，**其余一律落进函数末尾那个 UDP 分支**，把整个字符串
+// 当成主机名去连。
+//
+// 所以这份名单两侧的错误都必须挡住，而且两种失败在面板上都完全看不见：
+//   - udp:// tls:// quic://（注意 quic 只有 quic+local:// 这一种形式）看着
+//     天经地义，实测（bin/xray-darwin-arm64，26.7.28）全部 Configuration OK，
+//     运行时却变成一个指向 "udp://223.5.5.5" 这种不可解析主机名的 UDP 客户端。
+//     DNS 设置从此完全空转，不报任何错，管理员以为解析已经换掉了。
+//   - IP:端口（1.1.1.1:53）更糟。它是域名族地址，进 url.Parse 直接失败，
+//     实测 xray **拒绝启动**（exit 23，"first path segment in URL cannot
+//     contain colon"）。而 dns 在 xray/hot_diff.go 的 static 名单里，保存必然
+//     触发整进程重启；Process.Start() 把 cmd.Run() 丢进 goroutine，从不回传
+//     启动失败，于是 /server/status 继续返回 running、errorMsg 为空，而机器上
+//     所有用户已经断网。改动前的校验器不但放行它，报错文案还在推荐这种写法。
+//
+// 前缀匹配不会互相遮蔽：https+local:// 的第 6 个字符是 '+'，https:// 是 ':'，
+// HasPrefix 不成立；h2c / tcp 同理。每个 +local 形式都有单独的用例守着。
+var dnsServerSchemes = []string{
+	"https://", "h2c://", "https+local://", "h2c+local://",
+	"quic+local://", "tcp://", "tcp+local://",
+}
+
+// checkDNSServer 只查语法，不测可达性。
+//
+// 可达性交给运行时：配错的最坏后果已经被「只用 UseIP 系列」兜住——解析
+// 失败时 freedom 回落按域名直连（proxy/freedom/freedom.go:298 只在
+// ForceIP() 时才把失败变成断连），而路由侧的 IPIfNonMatch 解析失败也只是
+// IP 规则不命中（features/routing/dns/context.go:21）。在保存这一刻做网络
+// 探测，换来的是一次网络抖动就把管理员挡在门外。
+//
+// 裸域名（dns.google）拒绝：xray 要先解析这个域名本身才能用它，而此时还
+// 没有可用的解析器，是个鸡生蛋问题。IP 型端点（https://8.8.8.8/dns-query）
+// 零 bootstrap 依赖，是唯一稳妥的写法。
+func checkDNSServer(item string) error {
+	if item == "localhost" {
+		return nil
+	}
+	for _, scheme := range dnsServerSchemes {
+		if !strings.HasPrefix(item, scheme) {
+			continue
+		}
+		if len(item) == len(scheme) {
+			return common.NewError("DNS 服务器地址缺少主机名:", item)
+		}
+		return nil
+	}
+	// 刻意不做 net.SplitHostPort：IP:端口 是 xray 唯一会拒绝启动的写法
+	// （见 dnsServerSchemes 的注释），必须在这里挡下。
+	if net.ParseIP(item) == nil {
+		return common.NewError("DNS 服务器地址不支持:", item,
+			"——应为裸 IP（8.8.8.8 / 2001:4860:4860::8888）、localhost，或 "+
+				strings.Join(dnsServerSchemes, " ")+"开头的地址。"+
+				"IP:端口 会让 xray 拒绝启动；udp:// tls:// quic:// 这三种写法 xray 并不认识，"+
+				"会静默退化成一个连不上的 UDP 解析器。"+
+				"不带协议头的裸域名（dns.google）也不支持：xray 要先解析它本身才能用它")
 	}
 	return nil
 }
@@ -200,6 +267,24 @@ func (s *AllSetting) CheckValid() error {
 
 	if s.AccessLogEnable != 0 && s.AccessLogEnable != 1 {
 		return common.NewError("访问日志开关只能是 0 或 1:", s.AccessLogEnable)
+	}
+
+	// 只接受 0/1：反射只支持 int，前端的 switch 也只会送这两个值。
+	// 放行其他值会让生成期写出一个 xray 不认识的 domainStrategy，
+	// 而那会让整份配置加载失败——全员断网。
+	if s.IPRuleResolveDomain != 0 && s.IPRuleResolveDomain != 1 {
+		return common.NewError("「IP 规则匹配域名目标」只能是 0 或 1:", s.IPRuleResolveDomain)
+	}
+
+	// 空表示不启用，是正常状态。
+	for _, line := range strings.Split(s.DNSServers, "\n") {
+		item := strings.TrimSpace(line)
+		if item == "" {
+			continue
+		}
+		if err := checkDNSServer(item); err != nil {
+			return err
+		}
 	}
 
 	// 不允许 0：0 在这里最容易被理解成「永不清除」，而实现上会变成

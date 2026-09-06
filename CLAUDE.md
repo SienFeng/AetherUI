@@ -111,6 +111,13 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 
 三个由安装向导写入的设置项——`defaultDomain` / `defaultCertFile` / `defaultKeyFile`（`entity.DefaultDomain`/`DefaultCertFile`/`DefaultKeyFile`）——只是**新建入站表单的默认填充值**，面板自己从不加载它们。`entity.CheckValid` 对面板自己要用的 `WebCertFile`/`WebKeyFile` 会调 `tls.LoadX509KeyPair` 实际打开证书文件，但这三个新字段**刻意只校验路径格式**（非空时须以 `/` 开头），不做同样的加载校验：证书尚未签发、只是先把将来的路径填进去，是这三项的正常状态（`bootstrap -mode caddy` 就是在证书由 Caddy 异步申请期间提前写入这三项），若在这里也 `LoadX509KeyPair`，会让整个设置页保存接口在证书签发前必然失败，且报错只指向这三个字段，误导管理员去查一个其实不相关的地方。
 
+分流子系统用到的两个 key：
+
+- **`ipRuleResolveDomain`**（int，默认 0）——为 1 时注入器往 `routing` 里写 `domainStrategy: "IPIfNonMatch"`，**覆盖模板里管理员可能手写过的那一项**；为 0 时压根不碰它（升级后行为零变化靠这一条）。打开它有两个不在开关名字里的后果：每条未命中的连接多一次本机解析；模板里那条 `geoip:private → blocked` 会**开始对域名目标生效**。
+- **`dnsServers`**（string，默认 ""，换行分隔）——非空即启用 `DNSInjector`。这一项的实现踩过一个必须原样记住的坑，它是本子系统失败模式的原型：**`domainStrategy` 要写进 freedom 出站的 `settings` 里，不是写在出站对象上**。出站对象对应 `infra/conf.OutboundDetourConfig`，其完整字段集是 `protocol/sendThrough/tag/settings/streamSettings/proxySettings/mux/targetStrategy`（`infra/conf/xray.go:213-222`），根本没有 `domainStrategy`；而 `infra/conf` 从不调用 `DisallowUnknownFields`，写错层级**不会有任何报错**——`run -test` 照样 `Configuration OK`，面板照样 `running`，freedom 停在 `AsIs`，整个 DNS 功能变成纯装饰。另外三条：只用 `UseIP*`，绝不用 `ForceIP*`（`transport/internet/config.go:13`；`ForceIP` 下解析失败会变成连接失败，`UseIP` 只记日志并回落按域名直连，这一条把「DNS 配错 = 全员断网」整个消掉）；`localhost` 永远补在列表**末位**，解析器全挂时退化成系统解析而不是断网；**任何时候都不往 `xrayTemplateConfig` 回写**，注入只发生在生成期。白名单为什么恰好是那几个 scheme，见「已知偏差与注意事项」。
+
+保存设置时除了 `entity.CheckValid` 的语法校验，还会对**会进入 xray 配置的项**（`dnsServers` / `ipRuleResolveDomain`）跑一遍真实 xray（`ValidateSettings`，`web/service/routing_validate.go`，与出站/入站/域名同一套 fail open 边界）。候选值由 `apply` 回调自己贴到完整配置上，不能指望 `GetXrayConfig()`——它读的是库里的旧值，「清空 `dnsServers`」这一次保存尤其会去校验一份根本不会下发的配置。`xrayTemplateConfig` **不**走这一步：换模板要让整条生成链按新模板重跑，而那需要再造一条与 `GetXrayConfig` 平行的生成链，两条一旦漂移，「校验通过的配置」与「真正下发的配置」就不是同一份，比不校验更危险。
+
 `secret`（session 加密密钥）的默认值是随机生成的，`GetSecret()` 检测到仍是默认值时会立刻落库固化，避免每次重启导致会话全部失效。
 
 ### i18n
@@ -128,10 +135,12 @@ settings 是 key-value 表。`SettingService` 用反射把 `entity.AllSetting` �
 三张表，规则是一条把前两者连起来的连线：
 
 ```
-DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + 订阅五件套（见下）
+DomainGroup   域名组     Remark + Domains(JSON 字符串数组) + Cidrs(JSON 字符串数组) + 订阅五件套（见下）+ SubscribedCidrs
 OutboundNode  出站节点   Tag(unique) + Remark + Protocol + Config(完整 outbound JSON) + Enable
 RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数组) → Action(proxy|block) + OutboundId + Priority + Enable
 ```
+
+「域名组」这个名字已经不准确了：它同时装域名和 IP 段，一个组可以只有 IP 段。
 
 **「用户」在本项目里等价于「一个入站」**——前端每个协议表单只绑定 `settings.<protocol>es[0]`，所以一个 inbound 恰好一个用户。因此分流按 `inboundTag` 匹配，不需要 email 维度。
 
@@ -139,6 +148,14 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 - **`Domains`（手工）与 `SubscribedDomains`（订阅）物理隔离，各自只有一个写入方。** 管理员编辑表单只写 `Domains`；`SubscriptionJob`/「立即更新」只写 `SubscribedDomains` 及其伴随的 `LastUpdatedAt`/`LastError`/`LastSkipped`。`buildRule` 用 `MergeDomains(manual, subscribed)` 在生成期合并两者（手工在前、订阅在后，保留首次出现），任何一侧都不会覆盖另一侧。
 - **拉取失败保留上一次成功的数据，绝不清空。** 清空 `SubscribedDomains` 会让合并结果可能变空，`buildRule` 因「域名组为空」跳过整条规则——本该走指定节点或被封禁的流量静默退回直连，比规则单纯不生效更危险。同理，写回成功结果时要带 `subscribe_url` 相等的条件（compare-and-set）：拉取耗时可达 30s、批量刷新可达分钟级，这期间管理员可能已经把订阅地址改成了别的，不加条件的话旧地址拉到的内容会被当成新地址的结果写回，界面显示「刚刚更新」但域名其实是错的。
+
+`Cidrs`（手工 IP 段）与 `SubscribedCidrs`（订阅 IP 段）是**第二对物理隔离、各自单写入方**的列，规则与上面那对完全相同。三条不变量：
+
+- **`updateFieldsFor` 必须列出 `cidrs`**，否则编辑接口对这个字段静默无效——`Get` 与展示完全正常，极易漏测（就是下一段说的那个代价）。
+- **订阅地址一变，`subscribed_domains` 与 `subscribed_cidrs` 一起清空**、`last_updated_at` 一起归零。只清一半会让旧地址拉来的 IP 继续参与分流。
+- **一次成功的拉取必须把两列都写掉，哪怕其中一列是空。** 这一条与上面那条「失败时绝不清空」方向相反，两条必须同时立住：那条约束的是**失败**路径；成功路径上上游真的不再列 IP 了，还留着上周的 IP 就是拿过期数据分流，比 IP 条件消失更危险，而且不会有任何一层报错。回归测试 `TestRefreshClearsSubscribedCidrsWhenUpstreamDropsThem`。
+
+`MergeDomains`（`web/service/routing_domain.go`）名字里只有 domain，实际两类值共用它——它就是个有序去重，与值的语义无关，别再照着名字复制一份 `MergeCidrs`。
 
 `DomainGroupService.Update` 不用 `Save` 写整行，而是拼一个只含实际要改的列的 `map[string]any`（`updateFieldsFor`），原因正是上一条：整行写入会把 `Get` 那一刻捕获的 `SubscribedDomains`/`LastUpdatedAt` 一并写回，把中间一次刚成功的订阅刷新静默回滚。**代价是这份列名单要手动维护**——将来给 `DomainGroup` 加字段，若不在 `updateFieldsFor` 里加对应的 key，这个字段就会静默地无法通过编辑接口更新（`Get`/展示不受影响，容易被漏测）。
 
@@ -154,9 +171,20 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 **回退到旧版本二进制**：`domain_group_id` 列保留不删，契约是一句话——**只有升级前就存在、且升级后未被编辑过的规则，回退后仍按原样生效；其余一律被旧代码整条丢弃**（`buildRule` 记 Warning，分流范围缩小而非放大，安全侧正确）。迁移只把 `domain_group_id` 回填进 `domain_group_ids`，不动原值，所以老规则回退后照常生效；`RoutingRuleService.Add` 只写 `DomainGroupIds`，因此升级后**新建**的规则不论单组多组，该值都是 0；`Update` **显式把它置 0**——既不保留旧值也不取首个组的 id：保留旧值会让一条从组 3 改到组 9 的规则在回退后按管理员已经删掉的组 3 分流，那既不是丢弃也不是范围缩小，而是一条谁都没要求过的规则，且 xray 返回 `Configuration OK`、面板显示 `running`，没有任何一层会报错。设计文档在 `docs/superpowers/specs/2026-09-05-rule-multi-domain-group-design.md`。
 
+### 域名写法与关键词（`web/service/routing_domain.go`）
+
+`domainPrefixes` 收 `domain: / full: / keyword: / regexp: / dotless: / geosite: / ext: / ext-domain: / ext-site:`（后两个是 `ext:` 的别名，`common/geodata/rule_parser.go`）。三条归一化规则各自防着一个静默失效：
+
+- **不含点也不含冒号的裸串归一成 `keyword:`。** 意图唯一（对应 Surge/Clash 的 `DOMAIN-KEYWORD`），显式存库让列表里的标签自己说清楚它在做什么，也让手工与订阅两条路径的存储形态一致。
+- **只对 `domain:` / `full:` / `keyword:` 的值转小写，绝不碰 `regexp:` / `dotless:`。** xray 只把目标域名转小写，不归一化配置里的模式（`app/router/condition.go:59`），所以 `domain:OpenAI.com` 是一条永不命中的哑规则且没有任何一层报错；而对正则转小写会把 `\D` 变成 `\d`——意义完全相反。`geosite:` / `ext:*` 的 code 由 xray 自己 `ToUpper`，同样不该在这里动。
+- **含点的裸串直接拒绝。** 同一段文本两种含义：在 routing 规则里裸串是**子串**匹配（`infra/conf/router.go` 传的 `defaultType` 是 `Domain_Substr`），在 geosite 数据文件里是**后缀**匹配。放行等于让从 geosite 列表复制来的 `openai.com` 静默变成能命中 `notopenai.com.evil.net` 的规则。报错里点名三种写法，补个前缀即可。
+
+订阅解析现在把 `DOMAIN-KEYWORD` 存成同样的显式 `keyword:` 形态，`MergeDomains` 才能把手工与订阅的同一个关键词去重掉。**代价是升级后第一次订阅刷新会重写每一个订阅组**——那次刷新必然改动配置字节，换来一次整进程重启。一次性的，但要知道它会发生。
+
 ### xray 会静默接受错误配置——这是本子系统的全部设计动机
 
-以下均由真实 xray 26.7.28 实测确认，不是推断：
+以下多数由真实 xray 26.7.28 实测确认；标注「源码」的两行由 xray-core 锁定版本的源码推导，
+不是运行实测。两类都不是猜测，但证据等级不同，改动时按各自的方式复核：
 
 | 情形 | xray 的反应 | 实际后果 |
 |---|---|---|
@@ -165,6 +193,10 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 | 规则的 `inboundTag` 为**空数组** | `Configuration OK` | 与上一行同构：规则从「只覆盖甲」**放大成覆盖所有入站**。Xray 26.7.28 实测：两个入站访问目标域名都被命中，对照域名正常放行 |
 | 规则引用已删除的**入站** | `Configuration OK` | 规则永不命中（无害） |
 | tag 含中文 | `Configuration OK` | 合法，无需转写 |
+| 规则同时含 `domain` 与 `ip` | `Configuration OK`（源码）| 条件是 **AND**（`app/router/config.go:33` 逐个 `conds.Add`，`condition.go:35` 全真才算命中）。「访问这批域名**或**这批 IP」写成一条就变成「域名和 IP 同时满足」，几乎永不命中 |
+| 规则的 `ip` 为**空数组** | `Configuration OK`（源码）| 与 `domain: []` / `inboundTag: []` 两行同构：条件整个消失，规则的覆盖范围被静默放大 |
+| `dns.servers` 里的 `tls://` / `quic://` / `udp://` | `Configuration OK` | 都不在 `app/dns/nameserver.go:53-76` 的分派表里，落进末尾的 UDP 分支，把整个字符串当主机名——DNS 设置完全空转，面板毫无表示 |
+| `dns.servers` 里的 `IP:端口` | **拒绝启动**（exit 23） | 唯一一个 xray 不肯放行的，可惜面板同样看不见：`dns` 在 `hot_diff` 的 static 名单里必然触发整进程重启，而 `Process.Start()` 从不回传启动失败，`/server/status` 继续返回 `running`、`errorMsg` 为空 |
 
 因此有**两道防线**，改动本子系统时都不能削弱：
 
@@ -174,8 +206,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 ### 配置注入的四条不变量（`web/service/routing_inject.go`）
 
 1. **一律 append 到末尾。** 出站追加到末尾，模板里的 `freedom` 才继续是 xray 的默认出站；规则追加到末尾，模板原有的安全规则（屏蔽私网、屏蔽 BT）与用户手写规则才保持更高优先级。
-2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。
-3. **绝不输出条件残缺的规则**（见上）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。入站条件同理：`buildRule` 会剔除已删除/已禁用的入站，**剔完为空则整条丢弃**，绝不输出空的 `inboundTag`；只剔掉一部分时规则照常生成，被剔掉的记 `logger.Warning`。
+2. **block 规则排在 proxy 规则之前**（两个独立切片先后 append，与 `Priority` 无关）。违规域名封禁是硬约束，不能被某条分流规则绕过。**数组顺序仍然成立，但它不再等于「block 一定先命中」**：开了 `ipRuleResolveDomain` 之后 xray 走两遍规则（`app/router/router.go:245-273`）——第一遍不带 DNS 客户端，域名条件能命中、IP 条件对域名目标必然不命中；只有整个第一遍都没命中才解析域名再走第二遍。于是一条用域名表达的 proxy 规则会在**第一遍**命中并短路掉一条只能在第二遍才可能命中的、用 CIDR 表达的 block 规则。**一条写成 IP 段的封禁，是可以被一条写成域名的分流规则绕过的。**代码里没有任何办法修正它（要修正就得让注入器知道哪条域名规则可能解析到哪个 IP），所以只能写下来。
+3. **绝不输出条件残缺的规则**（见上）。**一条数据库规则产出 0~2 条 xray 规则：域名一条、IP 一条，顺序固定 domain 在前、ip 在后。**绝不把两类条件并进同一条（那是 AND，见上表），也绝不发出 `ip: []`。两侧都空才整条丢弃——所以一个纯 IP 组照常生成规则，界面上任何「域名为空 = 规则不生效」的镜像都是错的（`web/html/xui/routing.html` 的 `groupEffective` / `ruleHasDomains` 守着这一点）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。入站条件同理：`buildRule` 会剔除已删除/已禁用的入站，**剔完为空则整条丢弃**，绝不输出空的 `inboundTag`；只剔掉一部分时规则照常生成，被剔掉的记 `logger.Warning`。
 4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
 
 黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，而悬空 `outboundTag` 不报错，block 会静默变直连。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。
@@ -185,6 +217,16 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 ### 域名分流依赖 sniffing
 
 路由要靠 xray 嗅探拿到 SNI/Host。入站若关掉 sniffing 或 `destOverride` 不含 `http`/`tls`，**域名规则永远不会命中且无任何报错**。新建入站默认 `enabled=true, destOverride=['http','tls']`（`web/assets/js/model/xray.js` 的 `Sniffing` 类），页面的规则列表会对不满足的入站打黄色警告图标。
+
+**IP 条件不依赖 sniffing**，它匹配的是连接目标 IP：客户端直接连 IP 字面量时才会命中，客户端连域名时第一遍必然不命中——除非打开 `ipRuleResolveDomain`（见「设置系统」），那时 xray 会在所有规则都没命中后于本机解析域名再走一遍。所以那个黄色警告只对**确实贡献了域名条件**的规则才有意义，对纯 IP 规则报「永远不会命中」是在说反话。
+
+### 内置 DNS 注入器（`web/service/dns_inject.go`）
+
+`dnsServers` 非空时，`DNSInjector` 用 `{"servers": [...]}` **整体替换**模板里的 `dns` 段（不合并——`hosts`/`disableCache` 这些字段之间有耦合，谁优先没有唯一答案），并给数组首位那个 freedom 出站的 `settings` 加上 `domainStrategy: "UseIP"`。没有后半步，`dns` 段对直连流量完全空转：freedom 只在自己的 `domainStrategy.HasStrategy()` 为真时才走 xray 的内置 DNS 客户端（`proxy/freedom/freedom.go:290`），默认的 `AsIs` 走系统解析器。手写模板的人几乎不会知道这一点——这正是本功能相对「自己往模板里塞一段 dns」的主要价值。
+
+**`GetXrayConfig` 里必须先 `routingInjector.Inject` 再 `dnsInjector.Inject`，顺序不能反。** 路由那一步会把整个 `outbounds` 数组反序列化再重新序列化，反过来的话它会把 DNS 这一步写的那个键**无声地冲掉**——没有报错、没有日志，只有 DNS 功能不起作用。这条顺序目前只由 `TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig` 一个测试守着，没有别的东西。
+
+`dnsServers` 为空时一个字节都不改（「升级后行为零变化」），但模板里若手写着 `dns` 段会记一条 `logger.Warning`：那正是上面描述的空转状态，而唯独这个组合下管理员最可能以为解析器已经换掉了。
 
 ### 输入侧校验（`web/service/routing_validate.go`）
 
@@ -218,7 +260,9 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **导入的出站节点保留原 tag，但落库前必须 `model.IsReservedTag()` 拦一道。** 保留 tag 不在 `outbound_nodes` 表里，唯一约束看不见它们，撞名会让 xray 报 `existing tag found` 拒绝启动整份配置——全员断网而面板首页仍显示 `running`。这一道要排在 `ValidateOutbound` **之前**。同样要拦空 tag：空 tag 不会被 `ValidateOutbound` 拒绝，但会让 `xray/hot_diff.go` 的 `decodeOutbounds` 对整份配置判「必须重启」，出站热更新从此静默失效。**还必须要求导入的 tag 以 `a-ui-` 开头。** 手工新增路径的 `allocTag` 恒定产出 `a-ui-…`，所以「所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离」这条不变量此前在结构上就是成立的；导入是第一条能把任意 tag 写进 `outbound_nodes` 的路径，这条隔离第一次面临被打破的风险——`web/service/config.json` 模板里有一个 tag 为 `blocked` 的出站，撞名后果与保留 tag 撞名完全同形（`existing tag found`、全员断网、面板首页仍显示 `running`），但防线等级并不对称：保留 tag 有 fail-close 的 `IsReservedTag` 挡着，模板 tag 却只有 fail-open 的 `ValidateOutbound` 兜底。所以导入侧要求前缀，把这道 fail-close 的防线补回来；真实导出文件天然满足这个前缀，不影响正常使用。
 
-**不导出 `SubscribedDomains`**（单个组可达十几万条，生产实例实测 `+111226`）**与 `LastUpdatedAt`/`LastError`/`LastSkipped`**（是本机这一次拉取的状态，搬过去会显示一个假的「刚刚更新」）。导入的订阅组 `LastUpdatedAt = 0`，而 `ShouldUpdateNow` 对 0 直接返回 true，`SubscriptionJob`（每 10 分钟）会自动补上首次拉取——**导入路径本身不同步拉取**，一个慢地址能把 HTTP 请求挂满 30 秒。代价是首次拉取成功前，仅依赖订阅内容的规则会被 `buildRule` 跳过，报告里要明说。
+**`PortableDomainGroup` 带 `cidrs`，而且刻意是值类型切片 `[]string`，与 `PortableRule.InboundRefs` 的指针类型正相反。** 那边必须区分「字段缺失」与「显式的空数组」，是因为 `[]` 在那里另有「对所有入站生效」这个特殊含义；这边两者都只意味着「这个组没有 IP 段」，是同义词，没有可分辨的必要，加个指针只会多出一处需要解释的不对称。没有 `cidrs` 的旧文件照常导入；新文件被旧面板读到时那个键被忽略，该组退化成只有域名——范围缩小，安全侧正确。
+
+**不导出 `SubscribedDomains`/`SubscribedCidrs`**（单个组可达十几万条，生产实例实测 `+111226`）**与 `LastUpdatedAt`/`LastError`/`LastSkipped`**（是本机这一次拉取的状态，搬过去会显示一个假的「刚刚更新」）。导入的订阅组 `LastUpdatedAt = 0`，而 `ShouldUpdateNow` 对 0 直接返回 true，`SubscriptionJob`（每 10 分钟）会自动补上首次拉取——**导入路径本身不同步拉取**，一个慢地址能把 HTTP 请求挂满 30 秒。代价是首次拉取成功前，仅依赖订阅内容的规则会被 `buildRule` 跳过，报告里要明说。
 
 **不用事务。** 出站落库前要 exec 真实 xray 校验，包进事务会长时间持有 SQLite 写锁把整个面板卡住。逐条独立成败 + 逐条报告 + 幂等，重跑即补齐。
 
@@ -372,5 +416,6 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 - **面板里的「安装 xray」会连带覆盖 `bin/geoip.dat` 与 `bin/geosite.dat`**（`ServerService.UpdateXray` 从 zip 里一并解出），而这两个文件是仓库跟踪的。仓库当前这份来自 Xray 26.7.28，**含 OPENAI 类别**；更早的版本不含，会让 `geosite:openai` 直接报错。不要把它们还原成更旧的版本。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
 - **面板报告的 xray 状态可能是假的，`bin/config.json` 现在也可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 为准，不要相信面板首页**。此前这里还建议「对 `bin/config.json` 跑一次 `xray run -test`」，热更新上线后这条不再可靠：`tryHotApply` 成功时只通过 gRPC 控制面把改动下发进正在跑的核心，**不会重写 `bin/config.json`**——该文件仍是上一次整进程重启（或面板启动）时写的那份，只有下一次真正触发重启才会被重新生成，中间这段时间它不反映核心的真实配置。确认核心当前真实状态，只能靠它的 gRPC 控制面（本项目目前没有现成的查询工具，`RoutingService.TestRoute` 落地前只能靠重启换回一份准确的 `bin/config.json`，或读面板日志里 `热应用：` 开头的 Debug 行辅助判断）。
+- **`dns.servers` 认识的写法比它看起来的少得多。** 核心的分派表（`app/dns/nameserver.go:53-76`）只认 `localhost`（整串精确）、`https://` `h2c://` `https+local://` `h2c+local://` `quic+local://` `tcp://` `tcp+local://`、`fakedns` 与裸 IP 目标；**其余一律落进函数末尾那个 UDP 分支，把整个字符串当主机名去连**。所以 `udp://` `tls://` `quic://`（注意非 local 的 quic 不存在）看着天经地义，实测全部 `Configuration OK`，运行时却是一个指向不可解析主机名的 UDP 客户端——DNS 设置完全空转；而 `IP:端口` 是域名族地址，`url.Parse` 直接失败，xray **拒绝启动**（exit 23）。两侧的失败在面板上都看不见（`dns` 在 `hot_diff` 的 static 名单里必然触发整进程重启，而 `Process.Start()` 从不回传启动失败）。`entity.dnsServerSchemes` 的白名单因此必须与那张分派表一一对应，`web/service/setting_defaults_test.go` 每个形式一条用例，都在真实 xray 上 `run -test` 验证过。改动前的版本收 `udp://` `tls://` `quic://` 与 `IP:端口`，报错文案还在推荐 `IP:端口`。
 - **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。分流子系统靠三个 `Check*Refs` 守卫堵住了这条路，**新增任何存 id 外键的表都要照做**。
 - **cron 任务的 panic 现在会被截住，但不是所有 job 都有第二层。** `web/web.go` 的 `cron.New(...)` 已配 `cron.WithChain(cron.Recover(cronLogger{}))`：任何挂在这个 cron 实例上的任务（含每 10 秒的 xray 重启消费任务）发生 panic，都会被这层截住、由 `cronLogger` 带完整堆栈记进面板日志，不再杀掉整个面板进程。目前 `access_log_job.go` 的两个任务、`concurrency_job.go`、`shaping_job.go`、`traffic_cleanup_job.go` 在各自 `Run` 的首行加了 `defer common.Recover("<任务名>")`（`util/common/err.go`）作为更早的一层——它抢在 cron 那层之前拿到 panic，日志里能带上具体任务名，而不是只知道「某个 job 挂了」；`check_inbound_job.go`、`check_xray_running_job.go`、`ipdb_update_job.go`、`subscription_job.go`、`xray_traffic_job.go` 还没有加这层，完全依赖 cron 那层通用兜底。**这不是「新 job 才有、旧 job 没有」的演进结果**——`ipdb_update_job.go`（没有这层）与 `concurrency_job.go`、`shaping_job.go`（都有）是同一个提交（`601a344`）加的，谁有谁没有只是各自实现时的疏漏，不代表任何时间线，不要据此推断「后来加的就补齐了」。**新增 job 一律照带 Recover 的写法办理**：`Run` 首行 `defer common.Recover("<任务名>")`。在这些路径上写代码仍要格外注意 nil map、越界等运行时 panic——多一层 recover 挡住的是「杀死整个进程」，挡不住「这一轮任务后续逻辑没跑完」。

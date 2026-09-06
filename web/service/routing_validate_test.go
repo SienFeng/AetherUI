@@ -148,3 +148,24 @@ func TestValidateOutboundReplacingNeverRemovesTheInjectedBlackhole(t *testing.T)
 			model.BlockOutboundTag)
 	}
 }
+
+// 空列表直接放行，绝不构造探针规则：ip 为空数组时那条探针只剩 outboundTag
+// 一个非条件字段，xray 会报 "this rule has no effective fields"
+// （app/router/config.go:114）而整份配置被判非法——一个「这个组没有 IP 段」
+// 的正常状态会变成保存失败。
+func TestValidateCidrsAllowsEmpty(t *testing.T) {
+	if err := ValidateCidrs(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if err := ValidateCidrs([]string{}); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateCidrsAcceptsValidList(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	if err := ValidateCidrs([]string{"1.2.3.0/24", "geoip:private"}); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
