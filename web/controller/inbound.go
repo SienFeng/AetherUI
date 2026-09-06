@@ -19,6 +19,7 @@ type InboundController struct {
 	accessLogService      service.AccessLogService
 	geoService            service.GeoService
 	trafficHistoryService service.TrafficHistoryService
+	sharingService        service.SharingService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -44,6 +45,8 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/recentSources/:id", a.getRecentSources)
 	g.POST("/traffic/history/:id", a.getTrafficHistory)
 	g.POST("/traffic/overview", a.getTrafficOverview)
+	g.POST("/sharing/summary", a.getSharingSummary)
+	g.POST("/sharing/detail/:id", a.getSharingDetail)
 	g.POST("/provinces", a.getProvinces)
 }
 
@@ -319,6 +322,35 @@ func (a *InboundController) getTrafficOverview(c *gin.Context) {
 	result, err := a.trafficHistoryService.Overview(service.TrafficRange(form.Range), form.Top, time.Now())
 	if err != nil {
 		jsonMsg(c, "获取用量总览", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getSharingSummary 返回各入站的并存统计。
+//
+// 刻意不塞进入站列表主接口：不改已有接口契约，而且这样天然 fail open——
+// 这个查询失败时列表照常渲染，只是没有并存标记。反过来把聚合塞进列表主
+// 接口，一次慢查询就能让整个入站列表打不开。
+func (a *InboundController) getSharingSummary(c *gin.Context) {
+	result, err := a.sharingService.Summary(time.Now())
+	if err != nil {
+		jsonMsg(c, "获取共享检测统计", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getSharingDetail 返回某入站的共享检测明细。
+func (a *InboundController) getSharingDetail(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取共享检测明细", err)
+		return
+	}
+	result, err := a.sharingService.Detail(id, time.Now())
+	if err != nil {
+		jsonMsg(c, "获取共享检测明细", err)
 		return
 	}
 	jsonObj(c, result, nil)

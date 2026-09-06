@@ -195,3 +195,130 @@ func (s *SharingService) DeleteByInbound(inboundId int) error {
 	}
 	return db.Where("inbound_id = ?", inboundId).Delete(&model.InboundIPHour{}).Error
 }
+
+// SharingDetailEntry 是明细里的一条：某个 IP 在某小时的活跃情况。
+type SharingDetailEntry struct {
+	IP            string `json:"ip"`
+	Province      string `json:"province"`
+	ActiveSeconds int    `json:"activeSeconds"`
+}
+
+// SharingDetailHour 是明细里的一个小时。
+type SharingDetailHour struct {
+	HourStart int64 `json:"t"`
+	// Label 在**服务端**按面板时区格式化。让浏览器自己格式化的话，访问者
+	// 所在时区一变，明细上的时间就和面板设置的时区对不上了——用量图表那边
+	// 也是这个理由。
+	Label    string               `json:"label"`
+	Coexists bool                 `json:"coexists"`
+	Entries  []SharingDetailEntry `json:"entries"`
+}
+
+// SharingDetail 是某入站的共享检测明细。
+type SharingDetail struct {
+	Stat       CoexistStat      `json:"stat"`
+	Suggestion RegionSuggestion `json:"suggestion"`
+	// Hours 按时间倒序，只含发生过并存的小时——全都列出来的话，一个正常
+	// 用户 30 天有几百个小时，管理员要找的那几行会被淹掉。
+	Hours []SharingDetailHour `json:"hours"`
+	// WindowDays 与 RetentionDays 下发给前端做文案，避免两边各写一份常量
+	// 然后慢慢漂移。
+	WindowDays    int `json:"windowDays"`
+	RetentionDays int `json:"retentionDays"`
+}
+
+// windowRows 读某入站在给定天数内的行。inboundId 为 0 表示读全部入站。
+func (s *SharingService) windowRows(inboundId, days int, now time.Time) ([]model.InboundIPHour, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return nil, nil
+	}
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour).Unix()
+	tx := db.Where("hour_start >= ?", cutoff)
+	if inboundId != 0 {
+		tx = tx.Where("inbound_id = ?", inboundId)
+	}
+	var rows []model.InboundIPHour
+	err := tx.Order("hour_start asc, ip asc").Find(&rows).Error
+	return rows, err
+}
+
+// Summary 返回各入站的并存统计，只含达到显示下限的。
+//
+// 低于下限的不返回：那是旅游迁移交界处的噪声，报出来会让入站列表变成
+// 满屏黄标，告警就此失去意义。
+func (s *SharingService) Summary(now time.Time) (map[int]CoexistStat, error) {
+	rows, err := s.windowRows(0, sharingWindowDays, now)
+	if err != nil {
+		return nil, err
+	}
+	byInbound := map[int][]model.InboundIPHour{}
+	for _, r := range rows {
+		byInbound[r.InboundId] = append(byInbound[r.InboundId], r)
+	}
+	out := map[int]CoexistStat{}
+	for id, list := range byInbound {
+		if stat := computeCoexist(list); stat.Flagged() {
+			out[id] = stat
+		}
+	}
+	return out, nil
+}
+
+// Detail 返回某入站的明细：判定窗口内的统计与建议，加上保留期内的并存时段。
+func (s *SharingService) Detail(inboundId int, now time.Time) (*SharingDetail, error) {
+	windowRows, err := s.windowRows(inboundId, sharingWindowDays, now)
+	if err != nil {
+		return nil, err
+	}
+	// 明细比判定窗口看得更远：多出来的那段是用来判断「一直在共享」还是
+	// 「上个月出了趟差」的。
+	historyRows, err := s.windowRows(inboundId, sharingRetentionDays, now)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := s.settingService.GetTimeLocation()
+	if err != nil {
+		return nil, err
+	}
+
+	detail := &SharingDetail{
+		Stat:          computeCoexist(windowRows),
+		Suggestion:    suggestRegions(windowRows),
+		Hours:         []SharingDetailHour{},
+		WindowDays:    sharingWindowDays,
+		RetentionDays: sharingRetentionDays,
+	}
+
+	byHour := map[int64][]model.InboundIPHour{}
+	order := make([]int64, 0)
+	for _, r := range historyRows {
+		if _, seen := byHour[r.HourStart]; !seen {
+			order = append(order, r.HourStart)
+		}
+		byHour[r.HourStart] = append(byHour[r.HourStart], r)
+	}
+	// historyRows 已按 hour_start 升序，这里倒过来给前端：最近的排最前。
+	for i := len(order) - 1; i >= 0; i-- {
+		hour := order[i]
+		list := byHour[hour]
+		// 只列发生过并存的小时。全都列出来的话，一个正常用户 30 天有几百
+		// 个小时，管理员要找的那几行会被淹掉。
+		if computeCoexist(list).Hours == 0 {
+			continue
+		}
+		entries := make([]SharingDetailEntry, 0, len(list))
+		for _, r := range list {
+			entries = append(entries, SharingDetailEntry{
+				IP: r.IP, Province: r.Province, ActiveSeconds: r.ActiveSeconds,
+			})
+		}
+		detail.Hours = append(detail.Hours, SharingDetailHour{
+			HourStart: hour,
+			Label:     time.Unix(hour, 0).In(loc).Format("2006-01-02 15:04"),
+			Coexists:  true,
+			Entries:   entries,
+		})
+	}
+	return detail, nil
+}

@@ -185,3 +185,82 @@ func TestPruneOrphansRemovesRowsOfDeletedInbounds(t *testing.T) {
 		t.Errorf("剩余行 = %+v, want 只剩存在的那个入站", rows)
 	}
 }
+
+// Summary 只返回达到显示下限的入站：低于下限的是旅游迁移交界处的噪声，
+// 报出来会让告警变成满屏黄标。
+func TestSummaryOnlyReturnsFlaggedInbounds(t *testing.T) {
+	setupSharingTest(t)
+	loud := mkSharingInbound(t, 31010, "并存很多")
+	quiet := mkSharingInbound(t, 31011, "只有一小时")
+	db := database.GetTrafficDB()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+
+	// loud：coexistDisplayMinHours 个小时都有两省并存
+	for i := 0; i < coexistDisplayMinHours; i++ {
+		at := now.Add(-time.Duration(i+1) * time.Hour)
+		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
+			f := sharingFlush{
+				InboundId: loud.Id, IP: ip, Province: province,
+				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
+			}
+			if err := upsertIPHour(db, f); err != nil {
+				t.Fatalf("写入: %v", err)
+			}
+		}
+	}
+	// quiet：只有一个小时并存，低于下限
+	at := now.Add(-time.Hour)
+	for ip, province := range map[string]string{"3.3.3.3": "江苏", "4.4.4.4": "上海"} {
+		f := sharingFlush{
+			InboundId: quiet.Id, IP: ip, Province: province,
+			HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
+		}
+		if err := upsertIPHour(db, f); err != nil {
+			t.Fatalf("写入: %v", err)
+		}
+	}
+
+	svc := SharingService{}
+	got, err := svc.Summary(now)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if _, ok := got[quiet.Id]; ok {
+		t.Error("低于显示下限的入站不该出现在 Summary 里")
+	}
+	stat, ok := got[loud.Id]
+	if !ok {
+		t.Fatal("达到下限的入站应出现在 Summary 里")
+	}
+	if stat.Hours != coexistDisplayMinHours {
+		t.Errorf("Hours = %v, want %v", stat.Hours, coexistDisplayMinHours)
+	}
+}
+
+// 窗口外的行不参与判定，但仍在保留期内供明细回溯。
+func TestSummaryIgnoresRowsOutsideWindow(t *testing.T) {
+	setupSharingTest(t)
+	in := mkSharingInbound(t, 31012, "旧数据")
+	db := database.GetTrafficDB()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-(sharingWindowDays + 1) * 24 * time.Hour)
+
+	for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
+		f := sharingFlush{
+			InboundId: in.Id, IP: ip, Province: province,
+			HourStart: model.AlignHourUTC(old), ActiveSeconds: 3600,
+		}
+		if err := upsertIPHour(db, f); err != nil {
+			t.Fatalf("写入: %v", err)
+		}
+	}
+
+	svc := SharingService{}
+	got, err := svc.Summary(now)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if _, ok := got[in.Id]; ok {
+		t.Error("窗口外的行不该参与判定")
+	}
+}
