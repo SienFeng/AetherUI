@@ -325,37 +325,73 @@ func (a *RoutingController) refreshDomainGroup(c *gin.Context) {
 	}
 }
 
-// encodeDomainsFromForm 把 textarea 原文校验并转成入库格式。
-// 允许为空：域名组可以只有订阅内容，手工域名一条不填。
-// 合并后仍为空的组，其规则会被 buildRule 跳过并记 warning，防线不受影响。
-func encodeDomainsFromForm(raw string) (string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return "[]", nil
+// jsonMsgDedup 在标准的「XX成功」后面补一句本次去掉了多少条重复。
+//
+// 出错时、以及一条重复都没去掉时，原样走 jsonMsg——绝大多数保存都落在这两支，
+// 响应逐字节不变。失败路径尤其不能捎带说明：那一次根本没落库，说「已自动去掉
+// N 条重复」会让管理员以为库里的内容已经被改过了。
+func jsonMsgDedup(c *gin.Context, action string, domains, cidrs int, err error) {
+	note := dedupNote(domains, cidrs)
+	if err != nil || note == "" {
+		jsonMsg(c, action, err)
+		return
 	}
-	list, err := service.ParseDomains(raw)
-	if err != nil {
-		return "", err
-	}
-	if err := service.ValidateDomains(list); err != nil {
-		return "", err
-	}
-	return service.EncodeDomains(list)
+	pureJsonMsg(c, true, action+"成功"+note)
 }
 
-// encodeCidrsFromForm 把 textarea 原文校验并转成入库格式。
-// 允许为空：一个组可以只有域名，或只有订阅内容。
-func encodeCidrsFromForm(raw string) (string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return "[]", nil
+// dedupNote 说明这次保存去掉了什么，没去掉任何东西时返回空串。
+//
+// 域名与 IP 段分开报，不合成一个总数：两个输入框是分开的，只给总数的话管理员
+// 不知道该回哪个框去看自己写了什么。
+func dedupNote(domains, cidrs int) string {
+	parts := make([]string, 0, 2)
+	if domains > 0 {
+		parts = append(parts, strconv.Itoa(domains)+" 条重复域名")
 	}
-	list, err := service.ParseCidrs(raw)
+	if cidrs > 0 {
+		parts = append(parts, strconv.Itoa(cidrs)+" 条重复 IP 段")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "，已自动去掉 " + strings.Join(parts, "、")
+}
+
+// encodeDomainsFromForm 把 textarea 原文校验并转成入库格式，
+// 第二个返回值是 ParseDomains 去掉的重复条数，交给 jsonMsgDedup 报给管理员。
+// 允许为空：域名组可以只有订阅内容，手工域名一条不填。
+// 合并后仍为空的组，其规则会被 buildRule 跳过并记 warning，防线不受影响。
+func encodeDomainsFromForm(raw string) (string, int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "[]", 0, nil
+	}
+	list, removed, err := service.ParseDomains(raw)
 	if err != nil {
-		return "", err
+		return "", 0, err
+	}
+	if err := service.ValidateDomains(list); err != nil {
+		return "", 0, err
+	}
+	encoded, err := service.EncodeDomains(list)
+	return encoded, removed, err
+}
+
+// encodeCidrsFromForm 把 textarea 原文校验并转成入库格式，
+// 第二个返回值的含义与 encodeDomainsFromForm 相同。
+// 允许为空：一个组可以只有域名，或只有订阅内容。
+func encodeCidrsFromForm(raw string) (string, int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "[]", 0, nil
+	}
+	list, removed, err := service.ParseCidrs(raw)
+	if err != nil {
+		return "", 0, err
 	}
 	if err := service.ValidateCidrs(list); err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return service.EncodeCidrs(list)
+	encoded, err := service.EncodeCidrs(list)
+	return encoded, removed, err
 }
 
 func (a *RoutingController) addDomainGroup(c *gin.Context) {
@@ -364,12 +400,12 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 		jsonMsg(c, "添加域名组", err)
 		return
 	}
-	encoded, err := encodeDomainsFromForm(form.Domains)
+	encoded, dupDomains, err := encodeDomainsFromForm(form.Domains)
 	if err != nil {
 		jsonMsg(c, "添加域名组", err)
 		return
 	}
-	encodedCidrs, err := encodeCidrsFromForm(form.Cidrs)
+	encodedCidrs, dupCidrs, err := encodeCidrsFromForm(form.Cidrs)
 	if err != nil {
 		jsonMsg(c, "添加域名组", err)
 		return
@@ -391,7 +427,7 @@ func (a *RoutingController) addDomainGroup(c *gin.Context) {
 		Remark: form.Remark, Domains: encoded, Cidrs: encodedCidrs, SubscribeUrl: subscribeUrl,
 	}
 	err = a.domainGroupService.Add(group)
-	jsonMsg(c, "添加域名组", err)
+	jsonMsgDedup(c, "添加域名组", dupDomains, dupCidrs, err)
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
@@ -408,12 +444,12 @@ func (a *RoutingController) updateDomainGroup(c *gin.Context) {
 		jsonMsg(c, "修改域名组", err)
 		return
 	}
-	encoded, err := encodeDomainsFromForm(form.Domains)
+	encoded, dupDomains, err := encodeDomainsFromForm(form.Domains)
 	if err != nil {
 		jsonMsg(c, "修改域名组", err)
 		return
 	}
-	encodedCidrs, err := encodeCidrsFromForm(form.Cidrs)
+	encodedCidrs, dupCidrs, err := encodeCidrsFromForm(form.Cidrs)
 	if err != nil {
 		jsonMsg(c, "修改域名组", err)
 		return
@@ -441,7 +477,7 @@ func (a *RoutingController) updateDomainGroup(c *gin.Context) {
 	err = a.domainGroupService.Update(&model.DomainGroup{
 		Id: id, Remark: form.Remark, Domains: encoded, Cidrs: encodedCidrs, SubscribeUrl: subscribeUrl,
 	})
-	jsonMsg(c, "修改域名组", err)
+	jsonMsgDedup(c, "修改域名组", dupDomains, dupCidrs, err)
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}

@@ -36,10 +36,23 @@ var lowercaseValuePrefixes = map[string]bool{
 	"domain:": true, "full:": true, "keyword:": true,
 }
 
-// ParseDomains 把用户在 textarea 中一行一条录入的域名解析成入库列表。
+// ParseDomains 把用户在 textarea 中一行一条录入的域名解析成入库列表，
+// 返回（列表, 去掉的重复条数, 错误）。
 //
-// 按输入行序输出，不排序：顺序是「生成逐字节确定」不变量的一部分。
-func ParseDomains(raw string) ([]string, error) {
+// 按输入行序输出，不排序：顺序是「生成逐字节确定」不变量的一部分。去重保留
+// 首次出现，同样是为了这条不变量。
+//
+// 去重发生在归一化【之后】：domain:OpenAI.com 与 domain:openai.com 在框里是
+// 两行不同的文本，归一后才是同一条规则——那恰恰是管理员自己完全看不出来的
+// 一类重复。放在归一化之前只能去掉字面完全相同的那些，最需要帮忙的一类反而
+// 一条都去不掉。
+//
+// 只做字面去重，不做语义包含去重：domain:example.com 覆盖 domain:sub.example.com
+// 这类冗余要靠语义分析才能判定，删错了就是改写管理员的意图。
+//
+// 生成期的 MergeDomains 本来就会去重，所以这一步不改变 xray 拿到的配置；
+// 它消掉的是编辑框回显、列表计数、导出文件与送检列表里的噪音。
+func ParseDomains(raw string) ([]string, int, error) {
 	lines := strings.Split(raw, "\n")
 	list := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -49,14 +62,15 @@ func ParseDomains(raw string) ([]string, error) {
 		}
 		normalized, err := normalizeDomainRule(item)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		list = append(list, normalized)
 	}
 	if len(list) == 0 {
-		return nil, common.NewError("域名列表不能为空")
+		return nil, 0, common.NewError("域名列表不能为空")
 	}
-	return list, nil
+	deduped := MergeDomains(list)
+	return deduped, len(list) - len(deduped), nil
 }
 
 // normalizeDomainRule 把一行录入归一成入库形态，或说明它为什么不合法。

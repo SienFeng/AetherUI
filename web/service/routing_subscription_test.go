@@ -737,7 +737,7 @@ func TestSubscriptionKeywordMatchesManualForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSubscription: %v", err)
 	}
-	fromManual, err := ParseDomains("openai")
+	fromManual, _, err := ParseDomains("openai")
 	if err != nil {
 		t.Fatalf("ParseDomains: %v", err)
 	}

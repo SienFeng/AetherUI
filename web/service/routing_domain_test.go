@@ -18,7 +18,7 @@ func setupDB(t *testing.T) {
 
 func TestParseDomainsAcceptsNativeSyntax(t *testing.T) {
 	raw := "domain:openai.com\nfull:chat.openai.com\ngeosite:openai\nregexp:.*\\.oaistatic\\.com"
-	got, err := ParseDomains(raw)
+	got, _, err := ParseDomains(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestParseDomainsAcceptsNativeSyntax(t *testing.T) {
 }
 
 func TestParseDomainsSkipsBlankLinesAndTrims(t *testing.T) {
-	got, err := ParseDomains("  domain:a.com  \n\n\n  geosite:openai\n")
+	got, _, err := ParseDomains("  domain:a.com  \n\n\n  geosite:openai\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,13 +41,13 @@ func TestParseDomainsSkipsBlankLinesAndTrims(t *testing.T) {
 }
 
 func TestParseDomainsRejectsUnknownPrefix(t *testing.T) {
-	if _, err := ParseDomains("wat:openai.com"); err == nil {
+	if _, _, err := ParseDomains("wat:openai.com"); err == nil {
 		t.Error("expected error for unknown prefix")
 	}
 }
 
 func TestParseDomainsRejectsEmptyResult(t *testing.T) {
-	if _, err := ParseDomains("   \n  \n"); err == nil {
+	if _, _, err := ParseDomains("   \n  \n"); err == nil {
 		t.Error("expected error for empty domain list")
 	}
 }
@@ -151,7 +151,7 @@ func TestParseDomainsAcceptsAllXrayPrefixes(t *testing.T) {
 	raw := "domain:openai.com\nfull:chat.openai.com\nkeyword:openai\n" +
 		"regexp:.*\\.oaistatic\\.com\ndotless:localhost\n" +
 		"geosite:openai\next:geoip.dat:cn\next-domain:x.dat:tag\next-site:y.dat:tag"
-	got, err := ParseDomains(raw)
+	got, _, err := ParseDomains(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +187,7 @@ full:openaicomproductionae4b.blob.core.windows.net
 full:production-openaicom-storage.azureedge.net
 openai
 chatgpt-async-webps`
-	got, err := ParseDomains(raw)
+	got, _, err := ParseDomains(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +206,7 @@ chatgpt-async-webps`
 // 后缀匹配。放行等于让从 geosite 列表复制来的 openai.com 静默变成能命中
 // notopenai.com.evil.net 的规则，而没有任何一层会报错。
 func TestParseDomainsRejectsAmbiguousBareDomain(t *testing.T) {
-	_, err := ParseDomains("openai.com")
+	_, _, err := ParseDomains("openai.com")
 	if err == nil {
 		t.Fatal("expected error for bare dotted string")
 	}
@@ -219,12 +219,19 @@ func TestParseDomainsRejectsAmbiguousBareDomain(t *testing.T) {
 
 // xray 只把目标域名转小写、不归一化配置里的模式
 // （app/router/condition.go:59），所以大写的模式是永不命中的哑规则。
+//
+// 第四行刻意不再用 OpenAI：裸串归一成 keyword:openai，与第三行完全相同，
+// 会被 ParseDomains 的去重吃掉一条，这条测试就变成在断言去重而不是断言
+// 大小写归一了。换一个不相干的裸串，四种可小写化形态各验一次的原意不变。
 func TestParseDomainsLowercasesMatchableValues(t *testing.T) {
-	got, err := ParseDomains("domain:OpenAI.COM\nfull:Chat.OpenAI.com\nkeyword:OpenAI\nOpenAI")
+	got, _, err := ParseDomains("domain:OpenAI.COM\nfull:Chat.OpenAI.com\nkeyword:OpenAI\nAds")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := []string{"domain:openai.com", "full:chat.openai.com", "keyword:openai", "keyword:openai"}
+	want := []string{"domain:openai.com", "full:chat.openai.com", "keyword:openai", "keyword:ads"}
+	if len(got) != len(want) {
+		t.Fatalf("got = %v, want %v", got, want)
+	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
@@ -236,7 +243,7 @@ func TestParseDomainsLowercasesMatchableValues(t *testing.T) {
 // 意义完全相反的东西。geosite:/ext: 的 code 由 xray 自己 ToUpper。
 func TestParseDomainsKeepsCaseSensitiveForms(t *testing.T) {
 	raw := "regexp:^API\\D+\\.Example\\.COM$\ndotless:LocalHost\ngeosite:OpenAI"
-	got, err := ParseDomains(raw)
+	got, _, err := ParseDomains(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,13 +256,13 @@ func TestParseDomainsKeepsCaseSensitiveForms(t *testing.T) {
 }
 
 func TestParseDomainsRejectsEmptyPrefixValue(t *testing.T) {
-	if _, err := ParseDomains("domain:"); err == nil {
+	if _, _, err := ParseDomains("domain:"); err == nil {
 		t.Error("expected error for prefix with no value")
 	}
 }
 
 func TestParseDomainsRejectsKeywordWithSeparators(t *testing.T) {
-	if _, err := ParseDomains("open ai"); err == nil {
+	if _, _, err := ParseDomains("open ai"); err == nil {
 		t.Error("expected error for keyword containing a space")
 	}
 }
@@ -315,5 +322,58 @@ func TestDomainGroupUpdatePersistsCidrs(t *testing.T) {
 	if got.Cidrs != `["8.8.8.8"]` {
 		t.Errorf("Cidrs = %q, want %q — updateFieldsFor 若漏掉 cidrs 列，这里会拿到 Update 之前的旧值",
 			got.Cidrs, `["8.8.8.8"]`)
+	}
+}
+
+// 去重必须发生在归一化【之后】。domain:OpenAI.com 与 domain:openai.com 在
+// textarea 里是两行不同的文本，归一后是同一条规则——这恰恰是管理员自己
+// 完全看不出来的那一类重复。放在归一化之前去重的话，只有字面完全相同的那些
+// 能被去掉，最需要帮忙的一类反而一条都去不掉。
+func TestParseDomainsDropsDuplicatesAfterNormalization(t *testing.T) {
+	got, removed, err := ParseDomains(
+		"domain:a.com\ndomain:b.com\ndomain:a.com\ndomain:A.com\nAds\nads")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"domain:a.com", "domain:b.com", "keyword:ads"}
+	if len(got) != len(want) {
+		t.Fatalf("got = %v, want %v", got, want)
+	}
+	// 顺序必须是首次出现的顺序：生成逐字节确定是 Config.Equals 的前提，
+	// 重排会让它恒为 false，那个 10 秒的 cron 就开始不停重启 xray。
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q（顺序必须保留首次出现）", i, got[i], want[i])
+		}
+	}
+	if removed != 3 {
+		t.Errorf("removed = %d, want 3", removed)
+	}
+}
+
+// 同一个值挂在不同前缀下是三条语义不同的规则，不是重复。去重只能按归一后的
+// 完整字符串比，绝不能只比值。
+func TestParseDomainsKeepsSameValueUnderDifferentPrefixes(t *testing.T) {
+	got, removed, err := ParseDomains("domain:a.com\nfull:a.com\nkeyword:a.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("got = %v, want 3 条（前缀不同就不是重复）", got)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
+	}
+}
+
+// 没有重复时 removed 必须是 0：controller 靠它决定要不要在成功提示里多说一句，
+// 恒非零会让每一次保存都挂上一句莫名其妙的「已自动去掉 0 条重复」。
+func TestParseDomainsReportsZeroWhenNothingDuplicated(t *testing.T) {
+	got, removed, err := ParseDomains("domain:a.com\ngeosite:openai")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 || removed != 0 {
+		t.Errorf("got = %v, removed = %d, want 2 条且 removed 为 0", got, removed)
 	}
 }

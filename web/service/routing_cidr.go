@@ -13,10 +13,16 @@ import (
 // geoip:xx 会被 xray 改写成 ext:geoip.dat:xx。
 var cidrPrefixes = []string{"geoip:", "ext:", "ext-ip:"}
 
-// ParseCidrs 把用户在 textarea 中一行一条录入的 IP 段解析成入库列表。
+// ParseCidrs 把用户在 textarea 中一行一条录入的 IP 段解析成入库列表，
+// 返回（列表, 去掉的重复条数, 错误）。
 //
-// 按输入行序输出，不排序：顺序是「生成逐字节确定」不变量的一部分。
-func ParseCidrs(raw string) ([]string, error) {
+// 按输入行序输出，不排序：顺序是「生成逐字节确定」不变量的一部分。去重的
+// 理由与取舍见 ParseDomains，两条路径共用 MergeDomains 那一个有序去重。
+//
+// 比较的是归一后的完整字符串，取反符号因此是规则的一部分：geoip:cn 与
+// !geoip:cn 是「命中中国 IP」和「排除中国 IP」两条相反的规则，剥掉 ! 再比会
+// 把它们当成重复静默删掉一条，分流范围被改写而没有任何一层会报错。
+func ParseCidrs(raw string) ([]string, int, error) {
 	lines := strings.Split(raw, "\n")
 	list := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -26,14 +32,15 @@ func ParseCidrs(raw string) ([]string, error) {
 		}
 		normalized, err := normalizeCidrRule(item)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		list = append(list, normalized)
 	}
 	if len(list) == 0 {
-		return nil, common.NewError("IP 段列表不能为空")
+		return nil, 0, common.NewError("IP 段列表不能为空")
 	}
-	return list, nil
+	deduped := MergeDomains(list)
+	return deduped, len(list) - len(deduped), nil
 }
 
 // normalizeCidrRule 校验一行录入，或说明它为什么不合法。

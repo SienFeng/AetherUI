@@ -7,7 +7,7 @@ import (
 
 func TestParseCidrsAcceptsXraySyntax(t *testing.T) {
 	raw := "1.2.3.0/24\n8.8.8.8\n2001:db8::/32\n::1\ngeoip:cn\ngeoip:!cn\n!geoip:cn\next:geoip.dat:cn\next-ip:x.dat:tag"
-	got, err := ParseCidrs(raw)
+	got, _, err := ParseCidrs(raw)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -20,7 +20,7 @@ func TestParseCidrsAcceptsXraySyntax(t *testing.T) {
 }
 
 func TestParseCidrsRejectsDomains(t *testing.T) {
-	_, err := ParseCidrs("openai.com")
+	_, _, err := ParseCidrs("openai.com")
 	if err == nil {
 		t.Fatal("expected error for a domain in the CIDR field")
 	}
@@ -30,25 +30,25 @@ func TestParseCidrsRejectsDomains(t *testing.T) {
 }
 
 func TestParseCidrsRejectsOutOfRangePrefix(t *testing.T) {
-	if _, err := ParseCidrs("1.2.3.0/33"); err == nil {
+	if _, _, err := ParseCidrs("1.2.3.0/33"); err == nil {
 		t.Error("expected error for IPv4 prefix > 32")
 	}
-	if _, err := ParseCidrs("2001:db8::/129"); err == nil {
+	if _, _, err := ParseCidrs("2001:db8::/129"); err == nil {
 		t.Error("expected error for IPv6 prefix > 128")
 	}
 }
 
 func TestParseCidrsRejectsEmptyPrefixValue(t *testing.T) {
-	if _, err := ParseCidrs("geoip:"); err == nil {
+	if _, _, err := ParseCidrs("geoip:"); err == nil {
 		t.Error("expected error for geoip: with no code")
 	}
-	if _, err := ParseCidrs("!"); err == nil {
+	if _, _, err := ParseCidrs("!"); err == nil {
 		t.Error("expected error for a lone negation")
 	}
 }
 
 func TestParseCidrsSkipsBlankLinesAndTrims(t *testing.T) {
-	got, err := ParseCidrs("  1.2.3.0/24  \n\n\n  geoip:cn\n")
+	got, _, err := ParseCidrs("  1.2.3.0/24  \n\n\n  geoip:cn\n")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestParseCidrsSkipsBlankLinesAndTrims(t *testing.T) {
 }
 
 func TestParseCidrsRejectsEmptyResult(t *testing.T) {
-	if _, err := ParseCidrs("  \n \n"); err == nil {
+	if _, _, err := ParseCidrs("  \n \n"); err == nil {
 		t.Error("expected error for empty list")
 	}
 }
@@ -84,5 +84,41 @@ func TestDecodeSubscribedCidrsToleratesEmpty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("got = %v, want empty", got)
+	}
+}
+
+// IP 段与域名共用同一条去重规则：按归一后的完整字符串比，保留首次出现。
+func TestParseCidrsDropsDuplicates(t *testing.T) {
+	got, removed, err := ParseCidrs("1.2.3.0/24\n8.8.8.8\n1.2.3.0/24\ngeoip:cn\ngeoip:cn")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"1.2.3.0/24", "8.8.8.8", "geoip:cn"}
+	if len(got) != len(want) {
+		t.Fatalf("got = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q（顺序必须保留首次出现）", i, got[i], want[i])
+		}
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+}
+
+// 取反符号是规则的一部分，geoip:cn / geoip:!cn / !geoip:cn 是三条不同的规则。
+// 去重若先剥掉 ! 再比较，会把「排除中国 IP」和「命中中国 IP」当成同一条，
+// 静默删掉其中两条——分流范围被改写，而没有任何一层会报错。
+func TestParseCidrsKeepsNegationVariantsApart(t *testing.T) {
+	got, removed, err := ParseCidrs("geoip:cn\ngeoip:!cn\n!geoip:cn")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("got = %v, want 3 条（取反写法不同就不是重复）", got)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
 	}
 }

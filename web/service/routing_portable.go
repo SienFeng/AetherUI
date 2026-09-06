@@ -506,9 +506,14 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 		}
 		// 走与表单同一条校验路径。导入文件是不可信输入，与管理员在表单里
 		// 输入的东西同级。
+		//
+		// 去重条数在这里丢掉，不进导入报告：报告要突出的是「跳过了什么、
+		// 哪条失败了」，而重复是源库里带过来的、去掉之后两台机器的列表页
+		// 计数本来就一致（EffectiveCount 一直是去重后的），多一行噪音只会
+		// 淹没真正需要管理员处理的那几条。
 		encoded := "[]"
 		if len(item.Domains) > 0 {
-			list, err := ParseDomains(strings.Join(item.Domains, "\n"))
+			list, _, err := ParseDomains(strings.Join(item.Domains, "\n"))
 			if err != nil {
 				report.DomainGroups.Failed++
 				report.fail("域名组「%s」的域名格式有误：%v", item.Remark, err)
@@ -527,10 +532,10 @@ func (s *RoutingPortableService) importDomainGroups(items []PortableDomainGroup,
 			}
 		}
 		// 走与表单同一条校验路径。导入文件是不可信输入，与管理员在表单里
-		// 输入的东西同级。
+		// 输入的东西同级。去重条数同样丢掉，理由见上。
 		encodedCidrs := "[]"
 		if len(item.Cidrs) > 0 {
-			list, err := ParseCidrs(strings.Join(item.Cidrs, "\n"))
+			list, _, err := ParseCidrs(strings.Join(item.Cidrs, "\n"))
 			if err != nil {
 				report.DomainGroups.Failed++
 				report.fail("域名组「%s」的 IP 段格式有误：%v", item.Remark, err)
