@@ -33,3 +33,37 @@ func TestRegistrable(t *testing.T) {
 		})
 	}
 }
+
+func TestIsRegistrable(t *testing.T) {
+	// 计量池只能收真正的注册域名。放行公共后缀本身会生成 domain:com
+	// 这种命中全部 .com 的规则，把该入站几乎全部流量吸进一个计量出站，
+	// 榜单从此只有一行。
+	yes := []string{
+		"doubleclick.net",
+		"example.co.uk",
+		"9gag.com",
+		"example.com.cn", // 多级公共后缀（com.cn）下的注册域名
+	}
+	for _, d := range yes {
+		if !IsRegistrable(d) {
+			t.Errorf("IsRegistrable(%q) = false，期望 true", d)
+		}
+	}
+	no := []string{
+		"",                        // 空
+		"com",                     // 公共后缀本身
+		"co.uk",                   // 多级公共后缀本身
+		"localhost",               // 不含点的主机名
+		"www.example.com",         // 子域名不是注册域名，池里只放归并后的结果
+		"some-cdn.example.com.cn", // 多级公共后缀下的子域名，注册域名是 example.com.cn
+		"1.2.3.4",                 // IPv4 字面量：需要 ip 条件而不是 domain 条件
+		"2001:db8::1",             // IPv6 字面量
+		"example.com.",            // 带末尾点：Registrable 已经剥过，这里不再兼容
+		"EXAMPLE.COM",             // 大写：Registrable 已经转过小写，这里不再兼容
+	}
+	for _, d := range no {
+		if IsRegistrable(d) {
+			t.Errorf("IsRegistrable(%q) = true，期望 false", d)
+		}
+	}
+}
