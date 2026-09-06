@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/json_util"
 	"a-ui/xray"
@@ -143,6 +144,32 @@ func (s *DNSInjector) applyFreedomStrategy(cfg *xray.Config) error {
 			"targetStrategy is cleared")
 	}
 	settings["domainStrategy"] = freedomDomainStrategy
+
+	// 计量出站（a-ui-meter-*）是 RoutingInjector 追加到数组末尾的默认出站
+	// 副本。不给它们补上同一个键的话，**被计量的直连流量会绕过内置 DNS**——
+	// dns 段对它们完全空转，没有报错、没有日志，正是本功能存在的理由所描述
+	// 的那种故障。
+	//
+	// 不需要给它们重跑一遍上面那套判定：它们是首位的逐字节副本，protocol 与
+	// targetStrategy 的结论必然相同；而首位判定不通过时函数本来就已经早退，
+	// 副本也就一同不写——这正是我们要的，给副本单独写一个默认出站没有的键，
+	// 恰恰会打破「除 tag 外逐字节相同」那条不变量。
+	for i := 1; i < len(outbounds); i++ {
+		ob, ok := outbounds[i].(map[string]any)
+		if !ok || ob == nil {
+			continue
+		}
+		tag, _ := ob["tag"].(string)
+		if !model.IsMeterTag(tag) {
+			continue
+		}
+		obSettings, _ := ob["settings"].(map[string]any)
+		if obSettings == nil {
+			obSettings = map[string]any{}
+			ob["settings"] = obSettings
+		}
+		obSettings["domainStrategy"] = freedomDomainStrategy
+	}
 
 	encoded, err := json.Marshal(outbounds)
 	if err != nil {
