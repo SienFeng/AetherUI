@@ -206,6 +206,30 @@
                                     <a-tag v-for="r in dbInbound.regionList" :key="r" color="purple">[[ r ]]</a-tag>
                                 </template>
                                 <a-tag v-else color="green">不限制</a-tag>
+                                <!-- 并存标记只报事实、不做分级：分级等于面板替管理员
+                                     下判断，而阈值调不好告警就变噪声。 -->
+                                <a-tooltip v-if="coexistOf(dbInbound.id)">
+                                    <template slot="title">
+                                        最近 7 天有 [[ coexistOf(dbInbound.id).hours ]] 小时，
+                                        <template v-if="coexistOf(dbInbound.id).byIp">
+                                            不同 IP 在同时使用这个节点（归属地库未加载，只能按 IP 判定）
+                                        </template>
+                                        <template v-else>
+                                            不同地区的 IP 在同时使用这个节点
+                                        </template>
+                                        。点击查看明细。
+                                    </template>
+                                    <a-tag color="orange" style="cursor: pointer"
+                                           @click="sharingModal.show(dbInbound)">
+                                        并存 [[ coexistOf(dbInbound.id).hours ]]h /
+                                        <template v-if="coexistOf(dbInbound.id).byIp">
+                                            [[ coexistOf(dbInbound.id).ips ]] IP
+                                        </template>
+                                        <template v-else>
+                                            [[ coexistOf(dbInbound.id).provinces.length ]] 省
+                                        </template>
+                                    </a-tag>
+                                </a-tooltip>
                             </template>
                             <template slot="online" slot-scope="text, dbInbound">
                                 <template v-if="onlineCountOf(dbInbound.id).supported">
@@ -403,6 +427,7 @@
             onlineCountTimer: null,
             // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
             kickBanSeconds: 0,
+            coexistMap: {},
         },
         methods: {
             loading(spinning=true) {
@@ -416,6 +441,18 @@
                     return;
                 }
                 this.setInbounds(msg.obj);
+                this.loadCoexist();
+            },
+            coexistOf(inboundId) {
+                return this.coexistMap[inboundId] || null;
+            },
+            // 单独拉一次，不塞进入站列表主接口：这个聚合查询失败时列表要
+            // 照常渲染，只是没有并存标记。
+            async loadCoexist() {
+                const msg = await HttpUtil.post('/aui/inbound/sharing/summary');
+                if (msg.success) {
+                    this.coexistMap = msg.obj || {};
+                }
             },
             setInbounds(dbInbounds) {
                 this.inbounds.splice(0);
@@ -781,6 +818,18 @@
             // 与展开行同频。两者共用同一份采样快照（sample() 有 500ms 闸门），
             // 所以多开一个轮询不会增加读内核连接表的次数。
             this.onlineCountTimer = setInterval(() => this.loadOnlineCounts(), 2000);
+            // sharing_modal.html 有自己的 Vue 根实例（照 access_log_modal 的
+            // 做法），两棵树之间靠事件通信。
+            window.addEventListener('sharing-adopt-regions', (e) => {
+                const dbInbound = this.dbInbounds.find(i => i.id === e.detail.inboundId);
+                if (!dbInbound) return;
+                // openEditInbound 内部走 inModal.show，它会 new 一份 DBInbound，
+                // 所以要在 show 之后再改 inModal.dbInbound，改传进去的那个无效。
+                this.openEditInbound(dbInbound);
+                this.$nextTick(() => {
+                    inModal.dbInbound.regionList = e.detail.regions.slice();
+                });
+            });
         },
         beforeDestroy() {
             if (this.onlineTimer != null) {
@@ -825,5 +874,6 @@
 {{template "inboundInfoModal"}}
 {{template "renewModal"}}
 {{template "accessLogModal"}}
+{{template "sharingModal"}}
 </body>
 </html>

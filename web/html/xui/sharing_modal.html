@@ -1,0 +1,132 @@
+{{define "sharingModal"}}
+<a-modal id="sharing-modal" v-model="sharingModal.visible" :title="sharingModal.title"
+         :closable="true" :mask-closable="true" width="900px" :footer="null">
+    <a-alert v-if="sharingModal.stat.byIp" type="warning" show-icon style="margin-bottom: 12px"
+             message="当前只能按 IP 判定，不是按地区"
+             description="IP 归属地库未加载，或该入站的来源都是 IPv6（归属地库只收录 IPv4）。这种情况下同一个人的手机与宽带会被算成两个来源，误报率远高于按省份判定。">
+    </a-alert>
+
+    <a-descriptions size="small" bordered :column="2" style="margin-bottom: 12px">
+        <a-descriptions-item label="并存时长">
+            <a-tag color="orange">[[ sharingModal.stat.hours ]] 小时</a-tag>
+            <span style="color: rgba(0,0,0,.45)">最近 [[ sharingModal.windowDays ]] 天</span>
+        </a-descriptions-item>
+        <a-descriptions-item :label="sharingModal.stat.byIp ? '涉及来源' : '涉及地区'">
+            <template v-if="sharingModal.stat.byIp">[[ sharingModal.stat.ips ]] 个 IP</template>
+            <template v-else>
+                <a-tag v-for="p in sharingModal.stat.provinces" :key="p" color="red">[[ p ]]</a-tag>
+            </template>
+        </a-descriptions-item>
+    </a-descriptions>
+
+    <a-card size="small" title="地区限制建议" style="margin-bottom: 12px"
+            v-if="sharingModal.suggestion.suggested.length > 0">
+        <template slot="extra">
+            <a-button type="primary" size="small" @click="sharingModal.adopt()">填入地区限制</a-button>
+        </template>
+        <p style="margin-bottom: 8px">
+            按最近 [[ sharingModal.windowDays ]] 天的活跃时长，覆盖 95% 的地区是：
+            <a-tag v-for="p in sharingModal.suggestion.suggested" :key="p"
+                   :color="sharingModal.isCoexisting(p) ? 'red' : 'purple'">[[ p ]]</a-tag>
+        </p>
+        <a-alert v-if="sharingModal.suggestion.coexisting.length > 0" type="error" show-icon
+                 message="标红的地区出现在并存记录里，请先判断再采纳"
+                 description="如果这个节点确实正在被共享，直接采纳会把对方所在的地区一并放行——等于把共享合法化，而面板不会有任何提示。面板分不清这是买家还是你自己老家常挂的设备，所以只标出来，由你决定删掉哪个。">
+        </a-alert>
+        <a-alert v-else type="info" show-icon
+                 message="采纳后该入站将只监听 IPv4"
+                 description="启用地区限制会让入站强制监听 0.0.0.0，通过 IPv6 连接的客户端会立刻连不上。确认保存前请留意这一点。">
+        </a-alert>
+    </a-card>
+
+    <a-table :columns="sharingModal.columns" :data-source="sharingModal.hours"
+             :row-key="h => h.t" :pagination="{ pageSize: 10 }" size="small">
+        <template slot="label" slot-scope="text, h">[[ h.label ]]</template>
+        <template slot="entries" slot-scope="text, h">
+            <a-tag v-for="e in h.entries" :key="e.ip" :color="e.province ? 'red' : 'default'">
+                [[ e.province || '归属地未知' ]] · [[ e.ip ]] · [[ sharingModal.minutes(e.activeSeconds) ]]
+            </a-tag>
+        </template>
+    </a-table>
+    <p style="margin-top: 8px; color: rgba(0,0,0,.45)">
+        只列出发生过并存的小时，最多回溯 [[ sharingModal.retentionDays ]] 天。时间按面板设置的时区显示。
+    </p>
+
+    <!-- 设计文档 §8/§9 要求这几条必须出现在界面上，不能只写在文档里：
+         管理员据此判断的是要不要停掉一个人的服务，判据的边界必须和判据
+         一起摆在他面前。 -->
+    <a-collapse :bordered="false" style="margin-top: 8px">
+        <a-collapse-panel key="limits" header="这个判定能说明什么、不能说明什么">
+            <p><b>并存不等于转卖。</b>运营商出口会漂移——手机在一小时内从一个省的出口切到另一个省，
+                是真实存在的误报源。你自己在老家常挂一台设备、人在外地用手机，看起来也和转卖一模一样。
+                所以这里只报事实，不做任何自动处置，判断权在你。</p>
+            <p><b>错峰共享检测不到。</b>白天你用、晚上他用，落在不同小时，不构成并存。
+                抓这种情况需要「一段时间内去重 IP 数」之类的指标，而正常用户 7 天十几个 IP、
+                横跨两三个省是常态，误报率高到没法用。</p>
+            <p><b>更根本的一条：</b>vmess / vless 的凭证就是一个 UUID，拿到就能复制，
+                技术上做不到「确保只有你自己用」。能做的是抬高共享成本、让共享无法隐藏：
+                并发限制让共享难用，限速让共享不值，这个检测让共享被看见。
+                任何声称能「杜绝」的做法，实际效果都只是给不懂技术的人制造麻烦，
+                代价却是你自己的正常用户被误伤。</p>
+        </a-collapse-panel>
+    </a-collapse>
+</a-modal>
+<script>
+
+    const sharingModal = {
+        visible: false,
+        title: '',
+        inboundId: 0,
+        stat: { hours: 0, provinces: [], byIp: false, ips: 0 },
+        suggestion: { suggested: [], coexisting: [] },
+        hours: [],
+        windowDays: 7,
+        retentionDays: 30,
+        columns: [
+            { title: '时段', align: 'left', width: 160, scopedSlots: { customRender: 'label' } },
+            { title: '同时活跃的来源', align: 'left', scopedSlots: { customRender: 'entries' } },
+        ],
+
+        isCoexisting(province) {
+            return this.suggestion.coexisting.indexOf(province) >= 0;
+        },
+
+        minutes(seconds) {
+            const m = Math.round(seconds / 60);
+            return m > 0 ? m + ' 分钟' : '不足 1 分钟';
+        },
+
+        async show(dbInbound) {
+            this.inboundId = dbInbound.id;
+            this.title = '共享检测 - ' + dbInbound.remark;
+            this.hours = [];
+            this.visible = true;
+            const msg = await HttpUtil.post('/aui/inbound/sharing/detail/' + dbInbound.id);
+            if (!msg.success) {
+                return;
+            }
+            this.stat = msg.obj.stat;
+            this.suggestion = msg.obj.suggestion;
+            this.hours = msg.obj.hours;
+            this.windowDays = msg.obj.windowDays;
+            this.retentionDays = msg.obj.retentionDays;
+        },
+
+        // 只把建议填进编辑框，不直接保存：管理员确认后走现有的保存流程，
+        // 复用 EncodeRegionsStrict 的校验与整条配置生成链，不新开写入路径。
+        adopt() {
+            this.visible = false;
+            window.dispatchEvent(new CustomEvent('sharing-adopt-regions', {
+                detail: { inboundId: this.inboundId, regions: this.suggestion.suggested.slice() },
+            }));
+        },
+    };
+
+    new Vue({
+        delimiters: ['[[', ']]'],
+        el: '#sharing-modal',
+        data: { sharingModal },
+    });
+
+</script>
+{{end}}
