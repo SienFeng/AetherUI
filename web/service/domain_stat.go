@@ -281,7 +281,7 @@ const (
 
 // TopDomainRow 是榜单里的一行。
 //
-// Up/Down 在第一期恒为 0，前端靠 TopDomainResult.Metered 决定是否显示这两列——
+// Up/Down 在未计量时恒为 0，前端靠 TopDomainResult.Metered 决定是否显示这两列——
 // 显示一列恒为 0 的「上传」会被当成「他没上传过」，比不显示更糟。
 type TopDomainRow struct {
 	Domain string `json:"domain"`
@@ -290,14 +290,65 @@ type TopDomainRow struct {
 	Down   int64  `json:"down"`
 }
 
+// TopDomainOrder 是榜单的排序维度。
+type TopDomainOrder string
+
+const (
+	TopOrderCount TopDomainOrder = "count"
+	TopOrderUp    TopDomainOrder = "up"
+	TopOrderDown  TopDomainOrder = "down"
+)
+
+// normalizeTopOrder 把档位翻译成 (实际生效值, ORDER BY 子句)。
+//
+// 未知值回落 count——这是个展示接口，一个拼错的参数不该变成报错弹窗。
+// 排序键末位一律用域名字典序兜底：数值相同时顺序抖动会让自动刷新的榜单
+// 里的行无端跳动。
+func normalizeTopOrder(o TopDomainOrder) (TopDomainOrder, string) {
+	switch o {
+	case TopOrderUp:
+		return TopOrderUp, "up desc, domain asc"
+	case TopOrderDown:
+		return TopOrderDown, "down desc, domain asc"
+	default:
+		return TopOrderCount, "count desc, domain asc"
+	}
+}
+
+// TopDomainCoverage 说明这份榜单覆盖了该入站多大比例的流量。
+//
+// 分子来自 DomainStat 的字节列（计量出站数出来的），分母来自 TrafficBucket
+// （入站计数器数出来的）。两者同库、同粒度、同对齐、同一次 GetTraffic 采集，
+// 可比性是结构性的。
+//
+// 它仍然是**近似值**：入站计的是客户端与面板之间的加密流，出站计的是面板与
+// 目标之间的流，两者相差一层协议开销与握手，所以覆盖率结构性地小于 100%。
+// UI 必须如实标注为「约」。
+//
+// 差额有三部分：被管理员自己的分流规则带走的流量、走默认出站但不在计量池里
+// 的域名、以及上面那层协议开销。比例低时榜单不可信，比例高时榜单就是答案——
+// 这是覆盖度唯一的用途。
+type TopDomainCoverage struct {
+	MeteredBytes int64 `json:"meteredBytes"`
+	TotalBytes   int64 `json:"totalBytes"`
+	// Ratio 为 nil 表示分母为 0，界面上整行不显示。显示 0% 会被理解成
+	// 「一点都没归因到」，那是另一回事。
+	Ratio *float64 `json:"ratio"`
+}
+
 // TopDomainResult 是榜单接口的返回体。
 type TopDomainResult struct {
-	// Metered 为 false 表示这批数据只有访问次数，没有字节数。第二期上线后
-	// 才为 true。
+	// Metered 为 false 表示这批数据只有访问次数，没有字节数。判据是「该入站
+	// 在 meter_domains 里至少有一行未在冷却」——池表就是生成端读的那张表，
+	// 用它两侧永远一致；用「配置里真的有计量规则」做判据则要反推一次配置生成
+	// 的结果，那条通路不存在，硬造只会多一个会与生成端漂移的真相源。
 	Metered bool           `json:"metered"`
 	Range   string         `json:"range"` // 实际生效的档位，前端据此回显
+	OrderBy string         `json:"orderBy"`
 	Limit   int            `json:"limit"`
 	List    []TopDomainRow `json:"list"`
+	// Coverage 在 Metered 为 false 时为 nil。
+	Coverage *TopDomainCoverage `json:"coverage"`
 }
 
 // topRangeSpec 把档位翻译成（粒度, 回溯时长）。未知档位回落 24h——
@@ -334,18 +385,21 @@ func topRangeSpec(r TopDomainRange) (model.TrafficGranularity, time.Duration, To
 // 不对齐的话，「最近 24 小时」的起点会落在某个小时的中间，而桶是整点的，
 // 边界那一桶要么整个漏掉要么整个算进来，取决于当前分钟数——同一个查询
 // 在一小时内会给出两种结果。
-func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit int, now time.Time) (*TopDomainResult, error) {
+func (s *DomainStatService) TopDomains(
+	inboundId int, r TopDomainRange, order TopDomainOrder, limit int, now time.Time,
+) (*TopDomainResult, error) {
 	inboundService := InboundService{}
 	if _, err := inboundService.GetInbound(inboundId); err != nil {
 		return nil, err
 	}
 	g, back, effective := topRangeSpec(r)
+	effectiveOrder, orderClause := normalizeTopOrder(order)
 	if limit <= 0 {
 		limit = 10
 	}
 	result := &TopDomainResult{
-		Metered: false, // 第二期上线后改为真实的计量状态
 		Range:   string(effective),
+		OrderBy: string(effectiveOrder),
 		Limit:   limit,
 		List:    make([]TopDomainRow, 0, limit), // 不能给前端 null
 	}
@@ -377,9 +431,7 @@ func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit in
 		// 所有档位都多覆盖一个桶，7d 实际是 8 个日桶、15d 是 16 个。
 		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
 		Group("domain").
-		// 次数相同时按域名字典序兜底，让同一份数据每次返回的顺序一致——
-		// 顺序抖动会让自动刷新时榜单里的行无端跳动。
-		Order("count desc, domain asc").
+		Order(orderClause).
 		Limit(limit).
 		Scan(&rows).Error
 	if err != nil {
@@ -388,7 +440,74 @@ func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit in
 	if rows != nil {
 		result.List = rows
 	}
+
+	metered, err := s.inboundIsMetered(db, inboundId, now)
+	if err != nil {
+		return nil, err
+	}
+	result.Metered = metered
+	if metered {
+		coverage, err := s.coverage(db, g, inboundId, since)
+		if err != nil {
+			return nil, err
+		}
+		result.Coverage = coverage
+	}
 	return result, nil
+}
+
+// inboundIsMetered 判断这个入站当前是否有域名正在被计量。
+//
+// 已知的不精确处：入站被停用时不生成计量规则，但池行还在（生成期刻意不删，
+// 入站可能只是临时停用），于是这里仍会返回 true。后果只是给一个没有流量的
+// 入站显示了字节列与 0% 覆盖率，可以接受；反过来把它做精确，就要在查询路径上
+// 引入一次入站启用状态的判断，而那个状态与「历史上这段时间是否被计量过」
+// 根本不是一回事——榜单查的是过去 15 天，入站是此刻的状态。
+func (s *DomainStatService) inboundIsMetered(db *gorm.DB, inboundId int, now time.Time) (bool, error) {
+	var n int64
+	err := db.Model(&model.MeterDomain{}).
+		Where("inbound_id = ? and cooldown_until <= ?", inboundId, now.Unix()).
+		Count(&n).Error
+	return n > 0, err
+}
+
+// coverage 算出这份榜单覆盖了该入站多大比例的流量。
+func (s *DomainStatService) coverage(
+	db *gorm.DB, g model.TrafficGranularity, inboundId int, since int64,
+) (*TopDomainCoverage, error) {
+	var metered struct{ Up, Down int64 }
+	err := db.Model(&model.DomainStat{}).
+		Select("coalesce(sum(up),0) as up, coalesce(sum(down),0) as down").
+		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
+		Scan(&metered).Error
+	if err != nil {
+		return nil, err
+	}
+	var total struct{ Up, Down int64 }
+	err = db.Model(&model.TrafficBucket{}).
+		Select("coalesce(sum(up),0) as up, coalesce(sum(down),0) as down").
+		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
+		Scan(&total).Error
+	if err != nil {
+		return nil, err
+	}
+	out := &TopDomainCoverage{
+		MeteredBytes: metered.Up + metered.Down,
+		TotalBytes:   total.Up + total.Down,
+	}
+	if out.TotalBytes > 0 {
+		// 钳到 [0,1]：协议开销在极端情况下可能让比值越界，显示一个 103%
+		// 或负数会让整块数据失去可信度。
+		ratio := float64(out.MeteredBytes) / float64(out.TotalBytes)
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		out.Ratio = &ratio
+	}
+	return out, nil
 }
 
 // Cleanup 删除某一级中早于保留期的行，返回删除行数。
