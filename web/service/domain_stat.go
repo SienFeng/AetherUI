@@ -231,11 +231,19 @@ func topRangeSpec(r TopDomainRange) (model.TrafficGranularity, time.Duration, To
 
 // TopDomains 返回某入站在给定档位内访问次数最多的域名。
 //
+// 校验入站存在性：不校验的话，一个不存在的入站 id 会返回一张空榜单，
+// 管理员会把它理解成「这个人没访问过任何网站」，而不是「你查的这个入站
+// 不存在」。
+//
 // 起点按面板时区对齐后回溯，与用量图的刻度算法一致：不对齐的话，
 // 「最近 24 小时」的起点会落在某个小时的中间，而桶是整点的，边界那一桶
 // 要么整个漏掉要么整个算进来，取决于当前分钟数——同一个查询在一小时内
 // 会给出两种结果。
 func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit int, now time.Time) (*TopDomainResult, error) {
+	inboundService := InboundService{}
+	if _, err := inboundService.GetInbound(inboundId); err != nil {
+		return nil, err
+	}
 	g, back, effective := topRangeSpec(r)
 	if limit <= 0 {
 		limit = 10

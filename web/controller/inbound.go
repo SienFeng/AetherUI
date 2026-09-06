@@ -300,12 +300,6 @@ func (a *InboundController) getTopDomains(c *gin.Context) {
 	if form.Limit <= 0 || form.Limit > 50 {
 		form.Limit = 10
 	}
-	// 入站必须存在：不校验的话，一个不存在的 id 会返回一张空榜单，
-	// 看起来像「这个人没访问过任何网站」。
-	if _, err := a.inboundService.GetInbound(id); err != nil {
-		jsonMsg(c, "获取域名榜单", err)
-		return
-	}
 	result, err := a.domainStatService.TopDomains(id, service.TopDomainRange(form.Range), form.Limit, time.Now())
 	if err != nil {
 		jsonMsg(c, "获取域名榜单", err)
