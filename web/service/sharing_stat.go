@@ -99,3 +99,83 @@ func computeCoexist(rows []model.InboundIPHour) CoexistStat {
 	}
 	return stat
 }
+
+// regionSuggestCoverage 是建议集合要覆盖的活跃时长占比。
+//
+// 不取 100%：一次出差、一次连错网络都会在列表里留下一个只占千分之几的
+// 省份，全收进来等于建议「不限制」。95% 能盖住常住地与常去地，又能把
+// 长尾切掉。
+const regionSuggestCoverage = 0.95
+
+// RegionSuggestion 是地区限制的建议值。
+type RegionSuggestion struct {
+	// Suggested 是按活跃时长降序累计、覆盖到 95% 的省份，升序输出。
+	Suggested []string `json:"suggested"`
+
+	// Coexisting 是 Suggested 里同时出现在并存记录中的省份。
+	//
+	// **刻意不从 Suggested 里剔除。** 面板分不清「买家的省」和「用户老家
+	// 常挂的设备」，猜错两个方向都是错的：剔错了管理员采纳后把自己的用户
+	// 挡在门外，不剔则可能把买家放行。标出来交给管理员判断是唯一诚实的
+	// 做法——而且这一步若猜错完全静默：界面正常、xray 返回 Configuration
+	// OK、面板显示 running，只是流量走对了不该走的人。
+	Coexisting []string `json:"coexisting"`
+}
+
+// suggestRegions 从窗口内的行算出地区限制的建议值。
+func suggestRegions(rows []model.InboundIPHour) RegionSuggestion {
+	total := 0
+	byProvince := map[string]int{}
+	for _, r := range rows {
+		// 归属地未知的行不参与建议：空串既不是合法省份，填进地区限制
+		// 也没有任何意义。
+		if r.Province == "" {
+			continue
+		}
+		byProvince[r.Province] += r.ActiveSeconds
+		total += r.ActiveSeconds
+	}
+	if total == 0 {
+		return RegionSuggestion{}
+	}
+
+	type entry struct {
+		province string
+		seconds  int
+	}
+	list := make([]entry, 0, len(byProvince))
+	for p, s := range byProvince {
+		list = append(list, entry{p, s})
+	}
+	// 时长降序；时长相同按省份名升序。第二级排序不是可省的——遍历 map
+	// 的顺序不定，没有它时两个时长相同的省份谁进 95% 会随机变化。
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].seconds != list[j].seconds {
+			return list[i].seconds > list[j].seconds
+		}
+		return list[i].province < list[j].province
+	})
+
+	acc := 0
+	picked := make([]string, 0, len(list))
+	for _, e := range list {
+		picked = append(picked, e.province)
+		acc += e.seconds
+		if float64(acc) >= regionSuggestCoverage*float64(total) {
+			break
+		}
+	}
+	sort.Strings(picked)
+
+	inCoexist := map[string]bool{}
+	for _, p := range computeCoexist(rows).Provinces {
+		inCoexist[p] = true
+	}
+	flagged := make([]string, 0, len(picked))
+	for _, p := range picked {
+		if inCoexist[p] {
+			flagged = append(flagged, p)
+		}
+	}
+	return RegionSuggestion{Suggested: picked, Coexisting: flagged}
+}

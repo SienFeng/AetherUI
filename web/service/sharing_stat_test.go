@@ -125,3 +125,63 @@ func TestCoexistFlaggedNeedsDisplayMinimum(t *testing.T) {
 		t.Error("达到显示下限就该打标")
 	}
 }
+
+func TestSuggestRegionsCoversNinetyFivePercent(t *testing.T) {
+	const h = 3600
+	// 江苏 900 秒（90%）、上海 80（8%）、浙江 20（2%）。
+	// 90 不够 95，加上海到 98 够了，浙江这条长尾被切掉——一次出差、
+	// 一次连错网络不该让建议退化成「几乎不限制」。
+	rows := []model.InboundIPHour{
+		hourRow(1, 0*h, "1.1.1.1", "江苏", 900),
+		hourRow(1, 1*h, "2.2.2.2", "上海", 80),
+		hourRow(1, 2*h, "3.3.3.3", "浙江", 20),
+	}
+	got := suggestRegions(rows).Suggested
+	want := []string{"上海", "江苏"} // 升序；UTF-8 下 "上" < "江"
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Suggested = %v, want %v", got, want)
+	}
+}
+
+// 若该入站正在被共享，建议值会把买家的省份一并算进去。**不自动剔除**，
+// 只标出来：面板分不清「买家的省」和「用户老家常挂的设备」，猜错两个
+// 方向都是错的。直接采纳等于把转卖合法化，而这一步完全静默——界面正常、
+// 配置正常生成，只是流量走对了买家。
+func TestSuggestRegionsFlagsCoexistingWithoutRemoving(t *testing.T) {
+	const h = 3600
+	rows := []model.InboundIPHour{
+		hourRow(1, 0*h, "1.1.1.1", "江苏", 1800),
+		hourRow(1, 0*h, "2.2.2.2", "上海", 1800),
+	}
+	got := suggestRegions(rows)
+	want := []string{"上海", "江苏"}
+	if !reflect.DeepEqual(got.Suggested, want) {
+		t.Errorf("Suggested = %v, want %v（不得自动剔除并存省份）", got.Suggested, want)
+	}
+	if !reflect.DeepEqual(got.Coexisting, want) {
+		t.Errorf("Coexisting = %v, want %v", got.Coexisting, want)
+	}
+}
+
+func TestSuggestRegionsIgnoresUnknownProvince(t *testing.T) {
+	const h = 3600
+	// 归属地未知的行不参与建议：拿空串当省份填进地区限制会让整份配置
+	// 生成失败（EncodeRegionsStrict 会拒），或者更糟——静默变成不限制。
+	rows := []model.InboundIPHour{
+		hourRow(1, 0*h, "1.1.1.1", "江苏", 3600),
+		hourRow(1, 0*h, "2.2.2.2", "", 3600),
+	}
+	got := suggestRegions(rows).Suggested
+	want := []string{"江苏"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Suggested = %v, want %v", got, want)
+	}
+}
+
+func TestSuggestRegionsEmptyWhenNoProvinceAtAll(t *testing.T) {
+	rows := []model.InboundIPHour{hourRow(1, 0, "1.1.1.1", "", 3600)}
+	got := suggestRegions(rows)
+	if len(got.Suggested) != 0 || len(got.Coexisting) != 0 {
+		t.Errorf("全未知时应给空建议, got %+v", got)
+	}
+}
