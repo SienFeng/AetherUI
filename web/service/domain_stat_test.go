@@ -56,7 +56,7 @@ func TestAggregateWritesBothGranularities(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
-	n, err := (&DomainStatService{}).Aggregate(at)
+	n, err := (&DomainStatService{}).Aggregate()
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
@@ -112,10 +112,10 @@ func TestAggregateIsIdempotent(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 	svc := &DomainStatService{}
-	if _, err := svc.Aggregate(at); err != nil {
+	if _, err := svc.Aggregate(); err != nil {
 		t.Fatalf("第一次 Aggregate: %v", err)
 	}
-	n, err := svc.Aggregate(at)
+	n, err := svc.Aggregate()
 	if err != nil {
 		t.Fatalf("第二次 Aggregate: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAggregateSkipsUnknownInbound(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Store: %v", err)
 	}
-	if _, err := (&DomainStatService{}).Aggregate(at); err != nil {
+	if _, err := (&DomainStatService{}).Aggregate(); err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
 	if rows := listDomainStats(t, model.GranularityHour); len(rows) != 0 {

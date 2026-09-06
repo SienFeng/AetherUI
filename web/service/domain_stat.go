@@ -1,6 +1,7 @@
 package service
 
 import (
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -30,10 +31,19 @@ type DomainStatService struct {
 	settingService SettingService
 }
 
+// domainStatLock 防止 Aggregate 的重叠调用。首次启用时库里可能积压几十万行，
+// domainStatMaxRounds 轮循环有可能跑过 cron 的调度周期（这里没有配
+// SkipIfStillRunning，只有 cron.Recover）；不加锁的话下一次触发会在位点
+// 推进前读到同一批行，两个事务各自提交，同一批访问日志被计两次。
+var domainStatLock sync.Mutex
+
 // Aggregate 把访问日志里位点之后的记录聚合成域名分时桶，返回本次消费的行数。
 //
 // 库不可用时静默返回 0：榜单不可用不该让调用方出错。
-func (s *DomainStatService) Aggregate(now time.Time) (int, error) {
+func (s *DomainStatService) Aggregate() (int, error) {
+	domainStatLock.Lock()
+	defer domainStatLock.Unlock()
+
 	tdb := database.GetTrafficDB()
 	adb := database.GetAccessLogDB()
 	if tdb == nil || adb == nil {
