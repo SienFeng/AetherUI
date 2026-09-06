@@ -154,10 +154,10 @@ func TestAggregateSkipsUnknownInbound(t *testing.T) {
 //
 // 位点现在以 (LastLogTime, LastLogId) 为复合序、Time 为主序，这个场景不再
 // 需要任何自愈或回退逻辑：清空后新写入的 d.com，不管它复用到的 id 是几，
-// 只要它的 Time 晚于位点记录的 Time，就会被 Where(time > 位点时间 OR ...)
-// 正常读到——这条测试与
-// TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete、
-// TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData、
+// 只要它的 Time 晚于位点记录的 Time，就会被 Where(time >= 位点时间 AND
+// (time > 位点时间 OR id > 位点id)) 正常读到——这条测试与
+// TestAggregateDoesNotDoubleCountAfterPartialDelete、
+// TestAggregateHandlesMixedPartialDeleteAndNewData、
 // TestAggregateHandlesNewDataExceedingReleasedIdRange 合起来覆盖了 id 复用
 // 的几种典型场景，均无需特殊处理即可正确工作（函数名仍保留"Recovers"是
 // 因为它描述的运维场景没变，不是因为代码里还有一段"恢复"逻辑）。
@@ -252,7 +252,7 @@ func TestAggregateRecoversAfterAccessLogIdsReset(t *testing.T) {
 // LastLogId) 为复合序、Time 为主序，天然处理好这个场景：A 剩下的那一行
 // 时间不晚于位点记录的 Time（它在删除前就已经被聚合过），Where 子句
 // 自然把它排除在外，不需要任何专门的判断逻辑。
-func TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete(t *testing.T) {
+func TestAggregateDoesNotDoubleCountAfterPartialDelete(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31012, "甲")
 	other := mkTrafficInbound(t, 31013, "乙")
@@ -316,7 +316,7 @@ func TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete(t *testing.T) {
 // 方案（按 id 判断是否需要自愈）完全检测不到、新数据永久丢失且无任何报错
 // 的真实缺陷；这里的场景③（新旧数量相等）用旧方案则表现为"自愈能检测到、
 // 但归零会导致 A 被重复计数"。两条测试合起来才是完整的覆盖。
-func TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData(t *testing.T) {
+func TestAggregateHandlesMixedPartialDeleteAndNewData(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31014, "甲")
 	other := mkTrafficInbound(t, 31015, "乙")
@@ -471,7 +471,7 @@ func TestAggregateHandlesNewDataExceedingReleasedIdRange(t *testing.T) {
 }
 
 // 边界①：首次运行、access_log 完全为空。cursor 与 LastLogTime 都是零值，
-// Where(time > 0 OR (time = 0 AND id > 0)) 在空表上查不到任何行，正常
+// Where(time >= 0 AND (time > 0 OR id > 0)) 在空表上查不到任何行，正常
 // 结束，不需要任何特判。这条测试钉住这个边界不 panic、不写出任何脏位点。
 func TestAggregateNoOpOnEmptyAccessLog(t *testing.T) {
 	setupDomainStatTest(t)
@@ -610,6 +610,13 @@ func TestAggregateMigrationWithEmptyAccessLogResetsCleanly(t *testing.T) {
 // 重复计数；②真的发生跳过时（后写入的一行 Time 反而更早），后果是这一行
 // 永久不被计入（榜单少一段数据），而不是任何形式的重复计数——方向落在
 // 安全侧，这是本项目一贯的取舍（"宁可漏读也不能重复计入"）。
+//
+// **重要：这条测试的 n == 0 断言守的是一个刻意接受的取舍，不是正确性
+// 不变量。** 如果将来给这类跳过加缓解措施（比如给回拨预留一个回看窗口、
+// 允许 Time 在一定范围内倒退仍被读到），这条测试会先变红——那不代表改坏
+// 了东西，而是这条测试在提醒"你正在动一个已知取舍，确认这是你想要的
+// 变化"。不要因为这条测试失败就假设自己引入了 bug，也不要为了让它通过
+// 而回避处理真正的缓解需求。
 func TestAggregateClockRollbackSkipsRatherThanDoubleCounts(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31022, "甲")
@@ -742,6 +749,66 @@ func TestAggregateHandlesBatchBoundaryMidMillisecond(t *testing.T) {
 		if r.Count != 1 {
 			t.Fatalf("域名 %s 计数 = %d，期望 1（不能因跨批次边界被重复计入）", r.Domain, r.Count)
 		}
+	}
+}
+
+// 位点跑到未来：系统时钟一度超前（NTP 故障、date -s 打错、虚拟机快照回滚后
+// 再前进）时写下的日志会把位点顶到未来某个时刻；时钟校正回来之后，
+// time >= 位点 从此永远不可能被真实数据满足，聚合永久停摆——且这次停摆
+// 无界（幅度等于时钟当时前跳的量）、没有任何一行日志、也不会自愈
+// （AccessLogCleanupJob 的清理条件是 time < cutoff，永远删不到这些
+// "来自未来"的行）。
+//
+// 这条测试只断言可观察的行为（停摆、不 panic、不自愈），不断言
+// logger.Warning 的具体内容——本项目的 logger 直接写 os.Stderr，没有可
+// 注入的 writer，其它测试里对 WARNING 的验证也都是靠人工看 `go test -v`
+// 的输出，不是程序化断言，这里保持一致。**明确不做自愈**：断言的是位点
+// 保持不动、新真实数据也读不到，这是刻意接受的取舍（见 DomainStatCursor
+// 注释与设计文档 §4.3 的"残留代价"），不是待修的 bug——将来任何缓解
+// 措施都会先撞红这条测试，改的时候要清楚自己在动一个已知取舍，不是在
+// 修一个遗留缺陷。
+func TestAggregateWarnsAndStopsWhenPositionIsInTheFuture(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31024, "甲")
+
+	// 直接把位点摆到未来 48 小时——模拟"时钟一度超前，写下的日志把位点
+	// 顶到未来，随后时钟校正回来"这个故障后的状态，不需要真的操纵系统
+	// 时钟。48 小时明显超过代码里 24 小时的告警容差。
+	future := time.Now().Add(48 * time.Hour)
+	tdb := database.GetTrafficDB()
+	if err := tdb.Create(&model.DomainStatCursor{Id: 1, LastLogId: 5, LastLogTime: future.UnixMilli()}).Error; err != nil {
+		t.Fatalf("写入未来位点: %v", err)
+	}
+
+	// 时钟校正回来之后写的真实数据，Time 是当前时刻——远早于位点里那个
+	// "未来"时刻，应该被永久跳过。
+	now := time.Now()
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: now, SourceIP: "1.2.3.4", Network: "tcp", Target: "stranded.example:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	n, err := svc.Aggregate()
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("消费了 %d 条，期望 0（位点在未来，真实数据的 Time 追不上它）", n)
+	}
+	if rows := listDomainStats(t, model.GranularityHour); len(rows) != 0 {
+		t.Errorf("写入了 %d 行，期望 0（不应该有任何自愈动作）", len(rows))
+	}
+
+	// 再跑一次，确认这是稳定的停摆而不是偶发：不 panic、不报错、不会
+	// 自己好起来。
+	n, err = svc.Aggregate()
+	if err != nil {
+		t.Fatalf("第二次 Aggregate: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("第二次消费了 %d 条，期望 0（停摆应该是持续的，不会自愈）", n)
 	}
 }
 

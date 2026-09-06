@@ -103,9 +103,22 @@ func (s *DomainStatService) Aggregate() (int, error) {
 		// 原地复用，而 time 是写入时刻，删除任何行都不会改变其余行的
 		// time，因此以 time 为主序之后，"id 是否失效"这件事不再存在，
 		// 不需要任何自愈或回退逻辑。
+		//
+		// 写成 time >= ? AND (time > ? OR id > ?) 而不是更直白的
+		// time > ? OR (time = ? AND id > ?)——两者逻辑完全等价（四种真值
+		// 组合逐一核对过：time>位点 命中；time=位点 且 id>位点id 命中；
+		// time=位点 且 id<=位点id 被内层排除；time<位点 被前导 time>=?
+		// 排除），区别只在查询计划：后者（纯 OR）在**绑定参数**下会让
+		// SQLite 放弃对 time 索引的定位式访问、退化成按索引顺序扫描全部
+		// 历史行——SQLite 只有在能看见两个 time 比较项是同一个常量时才能
+		// 把 OR 折成范围约束，绑定参数下看不见这一点，只有把参数内联成
+		// 字面量执行 EXPLAIN 才会得到误导性的"能走索引"的结论（本项目
+		// 曾经在这一点上判断错误，见设计文档 §4.3 的记录）。前导的
+		// time >= ? 让 SQLite 能先用索引定位到位点附近，代价从 O(位点
+		// 之前的全部历史行数) 降到 O(新增行数)，且不需要额外索引。
 		var logs []model.AccessLog
 		err = adb.Model(&model.AccessLog{}).
-			Where("time > ? OR (time = ? AND id > ?)", cursor.LastLogTime, cursor.LastLogTime, cursor.LastLogId).
+			Where("time >= ? AND (time > ? OR id > ?)", cursor.LastLogTime, cursor.LastLogTime, cursor.LastLogId).
 			Order("time asc, id asc").
 			Limit(domainStatBatchSize).
 			Find(&logs).Error
@@ -113,6 +126,44 @@ func (s *DomainStatService) Aggregate() (int, error) {
 			return total, err
 		}
 		if len(logs) == 0 {
+			// 空批次有两种截然不同的原因，但目前被编码成了同一个返回值
+			// (total, nil)，调用方（DomainStatJob）只在 n > 0 时才打日志，
+			// 二者从外部完全无法区分：
+			//   1. 已追平——位点确实是当前最新的，下一批数据还没写进来，
+			//      这是正常、每 10 分钟都会发生一次的情形。
+			//   2. 位点跑到了未来——系统时钟一度超前（NTP 故障、
+			//      `date -s` 打错、虚拟机快照回滚后再前进）时写下的日志
+			//      把位点顶到了未来某个时刻，时钟校正回来之后，
+			//      time >= 位点 从此永远不可能被满足（真实时间还没追上
+			//      那个未来时刻），聚合永久停摆——且这次停摆无界（幅度
+			//      等于时钟当时前跳的量，可能是几小时到几天）、没有任何
+			//      一行日志、也不会自愈：AccessLogCleanupJob 的清理条件
+			//      是 time < cutoff，永远删不到这些"来自未来"的行，它们
+			//      会一直留在表里但永远读不到。TopDomains 用
+			//      bucket_start >= since 圈定榜单窗口，这意味着故障期间
+			//      访问过的域名会永久钉在每一个档位的榜单里（因为它们
+			//      从未被移出"最近"的窗口——它们的桶起点本来就是未来）。
+			//
+			// 这里不做自愈（不下调位点）——前三轮反复证明，任何"自动把
+			// 位点往回调"的尝试都会在另一个场景下引入虚高或漏数，见
+			// DomainStatCursor 上方注释记录的 v1~v3 迭代史。只做侦测：
+			// 位点时间明显超前于当前真实时间时记一条 Warning，把"没有
+			// 任何一层会说话"的静默失败变成看得见的失败，剩下的交给
+			// 人工处理（清空 domain_stat_cursors 那一行，代价是重新
+			// 聚合一遍历史——这是需要人判断"值不值得"的操作，不适合
+			// 程序自己替管理员做主）。
+			//
+			// 24 小时的容差覆盖两类良性抖动，不是任意选的：面板与 xray
+			// 各自独立启动，重启窗口内若系统时区被改动，time.Local 是
+			// 进程内缓存、两个进程在这段窗口里对同一时刻的本地时间解读
+			// 可能整体错位最多 26 小时（不同时区偏移之差的极值）；再加上
+			// 普通的 NTP 抖动，24 小时是一个远超正常抖动、但仍能及时报出
+			// 真实故障的阈值。
+			if cursor.LastLogTime > 0 {
+				if future := time.UnixMilli(cursor.LastLogTime); future.Sub(time.Now()) > 24*time.Hour {
+					logger.Warningf("域名统计位点的时间(%s)超前于当前系统时间超过 24 小时，聚合已经停止且不会自愈——这通常是系统时钟曾经跳变导致的（NTP 故障、误设系统时间、虚拟机快照），需要人工确认后清空 domain_stat_cursors 表里 id=1 的那一行以重新开始聚合", future.Format(time.RFC3339))
+				}
+			}
 			return total, nil
 		}
 
