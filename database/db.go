@@ -212,6 +212,14 @@ func InitTrafficDB(dbPath string) error {
 	if err := tdb.AutoMigrate(&model.InboundIPHour{}); err != nil {
 		return err
 	}
+	// 域名统计与用量桶同库：分库理由相同（高频写入不该抢主库那把写锁），
+	// 而且两张表的清理挂在同一个每小时任务里。
+	if err := tdb.AutoMigrate(&model.DomainStat{}); err != nil {
+		return err
+	}
+	if err := tdb.AutoMigrate(&model.DomainStatCursor{}); err != nil {
+		return err
+	}
 	trafficDB = tdb
 	return nil
 }
