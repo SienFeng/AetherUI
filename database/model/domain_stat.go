@@ -50,17 +50,30 @@ type DomainStat struct {
 // 会让整个保存配置接口失败，端口、证书路径一起遭殃。一个纯内部的位点不值得
 // 付这个代价。
 //
-// 位点用 access_log 的自增 id 而不是时间戳：id 单调递增（AccessLogService.Query
-// 本来就依赖这一点来保证翻页稳定），面板停机再久也只是补算，既不会重复计算
-// 也不会跳过；按时间窗重算则需要「重算最近 N 小时」的启发式，停机超过 N 小时
-// 就静默丢数据。
+// 位点主体用 access_log 的自增 id 而不是时间戳：AccessLogService.Query 本来
+// 就依赖 id 定序保证翻页稳定，Where("id > 位点") 也比按时间窗重算简单直接。
+// 但 id 不是自己就能说明一切——GORM 的 sqlite 驱动对 primaryKey;autoIncrement
+// 生成的是裸 rowid 别名，没有 AUTOINCREMENT，新行的 id 恒为「当前表内
+// max(rowid) + 1」：删除入站（AccessLogService.DeleteByInbound）、孤儿清理、
+// 保留期清理都会删行，一旦删掉的行占据了当时最高的那批 id，后续新写入的行
+// 就会复用比位点更小的 id，单靠 id 无法分辨一行现存的低位 id 记录，究竟是
+// 删除前就已经聚合过的历史行，还是删除后落进同一 id 区间的全新数据。
 //
-// 前提是 access_log 的自增 id 单调不回退——但 GORM 的 sqlite 驱动对
-// primaryKey;autoIncrement 生成的是裸 rowid 别名，没有 AUTOINCREMENT，表被
-// 清空后（保留期清理或手工删库）新行的 id 会从 1 重新开始。DomainStatService.
-// Aggregate 里有一段自愈逻辑检测并纠正这种情形（见该函数注释），否则位点会
-// 永久超前、聚合永久停摆。
+// LastLogTime 就是为此而加的：记上次成功聚合那一批里最后一条记录的
+// AccessLog.Time（毫秒，同单位）。Time 是写入时刻，只会随时间推进，不因
+// 删除而倒退或复用，因此可以拿它问一个 id 回答不了的问题——「库里还有没有
+// 比我上次聚合的那一刻更晚的记录，却没被 id > 位点 读到？」——
+// DomainStatService.Aggregate 里的自愈逻辑正是靠这个判据检测位点是否失效
+// 并回退重新聚合，见该函数注释；只看 max(id) 与位点比较这条已经证明过是
+// 假前提（部分删除后又有新数据落回同一 id 区间的混合场景下，max(id) 可能
+// 又被顶回位点以上，连"位点已失效"都判断不出来）。
+//
+// AutoMigrate 给已存在的位点行加这一列时，LastLogTime 会是零值——自愈逻辑
+// 对「LastLogTime 为 0 但 LastLogId 已经 > 0」这个组合做了特判，当作位点
+// 仍然有效，否则会把这个从未跑过新判据的旧位点误判成失效、回退到 0 重新
+// 聚合已经聚合过的全部历史数据。
 type DomainStatCursor struct {
-	Id        int `gorm:"primaryKey"`
-	LastLogId int64
+	Id          int `gorm:"primaryKey"`
+	LastLogId   int64
+	LastLogTime int64
 }

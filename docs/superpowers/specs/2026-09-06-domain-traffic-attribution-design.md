@@ -159,12 +159,13 @@ SQLite 的 `ON CONFLICT` 按列的**集合**匹配唯一索引，不要求顺序
 
 ### 4.3 `model.DomainStatCursor`
 
-单行元数据表，同库，记「上次聚合到 `access_log` 的哪条 id」：
+单行元数据表，同库，记「上次聚合到 `access_log` 的哪条 id、那条记录写于何时」：
 
 ```go
 type DomainStatCursor struct {
-    Id        int   `gorm:"primaryKey"` // 恒为 1
-    LastLogId int64
+    Id          int   `gorm:"primaryKey"` // 恒为 1
+    LastLogId   int64
+    LastLogTime int64 // 毫秒，与 AccessLog.Time 同单位
 }
 ```
 
@@ -173,23 +174,65 @@ type DomainStatCursor struct {
 端口、证书路径一起遭殃。一个纯内部的聚合位点不值得付这个代价——与
 `2026-09-05-panel-version-update-design.md` 决定「版本缓存不落库」是同一个判断。
 
-**位点用 id 而不是时间戳。** `AccessLogService.Query` 已经依赖 `id desc` 保证翻页稳定（同一毫秒内多条记录
-靠 id 定序），`Store` 是批量插入、id 单调递增。用 id 做位点意味着面板停机再久也只是补算，
-既不会重复计算也不会跳过；而按时间窗重算需要「重算最近 N 小时」的启发式，停机超过 N 小时就静默丢数据。
+**位点主体用 id 而不是时间戳。** `AccessLogService.Query` 已经依赖 `id desc` 保证翻页稳定（同一毫秒内多条记录
+靠 id 定序），`Where("id > 位点")` 也比按时间窗重算简单直接。
 
-**前提是 `access_log` 的 id 单调不回退，而这个前提在表被清空过之后不成立。**
-`access_log` 的保留期清理（`AccessLogCleanupJob`）不看访问日志开关，无条件按保留期删行；
-管理员关闭访问日志超过保留期再打开，或手工删库腾空间，都会让整张表清空。GORM 的 sqlite 驱动对
-`primaryKey;autoIncrement` 生成的是裸 `integer`（rowid 别名），**没有** `AUTOINCREMENT`，
-表清空后新行的 id 会从 1 重新开始，而位点还停在被清空前的高位——`Where("id > 位点")` 从此恒为空，
-聚合永久停摆且没有任何一行日志（`DomainStatJob` 只在消费条数 > 0 时才打日志）。原先这里写的
-「面板停机再久也只是补算，不会跳过」在这个前提被打破时不成立：不是补算延迟，而是永久停摆。
+**但光有 id 不够——`access_log` 的自增 id 是可以被复用的 rowid，不是真正单调的序列。**
+这是本节最早的版本里被证伪的一条前提（当时写的是「id 单调递增，位点只会补算不会跳过」），
+记录下来是为了不要在将来重新犯同一个错误：GORM 的 sqlite 驱动对 `primaryKey;autoIncrement`
+生成的是裸 `integer`（rowid 别名），**没有** `AUTOINCREMENT`，新行的 id 恒为**当前表内
+`max(rowid) + 1`**。`access_log` 的保留期清理（`AccessLogCleanupJob`，不看访问日志开关）、
+`AccessLogService.DeleteByInbound`（接在 `InboundService.DelInbound`）、`PruneOrphans` 都会删行；
+只要被删掉的行占据了当时最高的那批 id（哪怕只是部分删除、表并未清空），后续新写入的行就会
+复用比位点更小的 id。此时单靠「当前 id 集合 + 旧位点」无法分辨一行现存的低位 id 记录，
+到底是**删除前就已经聚合过的历史行**（重读会静默虚高）还是**删除后落进同一 id 区间的全新
+数据**（跳过会静默漏数）——这两种情况甚至可能在同一次位点失效里同时出现（先删掉高位 id，
+又有新数据写回同一区间），那种混合场景下连"位点已经失效"这件事本身，光比较 `max(id)`
+与位点都判断不出来，因为新数据可能又把 `max(id)` 顶回位点以上。
 
-`DomainStatService.Aggregate` 现在有一段自愈逻辑兜底这个情形：某一轮批次读到 0 行、且位点 > 0 时，
-额外查一次 `access_log` 的 `max(id)`；`max(id) < 位点`（含表空时 `max` 为 0）说明表确实被清空重排过，
-而不是单纯追平，此时把位点归零并在本次调用内重试，而不是等下一个 10 分钟周期。只在读到空批次那一轮
-多这一次查询，正常运行时每轮都读得到数据，没有额外开销。回归测试见
-`web/service/domain_stat_test.go` 的 `TestAggregateRecoversAfterAccessLogIdsReset`。
+**`LastLogTime` 就是为堵上这个盲区而加的。** `AccessLog.Time` 是写入时刻，只会随时间推进，
+不会因为删除而倒退或复用；`Aggregate` 每次成功聚合一批之后，把这批里最后一条记录（`logs` 按
+`id asc` 读出，最后一条就是这批的最大 id）的 `Time` 和 `LastLogId` 一起落库。自愈时不再问
+"当前 `max(id)` 比位点小吗"，改问一个 id 回答不了的问题——**"库里还有没有比我上次聚合的
+那一刻更晚的记录，却没被 `id > 位点` 读到？"**：
+
+```sql
+SELECT COALESCE(MIN(id), 0) FROM access_logs WHERE time > ?   -- LastLogTime
+```
+
+- 返回 `min_id > 0`：确实存在更晚的记录没被读到，说明 id 已经不再单调，把位点回退到
+  `min_id - 1`，在本次调用内 `continue` 重试。
+- 返回 `0`：没有更晚的记录，位点仍然有效，正常返回，**不动位点**——这一条对「部分删除、
+  之后没有新数据」这种场景至关重要：删除前已经聚合过的那些历史行，它们的 `Time` 不会晚于
+  `LastLogTime`，不会被误判成"更晚的记录"，从而避免被重新聚合一遍。
+
+四个场景的推演（回归测试逐条对应）：
+
+| 场景 | 现象 | 新判据下的结果 |
+|---|---|---|
+| ① 整表清空后有新数据落地 | 位点 3，新行 id=1 | `time > t3` 命中新行，位点回退到 0，读到并聚合 ✓（`TestAggregateRecoversAfterAccessLogIdsReset`） |
+| ② 部分删除（删掉高位 id），之后无新数据 | 位点 6，剩 1-3 | `time > t6` 无匹配，位点不动，不重读 ✓（`TestAggregateSelfHealDoesNotDoubleCountAfterPartialDelete`） |
+| ③ 混合：删掉高位 id 后又有新数据复用同一段 id 区间 | 位点 6，删后又写出 4/5/6，`max(id)` 被顶回 6 | 光比 `max(id)` 与位点**连触发都不会触发**，新数据永久跳过；`time > t6` 仍能命中新行（它们的 Time 更晚），位点回退到 3，正确读到 4/5/6 ✓（`TestAggregateSelfHealHandlesMixedPartialDeleteAndNewData`） |
+| ④ 正常空闲，无新数据 | 位点 6，无变化 | `time > t6` 无匹配，不触发 ✓ |
+
+场景③是旧判据（不论是"归零"还是"对齐到 `max(id)`"）完全抓不到的盲区，这也是为什么必须换掉
+判据本身、而不是在同一个判据里换一个候选值——`0` 和 `max(id)` 两个值都无法同时满足场景①
+与场景②，这一点在实现过程中被两组互相矛盾的测试结果实证过。
+
+**两个边界**：
+
+- **首次运行**（`LastLogId=0`、`LastLogTime=0`）：若 `access_log` 已有数据，`Where(id > 0)`
+  直接读到，走不到自愈分支；若为空，`time > 0` 在空表上同样查不到行，`min_id=0`，正常结束。
+  不需要特判，回归测试见 `TestAggregateNoOpOnEmptyAccessLog`。
+- **`LastLogTime == 0` 但 `LastLogId > 0`**：这是 `AutoMigrate` 给已存在的位点行加
+  `LastLogTime` 列之后的状态——这一行从未跑过带新判据的聚合，列刚被加上时是零值。
+  若不特判，`time > 0` 会命中全表，把这个本来有效的位点误判成失效、回退到 0，导致早已
+  聚合过的历史数据被重新聚合一遍。加一条保护：这种组合下当作位点仍然有效，直接返回，不查
+  `time`、不动位点。正常运行时 `LastLogTime` 恒大于 0（真实的 Unix 毫秒时间戳），这个保护
+  不会误伤。回归测试见 `TestAggregateTreatsMigratedZeroLastLogTimeAsValid`。
+
+`saveDomainStatCursor` 现在必须同时写 `LastLogId` 与 `LastLogTime`：只推进 id 不更新 Time，
+会让下一次自愈判断用一个过时的时间边界去比较，把本该判定为"仍然有效"的位点误判成失效。
 
 ## 5. 第一期：Top 访问次数榜
 
