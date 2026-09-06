@@ -1,7 +1,7 @@
 # 域名维度流量归因与 Top 榜单 设计文档
 
 - 日期：2026-09-06
-- 状态：设计已确认，待实现
+- 状态：第一期已实现并发版（v1.13.0）；第二期设计已完成，待实现
 - 相关：`2026-09-04-traffic-history-design.md`（分时桶）、`2026-09-02-domain-routing-design.md`（分流注入器）、`2026-09-05-routing-ip-and-dns-design.md`（DNS 注入器）
 
 ## 1. 背景与目标
@@ -23,7 +23,7 @@
 - **不在访问日志明细表格里加「本次访问消耗流量」列。** §2 证明这个数在 xray 里不存在，加这一列只能靠估算，
   而估算等于用假数据覆盖真数据（与 `2026-09-04-traffic-history-design.md` §8 拒绝为改时区做补偿是同一条原则）。
 - 不做全局（跨入站合并）榜单。诉求是「针对每个用户」，全局榜没有对应的使用场景。
-- 不计量被管理员自己的分流规则带走的流量（见 §6.6）。
+- 不计量被管理员自己的分流规则带走的流量（见 §6.9）。
 - 不修改 xray-core。`bin/xray-*` 必须保持与 `go.mod` 里 `xray-core` 同版本的官方构建。
 
 ## 2. 已核实的事实：xray 不提供按域名的流量
@@ -88,10 +88,12 @@
 | 期 | 交付 | 数据 | 风险 |
 |---|---|---|---|
 | 一 | 自动刷新默认开 + Top **访问次数**榜 | 真实（连接次数） | 低：不碰 xray 配置，不重启 |
-| 二 | 榜单增加**上传/下载字节**排序 | 真实（xray 自己数的字节） | 高：改分流注入器与默认出站语义 |
+| 二 | 榜单增加**上传/下载字节**排序 | 真实（xray 自己数的字节） | 高：改分流注入器、打开出站统计（一次整进程重启）、会与两遍路由匹配相互作用（§6.1） |
 
 两期共用 §4 的同一张表和同一块 UI。第一期就把时区对齐、清理、删除入站连带清理、
-查询接口、榜单渲染一次做对；第二期只是往同一行补 `Up`/`Down` 两列，加一个排序维度。
+查询接口、榜单渲染一次做对；第二期在数据层面只是往同一行补 `Up`/`Down` 两列、加一个
+排序维度，**第一期的结构确实没有返工**——第二期全部的复杂度都在「怎么让 xray 数出这两个
+数」这一侧（§6），与第一期的表结构无关。
 
 **第一期不得为了「先跑起来」而绕开第二期需要的结构**——那会让第二期推翻第一期，
 分期的唯一理由（早点看到东西且不返工）就没了。
@@ -409,7 +411,7 @@ type TopDomainQuery struct {
 - `Limit` 的上界钳制在 controller。controller 是不可信输入的边界，与
   `InboundController.getTrafficOverview` 对 `top` 的钳制、导入接口的 10MB 上限同源。
 
-返回体除了榜单本身，还要带**覆盖度信息**（§6.7），第一期该字段恒为「未计量」，前端据此隐藏字节列。
+返回体除了榜单本身，还要带**覆盖度信息**（§6.8），第一期该字段恒为「未计量」，前端据此隐藏字节列。
 
 ### 5.4 自动刷新默认打开
 
@@ -423,137 +425,501 @@ type TopDomainQuery struct {
 
 ## 6. 第二期：真实字节数计量
 
-### 6.1 计量池
+### 6.0 实测数据
 
-面板自动维护一个**全局的**「被计量的注册域名集合」（所有入站共用同一批域名，出站按笛卡尔积展开）。
-全局一份而不是每入站一份，是为了让池的维护逻辑只有一处。
+本节所有容量与代价判断都以下面三组实测为依据，不是估算。环境：darwin/arm64、
+Xray 26.7.28（与 `go.mod` 锁定版本同 commit 的仓库内二进制）、全部走回环。绝对值在
+低配 VPS 上会更大，但三组数据要说明的都是**随规模如何变化**，那个结论与机器无关。
 
-来源：`DomainStat` 里最近 24 小时出现过的域名，按 `(Up+Down) desc, Count desc, Domain asc` 排序取前 K。
-**排序必须完全确定**（末位用域名字典序兜底）——`Config.Equals` 对 `OutboundConfigs` / `RouterConfig`
-按字节比较，顺序一抖动就恒不相等，那个 10 秒的 cron 会不停重启 xray。
+**（一）配置解析耗时与体积**，每个计量出站附带一条计量规则：
 
-容量自适应，保证生成配置的规模有界：
+| 计量出站数 | 生成配置体积 | `xray run -test` 耗时 |
+|---|---|---|
+| 0 | 1.3 KB | 35 ms |
+| 50 | 12.7 KB | 74 ms |
+| 100 | 24.2 KB | 120 ms |
+| 200 | 47.1 KB | 227 ms |
+| 400 | 93.6 KB | 449 ms |
+
+严格线性，约 **1.03 ms / 计量出站**、**235 B / 计量出站**。
+
+这条代价的落点**不是 xray 启动**（启动只发生在整进程重启时，多花 0.2 秒无人察觉），
+而是 `web/service/routing_validate.go` 那套**同步 HTTP 请求里的真实 xray 校验**：
+新建/编辑出站节点、新建/编辑入站、保存设置各会 `exec` 一次 `run -test`，导入路径
+每个节点 1~2 次。200 个计量出站意味着这些操作各多花约 0.21 秒，导入 50 个节点多花
+10~20 秒。**这才是 `meterOutboundBudget` 的真正约束来源。**
+
+**（二）新连接建立延迟**（SOCKS5 连接 → 收到应答，即 xray 完成路由匹配并建好出站
+连接的全部耗时；100 次预热后取 600 次样本，全部规则都用不匹配的域名以强制走完整
+规则链）：
+
+| 路由规则数 | 中位 | p95 |
+|---|---|---|
+| 0 | 0.103 ms | 0.176 ms |
+| 100 | 0.104 ms | 0.183 ms |
+| 200 | 0.100 ms | 0.186 ms |
+| 400 | 0.111 ms | 0.182 ms |
+
+400 条规则相对 0 条只多约 8 µs，**完全淹没在测量噪音里**（200 条那组甚至比 0 条还
+快）。xray 的域名匹配走的是专门的匹配器，一次匹配是纳秒级内存操作。
+
+结论要写进发版说明：**计量不会让节点变慢。**吞吐完全不受影响（计量出站是默认出站
+的逐字节副本，转发路径一模一样）；新连接建立的额外开销在微秒量级，而建立一条 TCP
+连接本身就是毫秒起步。规模的真正代价在上面第（一）项，不在网速。
+
+**（三）计量规则形态的交叉实验**——见 §6.1，那是本期最关键的一组数据。
+
+### 6.1 必须先解决的问题：计量规则会屏蔽 IP 规则的第二遍
+
+**这是第二期真正的技术难点，原设计漏掉了它。**
+
+`ipRuleResolveDomain` 打开时，注入器往 `routing` 写 `domainStrategy: "IPIfNonMatch"`，
+核心据此走两遍规则（`app/router/router.go:245-273`，锁定版本源码逐行确认）：
 
 ```
-K = min(poolCapMax, meterOutboundBudget / max(1, 已启用入站数))
-poolCapMax        = 60
-meterOutboundBudget = 200
+第一遍：不带 DNS 客户端遍历全部规则。任何一条命中即返回。
+        域名目标此时没有 IP，所以 ip 条件必然不命中。
+第二遍：只有整个第一遍一条都没命中时才发生。挂上 DNS 客户端重新遍历，
+        ip 条件这时才可能命中。
 ```
 
-2 个入站 → K=60（120 个计量出站）；10 个入站 → K=20（200 个）。
+计量规则带 `domain` 条件，**必然参与并可能命中第一遍**。它一旦命中，第二遍就永远
+不会发生——于是**每一条用 IP 段表达的规则，对池内域名全部静默失效**，包括：
 
-**冷启动的排序依据只有 `Count`**（还没有任何字节数据），所以第一轮池是按访问次数选的。
-运行一段时间后 `Up+Down` 会主导排序，真正的大流量域名被稳定留在池里。
-这个「先按次数、后按流量」的收敛过程要在 UI 上说清楚，不能让管理员以为第一小时的榜单就是全量真值。
+- 模板 `web/service/config.json` 自带的 `ip: ["geoip:private"] → blocked`（每一台机器都有）；
+- 管理员在域名组里配的 `Cidrs`/`SubscribedCidrs` 所生成的那条 ip 规则（封禁或分流）。
 
-**滞后（hysteresis）**：只有当新池与旧池的对称差达到 5 个域名时才真正换池。
-否则排在容量边界上的两个域名会每轮互换，导致出站被反复热增删。池的重算频率取 `@every 1h`。
+而池内域名恰恰是**流量最大的那一批**。这与 §6.4 拒绝兜底规则是同一个失效模式，只是
+原设计以为「加了 domain 条件就安全」——不是。CLAUDE.md「配置注入的四条不变量」第 2 条
+已经写下过这个危险（「一条写成 IP 段的封禁，是可以被一条写成域名的分流规则绕过的」），
+第二期若照原设计实现，就是由面板**自己**去批量制造它。
 
-### 6.2 计量出站
+**解法：给计量规则加一个只有第二遍才可能为真的 ip 守卫。**
 
-每个 `(入站 i, 池内域名 d)` 生成一个出站，tag 为：
+```json
+{"type":"field","inboundTag":["inbound-2886"],"domain":["domain:doubleclick.net"],
+ "ip":["0.0.0.0/0","::/0"],"outboundTag":"a-ui-meter-3-doubleclick.net"}
+```
+
+`ip: ["0.0.0.0/0","::/0"]` 匹配任意 IP，但**要求目标已经有 IP**。域名目标在第一遍
+没有 IP（`GetTargetIPs()` 返回空），条件不满足，规则整条不命中；第二遍挂上 DNS 客户端
+之后域名被解析出 IP，守卫恒真，规则正常命中。于是：
+
+- 所有既有 ip 条件规则（它们都排在计量规则之前）在第二遍**照常拿到它们本来的机会**；
+- 只有它们全都没命中时，计量规则才在第二遍末尾接住这条连接——这正是「只计量本来会走
+  默认出站的流量」想表达的语义；
+- **零额外 DNS 解析**：第二遍本来就已经发生了（第一遍没命中才会走到这里），守卫不制造
+  任何新的解析。第一遍就命中管理员规则的连接不受影响，仍然不解析。
+
+**实测交叉验证**（真实 xray 26.7.28，`dns.hosts` 把 `t.test` 指到 127.0.0.1，即
+`geoip:private` 覆盖的范围；SOCKS 客户端发 4096 B 并读回；用 `xray api statsquery`
+读计量计数器）：
+
+| 用例 | `domainStrategy` | 有 `geoip:private` 规则 | 计量规则形态 | 连接结果 | 计量计数器 |
+|---|---|---|---|---|---|
+| A | IPIfNonMatch | 有 | 纯 `domain` | **连通** | **5120 B** |
+| B | IPIfNonMatch | 有 | `domain` + ip 守卫 | **被 blackhole 掐断** | 0 B |
+| C | IPIfNonMatch | 无 | `domain` + ip 守卫 | 连通 | 5120 B |
+| D | AsIs（无 `domainStrategy`） | 无 | `domain` + ip 守卫 | 连通 | **0 B** |
+| E | AsIs | 无 | 纯 `domain` | 连通 | 5120 B |
+
+- A 复现了危险：私网封禁被静默绕过，流量照常送达，且被计量。
+- B 证明守卫修好了它：封禁生效，行为与「没有计量功能」时逐字节一致。
+- C 证明守卫形态在第二遍照常计量。
+- D 证明守卫形态在**单遍模式下永不命中**——所以形态必须按模式选。
+- E 证明单遍模式必须用纯形态；此时 ip 条件规则对域名目标本来就永不命中，没有第二遍
+  可屏蔽，纯形态是安全的。
+
+**形态的选择判据是「核心会不会在路由匹配期做 DNS 解析」，也就是生成配置里
+`routing.domainStrategy` 的最终值**，不是 `ipRuleResolveDomain` 这个设置项本身——
+管理员可能在模板里手写过 `IPOnDemand`，那时开关为 0 但核心仍会解析：
+
+| 最终 `routing.domainStrategy` | 计量规则形态 | 理由 |
+|---|---|---|
+| `IPIfNonMatch` | 带 ip 守卫 | 两遍匹配，必须让出第一遍 |
+| `IPOnDemand` | 带 ip 守卫 | 单遍但按需解析，守卫可满足；排在最后天然不抢先 |
+| 其余（`AsIs` / 缺失 / 无法识别） | 纯 `domain` | 不会解析，守卫恒假会让计量完全空转 |
+
+注入器已经把 `routing` 解成 map 并在这一步写 `domainStrategy`，取最终值不需要新增任何
+数据通路。**无法识别的值一律按「不解析」处理**：猜错的两种后果不对称——按「会解析」
+处理而实际不会，是计量静默全空转；按「不解析」处理而实际会，是回到 A 那一行的危险。
+落在前者。
+
+**这一条看上去违反了「绝不把 domain 与 ip 并进同一条规则（那是 AND）」那条不变量，
+必须解释清楚，否则将来一定会有人来「修」它。** 那条不变量约束的是**管理员表达的**
+规则：管理员说「这批域名**或**这批 IP 走 B」，写成一条就变成 AND、几乎永不命中。这里
+的 AND 是**刻意要的**——「域名是 X **且** 目标已经解析出 IP」，第二个合取项不是一个
+匹配条件，是一个**遍次闸门**。`buildRule` 生成管理员规则时仍然严格拆成两条，一个字节
+都不改；计量规则是注入器自己发出的，走独立的构造函数（§6.4），两条路径不共用代码。
+
+### 6.2 计量池
+
+面板自动维护「被计量的注册域名集合」，**按入站各自计算**。
+
+> **这里修订了原设计的「全局一份池」。**原理由是「让池的维护逻辑只有一处」，但出站是
+> 按 `(入站, 域名)` 笛卡尔积展开的，全局池与每入站池产生的出站数、规则数**完全相同**，
+> 成本一模一样；而全局池会让「流量被某个别人不访问的站主导」的用户拿到 0 覆盖率，
+> 与需求原文「针对每个用户显示出来」直接冲突。同样的成本下每入站池严格更优，没有取舍。
+
+#### 6.2.1 容量
 
 ```
-a-ui-meter-<inboundId>-<domain>      例：a-ui-meter-3-doubleclick.net
+启用入站数 N（GetAllInbounds 里 Enable 为真的条数，至少按 1 算）
+K = min(meterPoolCapMax, meterOutboundBudget / N)
 ```
 
-反查无歧义：剥掉固定前缀 `a-ui-meter-`，按**第一个** `-` 切开——`inboundId` 是十进制数字不含 `-`，
-其后全部是域名（域名可以含 `-`，所以不能从右边切）。
+| 常量 | 值 | 依据 |
+|---|---|---|
+| `meterOutboundBudget` | 200 | §6.0（一）：每次真实 xray 校验多花约 0.21 秒，是可接受的上限 |
+| `meterPoolCapMax` | 60 | 单入站场景不必把预算吃满；60 个注册域名已能覆盖绝大多数用户流量的主体 |
 
-tag 里直接带域名而不是用「槽位序号 + 映射表」，是为了消掉**槽位复用的归因错乱**：
-槽位从域名 A 换成 B 时，那一轮采集里属于 A 的残余流量会被算到 B 头上，而且没有任何一层会报错。
-tag 带域名则换池就是换计数器，旧 tag 被删时 xray 侧的计数器随之消失。
+2 个入站 → K=60（120 个计量出站）；10 个入站 → K=20（200 个）。入站超过 200 个时整数
+除法给出 K=0，整个计量功能自动停用，不生成任何计量出站与规则——这不是需要单独处理的
+边界，是预算约束的自然结果。
 
-**`model.IsReservedTag()` 必须扩展为也拒绝 `a-ui-meter-` 前缀。** 保留 tag 不在 `outbound_nodes` 表里，
-数据库唯一约束看不见它们；管理员把出站节点备注写成 `meter-3-x.com` 时 `allocTag` 就可能撞上，
-xray 报 `existing tag found` 并拒绝启动整份配置——全员断网而面板首页仍显示 `running`。
-CLAUDE.md 已定：新增保留 tag **只改这一个函数**，分配端 / 生成端 / 校验端都只认它。
-导入路径（`routing_portable.go`）对保留 tag 的 fail-close 检查因此自动覆盖新前缀。
+#### 6.2.2 排序：不能只按已实测字节排
 
-**出站内容必须是默认出站的完整副本**，除 tag 外逐字节相同。默认出站由 `tagDefaultOutbound` 那套逻辑确定
-（管理员手写模板给首个出站起过名字时要原样沿用），**绝不硬编码 freedom**。
+按 `(Up+Down) desc` 排序有一个会让功能在第二天就冻死的缺陷：**没进过池的域名字节数
+恒为 0，永远排在所有已计量域名之后，于是永远进不了池。**池会锁死在上线首日抓到的那
+一批上，新出现的大流量站永远看不见。原设计的「冷启动按 Count 排」只解决了第一轮。
 
-### 6.3 与 DNS 注入器的交互（必须处理）
+解法是把两种量放到**同一把尺子**上：用已计量域名算出「每次连接的平均字节数」，给未
+计量域名做一个**仅用于排序、绝不进入界面**的折算。
 
-`DNSInjector` 只给**数组首位**那个 freedom 出站的 `settings` 加 `domainStrategy: "UseIP"`
-（`web/service/dns_inject.go`）。计量出站是 `routingInjector` 追加到数组末尾的，
-不处理的话**被计量的直连流量会绕过内置 DNS**——`dns` 段对它们完全空转，没有报错、没有日志。
+```
+该入站最近 24 小时（小时桶）：
+  avgBytesPerConn = Σ(up+down) / Σcount      （分母为 0 时取 0）
+  权重(d) = bytes(d) > 0 ? bytes(d) : count(d) × avgBytesPerConn
+排序键：权重 desc, count desc, domain asc
+```
 
-解法：`DNSInjector` 同时给所有 `a-ui-meter-` 前缀的出站加同样的 `domainStrategy`。
+末位用域名字典序兜底是硬要求：**排序必须完全确定**，`Config.Equals` 对
+`OutboundConfigs`/`RouterConfig` 按字节比较，顺序一抖动就恒不相等，那个 10 秒的 cron
+会不停重启 xray。
 
-`GetXrayConfig` 里「先 `routingInjector.Inject` 再 `dnsInjector.Inject`」的顺序**不能反**
-（反了 routing 那步会把 DNS 写的键无声冲掉），而这个顺序恰好让 DNSInjector 能看到计量出站。
-守着这条顺序的 `TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig` 要相应扩展，
-新增一条断言：计量出站也拿到了 `domainStrategy`。
+折算值只用于**选谁进池**，不写库、不出现在任何接口返回体里——§1 非目标里「估算等于用
+假数据覆盖真数据」约束的是**展示**，这里是选择。这个区别要写进实现注释，否则将来会
+被误当成违反非目标而删掉。
+
+`avgBytesPerConn` 为 0（该入站还没有任何字节数据，即上线第一小时）时权重退化成
+`count × 0 = 0`，排序键自然落到第二项 `count desc`——这正是原设计说的「冷启动按访问
+次数选」，不需要单独的代码分支。
+
+注意这个权重**分不出**「在池但实测为 0」与「从没进过池」——两者的 `bytes` 都是 0，都会
+拿到折算权重。这是刻意的：排序只负责「谁值得一试」，「试过了确实没流量」由 §6.2.4 的
+试用退场闸门负责，两件事不要混在同一个表达式里。
+
+#### 6.2.3 候选过滤
+
+三条，缺一条都会出事：
+
+1. **只收真正的注册域名**：`publicsuffix.EffectiveTLDPlusOne(d)` 必须成功**且等于 `d`
+   本身**。第一期的归并对公共后缀本身（`com`）与 IP 字面量是「原样保留、不丢弃」，
+   这些值直接进池会生成 `domain:com` —— 一条命中**全部 `.com`** 的规则，把该入站几乎
+   全部流量吸进一个计量出站，榜单从此只有一行。为此在 `util/domain` 增加
+   `IsRegistrable(d string) bool`，与 `Registrable` 同文件、同一套 publicsuffix 判定。
+2. **IP 字面量不进池**（被第 1 条一并挡住）：它们需要 `ip` 条件而不是 `domain` 条件，
+   而管理员关心的是「哪些网站」。归入「未计量」。
+3. **冷却期内的域名不参选**（见 6.2.4）。
+
+#### 6.2.4 换池：三道闸门
+
+池要稳。每换一次池就是一批出站与规则的增删，而**退池的 tag 在核心里留下的计数器不会
+被回收**（见 6.2.5）。三道闸门，都作用在「每入站、每轮」上：
+
+| 闸门 | 规则 | 防的是什么 |
+|---|---|---|
+| 最小驻留 | 进池不足 `meterMinHoldRounds`(2) 轮的域名本轮强制保留 | 刚进池还没来得及产生字节就被自己的 0 权重挤出去 |
+| 替换余量 | 候选权重必须 ≥ 在位末位权重 × `meterSwapMargin`(1.25) 才替换 | 两个权重相近的域名每轮互换，出站被反复热增删 |
+| 试用退场 | 在池且连续 `meterProbeGiveUpRounds`(3) 轮实测字节为 0 的域名退池，并设 `CooldownUntil = now + meterCooldown`(24h) | 一个只有连接数、没有流量的域名（探测器、失败重连）长期占着槽位 |
+
+`MeterPoolJob` 频率 `@every 1h`，所以「轮」就是小时。
+
+零字节的域名**不会在 `DomainStat` 里留下行**（零增量不写行，与 `TrafficBucket` 同规），
+所以「在池但实测为 0」这个状态无法从 `DomainStat` 反推，必须由池表自己记账——这就是
+`MeterDomain.ProbeZeroRounds` 存在的唯一理由。
+
+#### 6.2.5 死计数器：一个必须承认、只能限制不能消除的代价
+
+`app/proxyman/outbound/outbound.go:131` 的 `RemoveHandler` **只从 handler 表里删对象，
+不注销 stats 计数器**；`app/stats/command` 的 `StatsService` 也没有任何注销 RPC
+（只有 `GetStats`/`QueryStats`/`GetSysStats`/…，逐条核对过 `command.proto:85-92`）。
+所以每一个退过池的 `a-ui-meter-*` tag，它的两个计数器会在核心里**留到进程退出为止**，
+并且每一次 `QueryStats` 都会把它们（值为 0）返回回来。
+
+两个后果，方向相反：
+
+- **好的一面**：退池到下一次采集之间的残余字节不会丢——计数器还在，下一轮
+  `GetTraffic` 照样取到并归到正确的域名上。所以退池不需要任何「先采集再删」的编排。
+- **坏的一面**：计数器集合只增不减。按 6.2.4 的三道闸门，稳态下每入站每天退池的域名
+  是个位数，但没有上限保证。
+
+**限制手段是观测式的，不记账**：`GetTraffic` 的返回里数出「tag 以 `a-ui-meter-` 开头
+但不在当前池内」的条目数，超过 `meterStaleCounterLimit`(2000) 就**冻结换池**（只停止
+吸纳新域名，已在池内的域名照常计量）并记一条 `logger.Warning`。观测式而不是记账式，
+是因为它天然跨重启自愈：xray 一旦整进程重启（改入站、改设置、升级核心、面板重启都会
+触发），计数器全清，观测值归零，冻结自动解除，不需要面板去跟踪「上一次重启是什么时候」
+这种它其实拿不准的状态。
+
+2000 个死计数器约合每次 `QueryStats` 多传 120 KB（计数器名约 56 字符，加 protobuf 开销
+每条约 60 B），10 秒一次，是可以接受的上界；按三道闸门约束下的稳态 churn 估算，要几周
+才会到达。
+
+#### 6.2.6 池落库
+
+池必须**落库**，不能在 `RoutingInjector.Inject` 里现算：`Inject` 由那个 10 秒的重启
+消费任务反复调用，现算意味着排名一变配置字节就变，cron 会不停热应用甚至重启。落库之后
+`Inject` 只是按确定顺序读一张表。
+
+```go
+// MeterDomain 是「当前正在被计量」的 (入站, 注册域名) 对。
+// 与 DomainStat 同库（用量库），理由相同：高频写入不抢主库那把写锁，
+// 而且它的清理与 DomainStat 挂在同一个每小时任务里。
+// 没有任何 json tag：这张表是纯服务端状态，既不下发给前端也不接受前端提交
+//（与 model.Inbound 的 LastResetAt/DisabledByTraffic 同一条理由）。
+type MeterDomain struct {
+    Id        int64  `gorm:"primaryKey;autoIncrement"`
+    InboundId int    `gorm:"uniqueIndex:idx_meter_domain,priority:1"`
+    Domain    string `gorm:"uniqueIndex:idx_meter_domain,priority:2"`
+
+    // EnteredAt 是进池时刻的 Unix 秒，供「最小驻留」闸门使用。
+    EnteredAt int64
+    // ProbeZeroRounds 是进池后连续几轮实测字节为 0。零字节不会在 DomainStat
+    // 里留下行，这个状态只能由池表自己记。
+    ProbeZeroRounds int
+    // CooldownUntil 之前该域名不参选，Unix 秒。
+    CooldownUntil int64
+}
+```
+
+**删除入站必须连带删除它的池行**（接在 `InboundService.DelInbound`，与 `DomainStat`、
+`TrafficBucket`、`AccessLog` 完全同构），另有 `TrafficCleanupJob` 里的 `PruneOrphans`
+兜底。SQLite 会复用被删除的自增 id：残留的池行会绑到下一个建出来的入站上，于是面板会
+为一个全新用户生成一批**别人的**域名的计量出站与规则——引用不再悬空，生成期没有任何一
+道防线拦得住，而配置与界面都渲染得完全正常。这是 CLAUDE.md「新增任何存 id 外键的表都要
+照做」那一条的直接适用。
+
+用量库打不开（`database.GetTrafficDB()` 为 nil）时池为空 → 不生成任何计量出站与规则 →
+`Metered` 为 false → 榜单退回第一期形态。整条链路对「库不可用」是 fail-open 到「没有这个
+功能」，不是 fail-close 到「配置生成失败」。
+
+### 6.3 计量出站
+
+每个 `(入站 i, 池内域名 d)` 一个出站，tag 为：
+
+```
+a-ui-meter-<inboundId>-<domain>        例：a-ui-meter-3-doubleclick.net
+```
+
+反查无歧义：剥掉固定前缀 `a-ui-meter-`，按**第一个** `-` 切开——`inboundId` 是十进制
+数字不含 `-`，其后全部是域名（域名可以含 `-`，所以不能从右边切）。反查必须校验 id 能解析
+成正整数、域名非空，否则跳过并记 Debug：一个形态不对的 tag 是无法归因的，硬猜只会把字节
+记到错的域名上。
+
+tag 里直接带域名而不是「槽位序号 + 映射表」，是为了消掉**槽位复用的归因错乱**：槽位从
+域名 A 换成 B 时，那一轮采集里属于 A 的残余流量会被算到 B 头上，而且没有任何一层会报错。
+tag 带域名则换池就是换计数器（6.2.5 说明了旧计数器还在，残余字节仍归 A）。
+
+**出站内容必须是默认出站的完整副本，除 tag 外逐字节相同。**默认出站由 `tagDefaultOutbound`
+确定（管理员手写模板给首个出站起过名字时原样沿用），**绝不硬编码 freedom**。复制要走
+JSON 往返做深拷贝——浅拷贝共享 `settings` 那个 map，§6.5 给计量出站写 `domainStrategy` 时
+会同时写进默认出站，或者反过来，两者再也分不开。
+
+追加位置在 `a-ui-block` 黑洞出站**之后**、数组最末。首位仍是默认出站（`diffOutbounds`
+要求它逐字节不变），黑洞出站的位置也不受影响。
+
+**`model.IsReservedTag()` 必须扩展为也拒绝 `a-ui-meter-` 前缀。**保留 tag 不在
+`outbound_nodes` 表里，数据库唯一约束看不见它们；管理员把出站节点备注写成 `meter-3-x.com`
+时 `allocTag` 就可能撞上，xray 报 `existing tag found` 并拒绝启动整份配置——全员断网而面板
+首页仍显示 `running`。CLAUDE.md 已定：新增保留 tag **只改这一个函数**，分配端（`allocTag`）、
+生成端（`buildOutbounds`）、校验端（`removeOutboundByTag`）、导入端（`routing_portable.go`
+的 fail-close 检查）都只认它，四处自动覆盖新前缀，不需要各自再加判断。
 
 ### 6.4 计量规则
 
-追加在**所有现有规则之后**（模板规则 → block 组 → proxy/direct 组 → 计量组）。这样只有
-「本来会走默认出站」的流量才进计量，已被管理员规则命中的流量不受影响。
+追加在**所有现有规则之后**：模板规则 → 地区规则 → block 组 → proxy/direct 组 → **计量组**。
+只有「本来会走默认出站」的流量才进计量，已被管理员规则命中的流量完全不受影响。
 
-每条形如：
+组内顺序按 `(inboundId asc, domain asc)`，与出站顺序一致，保证生成逐字节确定。
 
-```json
-{"inboundTag": ["inbound-2886"], "domain": ["domain:doubleclick.net"], "outboundTag": "a-ui-meter-3-doubleclick.net"}
+形态按 §6.1 的判据二选一：纯形态有 `inboundTag`、`domain` 两个条件，守卫形态多一个 `ip`，
+每一个都非空，不触碰「绝不输出条件残缺的规则」那条不变量。
+
+`domain` 的值一律带显式 `domain:` 前缀——含点的裸串在 xray 里是**子串**匹配
+（`infra/conf/router.go:175` 传给 `ParseDomainRules` 的默认类型是 `geodata.Domain_Substr`），
+`doubleclick.net` 会命中 `notdoubleclick.net.evil`；`domain:doubleclick.net` 才是按域名边界
+的后缀匹配，也正是第一期归并到 eTLD+1 想要的语义。
+
+只为**启用且存在**的入站生成规则（复用 `buildRules` 已经建好的 `inboundTagById`）。池里
+残留的、指向已停用入站的行本轮不生成规则，也不删——入站可能只是被临时停用。
+
+**不生成兜底规则。**早期设计想给每个入站加一条无 `domain` 条件的兜底规则来度量「池子漏了
+多少」，必须放弃：兜底规则没有 domain 条件，**第一遍必然命中**，于是第二遍永远不会发生，
+所有用 CIDR 表达的分流与封禁从此静默失效，而 `Configuration OK`、面板显示 `running`。
+（§6.1 说明了带 domain 条件的计量规则其实是同一个陷阱的弱化版，同样需要处理。）覆盖度改用
+§6.8 的口径，不需要任何额外规则。
+
+同样因为不生成兜底规则，**默认出站的语义完全不变**：没命中计量规则的流量照旧走
+`OutboundConfigs[0]`。
+
+### 6.5 与 DNS 注入器的交互
+
+`DNSInjector.applyFreedomStrategy` 只给**数组首位**那个 freedom 出站的 `settings` 加
+`domainStrategy: "UseIP"`。计量出站是 `routingInjector` 追加到末尾的，不处理的话**被计量的
+直连流量会绕过内置 DNS**——`dns` 段对它们完全空转，没有报错、没有日志，正是这个功能存在的
+理由所描述的那种故障。
+
+解法：`applyFreedomStrategy` 在处理完首位之后，遍历其余出站，对 tag 以 `a-ui-meter-` 开头
+的**同样**加 `domainStrategy`。**不需要给它们重跑一遍判定**：计量出站是默认出站的逐字节
+副本，首位的每一条判定（`protocol` 是不是 `freedom`、`targetStrategy` 是否已被占用）对副本
+必然给出相同结论；而首位判定不通过时函数本来就早退，副本也就一同不写——这正是我们要的，
+给副本单独写一个默认出站没有的键，恰恰会打破「除 tag 外逐字节相同」那条不变量。
+仍然**绝不用 `ForceIP` 系列**：`UseIP` 下解析失败只记日志并回落按域名直连，`ForceIP` 会
+变成连接失败。
+
+`GetXrayConfig` 里「先 `routingInjector.Inject` 再 `dnsInjector.Inject`」的顺序**不能反**
+（反了 routing 那步重建 outbounds 数组时会把 DNS 写的键无声冲掉），而这个顺序恰好让
+DNSInjector 能看到计量出站。守着这条顺序的
+`TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig` 要相应扩展：新增一条断言，
+计量出站也拿到了 `domainStrategy`，且其内容与默认出站除 tag 外逐字节相同。
+
+### 6.6 policy 注入：打开出站统计
+
+`app/proxyman/outbound/handler.go:34-56` 的 `getStatCounter` 在
+`policy.ForSystem().Stats.OutboundUplink` 为假时**根本不注册计数器**（源码逐行确认）。模板
+`web/service/config.json` 的 `policy.system` 只有 `statsInboundUplink`/`statsInboundDownlink`，
+所以出站字节现在一个都没有。
+
+`statsOutboundUplink` / `statsOutboundDownlink` **不能只改 `web/service/config.json`**：那是
+`xrayTemplateConfig` 的默认值，管理员一旦在设置页保存过配置，模板就已落库，改 embed 文件对
+他静默无效。必须像 `injectAccessLog` 那样在生成期注入：把 `policy` 解成
+`map[string]json.RawMessage`，再把其中的 `system` 解成同样的 map，**只设置这两个 key**，其余
+（管理员自己配的 `levels`、`handshake`、`statsUserUplink` 等）原样保留，再逐层 Marshal 回去
+（`encoding/json` 对 map key 排序，生成逐字节确定）。
+
+**无条件注入，不看池是否为空。**`policy` 在 `xray/hot_diff.go:55` 的 static 名单里，改它必然
+触发一次整进程重启；无条件注入让这次重启发生在**升级后的第一次配置变更**，时间点可预期、
+可以写进发版说明。若改成「池非空才注入」，重启会推迟到上线约一小时后池第一次形成时，变成
+一次谁都没预料到的全员断线。
+
+`getStatCounter` 在 **handler 创建时**取计数器，而 gRPC `AddHandler` 走的正是同一条创建路径
+——所以只要 policy 开关已经打开，**后续热增的计量出站照样有计数器**，换池不需要重启。这是
+「一次性代价」这个说法成立的前提，不是想当然。
+
+顺带的好处：出站统计打开之后，`a-ui-default`（默认出站，`tagDefaultOutbound` 保证它有 tag，
+而 `getStatCounter` 要求 `len(tag) > 0`）、各出站节点、`a-ui-block` 全都开始有字节数，这正是
+§6.8 覆盖度口径的输入之一。
+
+### 6.7 采集
+
+`XrayTrafficJob` 每 10 秒调一次 `GetTraffic(reset=true)`（取完 xray 侧清零），结果里出站条目
+现在被 `InboundService.AddTraffic` 静默丢弃（那个循环只处理 `traffic.IsInbound`）。
+
+**必须复用这同一次拉取**：`reset=true` 会清零计数器，另起一次独立拉取会让两条链路互相偷数据。
+
+在 `AddTraffic` 里，紧挨着已有的 `TrafficHistoryService.Record` 再加一行
+`DomainStatService.RecordMetered(traffics, time.Now())`，它：
+
+1. 只收 `!IsInbound && strings.HasPrefix(Tag, "a-ui-meter-")` 的条目；
+2. 反查出 `(inboundId, domain)`，反查失败的跳过并记 Debug；
+3. `Up+Down == 0` 的条目**不写行**（与 `TrafficBucket` 的「零增量不写行」同规，也是 6.2.5
+   里那些死计数器不会污染数据的原因）；
+4. 按面板时区对齐出小时桶与日桶，各做一次 upsert：
+   `up = up + ?, down = down + ?`（`clause.OnConflict` + `gorm.Expr`，与第一期的
+   `count = count + ?` 完全同构，两者可以合成同一个 upsert 函数的两种调用）。
+
+**失败只告警不阻断**，与 `TrafficHistoryService.Record` 同一条原则：`inbounds.up/down` 是限额
+与到期判定的输入，它停止累加的后果（用户超额不被停用）比榜单少一段数据严重得多。
+
+**一个必须写进注释、也必须写进 UI 的语义差异**：`Count` 来自访问日志，记的是**连接建立**时刻；
+`Up`/`Down` 来自 10 秒一次的计数器采样，记的是**流量发生**时刻。一条 10:59 建立、传到 11:30 的
+连接，它的 1 次计数落在 10 点桶，它的字节分落在 10 点和 11 点两个桶。所以同一个桶里
+`Count` 与 `Up/Down` 不是同一批连接的统计量，**一个域名完全可能出现 `Count=0` 而 `Up=5GB`
+的行**（upsert 天然支持，桶不存在就创建）。这不是 bug，是两个数据源的固有差异；把它们强行
+对齐需要连接级的字节数，而 §2 已经证明 xray 不提供。
+
+`parseTraffics`（`xray/process.go:276`）按 **tag 单键**建索引，不区分 `IsInbound`——入站 tag 是
+`inbound-<端口>`，计量出站 tag 是 `a-ui-meter-*`，两者不可能撞名，现状安全。将来若有人改动 tag
+生成规则，这个隐含前提要一起复核。
+
+### 6.8 覆盖度
+
+原设计的三项差值（`入站总字节 − Σ计量出站 − Σ其他出站`）不用了：它是近似值，而且**算不出
+每个入站的覆盖度**——出站计数器不带入站维度，`a-ui-default` 把所有入站的直连流量混在一起。
+
+改用同一张表里两个都**按入站分桶**的量：
+
+```
+该入站该周期已计量字节 = Σ DomainStat.(Up+Down)   （granularity/inbound_id/bucket_start 同一套条件）
+该入站该周期总字节     = Σ TrafficBucket.(Up+Down) （同库、同粒度、同对齐、同一次 GetTraffic 采集）
+覆盖率 = 已计量 / 总字节
 ```
 
-三个条件全部非空，不触碰「绝不输出条件残缺的规则」那条不变量。
+两个序列来自同一次 `GetTraffic`、同一套时区对齐、同一个库，可比性是结构性的，不是巧合。
 
-**不生成兜底规则。** 早期设计想给每个入站加一条无 `domain` 条件的兜底规则
-（`inboundTag` + `outboundTag: a-ui-meter-<i>-other`）来度量「池子漏了多少」，
-这个方案必须放弃，理由是它会静默破坏 IP 规则：
+仍然是**近似值，UI 必须如实标注为「约」**：入站计数的是客户端与面板之间的**加密流**，出站
+计数的是面板与目标之间的流，两者相差一层协议开销与握手，所以覆盖率结构性地小于 100%。
+分母为 0 时不显示（而不是显示 0%）；比值必须钳到 `[0, 1]` 再展示——协议开销在极端情况下可能
+让比值略微越界，显示一个 103% 或负数会让整块数据失去可信度。
 
-> 开启 `ipRuleResolveDomain` 后 xray 走两遍规则（`app/router/router.go:245-273`），
-> 只有整个第一遍都没命中才会解析域名再走第二遍。兜底规则没有 domain 条件，**第一遍必然命中**，
-> 于是第二遍永远不会发生——所有用 CIDR 表达的分流与封禁规则从此静默失效，`Configuration OK`，
-> 面板显示 `running`。
+差额的构成要在 UI 上说清楚，它有三部分：被管理员自己的分流规则带走的流量（§6.9）、走默认出站
+但不在池里的域名、以及上面那层协议开销。**比例低时榜单不可信，比例高时榜单就是答案**——这是
+覆盖度唯一的用途。
 
-覆盖度改用 §6.7 的差值算法，不需要任何额外规则。
+**`Metered` 的判据是「该入站在 `meter_domains` 里至少有一行」**，不是版本号、也不是「配置里
+真的有计量规则」——后者要求查询接口去反推一次配置生成的结果，那条通路不存在，硬造出来只会
+多一个会与生成端漂移的真相源。池表就是生成端读的那张表，用它做判据，两侧永远一致。
 
-同样因为不生成兜底规则，**默认出站的语义完全不变**：没命中计量规则的流量照旧走 `OutboundConfigs[0]`。
-这消掉了第二期原本最大的风险面。
+这个判据有一个已知的不精确处：入站被停用时不生成计量规则，但池行还在（§6.4 刻意不删——入站
+可能只是临时停用），于是 `Metered` 仍为 true。后果仅仅是给一个没有流量的入站显示了字节列与
+0% 覆盖率，可以接受；反过来把它做精确，就要在查询路径上再引入一次入站启用状态的判断，而那
+个状态与「历史上这段时间是否被计量过」根本不是一回事——榜单查的是过去 15 天，入站是此刻的
+状态。
 
-**IP 字面量目标不计量**，归入「未计量」。它们需要 `ip` 条件而不是 `domain` 条件，
-而管理员关心的是「哪些网站」。
+`Coverage` 落在 `DomainStatService` 上而不是 `TrafficHistoryService`：它是榜单的一部分，与
+榜单同一次查询返回。它读 `TrafficBucket` 这张不属于自己的表，是同库内的只读聚合，不涉及写入
+方的所有权。
 
-### 6.5 采集
-
-在 `InboundService.AddTraffic`（或它之前的一层）把 tag 以 `a-ui-meter-` 开头的出站条目解析成
-`(inboundId, domain)`，累加进 `DomainStat` 的 `Up` / `Down`（小时桶与日桶各一次 upsert）。
-
-必须复用 `XrayTrafficJob` 那**同一次** `GetTraffic(reset=true)` 的结果（§2.4）。
-
-失败只告警不阻断，与 `TrafficHistoryService.Record` 同一条原则：`inbounds.up/down` 是限额与到期判定的输入，
-它停止累加的后果（用户超额不被停用）比榜单少一段数据严重得多。
-
-### 6.6 只计量走默认出站的流量
+### 6.9 只计量走默认出站的流量
 
 这是必须写进 UI 的边界，不是可以含糊过去的实现细节。
 
-被管理员自己的分流规则带走的流量（走代理节点、被 block）不在计量范围内——要覆盖它们，
-就得为每个「域名 × 目标出站」的组合再建一份计量出站副本，组合爆炸。
+被管理员自己的分流规则带走的流量（走代理节点、被 block）不在计量范围内——要覆盖它们，就得为
+每个「域名 × 目标出站」的组合再建一份计量出站副本，组合爆炸。
 
 界面上这部分归入「未计量」并单独标注，**绝不混进榜单假装是 0**。
 
-### 6.7 覆盖度：用差值，不用兜底规则
+一个自然的副作用：管理员已经用规则分流走的域名，即使进了池，其计量出站也永远拿不到字节
+（管理员规则排在前面）。6.2.4 的「试用退场」闸门会在 3 轮后把它退池并冷却 24 小时，槽位自动
+让给别的域名——不需要为此专门做「池要排除已被规则覆盖的域名」的判断（那需要面板去求解
+`geosite:`/`keyword:`/`regexp:` 条件是否覆盖某个域名，做不到也不该做）。
 
-```
-未计量字节 ≈ 入站总字节 − Σ(计量出站字节) − Σ(其他出站字节)
-```
+### 6.10 这一期会发生几次重启
 
-三项都已经有：入站来自 `inbounds.up/down` 的同一次采集，两类出站都来自同一次 `GetTraffic`。
+| 时刻 | 发生什么 | 为什么 |
+|---|---|---|
+| 升级后第一次配置生成 | **一次整进程重启** | `policy` 段新增 `statsOutbound*`，在 `hot_diff` 的 static 名单里（§6.6） |
+| 每次换池 | 热应用，不重启 | 出站增删（非首位）与整段路由替换都有控制面接口 |
+| `ipRuleResolveDomain` 被切换 | 一次整进程重启 | `routing.domainStrategy` 变化，本来就在必须重启的清单里；计量规则形态随之切换（§6.1） |
 
-它是**近似值**（协议开销、握手失败的连接会让入站与出站对不齐），UI 必须如实标注为「约」，
-不能显示成精确数字。它的用途只有一个：告诉管理员这份榜单覆盖了多大比例的流量。
-比例低时榜单不可信，比例高时榜单就是答案。
+换池的热应用里有一个已知窗口，与 CLAUDE.md 记的「编辑出站」窗口同源：`tryHotApply` 先
+`DelOutbound` 再 `ApplyRoutingConfig`，两者之间旧路由仍引用着已删除的计量 tag，xray 对悬空
+`outboundTag` 不报错、**静默回落默认出站**。对计量规则而言回落目标就是直连——与该流量本来的
+去向完全一致，只是这一毫秒的字节没被计量。**这是所有悬空引用场景里唯一无害的一个**，刻意不做
+补偿，与本子系统「失败即退回重启，不做部分回滚」的原则一致。
 
-### 6.8 policy 注入
+### 6.11 回退到旧版本二进制
 
-`statsOutboundUplink` / `statsOutboundDownlink` **不能只改 `web/service/config.json`**。
-那是 `xrayTemplateConfig` 的默认值，管理员一旦在设置页保存过配置，模板就已落库，改 embed 文件对他静默无效。
+- `meter_domains` 表保留不删（`AutoMigrate` 本来也不删表），旧代码不认识它，不生成任何计量出站
+  与规则。
+- `statsOutbound*` 不再被注入 → `policy` 段变化 → 一次整进程重启，之后出站计数器不再产生。
+- `DomainStat` 的 `Up`/`Down` 两列第一期就已存在，旧代码读得到、只是恒不写：**历史字节数保留，
+  不再更新**。
+- 回退后的旧二进制里 `TopDomains` 根本没有 `Metered` 这条逻辑，它硬编码返回 false（第一期的
+  实现就是如此），前端据此隐藏字节列——不会出现「显示着一列停在昨天的上传量」这种最难排查
+  的形态。`meter_domains` 表里残留的行不影响这一点：旧代码压根不读它。
 
-必须像 `injectAccessLog` 那样在生成期注入：读出 `policy` 段，**只设置这两个 key**，
-其余（管理员自己配的 `levels`、`handshake` 等）原样保留，再用 map 中转 Marshal 保证 key 有序、生成逐字节确定。
+回退方向上没有数据损坏，也没有「范围被放大」的规则，落在安全侧。
 
 ## 7. 前端
 
@@ -561,9 +927,27 @@ CLAUDE.md 已定：新增保留 tag **只改这一个函数**，分配端 / 生�
 
 - **明细** —— 现在这张表，一个字段都不改。
 - **Top 域名** —— 周期按钮组（1h / 6h / 12h / 24h / 7d / 15d）+ 榜单表格。
-  第一期只有「访问次数」一列；第二期增加「上传 / 下载」两列与排序切换，并在表头上方显示覆盖度。
 
-两个既有陷阱：
+第二期在「Top 域名」这个 tab 里增加四样东西，四样都由 `metered` 一个字段统一开关：
+
+1. **上传 / 下载两列**，与「访问次数」并列，用 `sizeFormat` 格式化。
+   `metered` 为 false 时**必须整列隐藏**，不能显示一列恒为 0 的「上传」——那会被
+   理解成「他没上传过」，比不显示更糟。
+2. **排序切换**：次数 / 上传 / 下载三选一，作为 `orderBy` 参数发给服务端。排序在服务端做
+   （§5.3 已定：服务端排序、求和、格式化，前端只管渲染）。
+3. **覆盖度条**，在表头上方一行：
+   「本周期该用户约 **72%** 的流量已归因到具体域名；其余为被分流规则带走的流量、不在计量
+   范围内的域名，以及协议开销。」
+   `coverage.ratio` 为 null（分母为 0）时整行不显示，而不是显示 0%。
+4. **收敛期提示**：计量池按小时重算、按实测字节收敛（§6.2.2），上线第一小时的排序完全来自
+   访问次数。这一点必须说出来，不能让管理员以为第一小时的榜单就是全量真值。提示在
+   `coverage.ratio` 低于某个阈值或该入站尚无字节数据时显示。
+
+还要在 tab 内显示一句关于 `Count` 与 `Up/Down` 语义差异的说明（§6.7）：次数按**连接建立**
+时刻归桶，字节按**流量发生**时刻归桶，所以同一行出现「0 次访问、5 GB 上传」是正常的——那是
+一条跨桶的长连接。
+
+三个既有陷阱：
 
 - **`a-tabs` 的非活动面板仍在 DOM 里**，只是被隐藏。写选择器或做自动化时必须限定
   `.ant-tabs-tabpane-active`，否则会命中隐藏面板里的同名元素。
@@ -571,27 +955,40 @@ CLAUDE.md 已定：新增保留 tag **只改这一个函数**，分配端 / 生�
   （`new Vue({el: '#access-log-modal'})`，即 CLAUDE.md 说的「照 `inbound_modal.html` 的做法」），
   所以新增的 tab 内容必须留在 `<a-modal id="access-log-modal">` 这棵子树里，**不是 `#app`**。
   `web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 守着这条。
-
-改了 `web/assets/js|css` 而版本号没变，浏览器会命中 `max-age=31536000` 的强缓存——
-本次改动集中在模板里，如果确实动了 `web/assets`，发版时要留意 `cur_ver`。
+- 改了 `web/assets/js|css` 而版本号没变，浏览器会命中 `max-age=31536000` 的强缓存——
+  本次改动集中在模板里，如果确实动了 `web/assets`，发版时要留意 `cur_ver`。
 
 ## 8. 接口
 
 ```
 POST /aui/inbound/topDomains/:id
-  body: { since: "1h"|"6h"|"12h"|"24h"|"7d"|"15d", orderBy: "count"|"up"|"down", limit: int }
+  body: {
+    range:   "1h"|"6h"|"12h"|"24h"|"7d"|"15d",   // 缺省/非法回落 "24h"
+    orderBy: "count"|"up"|"down",                // 缺省/非法回落 "count"；第二期新增
+    limit:   int                                  // 缺省/越界回落 10，上界 50
+  }
   resp: {
-    list: [{ domain, count, up, down }],
-    metered: bool,        // 第一期恒 false，前端据此隐藏字节列
-    coverage: {           // metered 为 false 时不显示
-      totalBytes, meteredBytes, unmeteredBytes
-    },
-    since, orderBy, limit  // 实际生效值，前端据此回显
+    list:    [{ domain, count, up, down }],
+    metered: bool,      // 该入站在 meter_domains 里是否有行（§6.8）；false 时前端隐藏字节列
+    range:   string,    // 实际生效值，前端据此回显
+    orderBy: string,
+    limit:   int,
+    coverage: {         // 第二期新增；metered 为 false 时整个对象为 null
+      meteredBytes: int64,    // Σ DomainStat.(up+down)
+      totalBytes:   int64,    // Σ TrafficBucket.(up+down)，同粒度同窗口
+      ratio:        float|null // meteredBytes/totalBytes，钳到 [0,1]；分母为 0 时 null
+    }
   }
 ```
 
-沿用 `getAccessLogs` 的鉴权与路由位置（`web/controller/inbound.go:44` 附近）。
-`limit` 与 `since` 在 controller 校验并钳制，非法值回落默认而不是报错。
+字段名以第一期已落地的实现为准（`range`，不是 `since`）。`orderBy` 与 `coverage` 是第二期
+新增，**旧前端读到多出来的字段会忽略，新前端读到缺失的 `coverage` 要按 null 处理**——回退到
+旧二进制时后者就是实际形态（§6.11）。
+
+沿用 `getAccessLogs` 的鉴权与路由位置（`web/controller/inbound.go:46`）。`limit` / `range` /
+`orderBy` 一律在 controller 校验并钳制，非法值回落默认而不是报错：这是个展示接口，一个拼错的
+参数不该变成报错弹窗。钳制放在 controller 是因为它是不可信输入的边界，与
+`InboundController.getTrafficOverview` 对 `top` 的钳制、导入接口的 10MB 上限同源。
 
 ## 9. 已确认的决策
 
@@ -605,7 +1002,14 @@ POST /aui/inbound/topDomains/:id
 | 复用现有两个分时桶保留期设置 | 语义一致（都是分时桶），且避开新增设置项的代价 |
 | 计量 tag 内嵌域名，不用槽位序号 | 消掉槽位复用导致的归因错乱 |
 | 不生成无 domain 条件的兜底规则 | 会让 `ipRuleResolveDomain` 的第二遍规则永不发生，IP 规则静默失效 |
-| 覆盖度用差值估算 | 不需要任何额外规则，风险为零；如实标注为近似值 |
+| **计量规则在会解析域名的模式下带 `ip: ["0.0.0.0/0","::/0"]` 守卫** | 不带守卫会在第一遍命中并吃掉第二遍，让模板的 `geoip:private` 与管理员所有 CIDR 规则对池内域名静默失效；A/B 两个用例在真实 xray 上实测（§6.1） |
+| **形态判据取生成配置里 `routing.domainStrategy` 的最终值，不取设置项** | 管理员可能在模板里手写 `IPOnDemand`；无法识别的值按「不解析」处理，因为猜错的两种后果不对称 |
+| **计量池按入站各自计算，不用全局池** | 出站数与规则数完全相同（笛卡尔积），但全局池会让流量结构与他人不同的用户拿到 0 覆盖率，与「针对每个用户」冲突 |
+| **未计量域名按 `count × 平均每连接字节` 折算权重参与排序** | 纯按实测字节排会让池锁死在上线首日那一批（新域名字节恒为 0，永远进不来）；折算只用于选池，不进任何接口返回体 |
+| **池落库，不在 `Inject` 里现算** | `Inject` 由 10 秒的 cron 反复调用，现算会让排名一变配置字节就变，cron 不停热应用甚至重启 |
+| **无条件注入 `statsOutbound*`，不看池是否为空** | `policy` 必然触发整进程重启；无条件注入让这次重启落在可预期、可写进发版说明的时刻 |
+| **覆盖度改用「Σ DomainStat 字节 / Σ TrafficBucket 字节」，不用三项差值** | 差值算不出每入站的覆盖度（出站计数器不带入站维度），而这两个量本来就同库、同粒度、同对齐、同一次采集 |
+| **死计数器用观测式上限冻结，不记账** | `RemoveHandler` 不注销计数器且 `StatsService` 没有注销 RPC；观测式跨 xray 重启天然自愈，记账式要面板跟踪它其实拿不准的重启时刻 |
 | 榜单放访问日志弹窗的 tab | 入口就在排查现场，看完榜单能切回明细查具体记录 |
 
 ## 10. 改动文件清单
@@ -621,21 +1025,30 @@ POST /aui/inbound/topDomains/:id
 | `web/web.go` | `startTask` 注册新 job |
 | `web/service/inbound.go` | `DelInbound` 连带删 `DomainStat` |
 | `web/job/traffic_cleanup_job.go` | 按 granularity 清理 + `PruneOrphans` |
-| `web/controller/inbound.go` | `POST /topDomains/:id`，钳制 `limit`/`since` |
+| `web/controller/inbound.go` | `POST /topDomains/:id`，钳制 `limit`/`range` |
 | `web/html/xui/access_log_modal.html` | 拆 tab、榜单、`autoRefresh: true` 及注释 |
 
 ### 第二期
 
 | 文件 | 改动 |
 |---|---|
-| `database/model/routing.go` | `IsReservedTag` 增加 `a-ui-meter-` 前缀 |
-| `web/service/meter_pool.go` | 池的计算与滞后 |
-| `web/job/meter_pool_job.go` | `@every 1h` |
-| `web/service/routing_inject.go` | 生成计量出站与计量规则（追加在最末） |
-| `web/service/dns_inject.go` | 给 `a-ui-meter-*` 出站补 `domainStrategy` |
-| `web/service/xray.go` | policy 注入 `statsOutbound*` |
-| `web/service/inbound.go` | `AddTraffic` 分流出计量出站条目 |
-| `web/service/domain_stat.go` | 写 `Up`/`Down`、覆盖度计算 |
+| `database/model/routing.go` | `IsReservedTag` 增加 `a-ui-meter-` 前缀（一处改动，四个消费点自动覆盖） |
+| `database/model/meter.go` | 新增 `MeterDomain`（§6.2.6） |
+| `database/db.go` | 用量库 `AutoMigrate` 加 `MeterDomain` |
+| `util/domain/domain.go` | 新增 `IsRegistrable(d string) bool`（§6.2.3 第 1 条） |
+| `web/service/meter_pool.go` | 池的排序、三道闸门、死计数器观测、落库 |
+| `web/job/meter_pool_job.go` | `@every 1h`，首行 `defer common.Recover("计量池重算")` |
+| `web/web.go` | `startTask` 注册 `MeterPoolJob` |
+| `web/service/routing_inject.go` | `buildMeterOutbounds` / `buildMeterRules`，追加在出站与规则的最末；形态按 `routing.domainStrategy` 二选一 |
+| `web/service/dns_inject.go` | `applyFreedomStrategy` 遍历并给 `a-ui-meter-*` 出站补 `domainStrategy` |
+| `web/service/xray.go` | `GetXrayConfig` 调 `injectOutboundStats` |
+| `web/service/accesslog.go` 或新文件 | `injectOutboundStats(cfg)`：只设 `policy.system` 的两个 key，其余原样保留 |
+| `web/service/inbound.go` | `AddTraffic` 增加一行 `RecordMetered`；`DelInbound` 连带删 `MeterDomain` |
+| `web/service/domain_stat.go` | `RecordMetered`、`Coverage`、`TopDomains` 支持 `orderBy` 与 `Metered` |
+| `web/job/traffic_cleanup_job.go` | `PruneOrphans` 覆盖 `MeterDomain` |
+| `web/controller/inbound.go` | `orderBy` 参数的校验与钳制 |
+| `web/html/xui/access_log_modal.html` | 字节列、排序切换、覆盖度条、收敛期提示 |
+| `web/service/config.json` | `policy.system` 补两个 key（只影响全新安装的默认模板；存量靠生成期注入） |
 
 ## 11. 测试策略
 
@@ -652,14 +1065,39 @@ POST /aui/inbound/topDomains/:id
 
 第二期：
 
-- **生成逐字节确定**：同一份池连续生成两次配置，`Config.Equals` 为真。
-- 计量 tag 的反查：域名含 `-`、含多级、极长域名。
+- **规则形态的选择**（纯 Go 单测，不需要真实 xray）：`routing.domainStrategy` 分别为
+  `IPIfNonMatch` / `IPOnDemand` / `AsIs` / 缺失 / 无法识别的字符串时，生成的计量规则是否带
+  `ip` 守卫。无法识别的值必须落到「纯 domain」那一侧。
+- **真实 xray 的规则形态 e2e**：把 §6.1 那张交叉实验表固化成回归测试——带 `geoip:private`
+  规则时，纯形态的连接**能连通**（复现危险），守卫形态的连接**被 blackhole 掐断**（危险已挡住）；
+  无 `geoip:private` 时守卫形态照常计量。这是本期唯一一条「测试的是我们没有做错什么」的用例，
+  不能省。核心不提供所需能力时跳过并说明原因，不以「PID 变了」这种和真实缺陷无法区分的形式失败。
+- **生成逐字节确定**：同一份池连续生成两次配置，`Config.Equals` 为真；打乱池表的物理行序后
+  生成结果仍逐字节相同（守「禁止遍历 map 产生数组顺序」）。
+- **计量出站是默认出站的副本**：断言除 `tag` 外逐字节相同，且管理员把模板首个出站改名/换成
+  非 freedom 时行为正确（沿用 `tagDefaultOutbound` 的返回值，不硬编码）。
+- **深拷贝**：给计量出站写 `domainStrategy` 不会污染默认出站，反之亦然。
+- 计量 tag 的反查：域名含 `-`、多级子域、极长域名、id 非数字、缺少分隔符、域名为空。
 - `IsReservedTag` 对 `a-ui-meter-*` 的拒绝，覆盖 `allocTag` 与导入路径两个入口。
-- DNS 注入器给计量出站加上了 `domainStrategy`（扩展既有那条测试）。
-- **真实 xray 的 e2e**：沿用 `web/service/xray_hot_reload_e2e_test.go` 的形状——换池走热应用且不重启进程；
-  改 policy 触发整进程重启。核心不提供 `RoutingService` 时跳过并说明原因，不以「PID 变了」这种
-  和真实缺陷无法区分的形式失败。
-- 覆盖度差值为负时（协议开销导致）不显示负数。
+- **DNS 注入器给计量出站加上了 `domainStrategy`**（扩展既有那条
+  `TestDNSInjectorSetsFreedomDomainStrategyThroughGetXrayConfig`）。
+- **policy 注入**：只改两个 key，管理员写的 `levels`/`handshake`/`statsUserUplink` 原样保留；
+  连续注入两次逐字节相同；模板里 `policy` 缺失时也能正确建出来。
+- **池的三道闸门**：最小驻留（进池 1 轮的域名不被挤出）、替换余量（权重差 1.1 倍不换、1.5 倍换）、
+  试用退场（连续 3 轮零字节退池并冷却 24 小时，冷却期内不再入选）。
+- **排序权重**：`avgBytesPerConn` 为 0 时退化成按 count 排；有字节数据后新域名靠折算权重能挤进池
+  （守「池不会锁死在首日那一批」）。
+- **候选过滤**：`com`、IP 字面量、空串一律不进池——这条挡的是 `domain:com` 这种会吸走该入站几乎
+  全部流量的规则。
+- **死计数器冻结**：构造超过上限的 stale 计量条目，断言换池被冻结且已在池内的域名照常计量。
+- **采集**：出站条目被正确拆成 `(inboundId, domain)` 并累加进小时桶与日桶；零字节条目不写行；
+  非计量前缀的出站条目不影响 `inbounds.up/down` 的累加；`RecordMetered` 失败只告警不阻断
+  `AddTraffic`。
+- **覆盖度**：分母为 0 时返回 null 而不是 0；比值越界时钳到 `[0,1]`（协议开销可能让它略微超过 1）。
+- **热应用 e2e**：换池走热应用且不重启进程（沿用 `web/service/xray_hot_reload_e2e_test.go` 的形状）；
+  改 policy 触发整进程重启。
+- **回退形态**：`meter_domains` 有数据但生成端不产出计量规则时，`Metered` 为 false、`coverage`
+  为 null，历史 `Up`/`Down` 仍可查询。
 
 `make verify`（vet + test + build）是提交前的门禁。
 
@@ -667,16 +1105,36 @@ POST /aui/inbound/topDomains/:id
 
 | 风险 | 缓解 |
 |---|---|
-| 第二期上线触发一次全员断线重连 | 无法避免（policy 是 static 段）。发版说明里写明，并放在第二期而不是第一期 |
-| 计量池收敛期榜单不准 | UI 明示「运行 N 小时后数据趋于完整」，并显示覆盖度 |
-| 一个访问次数极少但流量极大的域名长期进不了池 | 覆盖度会持续偏低，管理员据此知道榜单不可信；`poolCapMax` 可调 |
-| 计量出站副本与默认出站不一致 | 副本除 tag 外逐字节相同；e2e 断言两者内容相等 |
-| 入站多时生成配置膨胀 | `meterOutboundBudget` 硬上限 200，K 自适应 |
+| 计量规则屏蔽 IP 规则的第二遍，让 `geoip:private` 与管理员 CIDR 规则对池内域名静默失效 | §6.1 的 ip 守卫，真实 xray 上 A/B 交叉验证；判据取 `domainStrategy` 最终值，无法识别时落到安全侧 |
+| 第二期上线触发一次全员断线重连 | 无法避免（`policy` 是 static 段）。无条件注入让它落在可预期的时刻，写进发版说明，并放在第二期而不是第一期 |
+| 计量池收敛期榜单不准 | UI 明示收敛过程并显示覆盖度；折算权重让新域名能在一小时内进池 |
+| 池锁死在上线首日抓到的那批域名 | §6.2.2 的折算权重 + §6.2.4 的试用退场闸门 |
+| 退池的计量 tag 在核心里留下永不回收的计数器 | 三道闸门压低 churn；`meterStaleCounterLimit` 观测式冻结；xray 任何一次整进程重启自动清零解冻 |
+| 一个访问次数极少但流量极大的域名长期进不了池 | 首次进池后就按实测字节排，会立刻升到前列；在此之前覆盖度持续偏低，管理员据此知道榜单不可信 |
+| 计量出站副本与默认出站不一致 | 副本除 tag 外逐字节相同；深拷贝；e2e 断言两者内容相等 |
+| 入站多时生成配置膨胀，拖慢每一次真实 xray 校验 | `meterOutboundBudget` 硬上限 200（实测每个计量出站 1.03 ms / 235 B），K 自适应；K 为 0 时功能自动停用 |
+| 节点网速变慢 | 实测排除：400 条规则相对 0 条只多约 8 µs，在噪音以内；吞吐完全不受影响（§6.0） |
 | 榜单聚合拖慢面板 | 聚合在独立库、独立 job、单轮有行数上限；查询走桶不走原始日志 |
+| 用量库打不开导致配置生成失败 | 池为空即不生成任何计量出站与规则，fail-open 到「没有这个功能」，不影响 xray 配置生成 |
 
 ## 13. 参考
 
-- `common/log/access.go`、`app/proxyman/{inbound/always.go,outbound/handler.go}`、
-  `app/dispatcher/default.go`（xray-core v1.260327.1-0.20260728075948-5ca6f4b7d4dc）
-- `docs/superpowers/specs/2026-09-04-traffic-history-design.md`
-- `docs/superpowers/specs/2026-09-05-routing-ip-and-dns-design.md`
+以下 xray-core 位置全部取自锁定版本 v1.260327.1-0.20260728075948-5ca6f4b7d4dc：
+
+- `common/log/access.go` —— 访问日志没有字节字段（§2.1）
+- `app/proxyman/inbound/always.go`、`app/dispatcher/default.go` —— 计数器只有三个维度（§2.2）
+- `app/proxyman/outbound/handler.go:34-56` —— 出站计数器由 `policy.system.statsOutbound*` 开关
+  控制，且在 handler 创建时注册（§6.6）
+- `app/proxyman/outbound/outbound.go:131` —— `RemoveHandler` 不注销计数器（§6.2.5）
+- `app/stats/command/command.proto:85-92`、`command.go:164` —— `StatsService` 没有注销 RPC，
+  `QueryStats` 会把值为 0 的计数器一并返回（§6.2.5）
+- `app/router/router.go:245-273` —— 两遍规则匹配，第二遍只在第一遍全不命中时发生（§6.1）
+- `features/routing/dns/context.go:21-50` —— 解析是惰性的、按连接缓存的，解析失败返回 nil（§6.1）
+- `infra/conf/router.go:175` —— 裸域名串按 `Domain_Substr` 解析（子串匹配），`domain:` 才是
+  按域名边界的后缀匹配（§6.4）
+
+本仓库内的相关设计文档：
+
+- `docs/superpowers/specs/2026-09-04-traffic-history-design.md`（分时桶、时区对齐、保留期）
+- `docs/superpowers/specs/2026-09-05-routing-ip-and-dns-design.md`（DNS 注入器、`ipRuleResolveDomain`）
+- `docs/superpowers/specs/2026-09-02-domain-routing-design.md`（分流注入器的四条不变量）
