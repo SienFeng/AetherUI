@@ -343,10 +343,15 @@ class KcpStreamSettings extends XrayCommonClass {
 }
 
 class WsStreamSettings extends XrayCommonClass {
-    constructor(path='/', headers=[]) {
+    // acceptProxyProtocol 让本入站从连接开头读一段 PROXY protocol 头，拿到
+    // 真实客户端 IP，而不是把前一跳当成客户端。只在本入站确实由 VLESS/Trojan
+    // 的 fallback（xver=1/2）或支持 PROXY protocol 的反代转发时才能开——
+    // 直连的客户端不发这段头，核心会一直等，握手直接失败。
+    constructor(path='/', headers=[], acceptProxyProtocol=false) {
         super();
         this.path = path;
         this.headers = headers;
+        this.acceptProxyProtocol = acceptProxyProtocol;
     }
 
     addHeader(name, value) {
@@ -370,6 +375,7 @@ class WsStreamSettings extends XrayCommonClass {
         return new WsStreamSettings(
             json.path,
             XrayCommonClass.toHeaders(json.headers),
+            !!json.acceptProxyProtocol,
         );
     }
 
@@ -377,6 +383,7 @@ class WsStreamSettings extends XrayCommonClass {
         return {
             path: this.path,
             headers: XrayCommonClass.toV2Headers(this.headers, false),
+            acceptProxyProtocol: this.acceptProxyProtocol,
         };
     }
 }

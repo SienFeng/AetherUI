@@ -4,6 +4,25 @@
         <a-input v-model.trim="inbound.stream.ws.path"></a-input>
     </a-form-item>
 </a-col>
+<a-col :span="12">
+    <a-form-item>
+        <span slot="label">
+            接收 PROXY protocol
+            <a-tooltip>
+                <template slot="title">
+                    只有本入站确实由 VLESS/Trojan 的 fallback（xver=1 或 2）、<br/>
+                    或支持 PROXY protocol 的反代转发时才能打开。<br/>
+                    <b>直连的客户端不发这段头，打开后会一直握手失败</b>，<br/>
+                    而 xray 的配置校验照样通过、面板照样显示运行中，看不出问题。<br/>
+                    作用是让本入站拿到真实客户端 IP 而不是前一跳的地址——<br/>
+                    地区限制、并发限制、IP 封禁、访问日志都依赖它。
+                </template>
+                <a-icon type="question-circle" theme="filled"></a-icon>
+            </a-tooltip>
+        </span>
+        <a-switch v-model="inbound.stream.ws.acceptProxyProtocol"></a-switch>
+    </a-form-item>
+</a-col>
 <a-col :span="24">
     <a-form-item label="请求头">
         <!-- + 按钮与输入组列表用 flex 并排：按钮居左并 align-items:center 垂直
