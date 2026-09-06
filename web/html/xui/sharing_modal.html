@@ -30,10 +30,15 @@
                    :color="sharingModal.isCoexisting(p) ? 'red' : 'purple'">[[ p ]]</a-tag>
         </p>
         <a-alert v-if="sharingModal.suggestion.coexisting.length > 0" type="error" show-icon
+                 style="margin-bottom: 8px"
                  message="标红的地区出现在并存记录里，请先判断再采纳"
                  description="如果这个节点确实正在被共享，直接采纳会把对方所在的地区一并放行——等于把共享合法化，而面板不会有任何提示。面板分不清这是买家还是你自己老家常挂的设备，所以只标出来，由你决定删掉哪个。">
         </a-alert>
-        <a-alert v-else type="info" show-icon
+        <!-- IPv4-only 是启用地区限制的必然副作用，与有没有并存嫌疑无关：
+             database/model/model.go:106 的 HasRegions 只看 regionList 是否
+             非空。所以这条**始终显示**，不能挂在上面那条的 v-else 上——
+             否则最该谨慎的那个场景（有并存嫌疑）反而看不到它。 -->
+        <a-alert type="info" show-icon
                  message="采纳后该入站将只监听 IPv4"
                  description="启用地区限制会让入站强制监听 0.0.0.0，通过 IPv6 连接的客户端会立刻连不上。确认保存前请留意这一点。">
         </a-alert>
