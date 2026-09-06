@@ -377,6 +377,14 @@
             this.topRange = msg.obj.range;
             this.topOrder = msg.obj.orderBy || 'count';
             this.topMetered = !!msg.obj.metered;
+            // metered 从真变假之后（K=0、池里的域名全部退场、管理员停用了入站），
+            // 排序单选组会被 v-if 整个藏起来——管理员再没有任何入口把 topOrder
+            // 改回来，除非关掉弹窗重开；而服务端会照着恒为 0 的 up/down 排序，
+            // 榜单实际退化成按域名字典序，看上去像坏了。控件消失时必须同时把
+            // 维度收回 count。
+            if (!this.topMetered) {
+                this.topOrder = 'count';
+            }
             this.topCoverageText = this.formatCoverage(msg.obj.coverage);
             this.rebuildTopColumns();
             this.topLoaded = true;

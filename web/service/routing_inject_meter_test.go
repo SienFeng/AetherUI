@@ -296,3 +296,72 @@ func jsonEq(t *testing.T, got any, want []string) bool {
 	}
 	return true
 }
+
+func TestInjectSurvivesMeterPoolQueryFailure(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32008)
+	putPoolRow(t, in.Id, "doubleclick.net", 0)
+
+	// 构造「用量库句柄还在、但查询本身失败」——这正是 Pool 里 db == nil 那条
+	// 已经正确的 fail-open 路径覆盖不到的那一半。现实触发条件是 SQLITE_BUSY
+	// 超过 go-sqlite3 默认 5s（用量库每 10 秒被三路写入、每小时还有一次可能
+	// 扫过一年数据的清理 DELETE）、磁盘满、文件损坏。
+	//
+	// 这里 fail-close 的后果不是「日志多一行」：GetXrayConfig 一失败，
+	// RestartXray 就在拿到配置那一步 return err，根本走不到 NewProcess；面板
+	// 重启后 xray 本来就没在跑，CheckXrayRunningJob 每次触发都卡在同一处——
+	// xray 永远起不来、全员断网。
+	if err := database.GetTrafficDB().Exec("DROP TABLE meter_domains").Error; err != nil {
+		t.Fatalf("DROP TABLE: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject 返回错误 %v——读池失败必须 fail-open 到「没有这个功能」，"+
+			"绝不能让整份 xray 配置生成失败", err)
+	}
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); model.IsMeterTag(tag) {
+			t.Errorf("读池失败却生成了计量出站 %q", tag)
+		}
+	}
+	for _, r := range decodeRules(t, cfg) {
+		if tag, _ := r["outboundTag"].(string); model.IsMeterTag(tag) {
+			t.Errorf("读池失败却生成了计量规则，outboundTag = %q", tag)
+		}
+	}
+}
+
+func TestInjectSkipsPoolRowsThatAreNoLongerRegistrableDomains(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32009)
+	// 写入路径（buildMeterCandidates）今天已经挡住了这种值，所以这一行只可能
+	// 来自 publicsuffix 表升级后变成公共后缀本身的存量数据。生成端必须再挡
+	// 一道：domain:com 会命中全部 .com，把该入站几乎全部流量吸进一个计量出站，
+	// 榜单从此只有一行。Recompute 一小时内自愈，但那一小时里生成端照发。
+	putPoolRow(t, in.Id, "com", 0)
+	putPoolRow(t, in.Id, "example.com", 0)
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	badTag := model.MeterTag(in.Id, "com")
+	goodTag := model.MeterTag(in.Id, "example.com")
+	meterTags := make([]string, 0, 2)
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); model.IsMeterTag(tag) {
+			meterTags = append(meterTags, tag)
+		}
+	}
+	if len(meterTags) != 1 || meterTags[0] != goodTag {
+		t.Errorf("计量出站 = %v，期望只有 %q（%q 必须被跳过）", meterTags, goodTag, badTag)
+	}
+	// 出站与规则必须消费同一份过滤结果，否则会留下悬空 outboundTag——
+	// xray 对此不报错，运行时静默回落默认出站。
+	for _, r := range decodeRules(t, cfg) {
+		if tag, _ := r["outboundTag"].(string); tag == badTag {
+			t.Errorf("生成了引用 %q 的计量规则，而该出站并未写进配置", badTag)
+		}
+	}
+}

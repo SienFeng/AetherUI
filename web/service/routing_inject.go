@@ -8,6 +8,7 @@ import (
 	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/common"
+	"a-ui/util/domain"
 	"a-ui/util/json_util"
 	"a-ui/xray"
 )
@@ -33,10 +34,20 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	inboundTagById := enabledInboundTags(inbounds)
 
 	// 计量池：出站与规则必须用同一份，理由见 filterMeterPool。
-	// 用量库不可用时 Pool 返回空，整个计量功能自动停用，配置照常生成。
+	//
+	// 读池失败绝不能让整份配置生成失败——这是本函数里唯一一处必须 fail-open
+	// 的错误。GetXrayConfig 一失败，RestartXray 就在拿到配置那一步 return err，
+	// 根本走不到 NewProcess；而面板重启后 xray 本来就没在跑，CheckXrayRunningJob
+	// 每次触发都会卡在同一处，xray 从此永远起不来、全员断网，唯一的信号只有
+	// 一行日志。而用量库是每 10 秒被三路写入、每小时还有一次大范围清理 DELETE
+	// 的独立 SQLite 文件，SQLITE_BUSY 超时、磁盘满、文件损坏都是现实触发条件。
+	//
+	// 与 Pool 内部 db == nil 那条路径保持一致：按空池继续，计量功能降级成
+	// 「没有这个功能」，配置照常生成（设计 §6.2.6 与 §12 风险表的原文要求）。
 	meterPool, err := (&MeterPoolService{}).Pool(time.Now())
 	if err != nil {
-		return err
+		logger.Warning("读取计量池失败，本次按空池生成（域名榜单的字节列会保持为空）:", err)
+		meterPool = nil
 	}
 	meterPool = filterMeterPool(meterPool, inboundTagById)
 
@@ -166,17 +177,30 @@ func enabledInboundTags(inbounds []*model.Inbound) map[int]string {
 	return byId
 }
 
-// filterMeterPool 剔除指向已停用或已删除入站的池行。
+// filterMeterPool 剔除指向已停用或已删除入站的池行，以及不再是注册域名的池行。
 //
 // 出站与规则必须消费**同一份**过滤后的列表：只过滤一侧会留下没有规则引用
 // 的孤儿出站（无害但无意义），或者引用不存在出站的悬空规则——后者危险得多，
 // xray 对悬空 outboundTag 不报错，运行时静默回落默认出站。
+//
+// 注册域名那一道是「写入路径拒绝 + 生成期跳过」两道防线里的第二道。今天写入
+// 侧（buildMeterCandidates）已经挡住了，但 golang.org/x/net/publicsuffix 的表
+// 升级后，一个曾是 eTLD+1 的域名可以变成公共后缀本身，那时存量池行就是脏数据。
+// 放行它会生成 domain:com 这种命中全部 .com 的规则，把该入站几乎全部流量吸进
+// 一个计量出站，榜单从此只有一行——Recompute 一小时内自愈，但那一小时里生成端
+// 照发，而这个量级值得第二道。
 func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEntry {
 	out := make([]MeterEntry, 0, len(pool))
 	for _, e := range pool {
-		if _, ok := inboundTagById[e.InboundId]; ok {
-			out = append(out, e)
+		if _, ok := inboundTagById[e.InboundId]; !ok {
+			continue
 		}
+		if !domain.IsRegistrable(e.Domain) {
+			logger.Warning("跳过池里不再是注册域名的条目（可能是 publicsuffix 表升级导致），入站:",
+				e.InboundId, "域名:", e.Domain)
+			continue
+		}
+		out = append(out, e)
 	}
 	return out
 }
@@ -188,8 +212,16 @@ func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEn
 // 道理：调用方必须只为实际写进配置的那些条目生成规则，否则会形成悬空
 // outboundTag，而 xray 对此不报错、静默回落默认出站。
 //
-// 深拷贝走 JSON 往返：浅拷贝会共享 settings 那个 map，DNSInjector 给计量
-// 出站写 domainStrategy 时会同时写进默认出站（或者反过来），两者再也分不开。
+// 深拷贝走 JSON 往返，理由就在下面那行 clone["tag"] = ...：浅拷贝（把 base
+// 这个 map 直接 append 进去）会让全部克隆与数组首位的默认出站是同一个对象，
+// 于是默认出站会被写上最后一个计量 tag。而 xray/hot_diff.go 的 diffOutbounds
+// 要求首位逐字节不变，一被改动就判「必须重启」——每换一次池都退化成整进程重启。
+// TestInjectAppendsMeterOutboundsAsDefaultCopies 里那条「首位的 tag 不是计量
+// tag」的断言正是抓这个的。
+//
+// 不是「DNSInjector 会串写 settings」：applyFreedomStrategy 是从
+// cfg.OutboundConfigs 的**字节**重新 Unmarshal 的，而这里产出的 map 在那之前
+// 就已经被 Marshal 成字节了，内存里的 map 共享在这之后一律不可能。
 //
 // 拿不到可复制的默认出站时整个放弃计量并记 Warning，而不是退而求其次自己
 // 造一个 freedom：默认出站是管理员可以改的（换协议、加 sendThrough），

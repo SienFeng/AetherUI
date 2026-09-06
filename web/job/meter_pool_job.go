@@ -31,17 +31,20 @@ func (j *MeterPoolJob) Run() {
 	// 具体任务名，而不是只知道「某个 job 挂了」。
 	defer common.Recover("计量池重算任务")
 
+	// changed 与 err 必须分开判：Recompute 逐入站累加 changed，任一入站出错就
+	// 带着已经发生的变动 return。此时库里的池已经变了，标志却没置的话，下发的
+	// 配置会一直停在旧池上，直到下一次无关改动或下一个整点——中间那段时间，
+	// 已退池域名的计量出站还在，新进池的域名一个字节都收不到。所以先按 changed
+	// 置标志，再报错。
 	changed, err := j.meterPoolService.Recompute(time.Now())
+	if changed > 0 {
+		logger.Debugf("计量池变动 %v 项", changed)
+		// 置了标志之后由 InboundController 那个 10 秒的消费任务调
+		// RestartXray(false)，走 tryHotApply：出站增删与整段路由替换都有控制面
+		// 接口，不会重启进程。池没变就没有配置改动，白置标志只会让消费任务空跑。
+		j.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		logger.Warning("重算计量池失败:", err)
-		return
 	}
-	if changed == 0 {
-		return
-	}
-	logger.Debugf("计量池变动 %v 项", changed)
-	// 池变了才置标志。置了标志之后由 InboundController 那个 10 秒的消费任务
-	// 调 RestartXray(false)，走 tryHotApply：出站增删与整段路由替换都有控制面
-	// 接口，不会重启进程。池没变就没有配置改动，白置标志只会让消费任务空跑。
-	j.xrayService.SetToNeedRestart()
 }

@@ -247,8 +247,23 @@ type MeterEntry struct {
 // Config.Equals 对 OutboundConfigs / RouterConfig 按字节比较——顺序一抖动
 // 就恒判不等，那个 10 秒的 cron 会不停重启 xray。
 //
-// 冷却中的行（CooldownUntil > now）不返回：它们已经退场，留在表里只是为了
-// 记住冷却截止时刻。
+// 「在池」的判据是**精确的 CooldownUntil == 0**，绝不是 <= now。CooldownUntil
+// 这一列同时承担「是不是在池」和「冷却到什么时候」两个语义，<= now 会把
+// 0 < CooldownUntil <= now 的行——已退场、冷却已过期、等着被下一次 Recompute
+// 删掉——也当成在池。那个窗口最长一小时（清理只在 Recompute 顶部跑，而任何
+// 一次面板重启都会打乱 cron 相位，窗口均匀分布在 [0, 1h)），足以让试用退场
+// 闸门每 24 小时被规律性击穿一次：一个刚被判定「不值得再试」的域名会在下一次
+// Recompute 之前自己回到生成配置里，既绕过 cooling 判定，也绕过「重新参选要
+// 和别人比权重」这一步。冻结分支更糟——它在那条清理之前就 return，于是过期
+// 冷却行会一直被当成在池，它们的 tag 从 RecordMetered 的死计数器统计里被剔
+// 出去，观测值下降、冻结提前解除，方向与冻结的目的正好相反。
+//
+// == 0 与「未退场」严格等价，靠 Recompute 那边的三条写入约束：创建时不写
+// CooldownUntil（零值），退场时写的是未来时刻，冷却期满是**删行**而不是把它
+// 改回 0。改动那三处任何一条之前，先回来看这里。
+//
+// now 因此不再参与查询，保留参数是为了不把「按某个时刻看池」这个调用约定
+// 从接口上抹掉；**不要**据此再往回加任何时间谓词。
 //
 // 用量库不可用时返回空切片而不是报错：整个计量功能自动停用，配置照常生成。
 func (s *MeterPoolService) Pool(now time.Time) ([]MeterEntry, error) {
@@ -257,7 +272,7 @@ func (s *MeterPoolService) Pool(now time.Time) ([]MeterEntry, error) {
 		return nil, nil
 	}
 	var rows []model.MeterDomain
-	err := db.Where("cooldown_until <= ?", now.Unix()).Find(&rows).Error
+	err := db.Where("cooldown_until = 0").Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -332,6 +347,11 @@ func (s *MeterPoolService) Recompute(now time.Time) (int, error) {
 	}
 	// 冷却期满的行直接删掉：它们已经不在池里，留着只是为了记冷却时刻，
 	// 到期后就是普通的「不在池内」，该重新参选了。
+	//
+	// 这次删除的行数**刻意不计进 changed**：Pool 的判据是 cooldown_until = 0，
+	// 这些行删除前后都不在池内，池的可见内容一个字节都没变，计进去只会让
+	// MeterPoolJob 白置一次重启标志。真正的可见变化是它们随后重新入选——那走
+	// 的是下面的 Create，本来就会计数。
 	if err := tdb.Where("cooldown_until > 0 and cooldown_until <= ?", now.Unix()).
 		Delete(&model.MeterDomain{}).Error; err != nil {
 		return 0, err
@@ -388,6 +408,11 @@ func (s *MeterPoolService) recomputeInbound(
 	}
 	inPool := make(map[string]*model.MeterDomain, len(rows))
 	cooling := make(map[string]bool)
+	// 这里用 > now 而不是 Pool 的 != 0，靠的是 Recompute 顶部那条清理已经把
+	// 0 < cooldown_until <= now 的行删干净了——剩下的要么是 0（在池），要么
+	// 在未来（冷却中），两个判据于是等价。刻意不改成 != 0：真出现过期行时
+	// 「不在池、也不在冷却」正是想要的语义，它本轮就该重新参选。
+	// 动这条清理之前先回来看这里。
 	for i := range rows {
 		r := &rows[i]
 		if r.CooldownUntil > now.Unix() {

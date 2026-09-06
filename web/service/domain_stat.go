@@ -463,10 +463,14 @@ func (s *DomainStatService) TopDomains(
 // 入站显示了字节列与 0% 覆盖率，可以接受；反过来把它做精确，就要在查询路径上
 // 引入一次入站启用状态的判断，而那个状态与「历史上这段时间是否被计量过」
 // 根本不是一回事——榜单查的是过去 15 天，入站是此刻的状态。
+//
+// 判据必须与 MeterPoolService.Pool 完全一致（cooldown_until = 0，理由见那里）：
+// 两处一旦漂移，界面会为一个其实已经全部退场的入站显示字节列，而那些列恒为 0。
+// now 因此不参与查询，保留参数是为了让签名与调用点的语义一致。
 func (s *DomainStatService) inboundIsMetered(db *gorm.DB, inboundId int, now time.Time) (bool, error) {
 	var n int64
 	err := db.Model(&model.MeterDomain{}).
-		Where("inbound_id = ? and cooldown_until <= ?", inboundId, now.Unix()).
+		Where("inbound_id = ? and cooldown_until = 0", inboundId).
 		Count(&n).Error
 	return n > 0, err
 }

@@ -405,6 +405,18 @@ func applyCandidateDNS(cfg map[string]any, candidate *entity.AllSetting) {
 
 // applyCandidateDomainStrategy 镜像 RoutingInjector 对 routing.domainStrategy
 // 的处理：开关为 1 时写 IPIfNonMatch，为 0 时【不碰】——模板里的原值才是最终值。
+//
+// 与上面 applyCandidateDNS 那条同类的近似：这里只改 domainStrategy 这一个键，
+// 不重算计量规则的形态。RoutingInjector 会按最终的 domainStrategy 二选一
+//（IPIfNonMatch 时给每条计量规则补 ip 守卫，否则是纯形态，见
+// meterRuleNeedsIPGuard），而基线来自 GetXrayConfig()，那里的计量规则是按库里
+// 的**旧**开关值生成的。于是把开关从 0 改到 1 的那一次保存，送去 run -test 的
+// 是「IPIfNonMatch + 纯形态计量规则」这个**永远不会被下发**的组合。
+//
+// 两种形态 xray 都接受（守卫只是一条恒真的 ip 条件），所以既不会误拒也不会
+// 漏放，无实际危害；正确地重算形态得把整条注入链再走一遍，那正是
+// xrayTemplateConfig 刻意不走这一步的同一个理由——两条生成链一旦漂移，
+// 「校验通过的配置」与「真正下发的配置」就不是同一份，比不校验更危险。
 func applyCandidateDomainStrategy(cfg map[string]any, candidate *entity.AllSetting) {
 	routing, _ := cfg["routing"].(map[string]any)
 	if candidate.IPRuleResolveDomain == 1 {

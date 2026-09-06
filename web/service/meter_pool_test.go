@@ -287,3 +287,27 @@ func TestRecomputeIgnoresDisabledInbounds(t *testing.T) {
 		t.Errorf("池行 = %+v，期望空——停用的入站不生成计量出站，也不该占预算", rows)
 	}
 }
+
+func TestPoolExcludesRowsWhoseCooldownAlreadyExpired(t *testing.T) {
+	setupMeterPoolTest(t)
+	now := time.Unix(1_800_000_000, 0)
+	putPoolRow(t, 3, "alive.com", 0)
+	// 已退场、冷却已过期、还没被下一次 Recompute 删掉。它绝不能被当成在池：
+	// 判据若是 cooldown_until <= now，这一行就会回到生成配置里，试用退场闸门
+	// 每 24 小时被规律性击穿一次（清理只在 Recompute 顶部跑，而面板重启会打乱
+	// cron 相位，窗口均匀分布在 [0, 1h)）。冻结分支更甚：它在清理之前就 return，
+	// 这些行会一直被当成在池，把 RecordMetered 的死计数器观测值压低，冻结提前
+	// 解除，方向与冻结的目的正好相反。
+	putPoolRow(t, 3, "expired.com", now.Add(-time.Hour).Unix())
+	// 冷却中的行本来就不该返回，一并守住。
+	putPoolRow(t, 3, "cooling.com", now.Add(time.Hour).Unix())
+
+	got, err := (&MeterPoolService{}).Pool(now)
+	if err != nil {
+		t.Fatalf("Pool: %v", err)
+	}
+	want := []MeterEntry{{InboundId: 3, Domain: "alive.com"}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("Pool = %+v，期望 %+v——只有 cooldown_until = 0 的行才在池内", got, want)
+	}
+}

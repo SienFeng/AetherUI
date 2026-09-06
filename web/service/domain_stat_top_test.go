@@ -102,6 +102,26 @@ func TestTopDomainsMeteredFollowsPool(t *testing.T) {
 	}
 }
 
+// Metered 的判据必须与 MeterPoolService.Pool 完全一致：一个只剩「已退场、
+// 冷却已过期、等着被下一次 Recompute 删掉」的行的入站，池里其实空无一物。
+// 两处判据一旦漂移，界面会为它显示上传/下载两列，而那两列恒为 0——那正是
+// 这个字段本身要避免的误读。
+func TestTopDomainsMeteredIgnoresExpiredCooldownRows(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := mkTrafficInbound(t, 31807, "甲")
+	now := time.Date(2026, 9, 6, 12, 30, 0, 0, time.UTC)
+	putPoolRow(t, in.Id, "retired.com", now.Add(-time.Hour).Unix())
+
+	got, err := (&DomainStatService{}).TopDomains(in.Id, TopRange1h, TopOrderCount, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if got.Metered {
+		t.Error("只剩过期冷却行时 Metered 应为 false——那些域名已经退场，" +
+			"不生成任何计量出站，字节列恒为 0")
+	}
+}
+
 func TestTopDomainsCoverageRatio(t *testing.T) {
 	setupMeterPoolTest(t)
 	in := mkTrafficInbound(t, 31804, "甲")
