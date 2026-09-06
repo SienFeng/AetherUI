@@ -264,11 +264,14 @@ func (s *DomainStatService) TopDomains(inboundId int, r TopDomainRange, limit in
 	var rows []TopDomainRow
 	err = db.Model(&model.DomainStat{}).
 		Select("domain, sum(count) as count, sum(up) as up, sum(down) as down").
-		// since 已经是整点/整日对齐的桶起点，与 back 恰好相差整数个桶；
-		// 用 ">=" 会把 since 自身那一桶也算进来，让「1h」档实际囊括当前
-		// 与上一个小时共两个桶。改用 ">" 排除 since 自身，"Nh"/"Nd" 档
-		// 才会恰好对应 N 个桶（当前桶 + 前面 N-1 个）。
-		Where("granularity = ? and inbound_id = ? and bucket_start > ?", g, inboundId, since).
+		// since 和桶起点一样落在对齐边界上，用 ">=" 会把 since 自身那一桶
+		// 也算进来，所以「最近 1 小时」实际覆盖的是 60~120 分钟，不是精确
+		// 的 60 分钟。这是刻意的取舍，不是疏忽：改成 ">" 更贴字面，但整点
+		// 刚过时就只剩当前这一个几乎为空的桶——聚合任务 @every 10m，日志
+		// 还来不及聚合进去——榜单会在每小时开头都短暂显示"无数据"。这里
+		// 要的是排名，多覆盖半个桶几乎不改变谁在前面，覆盖不足却会让功能
+		// 每小时必崩一次，两害相权取范围略宽的这个。
+		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
 		Group("domain").
 		// 次数相同时按域名字典序兜底，让同一份数据每次返回的顺序一致——
 		// 顺序抖动会让自动刷新时榜单里的行无端跳动。

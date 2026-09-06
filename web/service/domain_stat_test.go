@@ -196,8 +196,11 @@ func TestTopDomainsOrdersByCountWithinRange(t *testing.T) {
 	}
 }
 
-// 1h 档只看当前这一个小时桶；6h 档要把更早的桶算进来。
-// 边界算错的表征只是"数字偏小"，没有任何一层会报错。
+// since 与桶起点一样落在对齐边界上，TopDomains 用 ">="，所以「最近 1 小时」
+// 实际覆盖 since 自身那一桶到当前，一共两桶（见 TopDomains 里的注释）。
+// 这个用例守两件事：1h 与 6h 命中的桶数不同（不是"只要不报错就行"），且
+// 确实存在一个超出档位范围、被排除在外的更老的桶——只比条数的话，
+// 边界算错但恰好数量相同的回归会溜过去，所以要连域名一起比对。
 func TestTopDomainsRespectsRangeBoundary(t *testing.T) {
 	setupDomainStatTest(t)
 	in := mkTrafficInbound(t, 31005, "甲")
@@ -205,28 +208,57 @@ func TestTopDomainsRespectsRangeBoundary(t *testing.T) {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	tdb := database.GetTrafficDB()
 	cur := model.AlignHour(now, loc)
-	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "a.com", cur, 1); err != nil {
-		t.Fatal(err)
+	write := func(dom string, hoursAgo int64) {
+		t.Helper()
+		if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, dom, cur-hoursAgo*3600, 1); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := upsertDomainStat(tdb, model.GranularityHour, in.Id, "b.com", cur-3600, 1); err != nil {
-		t.Fatal(err)
+	write("a.com", 0)
+	write("b.com", 1)
+	write("c.com", 3)
+	write("d.com", 7)
+
+	domains := func(res *TopDomainResult) []string {
+		got := make([]string, 0, len(res.List))
+		for _, r := range res.List {
+			got = append(got, r.Domain)
+		}
+		return got
+	}
+	assertDomains := func(t *testing.T, res *TopDomainResult, want []string) {
+		t.Helper()
+		got := domains(res)
+		if len(got) != len(want) {
+			t.Fatalf("返回 %v，期望 %v", got, want)
+		}
+		for i := range want {
+			// 四个桶的 count 都是 1，排序退化成 "domain asc"（GORM 的
+			// Order("count desc, domain asc")），所以命中的域名天然按
+			// 字母序返回，这里可以逐位比对，不需要先排序。
+			if got[i] != want[i] {
+				t.Fatalf("返回 %v，期望 %v", got, want)
+			}
+		}
 	}
 
 	svc := &DomainStatService{}
+	// since = AlignHour(now-1h) = cur-3600，">=" 命中 cur-3600 与 cur，
+	// 即 b.com 与 a.com；cur-3*3600（c.com）与 cur-7*3600（d.com）都更早，
+	// 被排除。
 	res, err := svc.TopDomains(in.Id, TopRange1h, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
-	if len(res.List) != 1 || res.List[0].Domain != "a.com" {
-		t.Errorf("1h 档返回 %+v，期望只有 a.com", res.List)
-	}
+	assertDomains(t, res, []string{"a.com", "b.com"})
+
+	// since = cur-6*3600，命中前三个桶（a/b/c.com），cur-7*3600（d.com）
+	// 超出 6h 范围、必须被排除。
 	res, err = svc.TopDomains(in.Id, TopRange6h, 10, now)
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
-	if len(res.List) != 2 {
-		t.Errorf("6h 档返回 %d 条，期望 2", len(res.List))
-	}
+	assertDomains(t, res, []string{"a.com", "b.com", "c.com"})
 }
 
 // 7d / 15d 走日桶。走错粒度会把两级数据混在一起加倍计数。
