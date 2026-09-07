@@ -17,8 +17,18 @@ func Parse(data []byte) (*DB, error) {
 	if string(data[:len(magic)]) != magic {
 		return nil, common.NewError("文件头标识不匹配，不是 ipdb 数据文件")
 	}
-	if v := binary.LittleEndian.Uint32(data[8:]); v != formatVersion {
-		return nil, common.NewErrorf("格式版本为 %d，本程序只支持 %d", v, formatVersion)
+	// 两个版本都要认。v1 是不含运营商的旧格式，面板升级后机器上那份就是它：
+	// 拒绝加载会让整个归属地列当场消失，不只是运营商列。
+	version := binary.LittleEndian.Uint32(data[8:])
+	var locSize int
+	switch version {
+	case formatVersion:
+		locSize = locationSize
+	case legacyFormatVersion:
+		locSize = legacyLocationSize
+	default:
+		return nil, common.NewErrorf("格式版本为 %d，本程序只支持 %d 与 %d",
+			version, legacyFormatVersion, formatVersion)
 	}
 	builtAt := time.Unix(int64(binary.LittleEndian.Uint64(data[12:])), 0)
 	segCount := int(binary.LittleEndian.Uint32(data[20:]))
@@ -39,19 +49,23 @@ func Parse(data []byte) (*DB, error) {
 	}
 	off += segCount * segmentSize
 
-	if need := off + locCount*locationSize; len(data) < need {
+	if need := off + locCount*locSize; len(data) < need {
 		return nil, common.NewErrorf("归属地表被截断: 需要 %d 字节，实际 %d", need, len(data))
 	}
-	rawLocs := make([][3]uint16, locCount)
+	rawLocs := make([][4]uint16, locCount)
 	for i := 0; i < locCount; i++ {
-		b := data[off+i*locationSize:]
-		rawLocs[i] = [3]uint16{
+		b := data[off+i*locSize:]
+		rawLocs[i] = [4]uint16{
 			binary.LittleEndian.Uint16(b[0:]),
 			binary.LittleEndian.Uint16(b[2:]),
 			binary.LittleEndian.Uint16(b[4:]),
 		}
+		// v1 没有这一项，留 0——字符串池的 0 号位恒为空串。
+		if locSize == locationSize {
+			rawLocs[i][3] = binary.LittleEndian.Uint16(b[6:])
+		}
 	}
-	off += locCount * locationSize
+	off += locCount * locSize
 
 	if len(data) < off+4 {
 		return nil, common.NewError("字符串区被截断")
@@ -83,6 +97,7 @@ func Parse(data []byte) (*DB, error) {
 			Country: pool[raw[0]],
 			Region:  pool[raw[1]],
 			City:    pool[raw[2]],
+			ISP:     pool[raw[3]],
 		}
 	}
 	for i, s := range segments {
@@ -91,7 +106,12 @@ func Parse(data []byte) (*DB, error) {
 		}
 	}
 
-	return &DB{builtAt: builtAt, segments: segments, locations: locations}, nil
+	return &DB{
+		builtAt:   builtAt,
+		segments:  segments,
+		locations: locations,
+		hasISP:    version == formatVersion,
+	}, nil
 }
 
 // Load 从磁盘读入一份 ipdb 数据文件。

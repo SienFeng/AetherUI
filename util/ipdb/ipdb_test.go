@@ -2,6 +2,7 @@ package ipdb
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
 	"strings"
 	"testing"
@@ -230,4 +231,126 @@ func assertStrings(t *testing.T, got, want []string) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
+}
+
+// v2 写入的 ISP 必须能原样读回来。
+func TestBuildRecordsRoundTripsISP(t *testing.T) {
+	var buf bytes.Buffer
+	recs := []Record{
+		{Start: 0x01000000, End: 0x0100FFFF, Country: "中国", Region: "江苏省", City: "南京市", ISP: "中国电信"},
+		{Start: 0x01010000, End: 0x0101FFFF, Country: "中国", Region: "江苏省", City: "南京市", ISP: "中国联通"},
+		{Start: 0x03000000, End: 0x03FFFFFF, Country: "United States", ISP: "Google"},
+	}
+	if err := BuildRecords(recs, &buf, testBuiltAt); err != nil {
+		t.Fatalf("BuildRecords: %v", err)
+	}
+	db, err := Parse(buf.Bytes())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !db.HasISP() {
+		t.Error("HasISP() = false, 新生成的库应当是 v2")
+	}
+	for _, c := range []struct{ ip, isp string }{
+		{"1.0.0.1", "中国电信"},
+		{"1.1.0.1", "中国联通"},
+		{"3.1.1.1", "Google"},
+	} {
+		loc, ok := db.Lookup(net.ParseIP(c.ip))
+		if !ok {
+			t.Errorf("Lookup(%s) 未命中", c.ip)
+			continue
+		}
+		if loc.ISP != c.isp {
+			t.Errorf("Lookup(%s).ISP = %q, want %q", c.ip, loc.ISP, c.isp)
+		}
+	}
+}
+
+// 同城不同 ISP 的相邻段不能再被合并掉，否则 ISP 信息会丢。
+func TestBuildRecordsDoesNotMergeAdjacentSegmentsWithDifferentISP(t *testing.T) {
+	var buf bytes.Buffer
+	recs := []Record{
+		{Start: 0x02000000, End: 0x020000FF, Country: "中国", Region: "江苏省", City: "南京市", ISP: "中国电信"},
+		{Start: 0x02000100, End: 0x020001FF, Country: "中国", Region: "江苏省", City: "南京市", ISP: "中国联通"},
+	}
+	if err := BuildRecords(recs, &buf, testBuiltAt); err != nil {
+		t.Fatalf("BuildRecords: %v", err)
+	}
+	db, err := Parse(buf.Bytes())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if db.SegmentCount() != 2 {
+		t.Errorf("SegmentCount = %d, want 2（同城不同 ISP 不能合并）", db.SegmentCount())
+	}
+}
+
+// 升级路径的关键用例：机器上已有的 v1 库必须还能读，ISP 留空。
+// 拒绝加载会让整个归属地列当场消失——不只是新的运营商列，
+// 连现在能用的省市判定和共享检测的省份判定也一起失效。
+func TestParseAcceptsLegacyV1File(t *testing.T) {
+	data := buildLegacyV1(t)
+	db, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse v1: %v", err)
+	}
+	if db.HasISP() {
+		t.Error("HasISP() = true, v1 库不含 ISP")
+	}
+	loc, ok := db.Lookup(net.ParseIP("1.0.0.1"))
+	if !ok {
+		t.Fatal("Lookup 未命中")
+	}
+	if loc.Country != "中国" || loc.Region != "江苏省" || loc.City != "南京市" {
+		t.Errorf("got %+v, want 中国/江苏省/南京市", loc)
+	}
+	if loc.ISP != "" {
+		t.Errorf("ISP = %q, v1 库读出来必须是空串", loc.ISP)
+	}
+}
+
+// buildLegacyV1 手工拼一份 v1 格式的库：1 个段、1 个归属地。
+// 直接写字节而不是留一个 v1 的构建函数在生产代码里——v1 只需要能读，
+// 不需要能写。
+//
+// v1 线格式（全部小端）：
+//
+//	头部 32 字节：magic(8) + version(4) + builtAt(8) + segCount(4) + locCount(2) + 填充
+//	段 10 字节：start(4) + end(4) + locIndex(2)
+//	归属地 6 字节：country(2) + region(2) + city(2)，都是字符串池下标
+//	字符串池：count(4) + 每项 len(2) + 字节
+func buildLegacyV1(t *testing.T) []byte {
+	t.Helper()
+	pool := []string{"", "中国", "江苏省", "南京市"}
+
+	buf := make([]byte, headerSize)
+	copy(buf, magic)
+	binary.LittleEndian.PutUint32(buf[8:], 1)
+	binary.LittleEndian.PutUint64(buf[12:], uint64(testBuiltAt.Unix()))
+	binary.LittleEndian.PutUint32(buf[20:], 1)
+	binary.LittleEndian.PutUint16(buf[24:], 1)
+
+	seg := make([]byte, 10)
+	binary.LittleEndian.PutUint32(seg[0:], 0x01000000)
+	binary.LittleEndian.PutUint32(seg[4:], 0x0100FFFF)
+	binary.LittleEndian.PutUint16(seg[8:], 0)
+	buf = append(buf, seg...)
+
+	loc := make([]byte, 6)
+	binary.LittleEndian.PutUint16(loc[0:], 1)
+	binary.LittleEndian.PutUint16(loc[2:], 2)
+	binary.LittleEndian.PutUint16(loc[4:], 3)
+	buf = append(buf, loc...)
+
+	var n4 [4]byte
+	binary.LittleEndian.PutUint32(n4[:], uint32(len(pool)))
+	buf = append(buf, n4[:]...)
+	for _, s := range pool {
+		var n2 [2]byte
+		binary.LittleEndian.PutUint16(n2[:], uint16(len(s)))
+		buf = append(buf, n2[:]...)
+		buf = append(buf, s...)
+	}
+	return buf
 }

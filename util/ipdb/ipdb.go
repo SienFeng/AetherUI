@@ -21,11 +21,19 @@ import (
 
 const (
 	magic         = "AUIPDB01"
-	formatVersion = uint32(1)
+	formatVersion = uint32(2)
+	// legacyFormatVersion 是不含 ISP 的旧格式。Parse 必须继续认它：面板升级
+	// 后机器上的库还是这个版本，拒绝加载会让整个归属地列当场消失（连带
+	// 共享检测的省份判定），而界面上只显示「未加载」，看不出是格式版本的
+	// 问题，恢复要等到次日的定时更新时刻。
+	legacyFormatVersion = uint32(1)
 
-	headerSize   = 32
-	segmentSize  = 10
-	locationSize = 6
+	headerSize  = 32
+	segmentSize = 10
+	// locationSize 是 v2 的归属地表项大小：国家/省/市/运营商四个字符串池下标。
+	locationSize = 8
+	// legacyLocationSize 是 v1 的，没有运营商那一项。
+	legacyLocationSize = 6
 
 	chinaCountry = "中国"
 )
@@ -37,6 +45,8 @@ type Record struct {
 	Country    string
 	Region     string
 	City       string
+	// ISP 已经过 CanonicalISP 归一。境外段只在命中知名 IDC / 云厂商时非空。
+	ISP string
 }
 
 // Location 是一个 IP 段的归属地。境外段只有 Country，Region 与 City 为空。
@@ -44,6 +54,7 @@ type Location struct {
 	Country string
 	Region  string
 	City    string
+	ISP     string
 }
 
 type segment struct {
@@ -55,9 +66,16 @@ type DB struct {
 	builtAt   time.Time
 	segments  []segment
 	locations []Location
+	// hasISP 记录这份库是不是 v2。v1 库能被正常读出来，但所有 ISP 都是空的，
+	// 调用方需要区分「这个 IP 没有运营商信息」与「这份库根本不带运营商」——
+	// 前者无解，后者只要重新下载一次就有了。
+	hasISP bool
 }
 
 func (d *DB) SegmentCount() int { return len(d.segments) }
+
+// HasISP 报告这份库是否是含运营商信息的新格式。
+func (d *DB) HasISP() bool { return d.hasISP }
 
 func (d *DB) BuiltAt() time.Time { return d.builtAt }
 
@@ -196,7 +214,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 		}
 		hasPrev, prevEnd = true, r.End
 
-		loc := Location{Country: r.Country, Region: r.Region, City: r.City}
+		loc := Location{Country: r.Country, Region: r.Region, City: r.City, ISP: r.ISP}
 		id, ok := locIndex[loc]
 		if !ok {
 			if len(locations) >= 1<<16 {
@@ -208,6 +226,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 			intern(loc.Country)
 			intern(loc.Region)
 			intern(loc.City)
+			intern(loc.ISP)
 		}
 
 		if n := len(segments); n > 0 && segments[n-1].loc == id && segments[n-1].end+1 == r.Start {
@@ -246,6 +265,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 		binary.LittleEndian.PutUint16(buf[0:], uint16(strIndex[loc.Country]))
 		binary.LittleEndian.PutUint16(buf[2:], uint16(strIndex[loc.Region]))
 		binary.LittleEndian.PutUint16(buf[4:], uint16(strIndex[loc.City]))
+		binary.LittleEndian.PutUint16(buf[6:], uint16(strIndex[loc.ISP]))
 		if _, err := w.Write(buf); err != nil {
 			return err
 		}
