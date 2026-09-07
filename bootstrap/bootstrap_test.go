@@ -350,3 +350,91 @@ func TestRunForceKeepsExistingRoutingDefaults(t *testing.T) {
 		t.Error("ipRuleResolveDomain 被向导覆盖了")
 	}
 }
+
+// 新装面板的另一组开箱默认：记录访问日志 + 每日自动更新 IP 归属地库。
+//
+// 与上面那组分流默认值同理，前半段的断言不是凑数：defaultValueMap 里这两项
+// 必须保持关闭。访问日志一打开就是 xray 持续写盘加面板每 5 秒采集入库，
+// IP 库一打开就是每天几十 MB 的出网流量，都不该因为管理员更新了一次面板
+// 就静默发生在一台跑了很久的机器上。
+func TestRunWritesObservabilityDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"caddy", Options{Mode: "caddy", Domain: "example.com", BasePath: "/Ab3xK9pQ/",
+			Listen: "127.0.0.1", Port: 54321}},
+		{"reality", Options{Mode: "reality", RealityDest: "www.microsoft.com:443",
+			BasePath: "/Ab3xK9pQ/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDB(t)
+			s := service.SettingService{}
+
+			if v, _ := s.GetAccessLogEnable(); v {
+				t.Fatal("defaultValueMap 里 accessLogEnable 必须仍是 0")
+			}
+			if v, _ := s.GetIPDBUpdateTime(); v != "" {
+				t.Fatalf("defaultValueMap 里 ipdbUpdateTime 必须仍是空串，实际 %q", v)
+			}
+
+			if _, err := Run(tc.opts); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			if v, _ := s.GetAccessLogEnable(); !v {
+				t.Error("新装应打开访问日志")
+			}
+			if v, _ := s.GetIPDBUpdateTime(); v != DefaultIPDBUpdateTime {
+				t.Errorf("ipdbUpdateTime 期望 %q，实际 %q", DefaultIPDBUpdateTime, v)
+			}
+			// 常量本身也要钉一下：它一旦被改成空串，上面那条相等断言照样通过，
+			// 而空串的含义是「关闭自动更新」——新装即开启这个意图会静默消失，
+			// 连带面板启动后那次首次拉取（RunInitialUpdate）也一并不发生。
+			if DefaultIPDBUpdateTime == "" {
+				t.Error("DefaultIPDBUpdateTime 不能是空串：空串表示关闭自动更新")
+			}
+			// 保留天数在 defaultValueMap 里就是 7，bootstrap 不重复写一遍。
+			// 这条断言钉的是那个默认值：它一旦被改小，新装的机器会连
+			// 「上周那次异常访问」都查不到，而向导这边什么都不会报。
+			if v, _ := s.GetAccessLogRetentionDays(); v != 7 {
+				t.Errorf("accessLogRetentionDays 期望 7，实际 %d", v)
+			}
+		})
+	}
+}
+
+// -force 重跑向导时同样不能覆盖这两项，理由与分流默认值完全相同：管理员
+// 可能正是因为磁盘紧张才关掉访问日志、因为流量计费才关掉 IP 库自动更新，
+// 而他这次只是想重配域名和伪装站。
+func TestRunForceKeepsExistingObservabilityDefaults(t *testing.T) {
+	setupDB(t)
+
+	first := Options{Mode: "caddy", Domain: "example.com", BasePath: "/first/",
+		Listen: "127.0.0.1", Port: 54321}
+	if _, err := Run(first); err != nil {
+		t.Fatalf("首次 Run: %v", err)
+	}
+
+	s := service.SettingService{}
+	if err := s.SetAccessLogEnable(false); err != nil {
+		t.Fatalf("SetAccessLogEnable: %v", err)
+	}
+	if err := s.SetIPDBUpdateTime(""); err != nil {
+		t.Fatalf("SetIPDBUpdateTime: %v", err)
+	}
+
+	second := first
+	second.BasePath = "/second/"
+	second.Force = true
+	if _, err := Run(second); err != nil {
+		t.Fatalf("force Run: %v", err)
+	}
+
+	if v, _ := s.GetAccessLogEnable(); v {
+		t.Error("accessLogEnable 被向导覆盖了")
+	}
+	if v, _ := s.GetIPDBUpdateTime(); v != "" {
+		t.Errorf("ipdbUpdateTime 被向导覆盖了，实际 %q", v)
+	}
+}

@@ -452,6 +452,15 @@ func (s *SettingService) GetIPDBUpdateTime() (string, error) {
 	return s.getString("ipdbUpdateTime")
 }
 
+// SetIPDBUpdateTime 写入 IP 库的每日更新时刻。
+//
+// 与 SetIPRuleResolveDomain 同一个口径：defaultValueMap 里它仍是空串（关闭
+// 自动更新），新装的开箱默认由 a-ui bootstrap 显式落库。改默认值会让存量
+// 部署里从未点过「保存配置」的那些跟着每天出网几十 MB。
+func (s *SettingService) SetIPDBUpdateTime(v string) error {
+	return s.setString("ipdbUpdateTime", v)
+}
+
 // GetAccessLogEnable 返回是否记录访问日志。
 //
 // 默认关闭：它是持续写盘的动作，记录的又是用户访问了哪些站点，
@@ -462,6 +471,19 @@ func (s *SettingService) GetAccessLogEnable() (bool, error) {
 		return false, err
 	}
 	return v != 0, nil
+}
+
+// SetAccessLogEnable 写入是否记录访问日志。
+//
+// 默认值不动的理由同 SetIPDBUpdateTime：上面那句「该由管理员显式打开」说的
+// 是存量部署——一台跑了很久的机器不该因为更新了一次面板就开始持续写盘。
+// 新装是另一回事，向导会替管理员打开它。
+func (s *SettingService) SetAccessLogEnable(v bool) error {
+	n := 0
+	if v {
+		n = 1
+	}
+	return s.setInt("accessLogEnable", n)
 }
 
 // GetConcurrencyIdleTimeout 返回并发判定的闲置阈值（秒）。0 表示关闭闲置判定。

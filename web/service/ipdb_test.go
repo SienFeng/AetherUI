@@ -749,3 +749,105 @@ func TestStatusReportsLastCheckedAt(t *testing.T) {
 		t.Errorf("BuiltAt = %d，期望 %d：304 不该改动生成时间", got.BuiltAt, want)
 	}
 }
+
+// 新装的面板必须尽快拿到最新的库，不能空等到当天的更新时刻。
+//
+// 发版包带 ip2region 的种子库、不带纯真库，所以新装时 ip2region 的库文件
+// 在、生成时间是发版那天：到点判断会让凌晨装机的机器一直等到当天 05:00。
+// 「本机从未成功向上游确认过这个源」（CheckedAt 为 0）恰好就是新装形态，
+// 面板启动后据此补一次。
+func TestInitialUpdateRunsWhenSourceWasNeverChecked(t *testing.T) {
+	setupDB(t)
+	// 更新时刻定在今天还没到的点，到点判断必然不放行——这样这条测试测的
+	// 就只可能是首次更新那条路径。
+	setUpdateTime(t, "23:59")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	url, hits := countingSource(t, ipdbSampleSource)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+	svc.setDB("test", seedDatabaseAt(t, path, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)))
+
+	// 对照：同一状态下的定时更新按日程走，什么都不做。少了这一条，上面那个
+	// 「23:59」是不是真的挡住了到点判断就无从确认。
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if updated, err := svc.RunScheduledUpdate(now); err != nil || updated != 0 {
+		t.Fatalf("定时更新 = (%d, %v)，未到点时应为 (0, nil)", updated, err)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("定时更新发起了 %d 次网络请求，未到点时应为 0", n)
+	}
+
+	updated, err := svc.RunInitialUpdate()
+	if err != nil {
+		t.Fatalf("RunInitialUpdate: %v", err)
+	}
+	if updated != 1 {
+		t.Fatalf("首次更新了 %d 个源，期望 1", updated)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Errorf("首次更新发起了 %d 次网络请求，应为 1", n)
+	}
+}
+
+// 拉过一次之后不再重复。
+//
+// 这条路径每次面板启动都会走一遍，而管理员点一下「重启面板」就是一次启动
+// （面板重启是给自己发 SIGHUP，Server 重新 Start）。不看「是否已经确认过」
+// 的话，每次重启都要白下几十 MB。
+func TestInitialUpdateSkipsSourceAlreadyChecked(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "23:59")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	url, hits := countingSource(t, ipdbSampleSource)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	svc := &IPDBService{}
+	svc.setDB("test", seedDatabaseAt(t, path, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)))
+	svc.markChecked(src, time.Date(2026, 9, 2, 5, 0, 0, 0, time.UTC))
+
+	updated, err := svc.RunInitialUpdate()
+	if err != nil {
+		t.Fatalf("RunInitialUpdate: %v", err)
+	}
+	if updated != 0 {
+		t.Errorf("更新了 %d 个源，已确认过的源不该重复拉", updated)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("发起了 %d 次网络请求，应为 0", n)
+	}
+}
+
+// 关闭自动更新时一次网络请求都不发，与 RunScheduledUpdate 同一个理由：
+// 存量部署的 ipdbUpdateTime 默认就是空串，这条路径必须对它们完全无感。
+func TestInitialUpdateDoesNothingWhenDisabled(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "")
+	dir := t.TempDir()
+	path, before := seedOldDatabase(t, dir)
+	url, hits := countingSource(t, ipdbSampleSource)
+
+	src := urlSource("test", path, url)
+	src.EtagKey, src.CheckedAtKey = "testEtag", "testCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	updated, err := (&IPDBService{}).RunInitialUpdate()
+	if err != nil {
+		t.Fatalf("RunInitialUpdate: %v", err)
+	}
+	if updated != 0 {
+		t.Errorf("更新了 %d 个源，关闭自动更新时应为 0", updated)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("发起了 %d 次网络请求，关闭时应为 0", n)
+	}
+	assertFileUnchanged(t, path, before)
+}

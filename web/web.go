@@ -318,6 +318,16 @@ func (s *Server) startTask() {
 	// 每 10 分钟自检一次 IP 归属地库是否到了配置的更新时刻（默认关闭，关闭时不发请求）
 	s.cron.AddJob("@every 10m", job.NewIPDBUpdateJob())
 
+	// 启动后补一次「这台机器从未拉取过」的 IP 库。新装的面板只带 ip2region
+	// 的种子库、不带纯真库，光靠上面那个到点判断，凌晨装机的管理员要等到
+	// 当天的更新时刻才拿到完整的库。延迟 30 秒是为了避开面板启动、xray 启动
+	// 与这两个源合计约 60 MB 的下载互相抢网络。关闭自动更新时它一个字节都
+	// 不下，存量部署因此完全无感。
+	go func() {
+		time.Sleep(time.Second * 30)
+		job.NewIPDBUpdateJob().RunInitial()
+	}()
+
 	// 并发判定每秒跑一次。没有任何入站设置额度时它会直接返回，
 	// 不做任何系统调用，所以常态下的开销只是一次极小的查库。
 	s.cron.AddJob("@every 1s", job.NewConcurrencyJob())

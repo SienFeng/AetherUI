@@ -457,19 +457,78 @@ func (s *IPDBService) RunScheduledUpdate(now time.Time) (int, error) {
 				continue
 			}
 		}
-		db, err := s.fetchAndBuild(src, url, src.Path)
-		if errors.Is(err, errIPDBNotModified) {
-			s.markChecked(src, now)
-			continue
+		if s.refresh(src, url, now, "定时更新") {
+			updated++
 		}
-		if err != nil {
-			// 单个源失败保留它原来的库，也不影响另一个源。
-			logger.Warning("定时更新 IP 库失败, 源:", src.Name, "err:", err)
-			continue
-		}
-		s.setDB(src.Key, db)
+	}
+	return updated, nil
+}
+
+// refresh 拉取并安装单个源，返回是否产生了新库。what 只用于失败日志的前缀，
+// 让排查时能分清是哪条路径触发的。
+//
+// 上游未变更（304）与拉取失败都返回 false，但两者的善后不同：304 要记下
+// 「这一刻确认过了」，否则那个每 10 分钟跑一次的任务会整天不停地重问上游；
+// 失败则什么都不记，保留它原来的库，也不影响别的源——单个源坏掉不该把整批
+// 更新都挡住，这正是多源要解决的问题之一。
+func (s *IPDBService) refresh(src ipdbSource, url string, now time.Time, what string) bool {
+	db, err := s.fetchAndBuild(src, url, src.Path)
+	if errors.Is(err, errIPDBNotModified) {
 		s.markChecked(src, now)
-		updated++
+		return false
+	}
+	if err != nil {
+		logger.Warning(what+"IP 库失败, 源:", src.Name, "err:", err)
+		return false
+	}
+	s.setDB(src.Key, db)
+	s.markChecked(src, now)
+	return true
+}
+
+// RunInitialUpdate 在面板启动后补一次「本机从未成功拉取过」的数据源，
+// 返回实际更新的源个数。
+//
+// 为什么不能只靠 RunScheduledUpdate：发版包带 ip2region 的种子库
+// （bin/ipdb.dat）却不带纯真库，所以新装的机器上 ip2region 的库文件是在的、
+// 生成时间是发版那天，到点判断因此只会在当天的更新时刻之后才放行——凌晨装机
+// 的管理员打开面板，看到的是一份几个月前的库，而界面上没有任何东西说明它在
+// 等什么。
+//
+// 判据是「本机从未成功向上游确认过这个源」而不是「库很旧」：后者对种子库
+// 恒为真，会让每次面板启动都重下一遍（管理员点一下「重启面板」就是一次启动）。
+// CheckedAt 只在拉取成功或 304 之后前进，它一旦非零就说明这台机器已经自己
+// 拉过了，此后这条路径永远空转。
+//
+// 关闭自动更新（更新时刻留空）时一次网络请求都不发：存量部署的默认值正是
+// 空串，这条路径必须对它们完全无感。
+func (s *IPDBService) RunInitialUpdate() (int, error) {
+	raw, err := s.settingService.GetIPDBUpdateTime()
+	if err != nil {
+		return 0, err
+	}
+	if raw == "" {
+		return 0, nil
+	}
+
+	now := time.Now()
+	updated := 0
+	for _, src := range ipdbSourceList() {
+		// 不记录确认时间的源无从判断是否已经拉过，跳过它。漏掉一次首次更新
+		// 最多是等到当天的更新时刻，每次面板启动白下几十 MB 却是实打实的浪费。
+		if src.CheckedAtKey == "" || s.lastCheckedAt(src) > 0 {
+			continue
+		}
+		url, err := src.URL(&s.settingService)
+		if err != nil {
+			return updated, err
+		}
+		if url == "" {
+			continue
+		}
+		if s.refresh(src, url, now, "首次更新") {
+			updated++
+		}
 	}
 	return updated, nil
 }

@@ -45,6 +45,12 @@ type Options struct {
 // 空转或让 xray 拒绝启动，见 entity.dnsServerSchemes。
 const DefaultDNSServers = "https://8.8.8.8/dns-query\nhttps://1.1.1.1/dns-query"
 
+// DefaultIPDBUpdateTime 是新装面板的 IP 归属地库每日更新时刻，格式 HH:MM。
+//
+// 与域名组订阅的 04:00 错开一小时：两者都在半夜拉外网数据，订阅可能有十几万
+// 条域名、IP 库两个源合计约 60 MB，撞在同一分钟开始只是白白拉长各自的耗时。
+const DefaultIPDBUpdateTime = "05:00"
+
 type Result struct {
 	Mode     string `json:"mode"`
 	PanelURL string `json:"panelUrl"`
@@ -133,23 +139,35 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
-	// 分流开箱默认：IP 分流规则也匹配域名目标 + 加密 DNS。只在这里显式落库，
-	// 不动 defaultValueMap——那张表给的是「从未写过这个 key 时读到什么」，
-	// 也就是存量部署升级后的取值，改它会让老面板里从未点过「保存配置」的
-	// 那些静默启用 DoH 与 IPIfNonMatch，并因配置变化触发一次 xray 重启。
+	// 新装的开箱默认，四项：IP 分流规则也匹配域名目标、加密 DNS、记录访问
+	// 日志、每日自动更新 IP 归属地库。只在这里显式落库，不动 defaultValueMap
+	// ——那张表给的是「从未写过这个 key 时读到什么」，也就是存量部署升级后的
+	// 取值，改它会让老面板里从未点过「保存配置」的那些静默启用 DoH 与
+	// IPIfNonMatch、开始持续写盘记录用户访问了哪些站点、每天出网几十 MB 拉
+	// IP 库，其中前两项还会因配置变化触发一次 xray 重启。
+	//
+	// 访问日志的保留天数不在这里写：defaultValueMap 里它本来就是 7 天，
+	// 再写一遍只是把同一个值散到两处，将来改默认值时必然漏掉一处。
 	//
 	// -force 时不写：那条路径是 install.sh --wizard-only（a-ui 菜单「配置
 	// 域名与伪装站」）重跑向导，面板此前已被配置过、多半已经跑了一段时间，
-	// 这两项的当前值属于管理员的既有选择。向导问的是域名和伪装站，顺手改掉
-	// 解析路径是夹带修改，而且完全静默——没人会想到重配域名会动 DNS。代价
-	// 是从旧版本升级上来、又重跑过向导的机器拿不到这两个默认值，那和「存量
-	// 部署零变化」是同一件事，管理员去设置页打开即可。
+	// 这几项的当前值属于管理员的既有选择——他可能正是因为磁盘紧张才关掉访问
+	// 日志、因为流量计费才关掉 IP 库自动更新。向导问的是域名和伪装站，顺手
+	// 改掉解析路径是夹带修改，而且完全静默——没人会想到重配域名会动 DNS。
+	// 代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值，那和
+	// 「存量部署零变化」是同一件事，管理员去设置页打开即可。
 	if !opts.Force {
 		if err := s.SetIPRuleResolveDomain(true); err != nil {
 			return nil, fmt.Errorf("写入 IP 规则匹配域名目标开关失败: %w", err)
 		}
 		if err := s.SetDNSServers(DefaultDNSServers); err != nil {
 			return nil, fmt.Errorf("写入默认 DNS 服务器失败: %w", err)
+		}
+		if err := s.SetAccessLogEnable(true); err != nil {
+			return nil, fmt.Errorf("写入访问日志开关失败: %w", err)
+		}
+		if err := s.SetIPDBUpdateTime(DefaultIPDBUpdateTime); err != nil {
+			return nil, fmt.Errorf("写入 IP 库更新时刻失败: %w", err)
 		}
 	}
 
