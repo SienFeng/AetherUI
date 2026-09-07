@@ -161,17 +161,20 @@ func readU24(b []byte) uint32 {
 	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
 }
 
-// toRecord 把纯真库的自由文本归属地折成结构化的国家 / 省 / 市。
+// toRecord 把纯真库的自由文本归属地折成结构化的国家 / 省 / 市 / 运营商。
 //
 // 格式是「中国–江苏–南京」，但并非每条都这样：云厂商 anycast 段可能只有
 // 「腾讯云」或「中国」。**认不出省份时留空，绝不硬塞**——把「腾讯云」当成
 // 省份会污染整个允许集，生成的 CIDR 会把一批本不该放行的段带进来。
 func toRecord(start, end uint32, country, area string) ipdb.Record {
-	_ = area // ISP 信息本包不保留，与 ip2region 那一路口径一致
 	parts := strings.Split(strings.TrimSpace(country), areaSeparator)
 	rec := ipdb.Record{Start: start, End: end, Country: strings.TrimSpace(parts[0])}
+	// 第二段文本就是运营商。归一必须在落库前做：这个字段在真实库里有十万级的
+	// 取值（"电信/新世纪网吧" 这类按接入点拆的细分），原样入库会让归属地种类
+	// 撞上格式的 65536 上限，BuildRecords 报错、整次更新失败。
+	rec.ISP = ipdb.CanonicalISP(area, rec.Country != chinaCountry)
 	if rec.Country != chinaCountry {
-		// 境外只保留国家，与 ip2region 那一路一致。
+		// 境外只保留国家与已归一的云厂商标识，与 ip2region 那一路一致。
 		return rec
 	}
 	if len(parts) < 2 {

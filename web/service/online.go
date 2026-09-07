@@ -42,12 +42,18 @@ type OnlineIP struct {
 	// LocationAlt 是另一个数据源给出的、与主判定**不同**的结论。
 	// 两个源一致时为空。多源的价值就在于把分歧显示出来，藏起来等于白加。
 	LocationAlt string `json:"locationAlt"`
-	Conns       int    `json:"conns"`
-	FirstSeen   int64  `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
-	UpSpeed     int64  `json:"upSpeed"`   // B/s
-	DownSpeed   int64  `json:"downSpeed"`
-	Up          int64  `json:"up"` // 本次在线期间的累计字节
-	Down        int64  `json:"down"`
+	// ISP 是来源 IP 的运营商，已归一（"中国电信" / "腾讯云" / "Google"）。
+	// 境外 IP 只在命中知名 IDC / 云厂商时非空——那正是「这个来源是机房」
+	// 这个判断所需的全部信息，而它与家宽来源的含义完全不同。
+	ISP string `json:"isp"`
+	// ISPAlt 与 LocationAlt 同理：另一个源给出的、与主判定不同的运营商。
+	ISPAlt    string `json:"ispAlt"`
+	Conns     int    `json:"conns"`
+	FirstSeen int64  `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
+	UpSpeed   int64  `json:"upSpeed"`   // B/s
+	DownSpeed int64  `json:"downSpeed"`
+	Up        int64  `json:"up"` // 本次在线期间的累计字节
+	Down      int64  `json:"down"`
 
 	// Idle 为 true 表示该 IP 的连接还在，但已经连续 idleAfter 没有任何字节
 	// 往来。闲置来源不占用并发额度：TCP 连接不会因为没有流量就消失，客户端
@@ -253,17 +259,17 @@ func deltaBytes(now, prev uint64, seen bool) uint64 {
 }
 
 // snapshot 不做闲置判定，等价于 snapshotAt(port, locate, 0, now)。
-func (t *onlineTracker) snapshot(port int, locate func(net.IP) (primary, alt string)) []OnlineIP {
+func (t *onlineTracker) snapshot(port int, locate func(net.IP) ipLocation) []OnlineIP {
 	return t.snapshotAt(port, locate, 0, time.Now())
 }
 
 // snapshotIdle 按 idleAfter 判定闲置。idleAfter <= 0 表示关闭该判定。
-func (t *onlineTracker) snapshotIdle(port int, locate func(net.IP) (primary, alt string), idleAfter time.Duration) []OnlineIP {
+func (t *onlineTracker) snapshotIdle(port int, locate func(net.IP) ipLocation, idleAfter time.Duration) []OnlineIP {
 	return t.snapshotAt(port, locate, idleAfter, time.Now())
 }
 
 // snapshotAt 是核心实现，now 由调用方给出以便测试。
-func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) (primary, alt string), idleAfter time.Duration, now time.Time) []OnlineIP {
+func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) ipLocation, idleAfter time.Duration, now time.Time) []OnlineIP {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -272,11 +278,13 @@ func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) (primary, alt s
 		if key.port != port {
 			continue
 		}
-		primary, alt := locate(e.ip)
+		loc := locate(e.ip)
 		list = append(list, OnlineIP{
 			IP:          key.ip,
-			Location:    primary,
-			LocationAlt: alt,
+			Location:    loc.Location,
+			LocationAlt: loc.LocationAlt,
+			ISP:         loc.ISP,
+			ISPAlt:      loc.ISPAlt,
 			Conns:       e.conns,
 			FirstSeen:   e.firstSeen.UnixMilli(),
 			UpSpeed:     e.upSpeed,
@@ -297,11 +305,13 @@ func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) (primary, alt s
 		if _, live := t.ips[key]; live {
 			continue
 		}
-		primary, alt := locate(net.ParseIP(key.ip))
+		loc := locate(net.ParseIP(key.ip))
 		list = append(list, OnlineIP{
 			IP:          key.ip,
-			Location:    primary,
-			LocationAlt: alt,
+			Location:    loc.Location,
+			LocationAlt: loc.LocationAlt,
+			ISP:         loc.ISP,
+			ISPAlt:      loc.ISPAlt,
 			Blocked:     true,
 			RejectedAt:  at.UnixMilli(),
 		})
@@ -361,35 +371,53 @@ func formatLocation(loc ipdb.Location) string {
 	return out
 }
 
+// ipLocation 是一次归属地判定的完整结果。
+//
+// 不用四个 string 返回值：Location / LocationAlt / ISP / ISPAlt 类型相同，
+// 调用点写反了不会有任何编译错误，只会让界面上的主判定与分歧对调。
+type ipLocation struct {
+	Location    string
+	LocationAlt string
+	ISP         string
+	ISPAlt      string
+}
+
 // locate 返回主判定与「另一个源给出的不同结论」。
 //
 // 不做仲裁：实测两个离线库对同一批 IP 互有出入，谁也不是权威。把分歧原样
 // 显示给管理员，比替他挑一个更有用。
-func (s *OnlineService) locate(ip net.IP) (primary, alt string) {
+func (s *OnlineService) locate(ip net.IP) ipLocation {
 	return locateWithIPDB(s.ipdbService, ip)
 }
 
-// locateWithIPDB 判定 IP 归属地，返回主判定与另一个源给出的不同结论。
-// 在线明细与访问日志的来源列表共用同一套判定，避免两处结论对不上。
-func locateWithIPDB(svc IPDBService, ip net.IP) (primary, alt string) {
+// locateWithIPDB 判定 IP 的归属地与运营商，并把两个源的分歧一并带出来。
+// 在线明细与访问日志的来源列表共用同一套判定，避免三处结论对不上。
+//
+// 归属地与运营商各自独立判定分歧：两个源完全可能在城市名上有出入而运营商
+// 一致（真实数据就是如此），把它们绑成一个判定会让「存疑」失去指向。
+func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
+	var out ipLocation
 	db := svc.DB()
 	if db == nil {
-		return "", ""
+		return out
 	}
 	for _, sl := range db.Lookup(ip) {
-		text := formatLocation(sl.Location)
-		if text == "" {
-			continue
+		if text := formatLocation(sl.Location); text != "" {
+			if out.Location == "" {
+				out.Location = text
+			} else if text != out.Location && out.LocationAlt == "" {
+				out.LocationAlt = text
+			}
 		}
-		if primary == "" {
-			primary = text
-			continue
-		}
-		if text != primary && alt == "" {
-			alt = text
+		if isp := sl.Location.ISP; isp != "" {
+			if out.ISP == "" {
+				out.ISP = isp
+			} else if isp != out.ISP && out.ISPAlt == "" {
+				out.ISPAlt = isp
+			}
 		}
 	}
-	return primary, alt
+	return out
 }
 
 // transportObservable 判断某入站的传输方式能否从内核连接表里看到每个客户端。

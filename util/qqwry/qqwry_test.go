@@ -243,3 +243,26 @@ func TestResolveFollowsWholeRedirectForBothFields(t *testing.T) {
 		t.Errorf("area = %q，期望 电信——0x01 的地区也必须从重定向目标读", area)
 	}
 }
+
+// 纯真库记录的第二段文本就是运营商，此前被 `_ = area` 丢掉了。
+// 归一必须在这里做，不能留到展示层：这个字段在真实库里有 115,619 种取值，
+// 原样入库会撞上格式的 65536 种上限、整次更新失败。
+func TestToRecordKeepsNormalizedISP(t *testing.T) {
+	for _, c := range []struct {
+		country, area string
+		wantISP       string
+	}{
+		{"中国–江苏–南京", "电信", "中国电信"},
+		{"中国–江苏–南京", "电信/新世纪网吧", "中国电信"},
+		{"中国–山东–聊城", "联通", "中国联通"},
+		{"中国–北京–北京", " CZ88.NET", ""},
+		{"美国–加利福尼亚", "Google LLC", "Google"},
+		{"美国–加利福尼亚", "Comcast Cable", ""},
+	} {
+		rec := toRecord(0x01000000, 0x0100FFFF, c.country, c.area)
+		if rec.ISP != c.wantISP {
+			t.Errorf("toRecord(%q, %q).ISP = %q, want %q",
+				c.country, c.area, rec.ISP, c.wantISP)
+		}
+	}
+}

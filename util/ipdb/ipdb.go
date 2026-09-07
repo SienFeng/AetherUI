@@ -4,8 +4,10 @@
 // 数据来自 ip2region 的 ipv4_source.txt（Apache-2.0 OR MIT，与本项目 GPL-3.0 兼容），
 // 由 Build 转换成本包自定义的紧凑格式：35 MB 的文本压到约 2 MB，且可直接二分查找。
 //
-// 精度取舍：境外只保留国家，中国保留到省+市。上游把同一个城市按 ISP 拆成多段，
-// 而本包不存 ISP，因此相邻同归属地的段会被合并掉。
+// 精度取舍：中国保留到省+市+运营商，境外只保留国家与知名 IDC / 云厂商。
+// 境外的 ISP 不全量保留，是因为那个字段极其细碎，会让相邻段的合并几乎完全
+// 失效——实测纯真库的段数从 261,670 涨到 858,363，文件从 2.62 MB 涨到
+// 8.74 MB；而境外来源 IP 真正有价值的信息就是「它是不是机房」。
 package ipdb
 
 import (
@@ -21,11 +23,19 @@ import (
 
 const (
 	magic         = "AUIPDB01"
-	formatVersion = uint32(1)
+	formatVersion = uint32(2)
+	// legacyFormatVersion 是不含 ISP 的旧格式。Parse 必须继续认它：面板升级
+	// 后机器上的库还是这个版本，拒绝加载会让整个归属地列当场消失（连带
+	// 共享检测的省份判定），而界面上只显示「未加载」，看不出是格式版本的
+	// 问题，恢复要等到次日的定时更新时刻。
+	legacyFormatVersion = uint32(1)
 
-	headerSize   = 32
-	segmentSize  = 10
-	locationSize = 6
+	headerSize  = 32
+	segmentSize = 10
+	// locationSize 是 v2 的归属地表项大小：国家/省/市/运营商四个字符串池下标。
+	locationSize = 8
+	// legacyLocationSize 是 v1 的，没有运营商那一项。
+	legacyLocationSize = 6
 
 	chinaCountry = "中国"
 )
@@ -37,6 +47,8 @@ type Record struct {
 	Country    string
 	Region     string
 	City       string
+	// ISP 已经过 CanonicalISP 归一。境外段只在命中知名 IDC / 云厂商时非空。
+	ISP string
 }
 
 // Location 是一个 IP 段的归属地。境外段只有 Country，Region 与 City 为空。
@@ -44,6 +56,7 @@ type Location struct {
 	Country string
 	Region  string
 	City    string
+	ISP     string
 }
 
 type segment struct {
@@ -55,9 +68,16 @@ type DB struct {
 	builtAt   time.Time
 	segments  []segment
 	locations []Location
+	// hasISP 记录这份库是不是 v2。v1 库能被正常读出来，但所有 ISP 都是空的，
+	// 调用方需要区分「这个 IP 没有运营商信息」与「这份库根本不带运营商」——
+	// 前者无解，后者只要重新下载一次就有了。
+	hasISP bool
 }
 
 func (d *DB) SegmentCount() int { return len(d.segments) }
+
+// HasISP 报告这份库是否是含运营商信息的新格式。
+func (d *DB) HasISP() bool { return d.hasISP }
 
 func (d *DB) BuiltAt() time.Time { return d.builtAt }
 
@@ -87,12 +107,14 @@ func (d *DB) Lookup(ip net.IP) (Location, bool) {
 
 // normalize 把上游用来表示「无此字段」的占位值统一成空串，并按既定精度
 // 丢掉境外段的省市。
-func normalize(country, region, city string) Location {
+func normalize(country, region, city, isp string) Location {
 	if country == "Reserved" || country == "0" {
 		country = ""
 	}
 	if country != chinaCountry {
-		return Location{Country: country}
+		// 境外只保留国家与知名 IDC / 云厂商：全量保留 ISP 会让相邻段的合并
+		// 几乎完全失效，实测纯真库的段数会涨到 3.3 倍。
+		return Location{Country: country, ISP: CanonicalISP(isp, true)}
 	}
 	if region == "0" {
 		region = ""
@@ -100,7 +122,7 @@ func normalize(country, region, city string) Location {
 	if city == "0" {
 		city = ""
 	}
-	return Location{Country: country, Region: region, City: city}
+	return Location{Country: country, Region: region, City: city, ISP: CanonicalISP(isp, false)}
 }
 
 // Build 把上游的 ipv4_source.txt 转换成本包的紧凑格式。
@@ -149,10 +171,10 @@ func parseIP2Region(src io.Reader) ([]Record, error) {
 		if start > end {
 			return nil, common.NewErrorf("第 %d 行起始 IP 大于结束 IP: %q", lineNo, line)
 		}
-		loc := normalize(fields[2], fields[3], fields[4])
+		loc := normalize(fields[2], fields[3], fields[4], fields[5])
 		records = append(records, Record{
 			Start: start, End: end,
-			Country: loc.Country, Region: loc.Region, City: loc.City,
+			Country: loc.Country, Region: loc.Region, City: loc.City, ISP: loc.ISP,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -196,7 +218,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 		}
 		hasPrev, prevEnd = true, r.End
 
-		loc := Location{Country: r.Country, Region: r.Region, City: r.City}
+		loc := Location{Country: r.Country, Region: r.Region, City: r.City, ISP: r.ISP}
 		id, ok := locIndex[loc]
 		if !ok {
 			if len(locations) >= 1<<16 {
@@ -208,6 +230,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 			intern(loc.Country)
 			intern(loc.Region)
 			intern(loc.City)
+			intern(loc.ISP)
 		}
 
 		if n := len(segments); n > 0 && segments[n-1].loc == id && segments[n-1].end+1 == r.Start {
@@ -246,6 +269,7 @@ func BuildRecords(records []Record, dst io.Writer, builtAt time.Time) error {
 		binary.LittleEndian.PutUint16(buf[0:], uint16(strIndex[loc.Country]))
 		binary.LittleEndian.PutUint16(buf[2:], uint16(strIndex[loc.Region]))
 		binary.LittleEndian.PutUint16(buf[4:], uint16(strIndex[loc.City]))
+		binary.LittleEndian.PutUint16(buf[6:], uint16(strIndex[loc.ISP]))
 		if _, err := w.Write(buf); err != nil {
 			return err
 		}
