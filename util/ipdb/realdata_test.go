@@ -29,21 +29,35 @@ func realDB(t *testing.T) *DB {
 
 func TestRealDataLookupsKnownIPs(t *testing.T) {
 	db := realDB(t)
-	for _, c := range []struct{ ip, country, region, city string }{
-		{"114.114.114.114", "中国", "江苏省", "南京市"},
-		{"223.5.5.5", "中国", "浙江省", "杭州市"},
-		{"202.96.209.5", "中国", "上海市", "上海市"},
-		{"8.8.8.8", "United States", "", ""},
+	// isp 的期望值取自上游 ipv4_source.txt 里对应那一行的第 6 字段经
+	// CanonicalISP 归一的结果，不是推测：114.114.114.114 那一行的 ISP 字段
+	// 就是占位符 "0"，所以它的期望值是空串——这不是漏写。
+	for _, c := range []struct{ ip, country, region, city, isp string }{
+		{"114.114.114.114", "中国", "江苏省", "南京市", ""},
+		{"223.5.5.5", "中国", "浙江省", "杭州市", "阿里云"},
+		{"202.96.209.5", "中国", "上海市", "上海市", "中国电信"},
+		{"123.171.5.200", "中国", "山东省", "聊城市", "中国电信"},
+		{"8.8.8.8", "United States", "", "", "Google"},
 	} {
 		loc, ok := db.Lookup(net.ParseIP(c.ip))
 		if !ok {
 			t.Errorf("Lookup(%s) 未命中", c.ip)
 			continue
 		}
-		if loc.Country != c.country || loc.Region != c.region || loc.City != c.city {
-			t.Errorf("Lookup(%s) = %q/%q/%q, want %q/%q/%q",
-				c.ip, loc.Country, loc.Region, loc.City, c.country, c.region, c.city)
+		if loc.Country != c.country || loc.Region != c.region || loc.City != c.city || loc.ISP != c.isp {
+			t.Errorf("Lookup(%s) = %q/%q/%q/%q, want %q/%q/%q/%q",
+				c.ip, loc.Country, loc.Region, loc.City, loc.ISP,
+				c.country, c.region, c.city, c.isp)
 		}
+	}
+}
+
+// 种子库必须是当前格式。留一份旧格式在仓库里，每台新装的机器都要先走一次
+// 强制全量下载（fetchAndBuild 的判据会正确地触发它，但那是给存量部署的补救，
+// 不该让新装的机器也走一遍）。
+func TestRealDataIsCurrentFormat(t *testing.T) {
+	if !realDB(t).HasISP() {
+		t.Error("bin/ipdb.dat 还是不含运营商的旧格式，需要重新生成")
 	}
 }
 
