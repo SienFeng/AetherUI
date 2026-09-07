@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -109,9 +110,10 @@ func TestFetchAndBuildInstallsNewDatabase(t *testing.T) {
 	if db == nil {
 		t.Fatal("返回的 DB 为 nil")
 	}
-	// 5 行输入中有 2 行同为江苏南京且相连，应合并
-	if got := db.SegmentCount(); got != 4 {
-		t.Errorf("SegmentCount = %d, want 4", got)
+	// 5 行输入 → 5 段。其中两行同为江苏南京且相连，但运营商不同（电信 / 联通）：
+	// 运营商进了归属地之后它们不再等价，不再合并。
+	if got := db.SegmentCount(); got != 5 {
+		t.Errorf("SegmentCount = %d, want 5", got)
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("目标文件未生成: %v", err)
@@ -850,4 +852,113 @@ func TestInitialUpdateDoesNothingWhenDisabled(t *testing.T) {
 		t.Errorf("发起了 %d 次网络请求，关闭时应为 0", n)
 	}
 	assertFileUnchanged(t, path, before)
+}
+
+// 升级后本地那份库还是 v1（不含运营商）。它能被兼容的 Parse 正常加载，
+// 于是 dbOf(...) != nil 成立、带上 ETag、上游文件没变、服务端回 304、
+// 库不重建——运营商列会永远是空的，管理员点「更新」还只会得到「已是最新」。
+// 判据必须收紧成「本地那份确实在用**且已经是当前格式**」。
+func TestFetchAndBuildSkipsConditionalRequestWhenLocalDatabaseIsLegacy(t *testing.T) {
+	setupDB(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+
+	legacy, err := ipdb.Parse(legacyV1Bytes(t))
+	if err != nil {
+		t.Fatalf("解析 v1 样本: %v", err)
+	}
+
+	var gotConditional bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			gotConditional = true
+		}
+		_, _ = w.Write([]byte(ipdbSampleSource))
+	}))
+	t.Cleanup(srv.Close)
+
+	src := testSource(path, 1)
+	src.EtagKey = "testEtag"
+	useTestSources(t, []ipdbSource{src})
+
+	s := IPDBService{}
+	s.setDB(src.Key, legacy)
+	s.rememberEtag(src, `"deadbeef"`)
+
+	if _, err := s.fetchAndBuild(src, srv.URL, path); err != nil {
+		t.Fatalf("fetchAndBuild: %v", err)
+	}
+	if gotConditional {
+		t.Error("本地库还是 v1 时不该带 If-None-Match：带了会被 304 挡回，库永远换不成 v2")
+	}
+}
+
+// 反面：本地库已经是 v2 时，条件请求照旧，不能因为这次改动每次都多下几十 MB。
+func TestFetchAndBuildKeepsConditionalRequestWhenLocalDatabaseIsCurrent(t *testing.T) {
+	setupDB(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ipdb.dat")
+	current := seedDatabaseAt(t, path, time.Now())
+
+	var gotConditional bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") != "" {
+			gotConditional = true
+		}
+		_, _ = w.Write([]byte(ipdbSampleSource))
+	}))
+	t.Cleanup(srv.Close)
+
+	src := testSource(path, 1)
+	src.EtagKey = "testEtag"
+	useTestSources(t, []ipdbSource{src})
+
+	s := IPDBService{}
+	s.setDB(src.Key, current)
+	// 先记一个 ETag，否则判据后面那半段（etag != ""）不成立，测不出区别。
+	s.rememberEtag(src, `"deadbeef"`)
+
+	if _, err := s.fetchAndBuild(src, srv.URL, path); err != nil {
+		t.Fatalf("fetchAndBuild: %v", err)
+	}
+	if !gotConditional {
+		t.Error("本地库已经是 v2 时应当继续带 If-None-Match")
+	}
+}
+
+// legacyV1Bytes 手工拼一份 v1 库，与 util/ipdb 的同名 helper 是同一套线格式。
+// 在这个包里重拼一份而不是从 util/ipdb 导出：v1 只需要在测试里造得出来，
+// 不该为此在生产代码上开一个导出函数。
+func legacyV1Bytes(t *testing.T) []byte {
+	t.Helper()
+	pool := []string{"", "中国", "江苏省", "南京市"}
+
+	buf := make([]byte, 32)
+	copy(buf, "AUIPDB01")
+	binary.LittleEndian.PutUint32(buf[8:], 1)
+	binary.LittleEndian.PutUint64(buf[12:], uint64(time.Now().Unix()))
+	binary.LittleEndian.PutUint32(buf[20:], 1)
+	binary.LittleEndian.PutUint16(buf[24:], 1)
+
+	seg := make([]byte, 10)
+	binary.LittleEndian.PutUint32(seg[0:], 0x01000000)
+	binary.LittleEndian.PutUint32(seg[4:], 0x0100FFFF)
+	buf = append(buf, seg...)
+
+	loc := make([]byte, 6)
+	binary.LittleEndian.PutUint16(loc[0:], 1)
+	binary.LittleEndian.PutUint16(loc[2:], 2)
+	binary.LittleEndian.PutUint16(loc[4:], 3)
+	buf = append(buf, loc...)
+
+	var n4 [4]byte
+	binary.LittleEndian.PutUint32(n4[:], uint32(len(pool)))
+	buf = append(buf, n4[:]...)
+	for _, s := range pool {
+		var n2 [2]byte
+		binary.LittleEndian.PutUint16(n2[:], uint16(len(s)))
+		buf = append(buf, n2[:]...)
+		buf = append(buf, s...)
+	}
+	return buf
 }

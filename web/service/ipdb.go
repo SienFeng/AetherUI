@@ -348,9 +348,17 @@ func (s *IPDBService) fetchAndBuild(src ipdbSource, url, dstPath string) (*ipdb.
 	if err != nil {
 		return nil, common.NewError("下载 IP 库源数据失败:", err)
 	}
-	// 只有本地那份确实在用时才带条件头。库不在（首次安装、文件被删）时收到
-	// 304 就什么都拿不到，库会永远补不回来——而库缺失恰恰是最需要下载的时候。
-	if src.EtagKey != "" && s.dbOf(src.Key) != nil {
+	// 只有本地那份确实在用、且已经是当前格式时才带条件头。
+	//
+	// 「在用」那半段管的是首次安装与文件被删：库不在时收到 304 就什么都拿不到，
+	// 库会永远补不回来——而库缺失恰恰是最需要下载的时候。
+	//
+	// 「已经是当前格式」那半段管的是升级：旧格式的库能被兼容的 Parse 正常加载，
+	// 带上 ETag 就会被 304 挡回，库永远升不上来，运营商列永远是空的，而管理员
+	// 点「更新」只会得到「已是最新」——一个完全静默、且不会自愈到可预期时间的
+	// 失效。判据写成「格式对不对」而不是「升级过没有」，是为了自愈：任何原因
+	// 让库退回旧格式（回退过一次二进制、手工拷了旧文件），下次更新都会重建。
+	if cur := s.dbOf(src.Key); src.EtagKey != "" && cur != nil && cur.HasISP() {
 		etag, err := s.settingService.getOptionalString(src.EtagKey)
 		if err != nil {
 			logger.Warning("读取 IP 库 ETag 失败, 源:", src.Name, "err:", err)
