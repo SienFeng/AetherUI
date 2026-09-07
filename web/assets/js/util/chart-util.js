@@ -14,6 +14,12 @@ function trafficChartOptions(maxTicksLimit) {
         plugins: {
             legend: { position: 'top' },
             tooltip: {
+                // 按悬停这一刻的用量降序，而不是 Chart.js 默认的数据集顺序——后者
+                // 是服务端按「整个时间范围的总量」排出来的（Overview 的
+                // `total desc`），与当前时间点无关：总量第一的入站在某个小时
+                // 可能是 0 B，却仍排在最上面。图例不跟着排，它决定颜色分配，
+                // 跨时间点必须稳定。
+                itemSort: (a, b) => b.parsed.y - a.parsed.y,
                 callbacks: {
                     label: ctx => ctx.dataset.label + ': ' + sizeFormat(ctx.parsed.y),
                 },
