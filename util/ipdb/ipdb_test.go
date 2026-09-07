@@ -81,18 +81,26 @@ func TestLookupAtSegmentBoundaries(t *testing.T) {
 	}
 }
 
-// 相邻且归属地相同的段必须合并——上游按 ISP 拆得很碎，而我们不存 ISP。
+// 相邻且归属地完全相同（含运营商）的段必须合并——上游把同一个城市按接入点
+// 拆得很碎。
+//
+// 这个用例原先取的是 sampleSource 里「同城不同 ISP」的那两行：那时本包不存
+// ISP，两段确实等价。运营商进了归属地之后它们不再等价（那是
+// TestBuildRecordsDoesNotMergeAdjacentSegmentsWithDifferentISP 断言的行为），
+// 所以这里换成一份真正完全相同的输入，验证的不变量没有变。
 func TestBuildMergesAdjacentSegmentsWithSameLocation(t *testing.T) {
-	db := buildSample(t, sampleSource)
+	const src = `1.0.0.0|1.0.0.255|中国|江苏省|南京市|中国电信|CN
+1.0.1.0|1.0.1.255|中国|江苏省|南京市|中国电信|CN
+1.0.2.0|1.0.2.255|中国|江苏省|苏州市|中国电信|CN
+`
+	db := buildSample(t, src)
 
-	// 2.0.0.0-2.0.0.255 与 2.0.1.0-2.0.1.255 同为江苏省南京市（仅 ISP 不同），应合并为一段；
-	// 2.0.2.0 是苏州市，不合并。
-	if got := db.SegmentCount(); got != 7 {
-		t.Errorf("SegmentCount = %d, want 7（8 行输入中有 2 行应合并）", got)
+	if got := db.SegmentCount(); got != 2 {
+		t.Errorf("SegmentCount = %d, want 2（3 行输入中前 2 行应合并）", got)
 	}
-	loc, _ := db.Lookup(net.ParseIP("2.0.1.128"))
+	loc, _ := db.Lookup(net.ParseIP("1.0.1.128"))
 	if loc.City != "南京市" {
-		t.Errorf("合并后 2.0.1.128 的城市 = %q, want 南京市", loc.City)
+		t.Errorf("合并后 1.0.1.128 的城市 = %q, want 南京市", loc.City)
 	}
 }
 
@@ -229,6 +237,75 @@ func assertStrings(t *testing.T, got, want []string) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+// sampleSource 的第 6 字段就是 ISP，此前被丢掉了。
+func TestBuildReadsISPFromIP2RegionSource(t *testing.T) {
+	db := buildSample(t, sampleSource)
+	for _, c := range []struct{ ip, isp string }{
+		{"1.0.2.5", "中国电信"},
+		{"2.0.1.5", "中国联通"},
+		{"3.1.2.3", ""}, // 源里是 "0"，境外且非云厂商
+	} {
+		loc, ok := db.Lookup(net.ParseIP(c.ip))
+		if !ok {
+			t.Errorf("Lookup(%s) 未命中", c.ip)
+			continue
+		}
+		if loc.ISP != c.isp {
+			t.Errorf("Lookup(%s).ISP = %q, want %q", c.ip, loc.ISP, c.isp)
+		}
+	}
+}
+
+// 加 ISP 之后段变细了，但 CIDRsOfProvinces 的输出必须逐字节不变：
+// 它的结果进 geo dat 的内容哈希，一变就会让那个 10 秒的 cron 反复重启 xray。
+//
+// 之所以能不变：CIDRsOfProvinces 按 Region 过滤后自己重新合并连续区间
+// （hasRange && end+1 == s.start），不依赖 segments 的合并粒度。
+func TestCIDRsOfProvincesUnaffectedByISPSplit(t *testing.T) {
+	// 同一批数据的两种口径：一份不带 ISP（相邻同城段会合并），
+	// 一份带 ISP（同城不同 ISP 拆成两段）。
+	base := []Record{
+		{Start: 0x02000000, End: 0x020000FF, Country: "中国", Region: "江苏省", City: "南京市"},
+		{Start: 0x02000100, End: 0x020001FF, Country: "中国", Region: "江苏省", City: "南京市"},
+		{Start: 0x02000200, End: 0x020002FF, Country: "中国", Region: "江苏省", City: "苏州市"},
+	}
+	withISP := make([]Record, len(base))
+	copy(withISP, base)
+	withISP[0].ISP = "中国电信"
+	withISP[1].ISP = "中国联通"
+	withISP[2].ISP = "中国电信"
+
+	build := func(recs []Record) *DB {
+		t.Helper()
+		var buf bytes.Buffer
+		if err := BuildRecords(recs, &buf, testBuiltAt); err != nil {
+			t.Fatalf("BuildRecords: %v", err)
+		}
+		db, err := Parse(buf.Bytes())
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		return db
+	}
+
+	plain, split := build(base), build(withISP)
+	if plain.SegmentCount() == split.SegmentCount() {
+		t.Fatalf("两种口径的段数相同（都是 %d），用例没有覆盖到分裂场景",
+			plain.SegmentCount())
+	}
+	want := plain.CIDRsOfProvinces([]string{"江苏省"})
+	got := split.CIDRsOfProvinces([]string{"江苏省"})
+	if len(want) != len(got) {
+		t.Fatalf("CIDR 条数变了：不带 ISP %v，带 ISP %v", want, got)
+	}
+	for i := range want {
+		if want[i] != got[i] {
+			t.Errorf("第 %d 条 CIDR 变了: %q -> %q（geo dat 的内容哈希会跟着变，"+
+				"那个 10 秒的 cron 会反复重启 xray）", i, want[i], got[i])
 		}
 	}
 }

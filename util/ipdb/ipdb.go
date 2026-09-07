@@ -4,8 +4,10 @@
 // 数据来自 ip2region 的 ipv4_source.txt（Apache-2.0 OR MIT，与本项目 GPL-3.0 兼容），
 // 由 Build 转换成本包自定义的紧凑格式：35 MB 的文本压到约 2 MB，且可直接二分查找。
 //
-// 精度取舍：境外只保留国家，中国保留到省+市。上游把同一个城市按 ISP 拆成多段，
-// 而本包不存 ISP，因此相邻同归属地的段会被合并掉。
+// 精度取舍：中国保留到省+市+运营商，境外只保留国家与知名 IDC / 云厂商。
+// 境外的 ISP 不全量保留，是因为那个字段极其细碎，会让相邻段的合并几乎完全
+// 失效——实测纯真库的段数从 261,670 涨到 858,363，文件从 2.62 MB 涨到
+// 8.74 MB；而境外来源 IP 真正有价值的信息就是「它是不是机房」。
 package ipdb
 
 import (
@@ -105,12 +107,14 @@ func (d *DB) Lookup(ip net.IP) (Location, bool) {
 
 // normalize 把上游用来表示「无此字段」的占位值统一成空串，并按既定精度
 // 丢掉境外段的省市。
-func normalize(country, region, city string) Location {
+func normalize(country, region, city, isp string) Location {
 	if country == "Reserved" || country == "0" {
 		country = ""
 	}
 	if country != chinaCountry {
-		return Location{Country: country}
+		// 境外只保留国家与知名 IDC / 云厂商：全量保留 ISP 会让相邻段的合并
+		// 几乎完全失效，实测纯真库的段数会涨到 3.3 倍。
+		return Location{Country: country, ISP: CanonicalISP(isp, true)}
 	}
 	if region == "0" {
 		region = ""
@@ -118,7 +122,7 @@ func normalize(country, region, city string) Location {
 	if city == "0" {
 		city = ""
 	}
-	return Location{Country: country, Region: region, City: city}
+	return Location{Country: country, Region: region, City: city, ISP: CanonicalISP(isp, false)}
 }
 
 // Build 把上游的 ipv4_source.txt 转换成本包的紧凑格式。
@@ -167,10 +171,10 @@ func parseIP2Region(src io.Reader) ([]Record, error) {
 		if start > end {
 			return nil, common.NewErrorf("第 %d 行起始 IP 大于结束 IP: %q", lineNo, line)
 		}
-		loc := normalize(fields[2], fields[3], fields[4])
+		loc := normalize(fields[2], fields[3], fields[4], fields[5])
 		records = append(records, Record{
 			Start: start, End: end,
-			Country: loc.Country, Region: loc.Region, City: loc.City,
+			Country: loc.Country, Region: loc.Region, City: loc.City, ISP: loc.ISP,
 		})
 	}
 	if err := scanner.Err(); err != nil {
