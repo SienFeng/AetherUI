@@ -44,6 +44,7 @@
                 <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
                     <template slot="title">
                         [[ src.location || '归属地未知' ]]<template v-if="src.locationAlt">（另一个源认为是 [[ src.locationAlt ]]）</template><br>
+                        运营商 [[ src.isp || '未知' ]]<template v-if="src.ispAlt">（另一个源认为是 [[ src.ispAlt ]]）</template><br>
                         最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
                     </template>
                     <a-tag style="cursor: pointer; margin-bottom: 4px"
@@ -69,8 +70,11 @@
                     [[ DateUtil.formatMillis(row.time) ]]
                 </template>
                 <template slot="location" slot-scope="text, row">
-                    <a-tooltip v-if="row.locationAlt">
-                        <template slot="title">另一个源认为是 [[ row.locationAlt ]]</template>
+                    <a-tooltip v-if="row.locationAlt || row.ispAlt">
+                        <template slot="title">
+                            <template v-if="row.locationAlt">归属地：另一个源认为是 [[ row.locationAlt ]]<br></template>
+                            <template v-if="row.ispAlt">运营商：另一个源认为是 [[ row.ispAlt ]]</template>
+                        </template>
                         <span style="border-bottom: 1px dashed rgba(0,0,0,.25)">[[ row.location ]]</span>
                     </a-tooltip>
                     <span v-else-if="row.location">[[ row.location ]]</span>
@@ -178,6 +182,8 @@
         }, {
             title: "归属地", align: 'center', width: 170,
             scopedSlots: { customRender: 'location' },
+        }, {
+            title: "运营商", align: 'center', width: 100, dataIndex: "isp",
         }, {
             title: "访问目标", align: 'left', scopedSlots: { customRender: 'target' },
         }, {

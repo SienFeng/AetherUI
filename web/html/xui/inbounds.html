@@ -108,12 +108,22 @@
                                     <template slot="location" slot-scope="text, online">
                                         <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>
                                         <a-tag v-else>未知</a-tag>
-                                        <a-tooltip v-if="online.locationAlt">
+                                        <a-tooltip v-if="online.locationAlt || online.ispAlt">
                                             <template slot="title">
-                                                两个离线库判定不一致。另一个源认为是：[[ online.locationAlt ]]
+                                                两个离线库判定不一致。
+                                                <template v-if="online.locationAlt">
+                                                    <br>归属地：另一个源认为是 [[ online.locationAlt ]]
+                                                </template>
+                                                <template v-if="online.ispAlt">
+                                                    <br>运营商：另一个源认为是 [[ online.ispAlt ]]
+                                                </template>
                                             </template>
                                             <a-tag color="orange">存疑</a-tag>
                                         </a-tooltip>
+                                    </template>
+                                    <template slot="isp" slot-scope="text, online">
+                                        <a-tag v-if="online.isp" :color="ispColor(online.isp)">[[ online.isp ]]</a-tag>
+                                        <a-tag v-else>未知</a-tag>
                                     </template>
                                     <template slot="speed" slot-scope="text, online">
                                         <a-tag color="green">↑ [[ sizeFormat(online.upSpeed) ]]/s</a-tag>
@@ -379,6 +389,12 @@
         scopedSlots: { customRender: 'rate' },
     }];
 
+    // 服务端 CanonicalISP 归一出来的基础运营商名。不在这个表里的要么是云厂商，
+    // 要么是地方运营商，展开行按「机房色」显示——把账号挂在服务器上中转与
+    // 家宽来源是完全不同的两件事。表与 util/ipdb/isp_name.go 的 ispAliases
+    // 取值一致，那边新增基础运营商时这里要跟着加，否则它会被显示成机房色。
+    const ISP_CARRIER_NAMES = ['中国电信', '中国联通', '中国移动', '中国广电', '教育网', '科技网'];
+
     // 展开行：某个入站上每个来源 IP 的在线明细。
     const onlineColumns = [{
         title: "上线时间",
@@ -395,6 +411,11 @@
         align: 'center',
         width: 160,
         scopedSlots: { customRender: 'location' },
+    }, {
+        title: "运营商",
+        align: 'center',
+        width: 110,
+        scopedSlots: { customRender: 'isp' },
     }, {
         title: "连接数",
         align: 'center',
@@ -832,6 +853,16 @@
                 if (!online.banned) return '';
                 if (!online.banExpiresAt) return '永久封禁，需手动解除';
                 return '封禁至 ' + DateUtil.formatMillis(online.banExpiresAt);
+            },
+            // 机房 / 云厂商来源单独用一个颜色：家宽来源与「把账号挂在服务器上
+            // 中转」是完全不同的两件事，颜色让它在扫读时能立刻区分出来。
+            //
+            // 判据是「不在这几个基础运营商的名字里」——服务端的 CanonicalISP
+            // 已经把认得出的运营商归一成了固定的几个字符串，剩下的要么是云厂商，
+            // 要么是地方运营商（「鹏博士宽带」这类），后者按机房色显示只是偏
+            // 保守，不会误导。
+            ispColor(isp) {
+                return ISP_CARRIER_NAMES.includes(isp) ? 'blue' : 'purple';
             },
             async submit(url, data, modal) {
                 const msg = await HttpUtil.postWithModal(url, data, modal);
