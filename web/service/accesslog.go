@@ -124,6 +124,8 @@ type AccessLogRow struct {
 	model.AccessLog
 	Location    string `json:"location"`
 	LocationAlt string `json:"locationAlt"`
+	ISP         string `json:"isp"`
+	ISPAlt      string `json:"ispAlt"`
 }
 
 // AccessLogResult 是查询接口的返回体。
@@ -209,17 +211,22 @@ func (s *AccessLogService) GetAccessLogs(q AccessLogQuery) (*AccessLogResult, er
 	}
 	// 一页里往往反复出现同一个来源 IP（一个客户端刷一屏是常态），按 IP
 	// 记忆化，免得对同一个地址重复做几十次二分查找。
-	type located struct{ primary, alt string }
-	seen := make(map[string]located, len(list))
+	seen := make(map[string]ipLocation, len(list))
 	// make 而不是 var：前端直接拿去渲染表格，不能给 null。
 	rows := make([]AccessLogRow, 0, len(list))
 	for _, r := range list {
 		loc, ok := seen[r.SourceIP]
 		if !ok {
-			loc.primary, loc.alt = locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
+			loc = locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
 			seen[r.SourceIP] = loc
 		}
-		rows = append(rows, AccessLogRow{AccessLog: r, Location: loc.primary, LocationAlt: loc.alt})
+		rows = append(rows, AccessLogRow{
+			AccessLog:   r,
+			Location:    loc.Location,
+			LocationAlt: loc.LocationAlt,
+			ISP:         loc.ISP,
+			ISPAlt:      loc.ISPAlt,
+		})
 	}
 	return &AccessLogResult{
 		Enabled:  enabled,
@@ -269,6 +276,8 @@ type RecentSource struct {
 	IP          string `json:"ip"`
 	Location    string `json:"location"`
 	LocationAlt string `json:"locationAlt"`
+	ISP         string `json:"isp"`
+	ISPAlt      string `json:"ispAlt"`
 	FirstSeen   int64  `json:"firstSeen"` // 毫秒
 	LastSeen    int64  `json:"lastSeen"`
 	Count       int64  `json:"count"`
@@ -314,11 +323,13 @@ func (s *AccessLogService) RecentSources(inboundId int, limit int) ([]RecentSour
 
 	list := make([]RecentSource, 0, len(rows))
 	for _, r := range rows {
-		primary, alt := locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
+		loc := locateWithIPDB(s.ipdbService, net.ParseIP(r.SourceIP))
 		list = append(list, RecentSource{
 			IP:          r.SourceIP,
-			Location:    primary,
-			LocationAlt: alt,
+			Location:    loc.Location,
+			LocationAlt: loc.LocationAlt,
+			ISP:         loc.ISP,
+			ISPAlt:      loc.ISPAlt,
 			FirstSeen:   r.FirstSeen,
 			LastSeen:    r.LastSeen,
 			Count:       r.Cnt,

@@ -166,8 +166,8 @@ func (s *ConcurrencyService) disconnectBanned(inbound *model.Inbound, list []Onl
 	}
 }
 
-// noLocate 用于判定路径：这里不需要归属地，省掉每轮的查库开销。
-func noLocate(net.IP) (string, string) { return "", "" }
+// noLocate 用于判定路径：这里不需要归属地与运营商，省掉每轮的查库开销。
+func noLocate(net.IP) ipLocation { return ipLocation{} }
 
 // planRejections 决定某入站本轮应当拒绝哪些来源 IP：先剔除已断连的历史
 // 条目，再按先来后到挑出超额的部分。两步必须按这个顺序，理由见 liveOnly。

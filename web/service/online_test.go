@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,7 +16,7 @@ const testPort = 39001
 
 var testPorts = map[int]bool{testPort: true}
 
-func noLocation(net.IP) (string, string) { return "", "" }
+func noLocation(net.IP) ipLocation { return ipLocation{} }
 
 func conn(cookie uint64, port uint16, remote string, up, down uint64) netdiag.Conn {
 	return netdiag.Conn{
@@ -229,15 +231,18 @@ func TestSnapshotFillsLocation(t *testing.T) {
 	tk := newOnlineTracker()
 	tk.update([]netdiag.Conn{conn(1, testPort, "114.114.114.114", 100, 100)}, testPorts, time.Unix(1000, 0))
 
-	locate := func(ip net.IP) (string, string) {
+	locate := func(ip net.IP) ipLocation {
 		if ip.Equal(net.ParseIP("114.114.114.114")) {
-			return "中国 江苏省 南京市", ""
+			return ipLocation{Location: "中国 江苏省 南京市", ISP: "中国电信"}
 		}
-		return "", ""
+		return ipLocation{}
 	}
 	e := onlyEntry(t, tk.snapshot(testPort, locate))
 	if e.Location != "中国 江苏省 南京市" {
 		t.Errorf("归属地 = %q，期望 中国 江苏省 南京市", e.Location)
+	}
+	if e.ISP != "中国电信" {
+		t.Errorf("运营商 = %q，期望 中国电信", e.ISP)
 	}
 }
 
@@ -332,8 +337,13 @@ func TestSnapshotShowsDisagreementBetweenSources(t *testing.T) {
 	tk := newOnlineTracker()
 	tk.update([]netdiag.Conn{conn(1, testPort, "114.114.114.114", 100, 100)}, testPorts, time.Unix(1000, 0))
 
-	locate := func(ip net.IP) (string, string) {
-		return "中国 江苏省 南京市", "中国 山东省 济南市"
+	locate := func(ip net.IP) ipLocation {
+		return ipLocation{
+			Location:    "中国 江苏省 南京市",
+			LocationAlt: "中国 山东省 济南市",
+			ISP:         "中国电信",
+			ISPAlt:      "中国联通",
+		}
 	}
 	e := onlyEntry(t, tk.snapshot(testPort, locate))
 	if e.Location != "中国 江苏省 南京市" {
@@ -350,10 +360,15 @@ func TestSnapshotHidesAltWhenSourcesAgree(t *testing.T) {
 	tk := newOnlineTracker()
 	tk.update([]netdiag.Conn{conn(1, testPort, "114.114.114.114", 100, 100)}, testPorts, time.Unix(1000, 0))
 
-	locate := func(ip net.IP) (string, string) { return "中国 江苏省 南京市", "" }
+	locate := func(ip net.IP) ipLocation {
+		return ipLocation{Location: "中国 江苏省 南京市", ISP: "中国电信"}
+	}
 	e := onlyEntry(t, tk.snapshot(testPort, locate))
 	if e.LocationAlt != "" {
 		t.Errorf("次判定 = %q，两源一致时不该显示", e.LocationAlt)
+	}
+	if e.ISPAlt != "" {
+		t.Errorf("运营商次判定 = %q，两源一致时不该显示", e.ISPAlt)
 	}
 }
 
@@ -585,4 +600,91 @@ func TestSumLiveSpeedIsZeroOnFirstSample(t *testing.T) {
 	if up != 0 || down != 0 {
 		t.Errorf("首次采样合计速率 = %d/%d，期望 0/0", up, down)
 	}
+}
+
+// 运营商与归属地走同一次判定：两个源不一致时把分歧带出来，不做仲裁。
+func TestLocateWithIPDBReportsISPDisagreement(t *testing.T) {
+	svc := ipdbServiceWithSources(t,
+		buildISPTestDB(t, "中国电信"),
+		buildISPTestDB(t, "中国联通"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if got.ISP != "中国电信" {
+		t.Errorf("ISP = %q, want 中国电信", got.ISP)
+	}
+	if got.ISPAlt != "中国联通" {
+		t.Errorf("ISPAlt = %q, want 中国联通（分歧必须显示出来，不做仲裁）", got.ISPAlt)
+	}
+}
+
+// 两个源一致时不该报分歧，否则「存疑」标签会对几乎每个 IP 亮起。
+func TestLocateWithIPDBReportsNoDisagreementWhenSourcesAgree(t *testing.T) {
+	svc := ipdbServiceWithSources(t,
+		buildISPTestDB(t, "中国电信"),
+		buildISPTestDB(t, "中国电信"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if got.ISPAlt != "" {
+		t.Errorf("ISPAlt = %q, 两个源一致时必须为空", got.ISPAlt)
+	}
+}
+
+// 归属地与运营商各自独立判定分歧：两个源完全可能在城市名上有出入而运营商
+// 一致（真实数据就是如此——123.171.5.200 在 ip2region 是「聊城市」、
+// 纯真库是「聊城」，而两边的运营商都是电信）。
+func TestLocateWithIPDBJudgesLocationAndISPIndependently(t *testing.T) {
+	svc := ipdbServiceWithSources(t,
+		buildISPTestDBWithCity(t, "聊城市", "中国电信"),
+		buildISPTestDBWithCity(t, "聊城", "中国电信"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if got.LocationAlt == "" {
+		t.Error("LocationAlt 为空，城市名不同应当报分歧")
+	}
+	if got.ISPAlt != "" {
+		t.Errorf("ISPAlt = %q, 运营商相同时不该报分歧", got.ISPAlt)
+	}
+}
+
+// buildISPTestDB 造一份只含一段的库：1.0.0.0-1.0.255.255，中国/江苏省/南京市，
+// 运营商由调用方指定。
+func buildISPTestDB(t *testing.T, isp string) *ipdb.DB {
+	t.Helper()
+	return buildISPTestDBWithCity(t, "南京市", isp)
+}
+
+func buildISPTestDBWithCity(t *testing.T, city, isp string) *ipdb.DB {
+	t.Helper()
+	var buf bytes.Buffer
+	recs := []ipdb.Record{{
+		Start: 0x01000000, End: 0x0100FFFF,
+		Country: "中国", Region: "江苏省", City: city, ISP: isp,
+	}}
+	if err := ipdb.BuildRecords(recs, &buf, time.Unix(1788000000, 0)); err != nil {
+		t.Fatalf("BuildRecords: %v", err)
+	}
+	db, err := ipdb.Parse(buf.Bytes())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	return db
+}
+
+// ipdbServiceWithSources 把全局的数据源列表换成两个测试源，并塞入给定的两份库。
+// 顺序即 Multi.Lookup 的返回顺序，也就决定了谁是主判定、谁是 alt。
+func ipdbServiceWithSources(t *testing.T, primary, alt *ipdb.DB) IPDBService {
+	t.Helper()
+	dir := t.TempDir()
+	sources := []ipdbSource{
+		testSource(filepath.Join(dir, "primary.dat"), 1),
+		testSource(filepath.Join(dir, "alt.dat"), 1),
+	}
+	sources[0].Key = "primary"
+	sources[1].Key = "alt"
+	useTestSources(t, sources)
+
+	s := IPDBService{}
+	s.setDB("primary", primary)
+	s.setDB("alt", alt)
+	return s
 }
