@@ -29,6 +29,20 @@ type InboundIPHour struct {
 	Province string `json:"province"`
 
 	ActiveSeconds int `json:"activeSeconds"`
+
+	// ActiveBytes 是本小时该来源 IP 的上下行字节之和，是并存判定的「实质
+	// 使用」判据。
+	//
+	// 为什么不用 ActiveSeconds 承担这个判断：生产实测过一例——某入站显示
+	// 「并存 15 小时 / 2 省」，而第二个省那个 IP 15 个小时里每小时只累计
+	// 60~180 秒，且在**访问日志里一条记录都没有**（连被路由规则拦下都会留
+	// 下 route=a-ui-block 的记录，它连那个都没有）。它只是在反复建连、做
+	// TLS 握手，从未发出过一个可路由的请求。活跃时长分不出这种连接与真实
+	// 使用，字节量可以：握手/重连是 KB 级，真实使用是 MB 级。
+	//
+	// 升级前写入的行这一列是 0。computeCoexist 据此整体切换口径而不是逐行
+	// 判断，理由见那里。
+	ActiveBytes int64 `json:"activeBytes"`
 }
 
 // AlignHourUTC 把时刻对齐到它所在 UTC 小时的起点，返回 Unix 秒。

@@ -49,12 +49,15 @@
         <template slot="label" slot-scope="text, h">[[ h.label ]]</template>
         <template slot="entries" slot-scope="text, h">
             <a-tag v-for="e in h.entries" :key="e.ip" :color="e.province ? 'red' : 'default'">
-                [[ e.province || '归属地未知' ]] · [[ e.ip ]] · [[ sharingModal.minutes(e.activeSeconds) ]]
+                [[ e.province || '归属地未知' ]] · [[ e.ip ]] · [[ sharingModal.minutes(e.activeSeconds) ]] · [[ sizeFormat(e.activeBytes) ]]
             </a-tag>
         </template>
     </a-table>
     <p style="margin-top: 8px; color: rgba(0,0,0,.45)">
         只列出发生过并存的小时，最多回溯 [[ sharingModal.retentionDays ]] 天。时间按面板设置的时区显示。
+        <br>
+        每条后面的流量是判定用的「实质使用」判据：一小时不足 1 MB 的来源不计入并存——
+        反复建连做 TLS 握手也会产生活跃时长，但产生不了多少字节。
     </p>
 
     <!-- 设计文档 §8/§9 要求这几条必须出现在界面上，不能只写在文档里：

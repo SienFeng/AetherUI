@@ -14,6 +14,21 @@ import (
 // 告警就退化成噪声或漏报。
 const coexistDisplayMinHours = 3
 
+// coexistMinActiveBytes 是「实质使用」门槛：一条记录要参与并存判定，它在
+// 这一小时里的上下行字节之和必须达到这个值。
+//
+// 为什么判据是字节而不是活跃时长：生产实测过一例——某入站显示「并存 15
+// 小时 / 2 省」，第二个省那个 IP 每小时只累计 60~180 秒，而**访问日志里
+// 一条记录都没有**。被路由规则拦下的请求会留下 route=a-ui-block 的记录，
+// 它连那个都没有，说明它从未发出过一个可路由的请求，只是在反复建连、做
+// TLS 握手。sharingObservable 已经挡掉了「完全没有字节往来」的连接，但
+// 握手本身就产生字节，所以时长维度分不出这种连接与真实使用。
+//
+// 1 MB 是量级判断而非实测标定：一次 TLS + ws 握手是几 KB，每小时重连几次
+// 是几十 KB 量级；真在用代理的一小时轻松几十 MB。留了一个数量级的余量。
+// 明细页会显示每行的字节数，跑一段时间后可据真实分布调整。
+const coexistMinActiveBytes = 1 << 20
+
 // CoexistStat 是某入站在判定窗口内的并存统计。
 type CoexistStat struct {
 	// Hours 是并存小时数：某个 HourStart 下存在至少两条 Province 不同且
@@ -34,6 +49,21 @@ type CoexistStat struct {
 // Flagged 判断这份统计是否达到显示下限。
 func (s CoexistStat) Flagged() bool { return s.Hours >= coexistDisplayMinHours }
 
+// hasActiveBytes 判断这批行里有没有字节量，即并存判定该不该走字节门槛。
+//
+// 单独抽出来是因为它必须**对整批数据算一次**，不能逐小时各算各的：明细表
+// 回溯 30 天，逐小时算会让升级前的小时按旧口径判、升级后的按新口径判，同一
+// 张表里两种判据混用，管理员无从判断自己在看什么。这与 CoexistStat.ByIP
+// 那条「一旦有任何一条记录带上省份就整体以省份口径为准」是同一条原则。
+func hasActiveBytes(rows []model.InboundIPHour) bool {
+	for _, r := range rows {
+		if r.ActiveBytes > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // computeCoexist 从窗口内的行算出并存统计。
 //
 // 判定单位是「小时」而不是「是否出现过新省份」，这是整个功能的支点：
@@ -44,12 +74,29 @@ func (s CoexistStat) Flagged() bool { return s.Hours >= coexistDisplayMinHours }
 // 「窗口内去重活跃 IP 数」这类指标，而正常用户 7 天十几个 IP、横跨 2~3 个省
 // 是常态，误报率高到没法用。见设计文档 §9。
 func computeCoexist(rows []model.InboundIPHour) CoexistStat {
+	return computeCoexistGated(rows, hasActiveBytes(rows))
+}
+
+// computeCoexistGated 是 computeCoexist 的显式判据版本，供需要对多批数据
+// 沿用同一判据的调用方使用（SharingService.Detail 的逐小时筛选）。
+func computeCoexistGated(rows []model.InboundIPHour, byteGate bool) CoexistStat {
 	// 没有数据不等于「归属地库未加载」。不挡住的话空输入会因为 hasProvince
 	// 为 false 而被报成降级口径，界面上显示一条与事实无关的告警。
 	if len(rows) == 0 {
 		return CoexistStat{}
 	}
 
+	// byteGate 为真时按字节门槛判，为假时回落旧的「只看有没有活跃时长」口径。
+	//
+	// 判据是「整批数据里有没有字节量」而不是逐行判断 ActiveBytes 是否为 0：
+	// 逐行判会有歧义——一条恰好落在采样边界、本小时字节增量为 0 的新行，与
+	// 升级前写入的老行长得一模一样。
+	//
+	// 代价是升级后老行立刻不再参与判定，橙标会清零，7 天窗口滚过去才重新
+	// 长出来；而 Summary 只返回 Flagged() 的入站，所以橙标消失后弹窗入口也
+	// 跟着消失，那段历史在界面上暂时看不到（库里的行不删，保留期照旧）。
+	// 这是刻意的：老行无法证明有实质流量，报不出来好过报一个不可信的数字
+	// ——这个功能是告警，误报冤枉用户比漏报严重。
 	hasProvince := false
 	for _, r := range rows {
 		if r.Province != "" {
@@ -61,6 +108,11 @@ func computeCoexist(rows []model.InboundIPHour) CoexistStat {
 	byHourProvince := map[int64]map[string]bool{}
 	byHourIP := map[int64]map[string]bool{}
 	for _, r := range rows {
+		// 省份口径与 IP 降级口径都过这道门槛。降级口径的误报率本来就更高
+		// （同一个人的手机与宽带就是两个 IP），放宽只会让它更不可信。
+		if byteGate && r.ActiveBytes < coexistMinActiveBytes {
+			continue
+		}
 		if byHourIP[r.HourStart] == nil {
 			byHourIP[r.HourStart] = map[string]bool{}
 		}
