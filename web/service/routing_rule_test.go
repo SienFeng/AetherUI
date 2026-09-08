@@ -1112,3 +1112,99 @@ func TestAttachInboundIsIdempotent(t *testing.T) {
 		t.Errorf("inboundIds = %v, want [3 5]", got)
 	}
 }
+
+// 建入站必须走 AddInbound：被测的正是这条路径上的扩散。入站配置用
+// vlessSettings()+plainTCPStream（inbound_validate_test.go），它们能通过
+// AddInbound 里那次真实 xray 校验——CI 的 linux 上带着 bin/xray-linux-amd64，
+// 配置写错会出现「本地 macOS 过、CI 挂」。
+func addTestInboundThroughService(t *testing.T, port int) *model.Inbound {
+	t.Helper()
+	in := &model.Inbound{
+		UserId: 1, Port: port, Protocol: model.VLESS, Enable: true,
+		Tag:      "inbound-" + strconv.Itoa(port),
+		Settings: vlessSettings(), StreamSettings: plainTCPStream, Sniffing: "{}",
+	}
+	if err := (&InboundService{}).AddInbound(in); err != nil {
+		t.Fatalf("AddInbound(%d): %v", port, err)
+	}
+	return in
+}
+
+func TestAddInboundAttachesToOptedInRules(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20011)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+	manual := newTestRuleWithInbounds(t, "手工名单", []int{existing.Id}, false)
+
+	created := addTestInboundThroughService(t, 20012)
+
+	ids := mustInboundIds(t, opted.Id)
+	found := false
+	for _, id := range ids {
+		if id == created.Id {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("新入站 %d 没被加进声明自动应用的规则: %v", created.Id, ids)
+	}
+	if got := mustInboundIds(t, manual.Id); len(got) != 1 || got[0] != existing.Id {
+		t.Errorf("未声明的规则被改动了: %v", got)
+	}
+}
+
+func TestAddInboundsAttachesToOptedInRules(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20021)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+
+	// v2ui 迁移路径。只挂 AddInbound 会漏掉这条。
+	batch := []*model.Inbound{
+		{UserId: 1, Port: 20022, Protocol: model.VLESS, Enable: true,
+			Tag: "inbound-20022", Settings: vlessSettings(),
+			StreamSettings: plainTCPStream, Sniffing: "{}"},
+		{UserId: 1, Port: 20023, Protocol: model.VLESS, Enable: true,
+			Tag: "inbound-20023", Settings: vlessSettings(),
+			StreamSettings: plainTCPStream, Sniffing: "{}"},
+	}
+	if err := (&InboundService{}).AddInbounds(batch); err != nil {
+		t.Fatalf("AddInbounds: %v", err)
+	}
+
+	ids := mustInboundIds(t, opted.Id)
+	if len(ids) != 3 {
+		t.Errorf("批量建入站后 inboundIds = %v, want 3 个", ids)
+	}
+}
+
+// 扩散失败必须让建入站整个失败。放行的话是一个用户静默地没进规则——比
+// 人工遗漏更隐蔽，管理员以为系统已经处理了。
+func TestAddInboundRollsBackWhenAttachFails(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20031)
+	rule := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+	// 直接改库写进一段无法解码的 JSON，模拟脏数据让 AttachInbound 报错。
+	err := database.GetDB().Model(model.RoutingRule{}).Where("id = ?", rule.Id).
+		Update("inbound_ids", "{ 坏掉的 JSON").Error
+	if err != nil {
+		t.Fatalf("注入脏数据: %v", err)
+	}
+
+	in := &model.Inbound{
+		UserId: 1, Port: 20032, Protocol: model.VLESS, Enable: true,
+		Tag: "inbound-20032", Settings: vlessSettings(),
+		StreamSettings: plainTCPStream, Sniffing: "{}",
+	}
+	if err := (&InboundService{}).AddInbound(in); err == nil {
+		t.Fatal("扩散失败时 AddInbound 应当报错")
+	}
+
+	var count int64
+	if err := database.GetDB().Model(model.Inbound{}).
+		Where("port = ?", 20032).Count(&count).Error; err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 0 {
+		t.Error("扩散失败但入站落库了，事务没有回滚")
+	}
+}

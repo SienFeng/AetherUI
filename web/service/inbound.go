@@ -100,7 +100,15 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 		return err
 	}
 	db := database.GetDB()
-	return db.Save(inbound).Error
+	// 事务包住「落库 + 扩散」：扩散失败若放行，就是一个用户静默地没进规则，
+	// 正是「自动应用于新增用户」这个功能要消灭的失效。宁可整个失败让管理员
+	// 重试。inbound.Id 是自增的，必须 Save 之后才能拿来扩散。
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(inbound).Error; err != nil {
+			return err
+		}
+		return (&RoutingRuleService{}).AttachInbound(tx, inbound.Id)
+	})
 }
 
 func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
@@ -127,6 +135,11 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 
 	for _, inbound := range inbounds {
 		err = tx.Save(inbound).Error
+		if err != nil {
+			return err
+		}
+		// v2ui 迁移路径。只挂 AddInbound 会漏掉它，spec §4.3 三条路径要齐。
+		err = (&RoutingRuleService{}).AttachInbound(tx, inbound.Id)
 		if err != nil {
 			return err
 		}
