@@ -47,13 +47,16 @@ type OnlineIP struct {
 	// 这个判断所需的全部信息，而它与家宽来源的含义完全不同。
 	ISP string `json:"isp"`
 	// ISPAlt 与 LocationAlt 同理：另一个源给出的、与主判定不同的运营商。
-	ISPAlt    string `json:"ispAlt"`
-	Conns     int    `json:"conns"`
-	FirstSeen int64  `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
-	UpSpeed   int64  `json:"upSpeed"`   // B/s
-	DownSpeed int64  `json:"downSpeed"`
-	Up        int64  `json:"up"` // 本次在线期间的累计字节
-	Down      int64  `json:"down"`
+	ISPAlt string `json:"ispAlt"`
+	// Sources 是各数据源各自的结论，界面用它说明「是谁说的」——只说
+	// 「另一个源认为是 X」，管理员没法判断该信哪一个。
+	Sources   []ipSourceLocation `json:"sources"`
+	Conns     int                `json:"conns"`
+	FirstSeen int64              `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
+	UpSpeed   int64              `json:"upSpeed"`   // B/s
+	DownSpeed int64              `json:"downSpeed"`
+	Up        int64              `json:"up"` // 本次在线期间的累计字节
+	Down      int64              `json:"down"`
 
 	// Idle 为 true 表示该 IP 的连接还在，但已经连续 idleAfter 没有任何字节
 	// 往来。闲置来源不占用并发额度：TCP 连接不会因为没有流量就消失，客户端
@@ -285,6 +288,7 @@ func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) ipLocation, idl
 			LocationAlt: loc.LocationAlt,
 			ISP:         loc.ISP,
 			ISPAlt:      loc.ISPAlt,
+			Sources:     loc.Sources,
 			Conns:       e.conns,
 			FirstSeen:   e.firstSeen.UnixMilli(),
 			UpSpeed:     e.upSpeed,
@@ -312,6 +316,7 @@ func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) ipLocation, idl
 			LocationAlt: loc.LocationAlt,
 			ISP:         loc.ISP,
 			ISPAlt:      loc.ISPAlt,
+			Sources:     loc.Sources,
 			Blocked:     true,
 			RejectedAt:  at.UnixMilli(),
 		})
@@ -380,6 +385,22 @@ type ipLocation struct {
 	LocationAlt string
 	ISP         string
 	ISPAlt      string
+
+	// Sources 是每个加载成功的数据源各自的结论，顺序与 Multi.Sources() 一致。
+	//
+	// 上面四个字段只回答「主判定是什么、有没有别的说法」，回答不了「是谁说的」。
+	// 生产上真实吃过亏：ip2region 把一个湖北的 IP 判成北京，界面按顺序把它当作
+	// 唯一答案显示，看起来像地区限制漏放了一个北京来源——实际上纯真库判对了、
+	// 并集也正确放行。管理员只能自己去查第三方才搞清楚，而面板本来就掌握着
+	// 「两个源分别怎么说」这个信息。
+	Sources []ipSourceLocation
+}
+
+// ipSourceLocation 是单个数据源对一个 IP 的结论。
+type ipSourceLocation struct {
+	Source   string `json:"source"`
+	Location string `json:"location"`
+	ISP      string `json:"isp"`
 }
 
 // locate 返回主判定与「另一个源给出的不同结论」。
@@ -402,7 +423,13 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 		return out
 	}
 	for _, sl := range db.Lookup(ip) {
-		if text := formatLocation(sl.Location); text != "" {
+		text := formatLocation(sl.Location)
+		out.Sources = append(out.Sources, ipSourceLocation{
+			Source:   ipdbSourceName(sl.Source),
+			Location: text,
+			ISP:      sl.Location.ISP,
+		})
+		if text != "" {
 			if out.Location == "" {
 				out.Location = text
 			} else if text != out.Location && out.LocationAlt == "" {

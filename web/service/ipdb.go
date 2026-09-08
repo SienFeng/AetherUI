@@ -94,6 +94,20 @@ var ipdbSourceList = func() []ipdbSource {
 	}
 }
 
+// ipdbSourceName 把数据源的内部 key 换成界面上的显示名。
+//
+// util/ipdb 的 Multi.Lookup 只回传 key（"ip2region" / "qqwry"），而显示名定义在
+// ipdbSourceList 里。找不到时原样返回 key：显示一个不好看的标识，好过让整条
+// 分歧提示变成没有来源的「另一个源」。
+func ipdbSourceName(key string) string {
+	for _, s := range ipdbSourceList() {
+		if s.Key == key {
+			return s.Name
+		}
+	}
+	return key
+}
+
 // buildQQWry 把 qqwry.dat 转成本项目的紧凑格式。
 func buildQQWry(r io.Reader, w io.Writer, builtAt time.Time) error {
 	data, err := io.ReadAll(io.LimitReader(r, qqwryMaxSourceBytes+1))

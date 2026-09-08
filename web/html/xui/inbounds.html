@@ -123,15 +123,7 @@
                                         <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>
                                         <a-tag v-else>未知</a-tag>
                                         <a-tooltip v-if="online.locationAlt || online.ispAlt">
-                                            <template slot="title">
-                                                两个离线库判定不一致。
-                                                <template v-if="online.locationAlt">
-                                                    <br>归属地：另一个源认为是 [[ online.locationAlt ]]
-                                                </template>
-                                                <template v-if="online.ispAlt">
-                                                    <br>运营商：另一个源认为是 [[ online.ispAlt ]]
-                                                </template>
-                                            </template>
+                                            <template slot="title">{{ template "ipDivergenceTip" "online" }}</template>
                                             <a-tag color="orange">存疑</a-tag>
                                         </a-tooltip>
                                     </template>

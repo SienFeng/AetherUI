@@ -493,3 +493,20 @@ html, body {
     outline-offset: 2px;
     border-radius: 20px;
 }
+
+/* 归属地两个数据源判定不一致时的标记。
+ *
+ * 改动前只有一条 rgba(0,0,0,.25) 的虚线，在白底上对比度 1.84:1，等于看不见，
+ * 分歧完全藏在 hover 后面。#d46b08 是 3.56:1，过 SC 1.4.11 对非文本 UI 组件的
+ * 3:1 门槛；同时补一个图标，不让「有分歧」只靠颜色表达。
+ *
+ * 用橙色而不是红色：分歧是「哪个源可信不确定」，不是错误。实测过一次
+ * ip2region 判错、纯真判对，红色会让管理员以为是故障。 */
+.ip-divergent {
+    border-bottom: 1px dashed #d46b08;
+}
+
+.ip-divergent .anticon {
+    margin-left: 4px;
+    color: #d46b08;
+}
