@@ -1063,7 +1063,27 @@
                     },
                 });
             },
-            openRule(rule) {
+            async openRule(rule) {
+                // 打开前先强制刷新：this.rules 只在挂载和历次写操作后更新，
+                // 页面既不轮询也不在获得焦点时刷新。如果管理员在另一个标签页
+                // 刚创建了一个入站，AttachInbound 已经在同一事务里把它加进了
+                // 这条规则的 inboundIds，但当前标签页手里还是旧快照——不刷新
+                // 就直接编辑（哪怕只改了备注）保存，会用这份旧 inboundIds 整体
+                // 覆盖掉数据库里刚被自动纳入的那个入站，它的流量因此静默退回
+                // 默认出站，没有任何一层会报错。这正是「自动应用于新增入站」
+                // 这个功能本身要杜绝的失效场景。
+                await this.loadAll();
+                if (rule) {
+                    // rule 是刷新前那份 this.rules 数组里的引用，loadAll 已经把
+                    // 整个数组换成新对象，不能继续深拷贝这个已经过期的引用，
+                    // 必须按 id 从刷新后的数组里重新取。
+                    rule = this.rules.find(r => r.id === rule.id);
+                    if (!rule) {
+                        // 刷新期间该规则被别的会话删除了，没有东西可编辑。
+                        this.$message.error('该规则已被删除，请刷新后重试');
+                        return;
+                    }
+                }
                 this.ruleModal.rule = rule
                     ? RoutingRule.fromJson(JSON.parse(JSON.stringify(rule)))
                     : new RoutingRule();

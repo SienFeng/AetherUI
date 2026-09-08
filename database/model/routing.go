@@ -165,7 +165,12 @@ type RoutingRule struct {
 	// 所以改造后新建的规则不论单组多组该值都是 0。于是回退契约只有两种结局：
 	// 升级前就存在且此后未被编辑过的规则原样生效，其余被旧代码整条丢弃
 	// （范围缩小而非放大，安全侧正确）。理由见 Update 处的注释。
-	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
+	//
+	// json/form 都是 "-"：它只是服务端内部状态，controller 的读侧
+	// routingRuleView 与写侧 routingRuleForm 都刻意没有这个字段，既不
+	// 下发给前端也不接受前端提交——与 model.Inbound 的 DisabledByTraffic /
+	// LastResetAt 同一个理由。
+	DomainGroupId int    `json:"-" form:"-"`
 	Action        string `json:"action" form:"action"`
 	// OutboundId 仅在 Action 为 ActionProxy 时有意义。
 	OutboundId int  `json:"outboundId" form:"outboundId"`

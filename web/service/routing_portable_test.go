@@ -1434,3 +1434,35 @@ func TestPortableRuleWithoutApplyToNewInboundsDefaultsToFalse(t *testing.T) {
 		t.Error("旧文件没有这个键时应当是 false")
 	}
 }
+
+// 设计文档 §9 要求「导入导出往返保持该字段」，上面 TestExportCarries-
+// ApplyToNewInbounds 只覆盖了导出这一半——importRules 里把 item.Apply-
+// ToNewInbounds 写进落库的 model.RoutingRule 那一行没有任何测试覆盖，
+// 删掉它 make verify 依然全绿。这条走真实的 Import 入口，断言落库的规则
+// 确实带着这个标记。
+func TestImportCarriesApplyToNewInbounds(t *testing.T) {
+	setupDB(t)
+	newPortableTestInbound(t, "用户甲", 2886)
+	f := baseExportFile()
+	f.DomainGroups = []PortableDomainGroup{{Remark: "ChatGPT", Domains: []string{"domain:openai.com"}}}
+	f.Rules = []PortableRule{{
+		Remark: "自动纳新", DomainGroupRef: "ChatGPT",
+		InboundRefs:        refsPtr(PortableInboundRef{Remark: "用户甲", Port: 2886}),
+		Action:             model.ActionBlock,
+		Enable:             true,
+		ApplyToNewInbounds: true,
+	}}
+	if _, err := (&RoutingPortableService{}).Import(exportJSON(t, f)); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	rules, err := (&RoutingRuleService{}).GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("规则数 = %d, want 1", len(rules))
+	}
+	if !rules[0].ApplyToNewInbounds {
+		t.Error("导入丢掉了 applyToNewInbounds：item.ApplyToNewInbounds 没有被写进落库的 model.RoutingRule")
+	}
+}
