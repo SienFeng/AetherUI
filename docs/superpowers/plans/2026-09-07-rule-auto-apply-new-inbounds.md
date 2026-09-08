@@ -756,50 +756,51 @@ git commit -m "feat(routing): 接口与导入导出带上自动纳新标记"
 
 > **注意 `web/assets/` 下的文件受强缓存**（`max-age=31536000`，靠 `?{{ .cur_ver }}` 破缓存）。开发时用 `XUI_DEBUG=true` 从磁盘读；发版时版本号会变，用户侧自然更新。
 
-- [ ] **Step 2: 弹窗加复选框**
+- [ ] **Step 2: 弹窗加复选框（联动写在 `:checked` 里，不要用 watch）**
 
-`web/html/xui/routing.html` 的规则弹窗里，「用户（入站）」标题与「所有用户」复选框之后、搜索框之前插入：
+`web/html/xui/routing.html` 里找到「所有用户（含以后新建的入站）」那个 `<a-checkbox>`，在它与紧随其后的 `<div v-if="allUsersDisabledReason">` 之间插入：
 
 ```html
-                <a-checkbox v-model="ruleModal.rule.applyToNewInbounds"
-                            :disabled="ruleModal.allUsers">
-                    以后新增的用户自动应用此规则
-                </a-checkbox>
+                <div style="margin-top: 6px;">
+                    <!-- 不用 v-model：勾了「所有用户」时这一项必须显示为勾上且
+                         禁用（空数组本来就含未来新建的入站），而 allUsers 的变化
+                         有两条路径——toggleAllUsers 和 openRule 里的直接赋值，
+                         watch 也只盖得住其中一条。把联动写进 :checked 表达式，
+                         两条路径自动都对。
+
+                         allUsers 为真时提交体里这一项可能仍是 false，无妨：
+                         AttachInbound 对空数组一律跳过，两种取值行为完全一致
+                         （spec §5.2 明确后端不做强制改写）。 -->
+                    <a-checkbox :checked="ruleModal.allUsers || ruleModal.rule.applyToNewInbounds"
+                                :disabled="ruleModal.allUsers"
+                                @change="e => ruleModal.rule.applyToNewInbounds = e.target.checked">
+                        以后新增的用户自动应用此规则
+                    </a-checkbox>
+                </div>
 ```
 
-- [ ] **Step 3: 选中「所有用户」时联动勾上**
+> **不要新建 `watch` 段**：`routing.html` 没有 watch 段，而且 `ruleModal.allUsers` 不是 `v-model` 绑定（模板用 `:checked` + `@change="toggleAllUsers"`），`openRule` 里还有一处直接赋值。上面这个写法把联动收在一处，两条路径都覆盖到。
 
-在 Vue 实例的 `watch` 里加（若尚无 `watch` 段则新建一个，与 `computed` 平级）：
+- [ ] **Step 3: 新建时默认勾上**
 
-```js
-        watch: {
-            // 空数组本来就含未来新建的入站，让人配出「所有用户 + 不应用于
-            // 新增」这种自相矛盾的组合毫无意义。后端不做强制改写——
-            // AttachInbound 对空数组一律跳过，两种取值行为完全一致。
-            'ruleModal.allUsers'(val) {
-                if (val) this.ruleModal.rule.applyToNewInbounds = true;
-            },
-        },
-```
-
-- [ ] **Step 4: 新建时默认勾上**
-
-找到 `openRule()` 方法里新建分支构造 `new RoutingRule()` 的地方，在其后加：
+`openRule(rule)` 的赋值是一个三元表达式，没有可插语句的「新建分支」。在那条三元赋值之后、`this.ruleModal.allUsers = ...` 之前插入：
 
 ```js
-                    // 绝大多数分流规则本来就该覆盖所有人；只给特定几个人的
-                    // 规则由管理员手动取消。这是【表单初始值】，后端零值仍是
-                    // false——否则导入的旧文件也会变成 true。
+                if (!rule) {
+                    // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
+                    // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
+                    // 后端零值仍是 false——否则导入的旧文件也会变成 true。
                     this.ruleModal.rule.applyToNewInbounds = true;
+                }
 ```
 
-编辑分支不要动，它必须显示服务端返回的值。
+编辑分支（`rule` 非空）不要动，它必须显示服务端返回的值。
 
-- [ ] **Step 5: 提交体带上该字段**
+- [ ] **Step 4: 提交体带上该字段**
 
 `saveRule()` 里已有 `Object.assign({}, r, { inboundIds })`，`r` 是整个 `RoutingRule` 实例，Step 1 加了属性后自动带上。**确认一遍即可，不需要改代码。**
 
-- [ ] **Step 6: 规则列表显示标记**
+- [ ] **Step 5: 规则列表显示标记**
 
 `web/html/xui/component/routing_rule_table.html` 的 `<template slot="inbound" ...>` 里，在最外层 `</template>` 之前（即用户标签之后）加：
 
@@ -812,26 +813,26 @@ git commit -m "feat(routing): 接口与导入导出带上自动纳新标记"
 
 不显示的话，管理员从列表完全看不出哪些规则会自动纳新——而那正是他需要一眼看到的信息。
 
-- [ ] **Step 7: 跑模板不变量测试**
+- [ ] **Step 6: 跑模板不变量测试**
 
 Run: `go test ./web/ -run 'TestAllTemplatesParse|TestVueDirectives' -v 2>&1 | tail -12`
 Expected: 全部 PASS。
 
 > 这两条一条守「模板能解析」（`web.go` 的 `getHtmlTemplate` 把 `ParseFS` 错误 `// ignore` 掉了，语法错误会被静默跳过），一条守「Vue 指令落在根元素内」（Vue 2 只编译 `el` 指向的子树，写在外面的指令是完全静默的死代码）。改完模板必须跑。
 
-- [ ] **Step 8: 全量验证**
+- [ ] **Step 7: 全量验证**
 
 Run: `make verify 2>&1 | grep -E "FAIL|vet|build -"`
 Expected: 无 FAIL
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
 git add web/assets/js/model/routing.js web/html/xui/routing.html web/html/xui/component/routing_rule_table.html
 git commit -m "feat(routing): 规则弹窗与列表支持自动纳新标记"
 ```
 
-- [ ] **Step 10: 人工验证清单（无法自动化，交给管理员）**
+- [ ] **Step 9: 人工验证清单（无法自动化，交给管理员）**
 
 本仓库无法在本地做 UI 视觉验证。升级后请在面板上确认：
 

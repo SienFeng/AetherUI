@@ -188,6 +188,18 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 		if !sharedGroup {
 			continue
 		}
+		// 两条规则都声明「自动应用于新增用户」且共享域名组时必须拒绝：
+		// 新建入站会被同时扩散进两条，它们随即在同一域名组下覆盖同一个入站，
+		// 违反本函数守的核心不变量——而那次写入由 AttachInbound 发起，
+		// 不走表单校验，这里拦不住就没有第二道防线了。
+		//
+		// 判定单位是域名组不是规则：一条规则可以引用多个组。
+		if rule.ApplyToNewInbounds && other.ApplyToNewInbounds {
+			return common.NewErrorf(
+				"与分流规则「%s」冲突：域名组「%s」下已有一条声明了「以后新增用户自动应用」的规则。"+
+					"同一个域名组下只能有一条规则自动纳入新用户。",
+				ruleLabel(other), s.groupLabel(whichGroup))
+		}
 		otherIds, decodeErr := DecodeInboundIds(other.InboundIds)
 		if decodeErr != nil {
 			continue
@@ -254,6 +266,12 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	// 表单没有优先级输入框，ruleFromForm 出来的那一项恒为零值，照抄会让
 	// 任何一次「改个备注」都把规则弹到列表顶部——管理员改的是备注，动的
 	// 却是分流的先后顺序，而且不会有任何提示。
+	// （紧随其后的 ApplyToNewInbounds 结论相反，那一项必须同步。）
+	//
+	// 与紧邻的 priority 结论相反：priority 刻意不同步（表单没有那一项，
+	// 照抄零值会把规则弹到列表顶部），而这个字段表单里确实有复选框，
+	// 管理员改了就该落库。两者相邻，照着隔壁抄就会抄错。
+	old.ApplyToNewInbounds = rule.ApplyToNewInbounds
 	old.Enable = rule.Enable
 	db := database.GetDB()
 	return db.Save(old).Error
@@ -323,6 +341,49 @@ func (s *RoutingRuleService) Reorder(ids []int) error {
 		}
 		return nil
 	})
+}
+
+// AttachInbound 把新建的入站追加进所有声明了「自动应用于新增用户」的规则。
+//
+// tx 由调用方传入：扩散必须与建入站在同一个事务里。失败若只记日志放行，
+// 结果是一个用户静默地没进规则——正是这个功能要消灭的失效，而且比人工
+// 遗漏更隐蔽（管理员以为系统已经处理了）。
+func (s *RoutingRuleService) AttachInbound(tx *gorm.DB, inboundId int) error {
+	if inboundId <= 0 {
+		return nil
+	}
+	rules := make([]*model.RoutingRule, 0)
+	err := tx.Model(model.RoutingRule{}).
+		Where("apply_to_new_inbounds = ?", true).Find(&rules).Error
+	if err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		ids, decodeErr := DecodeInboundIds(rule.InboundIds)
+		if decodeErr != nil {
+			return common.NewError("分流规则", rule.Id, "的入站数据已损坏:", decodeErr)
+		}
+		// 空数组表示「所有用户」，已经覆盖刚建的这一个。往里追加会让规则
+		// 从「覆盖所有人」降级成「只覆盖这一个人」，其余用户当场失去它而
+		// 没有任何一层报错。正常情况下表单联动不会产生这种组合，但直接改库、
+		// 导入的文件、将来某条新写入路径都可能留下它。
+		if len(ids) == 0 {
+			continue
+		}
+		encoded, encodeErr := EncodeInboundIds(append(ids, inboundId))
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if encoded == rule.InboundIds {
+			continue
+		}
+		err = tx.Model(model.RoutingRule{}).Where("id = ?", rule.Id).
+			Update("inbound_ids", encoded).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *RoutingRuleService) Del(id int) error {

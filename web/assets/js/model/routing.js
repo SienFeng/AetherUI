@@ -105,7 +105,8 @@ class OutboundNode {
 class RoutingRule {
     constructor(id = 0, remark = "", inboundIds = [], domainGroupIds = [],
                 action = RULE_ACTION.PROXY, outboundId = 0, priority = 0,
-                enable = true, broken = false, groupsBroken = false) {
+                enable = true, broken = false, groupsBroken = false,
+                applyToNewInbounds = false) {
         this.id = id;
         this.remark = remark;
         // 空数组 = 所有用户（含以后新建的入站）。
@@ -126,11 +127,15 @@ class RoutingRule {
         // groupsBroken 为真表示服务端解码 domainGroupIds 失败。与 broken 分开
         // 是因为界面文案不同，合并会让管理员照着去修错的地方。
         this.groupsBroken = groupsBroken;
+        // 为真时，以后新建的入站会被服务端自动加进 this.inboundIds。
+        // 构造函数与 fromJson 必须同时改：只改一处，服务端返回的值会被
+        // 静默丢弃，界面永远显示这里的初始值。
+        this.applyToNewInbounds = applyToNewInbounds;
     }
 
     static fromJson(json = {}) {
         return new RoutingRule(json.id, json.remark, json.inboundIds || [],
             json.domainGroupIds || [], json.action, json.outboundId, json.priority,
-            json.enable, json.broken, json.groupsBroken);
+            json.enable, json.broken, json.groupsBroken, json.applyToNewInbounds);
     }
 }

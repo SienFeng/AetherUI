@@ -1012,3 +1012,300 @@ func TestUpdateKeepsPriority(t *testing.T) {
 		t.Errorf("编辑后 priority = %d, want 1（位置不该变）", got.Priority)
 	}
 }
+
+// newTestRuleWithInbounds 建一条覆盖指定入站的 block 规则。
+// 每条规则各配一个独立域名组：checkConflict 不允许同一域名组下入站集合重叠。
+func newTestRuleWithInbounds(t *testing.T, remark string, inboundIds []int, applyToNew bool) *model.RoutingRule {
+	t.Helper()
+	g := newTestGroup(t, remark+"-组")
+	encoded, err := EncodeInboundIds(inboundIds)
+	if err != nil {
+		t.Fatalf("EncodeInboundIds: %v", err)
+	}
+	r := &model.RoutingRule{
+		Remark:             remark,
+		InboundIds:         encoded,
+		DomainGroupId:      g.Id,
+		DomainGroupIds:     mustEncodeGroupIds(t, []int{g.Id}),
+		Action:             model.ActionBlock,
+		Enable:             true,
+		ApplyToNewInbounds: applyToNew,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add rule %s: %v", remark, err)
+	}
+	return r
+}
+
+func mustInboundIds(t *testing.T, ruleId int) []int {
+	t.Helper()
+	r, err := (&RoutingRuleService{}).Get(ruleId)
+	if err != nil {
+		t.Fatalf("Get rule %d: %v", ruleId, err)
+	}
+	ids, err := DecodeInboundIds(r.InboundIds)
+	if err != nil {
+		t.Fatalf("DecodeInboundIds: %v", err)
+	}
+	return ids
+}
+
+func TestAttachInboundOnlyTouchesRulesThatOptedIn(t *testing.T) {
+	setupDB(t)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{7, 3}, true)
+	manual := newTestRuleWithInbounds(t, "手工名单", []int{7, 3}, false)
+
+	if err := (&RoutingRuleService{}).AttachInbound(database.GetDB(), 5); err != nil {
+		t.Fatalf("AttachInbound: %v", err)
+	}
+
+	// 升序去重是「生成逐字节确定」的前提，顺序一抖动 Config.Equals 恒为
+	// false，那个 10 秒的重启 cron 会不停重启 xray。
+	got := mustInboundIds(t, opted.Id)
+	want := []int{3, 5, 7}
+	if len(got) != len(want) {
+		t.Fatalf("声明自动应用的规则 inboundIds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("声明自动应用的规则 inboundIds = %v, want %v", got, want)
+		}
+	}
+
+	if ids := mustInboundIds(t, manual.Id); len(ids) != 2 {
+		t.Errorf("未声明的规则被改动了: %v", ids)
+	}
+}
+
+// 空数组表示「所有用户」。往里追加一个 id 会让规则从「覆盖所有人」降级成
+// 「只覆盖这一个人」，其余用户当场失去这条规则、静默走默认出站，而 xray
+// 返回 Configuration OK、面板显示 running，没有任何一层会报错。
+func TestAttachInboundSkipsAllUsersRule(t *testing.T) {
+	setupDB(t)
+	all := newTestRuleWithInbounds(t, "所有用户", nil, true)
+	if ids := mustInboundIds(t, all.Id); len(ids) != 0 {
+		t.Fatalf("前置条件不成立，规则不是空数组: %v", ids)
+	}
+
+	if err := (&RoutingRuleService{}).AttachInbound(database.GetDB(), 5); err != nil {
+		t.Fatalf("AttachInbound: %v", err)
+	}
+
+	if ids := mustInboundIds(t, all.Id); len(ids) != 0 {
+		t.Errorf("「所有用户」规则被降级成了具体名单: %v", ids)
+	}
+}
+
+// 重复调用不应把同一个 id 塞两遍——EncodeInboundIds 会去重，但这条钉住
+// 「重跑一次不会改变结果」这个性质。
+func TestAttachInboundIsIdempotent(t *testing.T) {
+	setupDB(t)
+	r := newTestRuleWithInbounds(t, "自动纳新", []int{3}, true)
+	s := RoutingRuleService{}
+	for i := 0; i < 2; i++ {
+		if err := s.AttachInbound(database.GetDB(), 5); err != nil {
+			t.Fatalf("AttachInbound #%d: %v", i, err)
+		}
+	}
+	got := mustInboundIds(t, r.Id)
+	if len(got) != 2 || got[0] != 3 || got[1] != 5 {
+		t.Errorf("inboundIds = %v, want [3 5]", got)
+	}
+}
+
+// 建入站必须走 AddInbound：被测的正是这条路径上的扩散。入站配置用
+// vlessSettings()+plainTCPStream（inbound_validate_test.go），它们能通过
+// AddInbound 里那次真实 xray 校验——CI 的 linux 上带着 bin/xray-linux-amd64，
+// 配置写错会出现「本地 macOS 过、CI 挂」。
+func addTestInboundThroughService(t *testing.T, port int) *model.Inbound {
+	t.Helper()
+	in := &model.Inbound{
+		UserId: 1, Port: port, Protocol: model.VLESS, Enable: true,
+		Tag:      "inbound-" + strconv.Itoa(port),
+		Settings: vlessSettings(), StreamSettings: plainTCPStream, Sniffing: "{}",
+	}
+	if err := (&InboundService{}).AddInbound(in); err != nil {
+		t.Fatalf("AddInbound(%d): %v", port, err)
+	}
+	return in
+}
+
+func TestAddInboundAttachesToOptedInRules(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20011)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+	manual := newTestRuleWithInbounds(t, "手工名单", []int{existing.Id}, false)
+
+	created := addTestInboundThroughService(t, 20012)
+
+	ids := mustInboundIds(t, opted.Id)
+	found := false
+	for _, id := range ids {
+		if id == created.Id {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("新入站 %d 没被加进声明自动应用的规则: %v", created.Id, ids)
+	}
+	if got := mustInboundIds(t, manual.Id); len(got) != 1 || got[0] != existing.Id {
+		t.Errorf("未声明的规则被改动了: %v", got)
+	}
+}
+
+func TestAddInboundsAttachesToOptedInRules(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20021)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+
+	// v2ui 迁移路径。只挂 AddInbound 会漏掉这条。
+	batch := []*model.Inbound{
+		{UserId: 1, Port: 20022, Protocol: model.VLESS, Enable: true,
+			Tag: "inbound-20022", Settings: vlessSettings(),
+			StreamSettings: plainTCPStream, Sniffing: "{}"},
+		{UserId: 1, Port: 20023, Protocol: model.VLESS, Enable: true,
+			Tag: "inbound-20023", Settings: vlessSettings(),
+			StreamSettings: plainTCPStream, Sniffing: "{}"},
+	}
+	if err := (&InboundService{}).AddInbounds(batch); err != nil {
+		t.Fatalf("AddInbounds: %v", err)
+	}
+
+	ids := mustInboundIds(t, opted.Id)
+	if len(ids) != 3 {
+		t.Errorf("批量建入站后 inboundIds = %v, want 3 个", ids)
+	}
+}
+
+// 扩散失败必须让建入站整个失败。放行的话是一个用户静默地没进规则——比
+// 人工遗漏更隐蔽，管理员以为系统已经处理了。
+func TestAddInboundRollsBackWhenAttachFails(t *testing.T) {
+	setupDB(t)
+	existing := addTestInboundThroughService(t, 20031)
+	rule := newTestRuleWithInbounds(t, "自动纳新", []int{existing.Id}, true)
+	// 直接改库写进一段无法解码的 JSON，模拟脏数据让 AttachInbound 报错。
+	err := database.GetDB().Model(model.RoutingRule{}).Where("id = ?", rule.Id).
+		Update("inbound_ids", "{ 坏掉的 JSON").Error
+	if err != nil {
+		t.Fatalf("注入脏数据: %v", err)
+	}
+
+	in := &model.Inbound{
+		UserId: 1, Port: 20032, Protocol: model.VLESS, Enable: true,
+		Tag: "inbound-20032", Settings: vlessSettings(),
+		StreamSettings: plainTCPStream, Sniffing: "{}",
+	}
+	if err := (&InboundService{}).AddInbound(in); err == nil {
+		t.Fatal("扩散失败时 AddInbound 应当报错")
+	}
+
+	var count int64
+	if err := database.GetDB().Model(model.Inbound{}).
+		Where("port = ?", 20032).Count(&count).Error; err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 0 {
+		t.Error("扩散失败但入站落库了，事务没有回滚")
+	}
+}
+
+// 不加这条约束，新建入站会被同时扩散进两条规则，它们随即在同一域名组下
+// 覆盖同一个入站——系统自己造出违反核心不变量的数据，而管理员什么都没做错。
+func TestCheckConflictRejectsSecondAutoApplyRuleInSameGroup(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	err := s.Add(second)
+	if err == nil {
+		t.Fatal("同一域名组下第二条声明自动应用的规则应当被拒绝")
+	}
+	// importRules 靠 strings.Contains(err, "冲突") 把这类错误计入 Skipped
+	// 而非 Failed，导入才能保持幂等。
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Errorf("错误文案必须含「冲突」二字，实际: %v", err)
+	}
+}
+
+// 入站集合不重叠时，两条规则本来可以共存；只有都声明自动应用才冲突。
+func TestCheckConflictAllowsSecondRuleWithoutAutoApply(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: false,
+	}
+	if err := s.Add(second); err != nil {
+		t.Errorf("未声明自动应用的规则不该被拒绝: %v", err)
+	}
+}
+
+// 判定单位是域名组不是规则：一条规则可以引用多个组，任一组撞上即冲突。
+func TestCheckConflictAutoApplyIsPerDomainGroup(t *testing.T) {
+	setupDB(t)
+	g1 := newTestGroup(t, "ChatGPT")
+	g2 := newTestGroup(t, "Claude")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g1.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g1.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+	// 乙引用 {Claude, ChatGPT}，与甲在 ChatGPT 上撞车。
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: 0,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g1.Id, g2.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(second); err == nil {
+		t.Error("多组规则与已有声明者在任一组上撞车都应当被拒绝")
+	}
+}
+
+// 表单里有这个复选框，管理员改了就该落库——与相邻的 priority 结论相反。
+func TestUpdateSyncsApplyToNewInbounds(t *testing.T) {
+	setupDB(t)
+	r := newTestRuleWithInbounds(t, "自动纳新", []int{3}, true)
+	s := RoutingRuleService{}
+	edited, err := s.Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	edited.ApplyToNewInbounds = false
+	if err := s.Update(edited); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got.ApplyToNewInbounds {
+		t.Error("取消勾选没有落库")
+	}
+}

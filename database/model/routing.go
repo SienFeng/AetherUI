@@ -165,10 +165,25 @@ type RoutingRule struct {
 	// 所以改造后新建的规则不论单组多组该值都是 0。于是回退契约只有两种结局：
 	// 升级前就存在且此后未被编辑过的规则原样生效，其余被旧代码整条丢弃
 	// （范围缩小而非放大，安全侧正确）。理由见 Update 处的注释。
-	DomainGroupId int    `json:"domainGroupId" form:"domainGroupId"`
+	//
+	// json/form 都是 "-"：它只是服务端内部状态，controller 的读侧
+	// routingRuleView 与写侧 routingRuleForm 都刻意没有这个字段，既不
+	// 下发给前端也不接受前端提交——与 model.Inbound 的 DisabledByTraffic /
+	// LastResetAt 同一个理由。
+	DomainGroupId int    `json:"-" form:"-"`
 	Action        string `json:"action" form:"action"`
 	// OutboundId 仅在 Action 为 ActionProxy 时有意义。
 	OutboundId int  `json:"outboundId" form:"outboundId"`
 	Priority   int  `json:"priority" form:"priority"`
 	Enable     bool `json:"enable" form:"enable"`
+	// ApplyToNewInbounds 为真时，以后新建的入站会在创建它的同一个事务里被
+	// 追加进这条规则的 InboundIds（见 RoutingRuleService.AttachInbound）。
+	//
+	// 这是写入期扩散而非生成期推导：数据保持静态，规则弹窗里勾选框显示的
+	// 就是实际生效的名单。推导方案会让两者不一致。
+	//
+	// 零值 false：AutoMigrate 给老库加上它之后没有任何规则会自动扩散，
+	// 升级后行为零变化。前端新建表单默认勾上，那是表单初始值，不是这里的
+	// 默认值——否则导入的旧文件也会变成 true。
+	ApplyToNewInbounds bool `json:"applyToNewInbounds" form:"applyToNewInbounds"`
 }

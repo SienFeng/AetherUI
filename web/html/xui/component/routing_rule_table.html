@@ -22,6 +22,16 @@
                 <a-tag>等 [[ rule.inboundIds.length ]] 人</a-tag>
             </a-tooltip>
         </template>
+        <!-- 数据损坏的规则不该同时挂「+新用户」，那会让一条根本不生效的规则
+             看起来还带着自动纳新能力。「所有用户」（inboundIds 为空）永远覆盖
+             未来新建的入站——AttachInbound 对这类规则本来就是跳过不追加，
+             无论 applyToNewInbounds 是什么值都不影响它的实际行为——所以这里
+             不看这一列，直接把徽标显示出来，两条同样是「所有用户」的规则
+             才不会因为这一列的历史取值不同而在列表里显得不一样。 -->
+        <a-tooltip v-if="!rule.broken && (rule.applyToNewInbounds || !rule.inboundIds.length)"
+                   title="以后新建的入站会自动加入这条规则">
+            <a-tag color="blue">+新用户</a-tag>
+        </a-tooltip>
     </template>
     <template slot="group" slot-scope="text, rule">
         <template v-if="rule.groupsBroken">
