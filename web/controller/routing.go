@@ -92,6 +92,8 @@ type routingRuleForm struct {
 	DomainGroupIds []int  `json:"domainGroupIds" form:"domainGroupIds"`
 	Action         string `json:"action" form:"action"`
 	OutboundId     int    `json:"outboundId" form:"outboundId"`
+	// 表单里有这个复选框（与 Priority 不同，那一项已经移除、改由拖拽决定）。
+	ApplyToNewInbounds bool `json:"applyToNewInbounds" form:"applyToNewInbounds"`
 	// 没有 Priority：规则的先后顺序只由 /rule/reorder（拖拽）改。收下它就多
 	// 出一条能改顺序的写入路径，而管理员在表单里根本看不到这一项。
 	Enable bool `json:"enable" form:"enable"`
@@ -106,14 +108,15 @@ type routingReorderForm struct {
 }
 
 type routingRuleView struct {
-	Id             int    `json:"id"`
-	Remark         string `json:"remark"`
-	InboundIds     []int  `json:"inboundIds"`
-	DomainGroupIds []int  `json:"domainGroupIds"`
-	Action         string `json:"action"`
-	OutboundId     int    `json:"outboundId"`
-	Priority       int    `json:"priority"`
-	Enable         bool   `json:"enable"`
+	Id                 int    `json:"id"`
+	Remark             string `json:"remark"`
+	InboundIds         []int  `json:"inboundIds"`
+	DomainGroupIds     []int  `json:"domainGroupIds"`
+	Action             string `json:"action"`
+	OutboundId         int    `json:"outboundId"`
+	Priority           int    `json:"priority"`
+	ApplyToNewInbounds bool   `json:"applyToNewInbounds"`
+	Enable             bool   `json:"enable"`
 	// Broken 标记 InboundIds 列解码失败。这种规则 buildRule 会整条丢弃，
 	// 但解码失败得到的空数组在前端看来就是「所有用户」——不带这个标记，
 	// 一条已经不生效的规则会在界面上显示成覆盖全员的正常规则。
@@ -135,13 +138,14 @@ func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
 		return nil, err
 	}
 	return &model.RoutingRule{
-		Id:             id,
-		Remark:         form.Remark,
-		InboundIds:     encoded,
-		DomainGroupIds: encodedGroups,
-		Action:         form.Action,
-		OutboundId:     form.OutboundId,
-		Enable:         form.Enable,
+		Id:                 id,
+		Remark:             form.Remark,
+		InboundIds:         encoded,
+		DomainGroupIds:     encodedGroups,
+		Action:             form.Action,
+		OutboundId:         form.OutboundId,
+		ApplyToNewInbounds: form.ApplyToNewInbounds,
+		Enable:             form.Enable,
 	}, nil
 }
 
@@ -655,7 +659,8 @@ func (a *RoutingController) listRules(c *gin.Context) {
 			Id: rule.Id, Remark: rule.Remark, InboundIds: ids,
 			DomainGroupIds: groupIds, Action: rule.Action,
 			OutboundId: rule.OutboundId, Priority: rule.Priority,
-			Enable: rule.Enable, Broken: broken, GroupsBroken: groupsBroken,
+			ApplyToNewInbounds: rule.ApplyToNewInbounds,
+			Enable:             rule.Enable, Broken: broken, GroupsBroken: groupsBroken,
 		})
 	}
 	jsonObj(c, views, nil)

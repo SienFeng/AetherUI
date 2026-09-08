@@ -1381,3 +1381,56 @@ func TestExportOmitsSubscribedCidrs(t *testing.T) {
 		t.Errorf("export must not contain subscribed cidrs: %s", raw)
 	}
 }
+
+// 导出必须带上这个标记。丢掉它，导入端的规则不再自动纳新，而导入报告里
+// 一个字都不会提。
+func TestExportCarriesApplyToNewInbounds(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	in := newPortableTestInbound(t, "用户甲", 2886)
+	ids, err := EncodeInboundIds([]int{in.Id})
+	if err != nil {
+		t.Fatalf("EncodeInboundIds: %v", err)
+	}
+	err = (&RoutingRuleService{}).Add(&model.RoutingRule{
+		Remark: "自动纳新", InboundIds: ids, DomainGroupId: g.Id,
+		DomainGroupIds:     mustEncodeGroupIds(t, []int{g.Id}),
+		Action:             model.ActionBlock,
+		Enable:             true,
+		ApplyToNewInbounds: true,
+	})
+	if err != nil {
+		t.Fatalf("Add rule: %v", err)
+	}
+
+	f, err := (&RoutingPortableService{}).Export(ExportScopeAll)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if len(f.Rules) != 1 {
+		t.Fatalf("导出的规则数 = %d, want 1", len(f.Rules))
+	}
+	if !f.Rules[0].ApplyToNewInbounds {
+		t.Error("导出丢掉了 applyToNewInbounds")
+	}
+	raw, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"applyToNewInbounds":true`) {
+		t.Errorf("导出文件的 JSON 里没有这个键: %s", raw)
+	}
+}
+
+// 旧导出文件没有这个键，必须解成 false（范围缩小，安全侧正确），
+// 而不是被当成缺失值报错或猜成 true。
+func TestPortableRuleWithoutApplyToNewInboundsDefaultsToFalse(t *testing.T) {
+	raw := `{"remark":"旧文件","domainGroupRefs":["ChatGPT"],"inboundRefs":[],"action":"block"}`
+	var decoded PortableRule
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.ApplyToNewInbounds {
+		t.Error("旧文件没有这个键时应当是 false")
+	}
+}

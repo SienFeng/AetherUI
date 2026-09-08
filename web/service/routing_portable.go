@@ -91,6 +91,12 @@ type PortableRule struct {
 	Action      string                `json:"action"`
 	Priority    int                   `json:"priority"`
 	Enable      bool                  `json:"enable"`
+	// ApplyToNewInbounds 刻意是值类型 bool，与上面的 InboundRefs 指针相反：
+	// 那边必须区分「字段缺失」与「显式 []」，因为 [] 在那里另有「对所有入站
+	// 生效」这个特殊含义；这边「键缺失」与 false 都只意味着「不自动纳新」，
+	// 是同义词，加指针只会多出一处需要解释的不对称。与 PortableDomainGroup
+	// 的 Cidrs 取舍相同。
+	ApplyToNewInbounds bool `json:"applyToNewInbounds"`
 }
 
 type ExportFile struct {
@@ -334,14 +340,15 @@ func (s *RoutingPortableService) toPortableRule(
 		refs = append(refs, PortableInboundRef{Remark: in.Remark, Port: in.Port})
 	}
 	return PortableRule{
-		Remark:          r.Remark,
-		DomainGroupRefs: &groupRefs,
-		DomainGroupRef:  legacyRef,
-		OutboundRef:     outboundRef,
-		InboundRefs:     &refs,
-		Action:          r.Action,
-		Priority:        r.Priority,
-		Enable:          r.Enable,
+		Remark:             r.Remark,
+		DomainGroupRefs:    &groupRefs,
+		DomainGroupRef:     legacyRef,
+		OutboundRef:        outboundRef,
+		InboundRefs:        &refs,
+		Action:             r.Action,
+		Priority:           r.Priority,
+		Enable:             r.Enable,
+		ApplyToNewInbounds: r.ApplyToNewInbounds,
 	}, nil
 }
 
@@ -894,6 +901,7 @@ func (s *RoutingPortableService) importRules(items []PortableRule, report *Impor
 			Remark: item.Remark, InboundIds: encoded, DomainGroupIds: encodedGroups,
 			Action: item.Action, OutboundId: outboundId,
 			Priority: item.Priority, Enable: enable,
+			ApplyToNewInbounds: item.ApplyToNewInbounds,
 		}
 		// 走 Add 而不是直接写库：它自带 validate（域名组/出站存在、动作合法）
 		// 与 checkConflict（同一域名组下入站不得重叠）。
