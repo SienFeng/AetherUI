@@ -90,43 +90,65 @@
         <a-layout-content>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
                 <transition name="list" appear>
-                    <a-card hoverable style="margin-bottom: 20px;">
-                        <a-row>
-                            <a-col :xs="24" :sm="24" :lg="6">
-                                域名组：
-                                <a-tag color="green">[[ groups.length ]]</a-tag>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="6">
-                                出站节点：
-                                <a-tag color="green">启用 [[ enabledNodeCount ]] / 共 [[ nodes.length ]]</a-tag>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="6">
-                                分流规则：
-                                <a-tag color="green">[[ rules.length ]]</a-tag>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="6">
-                                未生效规则：
-                                <a-tag v-if="brokenRules.length === 0" color="green">0</a-tag>
-                                <a-tooltip v-else :title="brokenSummary" placement="bottomLeft">
-                                    <a-tag color="red">[[ brokenRules.length ]]</a-tag>
-                                </a-tooltip>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="6">
-                                订阅异常：
-                                <a-tag :color="subscriptionErrorCount ? 'red' : 'green'">[[ subscriptionErrorCount ]]</a-tag>
-                            </a-col>
-                        </a-row>
-                        <a-row style="margin-top:12px">
-                            <a-col :span="24" style="text-align:right">
-                                <a-button icon="download" @click="confirmExport('all')">导出全部</a-button>
-                                <a-button icon="upload" style="margin-left:8px" @click="pickImportFile()">导入全部</a-button>
-                            </a-col>
-                        </a-row>
-                    </a-card>
+                    <div class="stat-row">
+                        <div class="stat-card tone-blue">
+                            <span class="stat-icon"><a-icon type="folder"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">域名组</span>
+                                <div class="stat-value">[[ groups.length ]]</div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-cyan">
+                            <span class="stat-icon"><a-icon type="cloud-server"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">出站节点</span>
+                                <div class="stat-value">[[ enabledNodeCount ]]<span class="unit">/ [[ nodes.length ]] 已启用</span></div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-purple">
+                            <span class="stat-icon"><a-icon type="branches"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">分流规则</span>
+                                <div class="stat-value">[[ rules.length ]]</div>
+                            </div>
+                        </div>
+                        <!-- tabindex 不是可有可无的：tooltip 挂在普通元素上，没有它键盘
+                             用户永远看不到「哪几条规则没生效」。图标与 aria-label 同理——
+                             只用红色的话，色觉障碍用户看到的和正常值没有区别。 -->
+                        <a-tooltip :title="brokenRules.length ? brokenSummary : null" placement="bottomLeft">
+                            <div class="stat-card" tabindex="0"
+                                 :class="brokenRules.length ? 'tone-alert' : 'tone-ok'"
+                                 :aria-label="brokenRules.length ? brokenRules.length + ' 条规则未生效' : null">
+                                <span class="stat-icon">
+                                    <a-icon :type="brokenRules.length ? 'exclamation-circle' : 'check-circle'" theme="filled"/>
+                                </span>
+                                <div class="stat-text">
+                                    <span class="stat-label">未生效规则</span>
+                                    <div class="stat-value">[[ brokenRules.length ]]</div>
+                                </div>
+                            </div>
+                        </a-tooltip>
+                        <div class="stat-card" :class="subscriptionErrorCount ? 'tone-alert' : 'tone-ok'"
+                             :aria-label="subscriptionErrorCount ? subscriptionErrorCount + ' 个订阅异常' : null">
+                            <span class="stat-icon">
+                                <a-icon :type="subscriptionErrorCount ? 'exclamation-circle' : 'check-circle'" theme="filled"/>
+                            </span>
+                            <div class="stat-text">
+                                <span class="stat-label">订阅异常</span>
+                                <div class="stat-value">[[ subscriptionErrorCount ]]</div>
+                            </div>
+                        </div>
+                    </div>
                 </transition>
 
                 <transition name="list" appear>
                     <a-tabs id="routing-tabs" default-active-key="1">
+                        <!-- 放进标签栏右端而不是单独占一行：这两个按钮作用于整页，
+                             与标签是同级操作，挤在指标卡上方只会白占一行。 -->
+                        <template slot="tabBarExtraContent">
+                            <a-button icon="download" @click="confirmExport('all')">导出全部</a-button>
+                            <a-button icon="upload" style="margin-left:8px" @click="pickImportFile()">导入全部</a-button>
+                        </template>
 
                         <a-tab-pane key="1" tab="域名组">
                             <a-card hoverable>
