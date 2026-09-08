@@ -18,6 +18,60 @@
         margin-bottom: 16px;
     }
 
+    /* 拖拽手柄用 CSS 画 2×3 点阵，不用 a-icon：ant-design-vue 1.7.2 的图标集
+       里没有 holder，drag/bars 是否真是图标名无法确认，写错只会显示成空白，
+       而「看不见手柄」等于整个拖拽功能对用户不存在。 */
+    .rule-drag-handle {
+        display: inline-block;
+        width: 10px;
+        height: 16px;
+        cursor: grab;
+        color: #bfbfbf;
+        background-image: radial-gradient(currentColor 1.2px, transparent 1.3px);
+        background-size: 5px 5px;
+        background-position: 0 2px;
+        vertical-align: middle;
+        user-select: none;
+    }
+
+    .rule-drag-handle:hover {
+        color: #1890ff;
+    }
+
+    .rule-drag-handle:active {
+        cursor: grabbing;
+    }
+
+    /* 被拖起的那一行淡出，让「它正在移动」这件事有实感 */
+    tr.rule-dragging > td {
+        opacity: 0.4;
+    }
+
+    /* 落点提示画在目标行的上/下边缘，而不是整行高亮——整行高亮说不清
+       松手后是插在这一行之前还是之后。 */
+    tr.rule-drop-before > td {
+        border-top: 2px solid #1890ff !important;
+    }
+
+    tr.rule-drop-after > td {
+        border-bottom: 2px solid #1890ff !important;
+    }
+
+    /* 段头是表格外的独立元素，不用 a-table 的 title——那是个函数 prop，
+       slot 形式在 1.7.2 上没有把握，写错只会让段头整个不显示。 */
+    .rule-section-title {
+        font-weight: 500;
+        margin-top: 24px;
+        margin-bottom: 8px;
+    }
+
+    .rule-section-hint {
+        font-weight: normal;
+        color: rgba(0, 0, 0, 0.45);
+        font-size: 12px;
+        margin-left: 8px;
+    }
+
     .import-messages {
         max-height: 360px;
         overflow: auto;
@@ -229,62 +283,32 @@
                                     <a-button icon="upload" style="margin-left:8px"
                                               @click="pickImportFile()">导入</a-button>
                                 </div>
-                                <a-table :columns="ruleColumns" :data-source="rules"
-                                         :row-key="r => r.id" :loading="spinning" :pagination="false"
-                                         style="margin-top: 20px">
-                                    <template slot="inbound" slot-scope="text, rule">
-                                        <a-tag v-if="rule.broken" color="red">数据损坏</a-tag>
-                                        <a-tag v-else-if="!rule.inboundIds.length">所有用户</a-tag>
-                                        <template v-else>
-                                            <a-tag v-for="id in rule.inboundIds.slice(0, 3)" :key="id"
-                                                   :color="inboundMissing(id) ? 'red' : ''">
-                                                [[ inboundName(id) ]]
-                                            </a-tag>
-                                            <a-tooltip v-if="rule.inboundIds.length > 3"
-                                                       :title="rule.inboundIds.map(inboundName).join('、')">
-                                                <a-tag>等 [[ rule.inboundIds.length ]] 人</a-tag>
-                                            </a-tooltip>
-                                        </template>
-                                    </template>
-                                    <template slot="group" slot-scope="text, rule">
-                                        <template v-if="rule.groupsBroken">
-                                            <a-tag color="red">域名组数据损坏</a-tag>
-                                        </template>
-                                        <template v-else>
-                                            <a-tag v-for="gid in rule.domainGroupIds" :key="gid"
-                                                   :color="groupMissing(gid) ? 'red' : ''">
-                                                [[ groupName(gid) ]]
-                                            </a-tag>
-                                        </template>
-                                    </template>
-                                    <template slot="target" slot-scope="text, rule">
-                                        <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
-                                        <a-tag v-else-if="rule.action === 'direct'" color="green">直连</a-tag>
-                                        <a-tag v-else :color="nodeMissing(rule.outboundId) ? 'red' : 'blue'">
-                                            [[ nodeName(rule.outboundId) ]]
-                                        </a-tag>
-                                    </template>
-                                    <template slot="warn" slot-scope="text, rule">
-                                        <a-tooltip v-if="ruleIssue(rule)" :title="ruleIssue(rule)">
-                                            <a-icon type="warning" style="color: #faad14;"></a-icon>
-                                        </a-tooltip>
-                                        <a-icon v-else type="check-circle" style="color: #52c41a;"></a-icon>
-                                    </template>
-                                    <template slot="action" slot-scope="text, rule">
-                                        <a-dropdown :trigger="['click']">
-                                            <a @click="e => e.preventDefault()">操作</a>
-                                            <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
-                                                <a-menu-item key="edit">
-                                                    <a-icon type="edit"></a-icon>编辑
-                                                </a-menu-item>
-                                                <a-menu-item key="delete">
-                                                    <span style="color: #FF4D4F">
-                                                        <a-icon type="delete"></a-icon>删除
-                                                    </span>
-                                                </a-menu-item>
-                                            </a-menu>
-                                        </a-dropdown>
-                                    </template>
+                                <!-- 拆成两张表，不是一张。
+                                     生成期 block 规则整体排在所有分流规则之前
+                                     （routing_inject.go 的 buildRules 返回两个独立
+                                     切片，与 priority 无关）。混在一张表里拖拽，
+                                     「越往上越先匹配」就成了一句静默的假话——管理
+                                     员能把封禁拖到最后一行，而它实际仍然第一个匹
+                                     配，没有任何一层会报错。两张独立的表还天然拒
+                                     绝段间 drop。 -->
+                                <div v-if="blockRules.length" class="rule-section-title">
+                                    封禁规则
+                                    <span class="rule-section-hint">始终优先于下方所有分流规则</span>
+                                </div>
+                                <a-table v-if="blockRules.length" :columns="ruleColumns"
+                                         :data-source="blockRules" :custom-row="ruleRow"
+                                         :row-key="r => r.id" :loading="spinning" :pagination="false">
+{{template "routingRuleTableSlots" .}}
+                                </a-table>
+
+                                <div class="rule-section-title">
+                                    分流规则
+                                    <span class="rule-section-hint">越靠上越先匹配，拖动左侧手柄调整顺序</span>
+                                </div>
+                                <a-table :columns="ruleColumns" :data-source="routeRules"
+                                         :custom-row="ruleRow"
+                                         :row-key="r => r.id" :loading="spinning" :pagination="false">
+{{template "routingRuleTableSlots" .}}
                                 </a-table>
                             </a-card>
                         </a-tab-pane>
@@ -532,9 +556,6 @@
                     </a-select-option>
                 </a-select>
             </a-form-item>
-            <a-form-item label="优先级（数字越小越先匹配）">
-                <a-input-number v-model="ruleModal.rule.priority" :min="0"></a-input-number>
-            </a-form-item>
         </a-form>
     </a-modal>
 
@@ -604,12 +625,13 @@
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
             ruleColumns: [
+                // 优先级不再是一个可编辑的数字：它由行的先后决定，拖手柄改。
+                { title: '', width: 40, scopedSlots: { customRender: 'drag' } },
                 { title: '备注', dataIndex: 'remark', width: 140 },
                 { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140 },
                 { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140 },
                 { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
                 { title: '状态', width: 60, scopedSlots: { customRender: 'warn' } },
-                { title: '优先级', dataIndex: 'priority', width: 80 },
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
             ],
             groupModal: {
@@ -620,6 +642,9 @@
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
             ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '', groupFilter: '' },
+            // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
+            // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
+            drag: { id: 0, section: '', overId: 0 },
             importReportVisible: false,
             importReport: {
                 domainGroups: { created: 0, skipped: 0, failed: 0 },
@@ -629,6 +654,14 @@
             },
         },
         computed: {
+            // 两段各自渲染成一张表。this.rules 已由服务端按 priority asc, id asc
+            // 排好，filter 保持相对顺序，所以段内顺序就是生成期的匹配顺序。
+            blockRules() {
+                return this.rules.filter(r => r.action === 'block');
+            },
+            routeRules() {
+                return this.rules.filter(r => r.action !== 'block');
+            },
             enabledNodeCount() {
                 return this.nodes.filter(n => n.enable).length;
             },
@@ -732,6 +765,98 @@
                 this.nodes = (n.data.obj || []).map(OutboundNode.fromJson);
                 this.rules = (r.data.obj || []).map(RoutingRule.fromJson);
                 this.inbounds = i.data.obj || [];
+            },
+            // 段由动作决定，不额外传参：section 本来就是 action 的函数，
+            // 让调用方各自传一遍只会多出一处可以写错的地方。
+            ruleSection(rule) {
+                return rule.action === 'block' ? 'block' : 'route';
+            },
+            // custom-row 只把每一行变成 drop 目标。draggable 挂在手柄上而不是
+            // 整行：整行可拖会干扰行内的「操作」下拉和文本选择。
+            ruleRow(rule, index) {
+                const cls = [];
+                if (this.drag.id === rule.id) cls.push('rule-dragging');
+                if (this.drag.overId === rule.id && this.drag.id && this.drag.id !== rule.id) {
+                    // 落点提示画在真正会落进去的那条缝上：splice 的语义是
+                    // 「移走再插到目标下标」，所以从上往下拖是落在目标行之后。
+                    const list = this.drag.section === 'block' ? this.blockRules : this.routeRules;
+                    const from = list.findIndex(r => r.id === this.drag.id);
+                    cls.push(from > -1 && from < index ? 'rule-drop-after' : 'rule-drop-before');
+                }
+                return {
+                    class: cls,
+                    on: {
+                        // 不挂 dragleave：它在 td 之间移动时也会冒泡触发，
+                        // 高亮会跟着闪。dragover 本身就持续更新 overId，
+                        // 拖出表格后由手柄上的 dragend 兜底清掉。
+                        dragover: e => this.onRuleDragOver(e, rule),
+                        drop: e => this.onRuleDrop(e, rule),
+                    },
+                };
+            },
+            onRuleDragStart(e, rule) {
+                this.drag.id = rule.id;
+                this.drag.section = this.ruleSection(rule);
+                this.drag.overId = 0;
+                if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = 'move';
+                    // Firefox 不调 setData 就不会真的开始拖拽。
+                    try {
+                        e.dataTransfer.setData('text/plain', String(rule.id));
+                    } catch (err) {
+                        // Safari 在某些版本下会抛，拖拽本身不受影响。
+                    }
+                }
+            },
+            onRuleDragOver(e, rule) {
+                if (!this.drag.id || this.drag.section !== this.ruleSection(rule)) return;
+                // 不调用 preventDefault，drop 事件根本不会触发。
+                e.preventDefault();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+                this.drag.overId = rule.id;
+            },
+            async onRuleDrop(e, rule) {
+                e.preventDefault();
+                const fromId = this.drag.id;
+                const section = this.drag.section;
+                this.resetRuleDrag();
+                if (!fromId || fromId === rule.id) return;
+                if (section !== this.ruleSection(rule)) return;
+                await this.reorderRules(fromId, rule.id, section);
+            },
+            resetRuleDrag() {
+                this.drag.id = 0;
+                this.drag.section = '';
+                this.drag.overId = 0;
+            },
+            async reorderRules(fromId, toId, section) {
+                const list = section === 'block' ? this.blockRules : this.routeRules;
+                const ids = list.map(r => r.id);
+                const from = ids.indexOf(fromId);
+                const to = ids.indexOf(toId);
+                if (from < 0 || to < 0) return;
+                ids.splice(to, 0, ids.splice(from, 1)[0]);
+                // 提交整张表的顺序，封禁段在前——与生成期 block 组整体提前一致。
+                // 服务端要求 ids 是全部规则 id 的一个排列，只提交本段会被整体拒绝。
+                const blockIds = section === 'block' ? ids : this.blockRules.map(r => r.id);
+                const routeIds = section === 'route' ? ids : this.routeRules.map(r => r.id);
+                const all = blockIds.concat(routeIds);
+                const byId = {};
+                this.rules.forEach(r => { byId[r.id] = r; });
+                // 先本地重排：等接口回来再动，行会明显「弹」一下。
+                this.rules = all.map(id => byId[id]);
+                // 不走 this.post：它点亮整页遮罩，而拖拽后界面已经是正确的，
+                // 转圈只会让一个瞬时操作看起来像卡住了。
+                const msg = await HttpUtil.post('aui/routing/rule/reorder', { ids: all });
+                if (!msg || !msg.success) {
+                    // 服务端拒绝多半是列表已被另一个会话改过，此时它才是权威。
+                    this.spinning = true;
+                    try {
+                        await this.loadAll();
+                    } finally {
+                        this.spinning = false;
+                    }
+                }
             },
             groupName(id) {
                 const g = this.groups.find(x => x.id === id);

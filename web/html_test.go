@@ -151,3 +151,35 @@ func TestVueDirectivesLiveInsideAVueRoot(t *testing.T) {
 		})
 	}
 }
+
+// TestRoutingRulesRenderAsTwoSections 守住「封禁规则与分流规则必须分两段渲染」。
+//
+// 生成期 block 规则整体排在所有分流规则之前（routing_inject.go 的 buildRules
+// 返回两个独立切片，与 priority 无关）。规则列表改成拖拽排序之后，「越往上越
+// 先匹配」是界面对管理员的一句承诺——一旦有人把两段合回一张表，管理员就能把
+// 封禁规则拖到最后一行，而它实际仍然第一个匹配。xray 返回 Configuration OK，
+// 面板显示 running，规则表渲染得完全正常，没有任何一层会报错。
+//
+// 两张独立的表同时也是段间拖拽的唯一拦截手段。
+func TestRoutingRulesRenderAsTwoSections(t *testing.T) {
+	tmpl := parseAllTemplates(t)
+	rendered := renderPage(t, tmpl, "routing.html")
+
+	for _, want := range []string{
+		`:data-source="blockRules"`,
+		`:data-source="routeRules"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("规则表少了分段数据源 %s", want)
+		}
+	}
+	// 合并回一张表的退化形态。
+	if strings.Contains(rendered, `:data-source="rules"`) {
+		t.Error("规则表回退成了单张表（:data-source=\"rules\"），封禁段不再独立")
+	}
+	// 两张表各一个拖拽手柄 slot——共享的 define 必须在两处都展开，
+	// 漏掉一处那一段就静默地拖不动了。
+	if got := strings.Count(rendered, `class="rule-drag-handle"`); got != 2 {
+		t.Errorf("拖拽手柄出现 %d 次, want 2（封禁段与分流段各一）", got)
+	}
+}

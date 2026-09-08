@@ -1,10 +1,13 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
+
+	"gorm.io/gorm"
 
 	"a-ui/database"
 	"a-ui/database/model"
@@ -247,10 +250,79 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	old.DomainGroupId = 0
 	old.Action = rule.Action
 	old.OutboundId = rule.OutboundId
-	old.Priority = rule.Priority
+	// priority 刻意不从候选对象取：规则的先后顺序只由 Reorder（拖拽）改。
+	// 表单没有优先级输入框，ruleFromForm 出来的那一项恒为零值，照抄会让
+	// 任何一次「改个备注」都把规则弹到列表顶部——管理员改的是备注，动的
+	// 却是分流的先后顺序，而且不会有任何提示。
 	old.Enable = rule.Enable
 	db := database.GetDB()
 	return db.Save(old).Error
+}
+
+// NextPriority 返回排在现有全部规则之后的 priority。
+//
+// 规则表单不再提交 priority——顺序由拖拽决定——所以新建规则的 priority 必须
+// 由服务端定。留成零值会让它和被 Reorder 写成 priority=0 的那条并列，再按
+// id asc 排在其后：新规则出现在列表第二行，既不是顶也不是底。
+//
+// 导入路径（routing_portable.go）刻意【不】走这里：导出文件里带着原机器上的
+// priority，那份顺序要原样搬过去，覆盖掉等于把导入的规则重排一遍。
+func (s *RoutingRuleService) NextPriority() (int, error) {
+	db := database.GetDB()
+	var max sql.NullInt64
+	if err := db.Model(model.RoutingRule{}).Select("MAX(priority)").Row().Scan(&max); err != nil {
+		return 0, err
+	}
+	// 表为空时 MAX(priority) 是 NULL。
+	if !max.Valid {
+		return 0, nil
+	}
+	return int(max.Int64) + 1, nil
+}
+
+// Reorder 按给定顺序把全部规则的 priority 重写成 0,1,2,…
+//
+// ids 必须是【全部】规则 id 的一个排列。少一条、多一条、重复、或换成一个不
+// 存在的 id，一律整体拒绝：前端手里的列表可能是陈旧的（另一个管理员刚新建或
+// 刚删掉一条规则），放行会让没列进来的那条留着旧 priority，顺序错乱而没有
+// 任何一层会报错——规则表照常渲染，配置也照常生成，只是流量走错了节点。
+//
+// 写入必须在一个事务里完成。逐条调 Update 会留下一个顺序错乱的中间态，而
+// InboundController 那个 10 秒的重启消费任务随时可能撞上它，把中间态真的
+// 下发给 xray。
+//
+// priority 重写成稠密的 0,1,2,… 而不是留空档：界面第 n 行与 priority 一一
+// 对应，下一次重排的结果才是可预测的。
+func (s *RoutingRuleService) Reorder(ids []int) error {
+	existing, err := s.GetAll()
+	if err != nil {
+		return err
+	}
+	if len(ids) != len(existing) {
+		return common.NewError("规则列表已变化，请刷新后重试")
+	}
+	remaining := make(map[int]bool, len(existing))
+	for _, r := range existing {
+		remaining[r.Id] = true
+	}
+	for _, id := range ids {
+		// 已被 delete 的 id 再次出现即重复，与「不存在」走同一条拒绝路径。
+		if !remaining[id] {
+			return common.NewError("规则列表已变化，请刷新后重试")
+		}
+		delete(remaining, id)
+	}
+	db := database.GetDB()
+	return db.Transaction(func(tx *gorm.DB) error {
+		for i, id := range ids {
+			err := tx.Model(model.RoutingRule{}).Where("id = ?", id).
+				Update("priority", i).Error
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *RoutingRuleService) Del(id int) error {

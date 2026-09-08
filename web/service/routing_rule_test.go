@@ -857,3 +857,158 @@ func TestCheckOutboundRefsIgnoresDirectRules(t *testing.T) {
 		t.Errorf("直连规则不该算作对出站节点的引用: %v", err)
 	}
 }
+
+// newTestBlockRule 建一条覆盖全部入站的 block 规则。
+//
+// 每条规则各配一个独立域名组：checkConflict 不允许同一域名组下的入站集合
+// 重叠，而这些规则的 InboundIds 都是「所有入站」。
+func newTestBlockRule(t *testing.T, remark string, enable bool) *model.RoutingRule {
+	t.Helper()
+	g := newTestGroup(t, remark+"-组")
+	r := &model.RoutingRule{
+		Remark:         remark,
+		InboundIds:     "[]",
+		DomainGroupId:  g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock,
+		Enable:         enable,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add rule %s: %v", remark, err)
+	}
+	return r
+}
+
+func TestReorderRewritesPriorityInGivenOrder(t *testing.T) {
+	setupDB(t)
+	// 中间那条是禁用的：它在界面列表里照样占一个位置、照样能被拖动，
+	// 重排必须一视同仁，否则它被启用的那一刻会跳到一个谁都没安排过的位置。
+	a := newTestBlockRule(t, "A", true)
+	b := newTestBlockRule(t, "B", false)
+	c := newTestBlockRule(t, "C", true)
+	s := RoutingRuleService{}
+
+	if err := s.Reorder([]int{c.Id, b.Id, a.Id}); err != nil {
+		t.Fatalf("Reorder: %v", err)
+	}
+
+	rules, err := s.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	want := []int{c.Id, b.Id, a.Id}
+	if len(rules) != len(want) {
+		t.Fatalf("规则条数 = %d, want %d", len(rules), len(want))
+	}
+	for i, r := range rules {
+		if r.Id != want[i] {
+			t.Errorf("第 %d 位 id = %d, want %d", i, r.Id, want[i])
+		}
+		// priority 必须稠密：留空档会让「界面第 n 行」与 priority 脱钩，
+		// 下一次重排的结果不再可预测。
+		if r.Priority != i {
+			t.Errorf("第 %d 位 priority = %d, want %d", i, r.Priority, i)
+		}
+	}
+}
+
+func TestReorderRejectsIdSetMismatch(t *testing.T) {
+	setupDB(t)
+	a := newTestBlockRule(t, "A", true)
+	b := newTestBlockRule(t, "B", true)
+	s := RoutingRuleService{}
+
+	// 前端手里的 id 集合可能是陈旧的——另一个管理员刚新建或刚删掉一条规则。
+	// 放行会让没列进来的那条规则留着旧 priority，顺序错乱且没有任何一层报错。
+	cases := map[string][]int{
+		"少一条":       {a.Id},
+		"多一条":       {a.Id, b.Id, 9999},
+		"重复":        {a.Id, a.Id},
+		"条数对但换了 id": {a.Id, 9999},
+		"空":         nil,
+	}
+	for name, ids := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := s.Reorder(ids); err == nil {
+				t.Fatal("expected error for mismatched id set")
+			}
+			// 拒绝必须是整体的：一条 priority 都不许落库。
+			rules, err := s.GetAll()
+			if err != nil {
+				t.Fatalf("GetAll: %v", err)
+			}
+			for _, r := range rules {
+				if r.Priority != 0 {
+					t.Errorf("被拒绝的重排写入了 priority: id=%d priority=%d", r.Id, r.Priority)
+				}
+			}
+		})
+	}
+}
+
+// 表单不再提交 priority（顺序由拖拽决定），新建的规则必须自己落到末尾。
+// 恒为 0 的话它会和被重排成 priority=0 的那条并列，按 id asc 排在它之后——
+// 新规则出现在列表第二行，位置既不是顶也不是底，谁都预料不到。
+func TestNextPriorityFollowsLargest(t *testing.T) {
+	setupDB(t)
+	s := RoutingRuleService{}
+
+	got, err := s.NextPriority()
+	if err != nil {
+		t.Fatalf("NextPriority on empty: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("空库的 NextPriority = %d, want 0", got)
+	}
+
+	a := newTestBlockRule(t, "A", true)
+	b := newTestBlockRule(t, "B", true)
+	if err := s.Reorder([]int{b.Id, a.Id}); err != nil {
+		t.Fatalf("Reorder: %v", err)
+	}
+
+	got, err = s.NextPriority()
+	if err != nil {
+		t.Fatalf("NextPriority: %v", err)
+	}
+	// 重排后最大 priority 是 1，新规则要排到它之后。
+	if got != 2 {
+		t.Errorf("NextPriority = %d, want 2", got)
+	}
+}
+
+// 编辑一条规则不能改变它在列表里的位置。
+//
+// 表单不再提交 priority，ruleFromForm 出来的候选对象那一项恒为零值；Update
+// 若照抄它，任何一次「改个备注」都会把规则弹到列表顶部，而管理员完全无从
+// 预料——他改的是备注，动的却是分流的先后顺序。
+func TestUpdateKeepsPriority(t *testing.T) {
+	setupDB(t)
+	a := newTestBlockRule(t, "A", true)
+	b := newTestBlockRule(t, "B", true)
+	s := RoutingRuleService{}
+	if err := s.Reorder([]int{a.Id, b.Id}); err != nil {
+		t.Fatalf("Reorder: %v", err)
+	}
+
+	edited, err := s.Get(b.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	edited.Remark = "B 改过备注"
+	edited.Priority = 0 // 表单绑定出来的零值
+	if err := s.Update(edited); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(b.Id)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got.Remark != "B 改过备注" {
+		t.Errorf("备注没改到: %q", got.Remark)
+	}
+	if got.Priority != 1 {
+		t.Errorf("编辑后 priority = %d, want 1（位置不该变）", got.Priority)
+	}
+}

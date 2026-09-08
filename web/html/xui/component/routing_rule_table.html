@@ -1,0 +1,65 @@
+<!-- 分流规则表的列渲染。封禁段与分流段是两张独立的 a-table（理由见
+     routing.html 里那段注释），列的渲染必须逐字一致——各写一份迟早会分叉，
+     而分叉后两段的差异不会有任何东西提醒你。 -->
+{{define "routingRuleTableSlots"}}
+    <template slot="drag" slot-scope="text, rule">
+        <a-tooltip title="拖动调整顺序">
+            <span class="rule-drag-handle" draggable="true"
+                  @dragstart="onRuleDragStart($event, rule)"
+                  @dragend="resetRuleDrag"></span>
+        </a-tooltip>
+    </template>
+    <template slot="inbound" slot-scope="text, rule">
+        <a-tag v-if="rule.broken" color="red">数据损坏</a-tag>
+        <a-tag v-else-if="!rule.inboundIds.length">所有用户</a-tag>
+        <template v-else>
+            <a-tag v-for="id in rule.inboundIds.slice(0, 3)" :key="id"
+                   :color="inboundMissing(id) ? 'red' : ''">
+                [[ inboundName(id) ]]
+            </a-tag>
+            <a-tooltip v-if="rule.inboundIds.length > 3"
+                       :title="rule.inboundIds.map(inboundName).join('、')">
+                <a-tag>等 [[ rule.inboundIds.length ]] 人</a-tag>
+            </a-tooltip>
+        </template>
+    </template>
+    <template slot="group" slot-scope="text, rule">
+        <template v-if="rule.groupsBroken">
+            <a-tag color="red">域名组数据损坏</a-tag>
+        </template>
+        <template v-else>
+            <a-tag v-for="gid in rule.domainGroupIds" :key="gid"
+                   :color="groupMissing(gid) ? 'red' : ''">
+                [[ groupName(gid) ]]
+            </a-tag>
+        </template>
+    </template>
+    <template slot="target" slot-scope="text, rule">
+        <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
+        <a-tag v-else-if="rule.action === 'direct'" color="green">直连</a-tag>
+        <a-tag v-else :color="nodeMissing(rule.outboundId) ? 'red' : 'blue'">
+            [[ nodeName(rule.outboundId) ]]
+        </a-tag>
+    </template>
+    <template slot="warn" slot-scope="text, rule">
+        <a-tooltip v-if="ruleIssue(rule)" :title="ruleIssue(rule)">
+            <a-icon type="warning" style="color: #faad14;"></a-icon>
+        </a-tooltip>
+        <a-icon v-else type="check-circle" style="color: #52c41a;"></a-icon>
+    </template>
+    <template slot="action" slot-scope="text, rule">
+        <a-dropdown :trigger="['click']">
+            <a @click="e => e.preventDefault()">操作</a>
+            <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
+                <a-menu-item key="edit">
+                    <a-icon type="edit"></a-icon>编辑
+                </a-menu-item>
+                <a-menu-item key="delete">
+                    <span style="color: #FF4D4F">
+                        <a-icon type="delete"></a-icon>删除
+                    </span>
+                </a-menu-item>
+            </a-menu>
+        </a-dropdown>
+    </template>
+{{end}}

@@ -92,8 +92,17 @@ type routingRuleForm struct {
 	DomainGroupIds []int  `json:"domainGroupIds" form:"domainGroupIds"`
 	Action         string `json:"action" form:"action"`
 	OutboundId     int    `json:"outboundId" form:"outboundId"`
-	Priority       int    `json:"priority" form:"priority"`
-	Enable         bool   `json:"enable" form:"enable"`
+	// 没有 Priority：规则的先后顺序只由 /rule/reorder（拖拽）改。收下它就多
+	// 出一条能改顺序的写入路径，而管理员在表单里根本看不到这一项。
+	Enable bool `json:"enable" form:"enable"`
+}
+
+// routingReorderForm 是拖拽排序提交的完整规则顺序。
+//
+// 只收 id，不收任何其他字段：拖拽改变的只有顺序，捎带别的字段会让这条路径
+// 变成第二个写入入口，绕开 Add/Update 里的 checkConflict 与 validate。
+type routingReorderForm struct {
+	Ids []int `json:"ids" form:"ids"`
 }
 
 type routingRuleView struct {
@@ -132,7 +141,6 @@ func ruleFromForm(id int, form *routingRuleForm) (*model.RoutingRule, error) {
 		DomainGroupIds: encodedGroups,
 		Action:         form.Action,
 		OutboundId:     form.OutboundId,
-		Priority:       form.Priority,
 		Enable:         form.Enable,
 	}, nil
 }
@@ -212,6 +220,7 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	rl.POST("/add", a.addRule)
 	rl.POST("/update/:id", a.updateRule)
 	rl.POST("/del/:id", a.delRule)
+	rl.POST("/reorder", a.reorderRules)
 
 	g.POST("/export", a.exportRouting)
 	g.POST("/import", a.importRouting)
@@ -663,6 +672,13 @@ func (a *RoutingController) addRule(c *gin.Context) {
 		jsonMsg(c, "添加分流规则", err)
 		return
 	}
+	// 表单不再有优先级输入框（顺序由拖拽决定），form.Priority 恒为零值。
+	// 新规则要落到列表末尾，priority 由服务端算。
+	rule.Priority, err = a.ruleService.NextPriority()
+	if err != nil {
+		jsonMsg(c, "添加分流规则", err)
+		return
+	}
 	err = a.ruleService.Add(rule)
 	jsonMsg(c, "添加分流规则", err)
 	if err == nil {
@@ -689,6 +705,24 @@ func (a *RoutingController) updateRule(c *gin.Context) {
 	err = a.ruleService.Update(rule)
 	jsonMsg(c, "修改分流规则", err)
 	if err == nil {
+		a.xrayService.SetToNeedRestart()
+	}
+}
+
+// reorderRules 接收一份完整的规则 id 顺序，把 priority 重写成 0,1,2,…
+//
+// 请求体是整张表的顺序（封禁段在前、分流段在后拼成一条），不是某一段的局部
+// 顺序：service 层要求 ids 是全部规则 id 的一个排列，收局部顺序会被整体拒绝。
+func (a *RoutingController) reorderRules(c *gin.Context) {
+	form := &routingReorderForm{}
+	if err := c.ShouldBind(form); err != nil {
+		jsonMsg(c, "调整分流规则顺序", err)
+		return
+	}
+	err := a.ruleService.Reorder(form.Ids)
+	jsonMsg(c, "调整分流规则顺序", err)
+	if err == nil {
+		// 规则数组顺序变了就是配置变了，必须重新下发。
 		a.xrayService.SetToNeedRestart()
 	}
 }
