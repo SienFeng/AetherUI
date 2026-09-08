@@ -388,3 +388,108 @@ html, body {
     white-space: pre-wrap;
     word-break: break-all;
 }
+/* 页面顶部的指标卡行。
+ *
+ * 改动前是 a-row/a-col 的 24 栅格：入站页 3 项 × lg=12、分流页 5 项 × lg=6，
+ * 都超过 24，最后一项必然换行；而 24 除不尽 5，分流页用栅格根本排不出一行。
+ *
+ * 中间试过「裸文字 + 间距」的紧凑条，实机上很难看：面板内容区约 1750px，
+ * 而数值短到只有「4 B」「9」，文字缩在左边三百多像素，右边一千多像素全是
+ * 空白，卡片看起来像没加载完。撑得住宽度的是**有边界的块**，不是文字间距。
+ * 所以改成每项一张卡、grid 平分整行。
+ *
+ * 颜色分两种用途，不能混：冷色（蓝/青/紫/靛）只用来区分不同指标，是装饰；
+ * 红色只用于异常，是信息。所以正常项一律不用红也不用绿，红色出现时才有
+ * 「出事了」这个含义。异常同时带图标与 aria-label，不只靠颜色。 */
+.stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+/* 圆角跟随面板既有语言：本文件上方的 .ant-card 是 30px，整套界面都是大圆角，
+ * 指标卡用小圆角会在一堆圆卡里显得突兀。这里取 20px 而不是照抄 30px——
+ * 大表格卡有八百多像素高，30px 只占它一小截；指标卡才 110px 高，同样的
+ * 30px 占到高度的四分之一以上，会圆到像药丸。 */
+.stat-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 20px;
+    background: #fff;
+    border: 1px solid #f0f0f0;
+    border-radius: 20px;
+    transition: border-color .2s, box-shadow .2s;
+}
+
+.stat-card:hover {
+    border-color: #d9d9d9;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .06);
+}
+
+.stat-icon {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+}
+
+.stat-text {
+    min-width: 0;
+}
+
+/* rgba(0,0,0,.45) 在白底上只有 3.36:1，达不到正文 4.5:1 的下限（antd 自己
+ * 多处用它，但那不是照抄的理由）。.65 是 7.0:1。 */
+.stat-label {
+    font-size: 12px;
+    line-height: 18px;
+    color: rgba(0, 0, 0, .65);
+    white-space: nowrap;
+}
+
+/* tabular-nums：这些数值每秒刷新一次，等宽数字才不会让整行左右跳动。 */
+.stat-value {
+    font-size: 24px;
+    line-height: 32px;
+    font-weight: 600;
+    color: #1f1f1f;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.stat-value .unit {
+    font-size: 13px;
+    font-weight: 400;
+    color: rgba(0, 0, 0, .65);
+    margin-left: 5px;
+}
+
+.stat-card.tone-blue .stat-icon   { color: #1890ff; background: #e6f7ff; }
+.stat-card.tone-cyan .stat-icon   { color: #13c2c2; background: #e6fffb; }
+.stat-card.tone-purple .stat-icon { color: #722ed1; background: #f9f0ff; }
+.stat-card.tone-geek .stat-icon   { color: #2f54eb; background: #f0f5ff; }
+.stat-card.tone-ok .stat-icon     { color: #52c41a; background: #f6ffed; }
+
+/* #cf1322 在白底上是 5.57:1，过 AA。 */
+.stat-card.tone-alert {
+    border-color: #ffccc7;
+    background: #fff2f0;
+}
+
+.stat-card.tone-alert .stat-icon  { color: #cf1322; background: #fff1f0; }
+.stat-card.tone-alert .stat-value { color: #cf1322; }
+
+/* tooltip 挂在普通元素上，不加 tabindex 键盘用户永远看不到「哪几条规则
+ * 没生效」。有了 tabindex 就必须给回一个可见的焦点环。 */
+.stat-card[tabindex] { cursor: default; }
+
+.stat-card[tabindex]:focus-visible {
+    outline: 2px solid #1890ff;
+    outline-offset: 2px;
+    border-radius: 20px;
+}

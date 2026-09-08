@@ -38,22 +38,36 @@
                     </a-tag>
                 </transition>
                 <transition name="list" appear>
-                    <a-card hoverable style="margin-bottom: 20px;">
-                        <a-row>
-                            <a-col :xs="24" :sm="24" :lg="12">
-                                总上传 / 下载：
-                                <a-tag color="green">[[ sizeFormat(total.up) ]] / [[ sizeFormat(total.down) ]]</a-tag>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="12">
-                                总用量：
-                                <a-tag color="green">[[ sizeFormat(total.up + total.down) ]]</a-tag>
-                            </a-col>
-                            <a-col :xs="24" :sm="24" :lg="12">
-                                入站数量：
-                                <a-tag color="green">[[ dbInbounds.length ]]</a-tag>
-                            </a-col>
-                        </a-row>
-                    </a-card>
+                    <div class="stat-row">
+                        <div class="stat-card tone-blue">
+                            <span class="stat-icon"><a-icon type="cloud-upload"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">总上传</span>
+                                <div class="stat-value">[[ sizeFormat(total.up) ]]</div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-cyan">
+                            <span class="stat-icon"><a-icon type="cloud-download"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">总下载</span>
+                                <div class="stat-value">[[ sizeFormat(total.down) ]]</div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-purple">
+                            <span class="stat-icon"><a-icon type="database"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">总用量</span>
+                                <div class="stat-value">[[ sizeFormat(total.up + total.down) ]]</div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-geek">
+                            <span class="stat-icon"><a-icon type="team"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">入站数量</span>
+                                <div class="stat-value">[[ dbInbounds.length ]]</div>
+                            </div>
+                        </div>
+                    </div>
                 </transition>
                 <transition name="list" appear>
                     <a-card hoverable>
