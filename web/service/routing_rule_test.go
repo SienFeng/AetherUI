@@ -1012,3 +1012,103 @@ func TestUpdateKeepsPriority(t *testing.T) {
 		t.Errorf("编辑后 priority = %d, want 1（位置不该变）", got.Priority)
 	}
 }
+
+// newTestRuleWithInbounds 建一条覆盖指定入站的 block 规则。
+// 每条规则各配一个独立域名组：checkConflict 不允许同一域名组下入站集合重叠。
+func newTestRuleWithInbounds(t *testing.T, remark string, inboundIds []int, applyToNew bool) *model.RoutingRule {
+	t.Helper()
+	g := newTestGroup(t, remark+"-组")
+	encoded, err := EncodeInboundIds(inboundIds)
+	if err != nil {
+		t.Fatalf("EncodeInboundIds: %v", err)
+	}
+	r := &model.RoutingRule{
+		Remark:             remark,
+		InboundIds:         encoded,
+		DomainGroupId:      g.Id,
+		DomainGroupIds:     mustEncodeGroupIds(t, []int{g.Id}),
+		Action:             model.ActionBlock,
+		Enable:             true,
+		ApplyToNewInbounds: applyToNew,
+	}
+	if err := (&RoutingRuleService{}).Add(r); err != nil {
+		t.Fatalf("Add rule %s: %v", remark, err)
+	}
+	return r
+}
+
+func mustInboundIds(t *testing.T, ruleId int) []int {
+	t.Helper()
+	r, err := (&RoutingRuleService{}).Get(ruleId)
+	if err != nil {
+		t.Fatalf("Get rule %d: %v", ruleId, err)
+	}
+	ids, err := DecodeInboundIds(r.InboundIds)
+	if err != nil {
+		t.Fatalf("DecodeInboundIds: %v", err)
+	}
+	return ids
+}
+
+func TestAttachInboundOnlyTouchesRulesThatOptedIn(t *testing.T) {
+	setupDB(t)
+	opted := newTestRuleWithInbounds(t, "自动纳新", []int{7, 3}, true)
+	manual := newTestRuleWithInbounds(t, "手工名单", []int{7, 3}, false)
+
+	if err := (&RoutingRuleService{}).AttachInbound(database.GetDB(), 5); err != nil {
+		t.Fatalf("AttachInbound: %v", err)
+	}
+
+	// 升序去重是「生成逐字节确定」的前提，顺序一抖动 Config.Equals 恒为
+	// false，那个 10 秒的重启 cron 会不停重启 xray。
+	got := mustInboundIds(t, opted.Id)
+	want := []int{3, 5, 7}
+	if len(got) != len(want) {
+		t.Fatalf("声明自动应用的规则 inboundIds = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("声明自动应用的规则 inboundIds = %v, want %v", got, want)
+		}
+	}
+
+	if ids := mustInboundIds(t, manual.Id); len(ids) != 2 {
+		t.Errorf("未声明的规则被改动了: %v", ids)
+	}
+}
+
+// 空数组表示「所有用户」。往里追加一个 id 会让规则从「覆盖所有人」降级成
+// 「只覆盖这一个人」，其余用户当场失去这条规则、静默走默认出站，而 xray
+// 返回 Configuration OK、面板显示 running，没有任何一层会报错。
+func TestAttachInboundSkipsAllUsersRule(t *testing.T) {
+	setupDB(t)
+	all := newTestRuleWithInbounds(t, "所有用户", nil, true)
+	if ids := mustInboundIds(t, all.Id); len(ids) != 0 {
+		t.Fatalf("前置条件不成立，规则不是空数组: %v", ids)
+	}
+
+	if err := (&RoutingRuleService{}).AttachInbound(database.GetDB(), 5); err != nil {
+		t.Fatalf("AttachInbound: %v", err)
+	}
+
+	if ids := mustInboundIds(t, all.Id); len(ids) != 0 {
+		t.Errorf("「所有用户」规则被降级成了具体名单: %v", ids)
+	}
+}
+
+// 重复调用不应把同一个 id 塞两遍——EncodeInboundIds 会去重，但这条钉住
+// 「重跑一次不会改变结果」这个性质。
+func TestAttachInboundIsIdempotent(t *testing.T) {
+	setupDB(t)
+	r := newTestRuleWithInbounds(t, "自动纳新", []int{3}, true)
+	s := RoutingRuleService{}
+	for i := 0; i < 2; i++ {
+		if err := s.AttachInbound(database.GetDB(), 5); err != nil {
+			t.Fatalf("AttachInbound #%d: %v", i, err)
+		}
+	}
+	got := mustInboundIds(t, r.Id)
+	if len(got) != 2 || got[0] != 3 || got[1] != 5 {
+		t.Errorf("inboundIds = %v, want [3 5]", got)
+	}
+}

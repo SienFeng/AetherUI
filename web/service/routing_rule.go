@@ -325,6 +325,49 @@ func (s *RoutingRuleService) Reorder(ids []int) error {
 	})
 }
 
+// AttachInbound 把新建的入站追加进所有声明了「自动应用于新增用户」的规则。
+//
+// tx 由调用方传入：扩散必须与建入站在同一个事务里。失败若只记日志放行，
+// 结果是一个用户静默地没进规则——正是这个功能要消灭的失效，而且比人工
+// 遗漏更隐蔽（管理员以为系统已经处理了）。
+func (s *RoutingRuleService) AttachInbound(tx *gorm.DB, inboundId int) error {
+	if inboundId <= 0 {
+		return nil
+	}
+	rules := make([]*model.RoutingRule, 0)
+	err := tx.Model(model.RoutingRule{}).
+		Where("apply_to_new_inbounds = ?", true).Find(&rules).Error
+	if err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		ids, decodeErr := DecodeInboundIds(rule.InboundIds)
+		if decodeErr != nil {
+			return common.NewError("分流规则", rule.Id, "的入站数据已损坏:", decodeErr)
+		}
+		// 空数组表示「所有用户」，已经覆盖刚建的这一个。往里追加会让规则
+		// 从「覆盖所有人」降级成「只覆盖这一个人」，其余用户当场失去它而
+		// 没有任何一层报错。正常情况下表单联动不会产生这种组合，但直接改库、
+		// 导入的文件、将来某条新写入路径都可能留下它。
+		if len(ids) == 0 {
+			continue
+		}
+		encoded, encodeErr := EncodeInboundIds(append(ids, inboundId))
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if encoded == rule.InboundIds {
+			continue
+		}
+		err = tx.Model(model.RoutingRule{}).Where("id = ?", rule.Id).
+			Update("inbound_ids", encoded).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *RoutingRuleService) Del(id int) error {
 	db := database.GetDB()
 	return db.Delete(model.RoutingRule{}, id).Error
