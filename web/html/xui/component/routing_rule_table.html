@@ -22,6 +22,10 @@
                 <a-tag>等 [[ rule.inboundIds.length ]] 人</a-tag>
             </a-tooltip>
         </template>
+        <a-tooltip v-if="rule.applyToNewInbounds"
+                   title="以后新建的入站会自动加入这条规则">
+            <a-tag color="blue">+新用户</a-tag>
+        </a-tooltip>
     </template>
     <template slot="group" slot-scope="text, rule">
         <template v-if="rule.groupsBroken">

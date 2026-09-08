@@ -470,6 +470,22 @@
                      style="color: #faad14; font-size: 12px; margin: 4px 0 0 24px;">
                     [[ allUsersDisabledReason ]]
                 </div>
+                <div style="margin-top: 6px;">
+                    <!-- 不用 v-model：勾了「所有用户」时这一项必须显示为勾上且
+                         禁用（空数组本来就含未来新建的入站），而 allUsers 的变化
+                         有两条路径——toggleAllUsers 和 openRule 里的直接赋值，
+                         watch 也只盖得住其中一条。把联动写进 :checked 表达式，
+                         两条路径自动都对。
+
+                         allUsers 为真时提交体里这一项可能仍是 false，无妨：
+                         AttachInbound 对空数组一律跳过，两种取值行为完全一致
+                         （spec §5.2 明确后端不做强制改写）。 -->
+                    <a-checkbox :checked="ruleModal.allUsers || ruleModal.rule.applyToNewInbounds"
+                                :disabled="ruleModal.allUsers"
+                                @change="e => ruleModal.rule.applyToNewInbounds = e.target.checked">
+                        以后新增的用户自动应用此规则
+                    </a-checkbox>
+                </div>
                 <a-divider style="margin: 8px 0;"></a-divider>
                 <div v-if="!inbounds.length" style="color: #999;">还没有任何入站</div>
                 <template v-else>
@@ -1051,6 +1067,12 @@
                 this.ruleModal.rule = rule
                     ? RoutingRule.fromJson(JSON.parse(JSON.stringify(rule)))
                     : new RoutingRule();
+                if (!rule) {
+                    // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
+                    // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
+                    // 后端零值仍是 false——否则导入的旧文件也会变成 true。
+                    this.ruleModal.rule.applyToNewInbounds = true;
+                }
                 this.ruleModal.allUsers = this.ruleModal.rule.inboundIds.length === 0;
                 // 搜索词不跨弹窗保留，否则下次打开会看到一个被过滤过的列表
                 // 却想不起来为什么少了人。
