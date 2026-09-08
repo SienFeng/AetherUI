@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -687,4 +688,74 @@ func ipdbServiceWithSources(t *testing.T, primary, alt *ipdb.DB) IPDBService {
 	s.setDB("primary", primary)
 	s.setDB("alt", alt)
 	return s
+}
+
+// namedDB 给测试用的数据源指定各自的显示名。ipdbServiceWithSources 把两个源
+// 的 Name 都留成 "测试源"，分辨不出谁是谁。
+type namedDB struct {
+	name string
+	db   *ipdb.DB
+}
+
+func ipdbServiceNamed(t *testing.T, a, b namedDB) IPDBService {
+	t.Helper()
+	dir := t.TempDir()
+	sources := []ipdbSource{
+		testSource(filepath.Join(dir, "a.dat"), 1),
+		testSource(filepath.Join(dir, "b.dat"), 1),
+	}
+	sources[0].Key, sources[0].Name = "a", a.name
+	sources[1].Key, sources[1].Name = "b", b.name
+	useTestSources(t, sources)
+
+	s := IPDBService{}
+	s.setDB("a", a.db)
+	s.setDB("b", b.db)
+	return s
+}
+
+// 分歧必须能追到是哪个源说的，否则管理员没法判断该信谁。
+//
+// 生产上真实发生过：ip2region 把一个湖北的 IP 判成北京，而界面按 Sources()
+// 顺序把 ip2region 的结论当作唯一答案显示，看起来像地区限制漏放了一个北京
+// 的来源——实际上纯真库判对了，Multi.CIDRsOfProvinces 的并集也正确放行。
+// 面板已经掌握「两个源分别怎么说」这个信息，却没有交给管理员。
+func TestLocateWithIPDBCarriesSourceNames(t *testing.T) {
+	svc := ipdbServiceNamed(t,
+		namedDB{"ip2region", buildISPTestDBWithCity(t, "北京市", "中国移动")},
+		namedDB{"纯真 IP 库", buildISPTestDBWithCity(t, "武汉市", "中国移动")})
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if len(got.Sources) != 2 {
+		t.Fatalf("Sources = %+v，期望两个源各一条", got.Sources)
+	}
+	if got.Sources[0].Source != "ip2region" || !strings.Contains(got.Sources[0].Location, "北京市") {
+		t.Errorf("Sources[0] = %+v，期望 ip2region 说北京市", got.Sources[0])
+	}
+	if got.Sources[1].Source != "纯真 IP 库" || !strings.Contains(got.Sources[1].Location, "武汉市") {
+		t.Errorf("Sources[1] = %+v，期望纯真 IP 库说武汉市", got.Sources[1])
+	}
+	// 顺序必须与 Sources() 一致：主判定取的是第一个非空的，两者对不上的话
+	// tooltip 里会把结论安到错误的源头上。
+	if got.Location != got.Sources[0].Location {
+		t.Errorf("主判定 %q 与 Sources[0] %q 不一致", got.Location, got.Sources[0].Location)
+	}
+}
+
+// 只有一个源加载成功时，Sources 只有一条，界面不该显示成「两源不一致」。
+func TestLocateWithIPDBSingleSourceHasNoDisagreement(t *testing.T) {
+	dir := t.TempDir()
+	sources := []ipdbSource{testSource(filepath.Join(dir, "only.dat"), 1)}
+	sources[0].Key, sources[0].Name = "only", "ip2region"
+	useTestSources(t, sources)
+	svc := IPDBService{}
+	svc.setDB("only", buildISPTestDBWithCity(t, "北京市", "中国移动"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if len(got.Sources) != 1 {
+		t.Fatalf("Sources = %+v，期望只有一条", got.Sources)
+	}
+	if got.LocationAlt != "" {
+		t.Errorf("LocationAlt = %q，单源不该产生分歧", got.LocationAlt)
+	}
 }

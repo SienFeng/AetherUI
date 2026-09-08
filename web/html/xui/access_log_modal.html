@@ -43,8 +43,11 @@
                 <span style="color: rgba(0,0,0,.45); margin-right: 8px">近期来源：</span>
                 <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
                     <template slot="title">
-                        [[ src.location || '归属地未知' ]]<template v-if="src.locationAlt">（另一个源认为是 [[ src.locationAlt ]]）</template><br>
-                        运营商 [[ src.isp || '未知' ]]<template v-if="src.ispAlt">（另一个源认为是 [[ src.ispAlt ]]）</template><br>
+                        <template v-if="src.locationAlt || src.ispAlt">{{ template "ipDivergenceTip" "src" }}</template>
+                        <template v-else>
+                            [[ src.location || '归属地未知' ]]<br>
+                            运营商 [[ src.isp || '未知' ]]
+                        </template>
                         最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
                     </template>
                     <a-tag style="cursor: pointer; margin-bottom: 4px"
@@ -70,12 +73,12 @@
                     [[ DateUtil.formatMillis(row.time) ]]
                 </template>
                 <template slot="location" slot-scope="text, row">
+                    <!-- 改动前这里只给主判定加一条 rgba(0,0,0,.25) 的虚线，在白底上
+                         对比度 1.84:1，等于看不见——分歧被藏在 hover 后面，界面把一个
+                         存疑的答案显示得像唯一答案。 -->
                     <a-tooltip v-if="row.locationAlt || row.ispAlt">
-                        <template slot="title">
-                            <template v-if="row.locationAlt">归属地：另一个源认为是 [[ row.locationAlt ]]<br></template>
-                            <template v-if="row.ispAlt">运营商：另一个源认为是 [[ row.ispAlt ]]</template>
-                        </template>
-                        <span style="border-bottom: 1px dashed rgba(0,0,0,.25)">[[ row.location ]]</span>
+                        <template slot="title">{{ template "ipDivergenceTip" "row" }}</template>
+                        <span class="ip-divergent">[[ row.location ]]<a-icon type="question-circle"/></span>
                     </a-tooltip>
                     <span v-else-if="row.location">[[ row.location ]]</span>
                     <span v-else style="color: rgba(0,0,0,.25)">-</span>

@@ -126,6 +126,8 @@ type AccessLogRow struct {
 	LocationAlt string `json:"locationAlt"`
 	ISP         string `json:"isp"`
 	ISPAlt      string `json:"ispAlt"`
+	// Sources 见 ipLocation.Sources：分歧要能追到是哪个源说的。
+	Sources []ipSourceLocation `json:"sources"`
 }
 
 // AccessLogResult 是查询接口的返回体。
@@ -226,6 +228,7 @@ func (s *AccessLogService) GetAccessLogs(q AccessLogQuery) (*AccessLogResult, er
 			LocationAlt: loc.LocationAlt,
 			ISP:         loc.ISP,
 			ISPAlt:      loc.ISPAlt,
+			Sources:     loc.Sources,
 		})
 	}
 	return &AccessLogResult{
@@ -278,9 +281,11 @@ type RecentSource struct {
 	LocationAlt string `json:"locationAlt"`
 	ISP         string `json:"isp"`
 	ISPAlt      string `json:"ispAlt"`
-	FirstSeen   int64  `json:"firstSeen"` // 毫秒
-	LastSeen    int64  `json:"lastSeen"`
-	Count       int64  `json:"count"`
+	// Sources 见 ipLocation.Sources：分歧要能追到是哪个源说的。
+	Sources   []ipSourceLocation `json:"sources"`
+	FirstSeen int64              `json:"firstSeen"` // 毫秒
+	LastSeen  int64              `json:"lastSeen"`
+	Count     int64              `json:"count"`
 }
 
 // recentSourcesDefaultLimit 是来源列表默认返回的条数。它只是给管理员一个
@@ -330,6 +335,7 @@ func (s *AccessLogService) RecentSources(inboundId int, limit int) ([]RecentSour
 			LocationAlt: loc.LocationAlt,
 			ISP:         loc.ISP,
 			ISPAlt:      loc.ISPAlt,
+			Sources:     loc.Sources,
 			FirstSeen:   r.FirstSeen,
 			LastSeen:    r.LastSeen,
 			Count:       r.Cnt,
