@@ -159,3 +159,76 @@ func TestAccumulatorForgetDropsInboundBeforeRollover(t *testing.T) {
 		t.Errorf("入站 2 的收尾写入被误删了, got %+v", got)
 	}
 }
+
+// 字节量是并存判定的「实质使用」判据，累加器必须把它攒出来。
+//
+// OnlineIP.Up/Down 是「本次在线期间的累计值」而不是增量，所以要在 cell 里
+// 做差分。cell 刚建立那一轮记 0：进入观测之前的字节属于上一个小时或上一次
+// 在线，算进来就是把别处的流量挪到本小时。
+func TestAccumulatorAccumulatesByteDeltas(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	obs := func(up, down int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up, Down: down}}
+	}
+
+	// 首轮：cell 新建，基线设成 (1000, 2000)，本轮计 0 字节。
+	a.observe(base, obs(1000, 2000), 30)
+	// 次轮：上行 +500、下行 +1500，累计 2000；同时活跃满 60 秒触发落库。
+	got := a.observe(base.Add(30*time.Second), obs(1500, 3500), 30)
+	if len(got) != 1 {
+		t.Fatalf("满 60 秒没落库: %+v", got)
+	}
+	if got[0].ActiveBytes != 2000 {
+		t.Errorf("ActiveBytes = %d, want 2000（上行 500 + 下行 1500）", got[0].ActiveBytes)
+	}
+	if got[0].ActiveSeconds != 60 {
+		t.Errorf("ActiveSeconds = %d, want 60", got[0].ActiveSeconds)
+	}
+}
+
+// 客户端断开重连时，tracker 的累计字节会从头开始。按 now-prev 算会得到负数，
+// 必须按全量计入——这与 online.go 的 deltaBytes 是同一条约束，本测试钉住
+// 累加器确实走了那条路径。
+func TestAccumulatorHandlesCounterResetOnReconnect(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	obs := func(up, down int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up, Down: down}}
+	}
+
+	a.observe(base, obs(10000, 20000), 30)
+	// 重连：计数器归零后重新涨到 (300, 700)，本轮应计 1000 而不是负数。
+	got := a.observe(base.Add(30*time.Second), obs(300, 700), 30)
+	if len(got) != 1 {
+		t.Fatalf("满 60 秒没落库: %+v", got)
+	}
+	if got[0].ActiveBytes != 1000 {
+		t.Errorf("ActiveBytes = %d, want 1000（计数器回退按全量计入）", got[0].ActiveBytes)
+	}
+}
+
+// 跨小时收尾写入同样要带上字节数，否则整点前最后一段的流量在库里是 0，
+// 而 computeCoexist 会把 0 字节的行判成「不实质」直接丢掉。
+func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
+	a := newSharingAccumulator()
+	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	obs := func(up int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up}}
+	}
+
+	a.observe(h10, obs(0), 30)
+	a.observe(h10.Add(30*time.Second), obs(5000), 30) // 落库，5000 字节
+	a.observe(h10.Add(60*time.Second), obs(9000), 30) // 未到下一次落库门槛
+	got := a.observe(h11, obs(9000), 30)
+	if len(got) == 0 {
+		t.Fatal("跨小时没有补写收尾记录")
+	}
+	if got[0].HourStart != model.AlignHourUTC(h10) {
+		t.Fatalf("收尾记录落在了错误的小时: %+v", got[0])
+	}
+	if got[0].ActiveBytes != 9000 {
+		t.Errorf("收尾记录 ActiveBytes = %d, want 9000", got[0].ActiveBytes)
+	}
+}

@@ -202,3 +202,121 @@ func TestSuggestRegionsEmptyWhenNoProvinceAtAll(t *testing.T) {
 			got.Suggested, got.Coexisting)
 	}
 }
+
+// hourRowBytes 造一条带字节量的小时桶记录。
+func hourRowBytes(inboundId int, hour int64, ip, province string, seconds int, bytes int64) model.InboundIPHour {
+	r := hourRow(inboundId, hour, ip, province, seconds)
+	r.ActiveBytes = bytes
+	return r
+}
+
+// 生产实测复现：某入站显示「并存 15 小时 / 2 省」，而第二个省那个 IP 每小时
+// 只累计 60~180 秒、访问日志里一条记录都没有——它在反复建连做 TLS 握手，
+// 从未发出过一个可路由的请求。活跃时长分不出这种连接，字节量可以。
+func TestCoexistRequiresSubstantialBytes(t *testing.T) {
+	const h = 3600
+	const MB = 1 << 20
+	rows := []model.InboundIPHour{
+		// 真实使用者：整点满活跃、几十 MB。
+		hourRowBytes(1, 0*h, "114.247.119.119", "北京市", 3600, 80*MB),
+		hourRowBytes(1, 1*h, "114.247.119.119", "北京市", 3600, 60*MB),
+		// 只做握手/重连的连接：活跃 150 秒、几十 KB。
+		hourRowBytes(1, 0*h, "183.167.113.33", "安徽省", 150, 40*1024),
+		hourRowBytes(1, 1*h, "183.167.113.33", "安徽省", 60, 12*1024),
+	}
+	got := computeCoexist(rows)
+	if got.Hours != 0 {
+		t.Errorf("Hours = %d, want 0——第二个省没有实质流量，不该算并存", got.Hours)
+	}
+	if len(got.Provinces) != 0 {
+		t.Errorf("Provinces = %v, want 空", got.Provinces)
+	}
+}
+
+// 双方都有实质流量时照常报出并存——字节门槛只挡「没在用」，不该把真的
+// 转卖一起挡掉。
+func TestCoexistStillReportsWhenBothSidesSubstantial(t *testing.T) {
+	const h = 3600
+	const MB = 1 << 20
+	rows := []model.InboundIPHour{
+		hourRowBytes(1, 0*h, "1.1.1.1", "江苏省", 3600, 50*MB),
+		hourRowBytes(1, 0*h, "2.2.2.2", "上海市", 1800, 20*MB),
+		hourRowBytes(1, 1*h, "1.1.1.1", "江苏省", 3600, 40*MB),
+		hourRowBytes(1, 1*h, "2.2.2.2", "上海市", 1800, 15*MB),
+	}
+	got := computeCoexist(rows)
+	if got.Hours != 2 {
+		t.Errorf("Hours = %d, want 2", got.Hours)
+	}
+	if !reflect.DeepEqual(got.Provinces, []string{"上海市", "江苏省"}) {
+		t.Errorf("Provinces = %v", got.Provinces)
+	}
+}
+
+// 升级前写入的行 ActiveBytes 全是 0。判据按「整批数据里有没有字节量」整体
+// 切换，而不是逐行判断：逐行判会把一条恰好落在采样边界、字节增量为 0 的
+// 新行误当成老行。一行都没有字节时回落旧口径，老数据的判定结果不变。
+func TestCoexistFallsBackToSecondsWhenNoRowCarriesBytes(t *testing.T) {
+	const h = 3600
+	rows := []model.InboundIPHour{
+		hourRow(1, 0*h, "1.1.1.1", "江苏省", 3600),
+		hourRow(1, 0*h, "2.2.2.2", "上海市", 3600),
+	}
+	if got := computeCoexist(rows).Hours; got != 1 {
+		t.Errorf("Hours = %d, want 1——没有任何字节数据时应回落旧口径", got)
+	}
+}
+
+// 一旦窗口内出现了带字节量的行，就对**所有**行应用门槛，老行（0 字节）因此
+// 被排除。这是刻意的：老行无法证明有实质流量，报不出来比报一个不可信的
+// 数字好——这个功能的失效方向应当偏保守。
+func TestCoexistExcludesLegacyRowsOnceBytesAppear(t *testing.T) {
+	const h = 3600
+	const MB = 1 << 20
+	rows := []model.InboundIPHour{
+		hourRow(1, 0*h, "1.1.1.1", "江苏省", 3600),             // 老行
+		hourRow(1, 0*h, "2.2.2.2", "上海市", 3600),             // 老行
+		hourRowBytes(1, 5*h, "1.1.1.1", "江苏省", 3600, 30*MB), // 新行
+	}
+	if got := computeCoexist(rows).Hours; got != 0 {
+		t.Errorf("Hours = %d, want 0——出现字节数据后老行不再参与判定", got)
+	}
+}
+
+// 降级口径（窗口内所有行的 Province 都为空）同样要过字节门槛。它的误报率
+// 本来就比省份口径高得多，放宽只会让降级状态下的橙标更不可信。
+func TestCoexistByteGateAppliesToIPFallback(t *testing.T) {
+	const h = 3600
+	const MB = 1 << 20
+	rows := []model.InboundIPHour{
+		hourRowBytes(1, 0*h, "1.1.1.1", "", 3600, 30*MB),
+		hourRowBytes(1, 0*h, "2.2.2.2", "", 120, 8*1024),
+	}
+	got := computeCoexist(rows)
+	if !got.ByIP {
+		t.Fatal("所有行都没有省份，应当是 IP 降级口径")
+	}
+	if got.Hours != 0 {
+		t.Errorf("Hours = %d, want 0——第二个 IP 没有实质流量", got.Hours)
+	}
+}
+
+// 地区建议**不**过字节门槛。它算的是「这个人实际在哪些省活跃」，按时长
+// 加权 + 95% 覆盖是对的；加门槛会让一个「用得少但真在用」的省份掉出建议，
+// 管理员采纳后就把自己的用户挡在门外了。
+func TestRegionSuggestionIgnoresByteGate(t *testing.T) {
+	const h = 3600
+	const MB = 1 << 20
+	rows := []model.InboundIPHour{
+		hourRowBytes(1, 0*h, "1.1.1.1", "江苏省", 3000, 50*MB),
+		hourRowBytes(1, 0*h, "2.2.2.2", "上海市", 1200, 4*1024),
+	}
+	got := suggestRegions(rows)
+	want := []string{"上海市", "江苏省"}
+	if !reflect.DeepEqual(got.Suggested, want) {
+		t.Errorf("Suggested = %v, want %v——字节门槛不该影响地区建议", got.Suggested, want)
+	}
+	if len(got.Coexisting) != 0 {
+		t.Errorf("Coexisting = %v, want 空——并存判定过了字节门槛，上海不算并存", got.Coexisting)
+	}
+}

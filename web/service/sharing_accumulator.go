@@ -33,6 +33,17 @@ type sharingCell struct {
 	province  string
 	seconds   int // 本小时累计活跃秒数
 	flushedAt int // 上次落库时 seconds 的值
+
+	// bytes 是本小时累计的上下行字节，lastUp/lastDown 是上一轮观测到的
+	// 累计值——OnlineIP.Up/Down 给的是「本次在线期间的累计量」而不是增量，
+	// 差分必须在这里做。
+	//
+	// cell 新建那一轮只设基线、不计字节：进入观测之前的流量属于上一个小时
+	// 或上一次在线，算进来就是把别处的流量挪到本小时。代价是每小时的第一个
+	// 采样间隔（30 秒）的流量不计入，相对 1 MB 的判定门槛可以忽略。
+	bytes    int64
+	lastUp   int64
+	lastDown int64
 }
 
 // sharingObservation 是一轮采样里的一条「这个 IP 此刻正在实质使用这个入站」。
@@ -40,6 +51,10 @@ type sharingObservation struct {
 	InboundId int
 	IP        string
 	Province  string
+
+	// Up/Down 是 tracker 给出的**本次在线期间累计**字节，不是本轮增量。
+	Up   int64
+	Down int64
 }
 
 // sharingFlush 是一条待写入的记录。
@@ -52,6 +67,7 @@ type sharingFlush struct {
 	Province      string
 	HourStart     int64
 	ActiveSeconds int
+	ActiveBytes   int64
 }
 
 // sharingAccumulator 在内存里累计各来源 IP 的活跃时长，满门槛才产出落库项。
@@ -105,9 +121,16 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 				a.cappedWarned[o.InboundId]++
 				continue
 			}
-			cell = &sharingCell{province: o.Province}
+			cell = &sharingCell{province: o.Province, lastUp: o.Up, lastDown: o.Down}
 			a.cells[key] = cell
 			perInbound[o.InboundId]++
+		} else {
+			// 复用 online.go 的 deltaBytes：内核计数器只会单调增长，出现
+			// 回退只可能是客户端断开重连、计数器从头开始，此时按全量计入，
+			// 绝不产生负增量。
+			cell.bytes += int64(deltaBytes(uint64(o.Up), uint64(cell.lastUp), true))
+			cell.bytes += int64(deltaBytes(uint64(o.Down), uint64(cell.lastDown), true))
+			cell.lastUp, cell.lastDown = o.Up, o.Down
 		}
 		// 省份以最近一次判定为准：归属地库更新后同一个 IP 的判定可能变，
 		// 用新的比留着旧的合理。空串不覆盖已知值——一次查库失败不该把
@@ -120,7 +143,7 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 			cell.flushedAt = cell.seconds
 			out = append(out, sharingFlush{
 				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
-				HourStart: hour, ActiveSeconds: cell.seconds,
+				HourStart: hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
 			})
 		}
 	}
@@ -138,7 +161,7 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 		if cell.seconds >= sharingFlushThreshold && cell.seconds > cell.flushedAt {
 			out = append(out, sharingFlush{
 				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
-				HourStart: a.hour, ActiveSeconds: cell.seconds,
+				HourStart: a.hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
 			})
 		}
 	}

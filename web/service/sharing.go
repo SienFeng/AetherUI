@@ -83,6 +83,8 @@ func (s *SharingService) Sample(now time.Time) error {
 				InboundId: in.Id,
 				IP:        e.IP,
 				Province:  s.provinceOf(e.IP),
+				Up:        e.Up,
+				Down:      e.Down,
 			})
 		}
 	}
@@ -151,13 +153,13 @@ func (s *SharingService) provinceOf(ipStr string) string {
 func upsertIPHour(db *gorm.DB, f sharingFlush) error {
 	row := &model.InboundIPHour{
 		InboundId: f.InboundId, IP: f.IP, HourStart: f.HourStart,
-		Province: f.Province, ActiveSeconds: f.ActiveSeconds,
+		Province: f.Province, ActiveSeconds: f.ActiveSeconds, ActiveBytes: f.ActiveBytes,
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "inbound_id"}, {Name: "ip"}, {Name: "hour_start"},
 		},
-		DoUpdates: clause.AssignmentColumns([]string{"province", "active_seconds"}),
+		DoUpdates: clause.AssignmentColumns([]string{"province", "active_seconds", "active_bytes"}),
 	}).Create(row).Error
 }
 
@@ -217,6 +219,10 @@ type SharingDetailEntry struct {
 	IP            string `json:"ip"`
 	Province      string `json:"province"`
 	ActiveSeconds int    `json:"activeSeconds"`
+	// ActiveBytes 是并存判定的实质使用判据（coexistMinActiveBytes），显示
+	// 出来管理员才看得见某一条为什么算数或为什么被排除——门槛是个量级判断
+	// 而非实测标定，界面上藏着它就没法据真实分布调整。
+	ActiveBytes int64 `json:"activeBytes"`
 }
 
 // SharingDetailHour 是明细里的一个小时。
@@ -322,19 +328,24 @@ func (s *SharingService) Detail(inboundId int, now time.Time) (*SharingDetail, e
 		}
 		byHour[r.HourStart] = append(byHour[r.HourStart], r)
 	}
+	// 判据对整段历史算一次，逐小时沿用同一个——逐小时各算各的会让升级前的
+	// 小时按旧口径判、升级后的按新口径判，同一张表里两种判据混用。
+	byteGate := hasActiveBytes(historyRows)
+
 	// historyRows 已按 hour_start 升序，这里倒过来给前端：最近的排最前。
 	for i := len(order) - 1; i >= 0; i-- {
 		hour := order[i]
 		list := byHour[hour]
 		// 只列发生过并存的小时。全都列出来的话，一个正常用户 30 天有几百
 		// 个小时，管理员要找的那几行会被淹掉。
-		if computeCoexist(list).Hours == 0 {
+		if computeCoexistGated(list, byteGate).Hours == 0 {
 			continue
 		}
 		entries := make([]SharingDetailEntry, 0, len(list))
 		for _, r := range list {
 			entries = append(entries, SharingDetailEntry{
-				IP: r.IP, Province: r.Province, ActiveSeconds: r.ActiveSeconds,
+				IP: r.IP, Province: r.Province,
+				ActiveSeconds: r.ActiveSeconds, ActiveBytes: r.ActiveBytes,
 			})
 		}
 		detail.Hours = append(detail.Hours, SharingDetailHour{
