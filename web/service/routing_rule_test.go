@@ -1208,3 +1208,104 @@ func TestAddInboundRollsBackWhenAttachFails(t *testing.T) {
 		t.Error("扩散失败但入站落库了，事务没有回滚")
 	}
 }
+
+// 不加这条约束，新建入站会被同时扩散进两条规则，它们随即在同一域名组下
+// 覆盖同一个入站——系统自己造出违反核心不变量的数据，而管理员什么都没做错。
+func TestCheckConflictRejectsSecondAutoApplyRuleInSameGroup(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	err := s.Add(second)
+	if err == nil {
+		t.Fatal("同一域名组下第二条声明自动应用的规则应当被拒绝")
+	}
+	// importRules 靠 strings.Contains(err, "冲突") 把这类错误计入 Skipped
+	// 而非 Failed，导入才能保持幂等。
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Errorf("错误文案必须含「冲突」二字，实际: %v", err)
+	}
+}
+
+// 入站集合不重叠时，两条规则本来可以共存；只有都声明自动应用才冲突。
+func TestCheckConflictAllowsSecondRuleWithoutAutoApply(t *testing.T) {
+	setupDB(t)
+	g := newTestGroup(t, "ChatGPT")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: g.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: false,
+	}
+	if err := s.Add(second); err != nil {
+		t.Errorf("未声明自动应用的规则不该被拒绝: %v", err)
+	}
+}
+
+// 判定单位是域名组不是规则：一条规则可以引用多个组，任一组撞上即冲突。
+func TestCheckConflictAutoApplyIsPerDomainGroup(t *testing.T) {
+	setupDB(t)
+	g1 := newTestGroup(t, "ChatGPT")
+	g2 := newTestGroup(t, "Claude")
+	s := RoutingRuleService{}
+	first := &model.RoutingRule{
+		Remark: "甲", InboundIds: "[3]", DomainGroupId: g1.Id,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g1.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(first); err != nil {
+		t.Fatalf("Add first: %v", err)
+	}
+	// 乙引用 {Claude, ChatGPT}，与甲在 ChatGPT 上撞车。
+	second := &model.RoutingRule{
+		Remark: "乙", InboundIds: "[9]", DomainGroupId: 0,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g1.Id, g2.Id}),
+		Action:         model.ActionBlock, Enable: true, ApplyToNewInbounds: true,
+	}
+	if err := s.Add(second); err == nil {
+		t.Error("多组规则与已有声明者在任一组上撞车都应当被拒绝")
+	}
+}
+
+// 表单里有这个复选框，管理员改了就该落库——与相邻的 priority 结论相反。
+func TestUpdateSyncsApplyToNewInbounds(t *testing.T) {
+	setupDB(t)
+	r := newTestRuleWithInbounds(t, "自动纳新", []int{3}, true)
+	s := RoutingRuleService{}
+	edited, err := s.Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	edited.ApplyToNewInbounds = false
+	if err := s.Update(edited); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	got, err := s.Get(r.Id)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got.ApplyToNewInbounds {
+		t.Error("取消勾选没有落库")
+	}
+}

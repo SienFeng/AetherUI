@@ -188,6 +188,18 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 		if !sharedGroup {
 			continue
 		}
+		// 两条规则都声明「自动应用于新增用户」且共享域名组时必须拒绝：
+		// 新建入站会被同时扩散进两条，它们随即在同一域名组下覆盖同一个入站，
+		// 违反本函数守的核心不变量——而那次写入由 AttachInbound 发起，
+		// 不走表单校验，这里拦不住就没有第二道防线了。
+		//
+		// 判定单位是域名组不是规则：一条规则可以引用多个组。
+		if rule.ApplyToNewInbounds && other.ApplyToNewInbounds {
+			return common.NewErrorf(
+				"与分流规则「%s」冲突：域名组「%s」下已有一条声明了「以后新增用户自动应用」的规则。"+
+					"同一个域名组下只能有一条规则自动纳入新用户。",
+				ruleLabel(other), s.groupLabel(whichGroup))
+		}
 		otherIds, decodeErr := DecodeInboundIds(other.InboundIds)
 		if decodeErr != nil {
 			continue
@@ -254,6 +266,12 @@ func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
 	// 表单没有优先级输入框，ruleFromForm 出来的那一项恒为零值，照抄会让
 	// 任何一次「改个备注」都把规则弹到列表顶部——管理员改的是备注，动的
 	// 却是分流的先后顺序，而且不会有任何提示。
+	// （紧随其后的 ApplyToNewInbounds 结论相反，那一项必须同步。）
+	//
+	// 与紧邻的 priority 结论相反：priority 刻意不同步（表单没有那一项，
+	// 照抄零值会把规则弹到列表顶部），而这个字段表单里确实有复选框，
+	// 管理员改了就该落库。两者相邻，照着隔壁抄就会抄错。
+	old.ApplyToNewInbounds = rule.ApplyToNewInbounds
 	old.Enable = rule.Enable
 	db := database.GetDB()
 	return db.Save(old).Error
