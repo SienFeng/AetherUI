@@ -151,6 +151,8 @@ func (s *ServerService) ReplaceXrayFiles(version string) error {
 }
 ```
 
+> **最终修复轮的更正**：上面 `extractXrayFiles` 那条注释「条目不存在时在删除目标文件之前就返回，所以缺条目不会破坏已有的核心」**比事实宽，已改**。它只对 `xray` 这一个条目成立——三个条目原本各写各的，zip 里有 `xray` 但缺 `geosite.dat` 时核心已经被换掉了函数才报错。更要紧的是原地写本身：`copyZipFile` 第一件事是 `os.Remove(目标)`，于是发版包那份唯一可用的种子核心在写第一个字节之前就没了，随后 `io.Copy` 失败（磁盘满，或 §5.1 那个 `timeout 600` 发来的 SIGTERM 直接杀掉进程、Go 不跑 defer）留下一个截断文件，而安装脚本紧接着 `chmod +x` 它并打印「将使用安装包内自带的版本」——自带的那份已经被这次失败的写入吃掉了。现在的实现是**全有或全无**：三个条目先各自写成同目录下的 `.tmp`，全部成功才逐个 `os.Rename` 就位（同目录是因为跨文件系统 rename 会失败；Linux 上 rename 覆盖正在运行的可执行文件合法，所以不再需要 `os.Remove`），中途失败清掉临时文件、一个目标都不动。回归测试见 §9.1。
+
 `openXrayZip` / `extractXrayFiles` 都不挂在 `ServerService` 上：都不需要任何服务状态，做成包级函数能让测试直接调，不必构造 service；`extractXrayFiles` 收显式路径参数而不是内部调 `xray.GetBinaryPath()`，是为了让测试能重定向到临时目录（见函数注释）。
 
 `downloadXRay` 不动。它把 zip 落在当前工作目录，而 `install.sh` 走到调用点时 pwd 正好是 `/usr/local/a-ui`，`bin/` 相对路径天然对得上。
@@ -204,7 +206,10 @@ a-ui xray -update v26.9.9     # 装指定版本
 
 - **`install_en.sh` 必须同步改。** CLAUDE.md「运维脚本」一节明文要求四个 shell 脚本成对维护——`install.sh`/`install_en.sh` 一对，`a-ui.sh`/`a-ui_en.sh` 另一对。这两个函数只加进 `install.sh` 的话，英文安装包用户完全拿不到本设计的功能，而且是静默的（脚本不报错，只是行为退回改动前）。最终两个脚本都加了同构的 `backup_xray_assets` / `restore_or_install_xray`。
 - **拉取要有超时。** `web/service/server.go` 里 `downloadXRay`／`GetXrayVersions` 用的是 Go 默认 `http.Client`，没有 `Timeout`。GitHub 只是被丢包（不是拒绝连接）时，`http.Get` 会永久挂住——而 `restore_or_install_xray` 走到调用 `a-ui xray -update latest` 这一步时，面板已经停了、`/usr/local/a-ui/` 已经删了重铺、systemd 单元还没起来，挂住就是把机器留在这个半死状态里出不来。调用点因此包一层 `timeout 600`（`command -v timeout` 判断该命令是否存在，不存在就退化成直接调用——不能让「没有 `timeout` 命令」这种边缘情况变成安装失败）。600 秒足够慢速网络拉完约 37MB 的核心；超时后走 §6 表里「拉取失败」那一行的既有 fail open 分支。
-- **备份目录不能落在 `/tmp`。** `mktemp -d` 默认给的路径在 systemd 发行版上通常在 `/tmp`，而多数发行版把 `/tmp` 挂成内存 tmpfs。三个待备份文件（xray 核心 + geoip.dat + geosite.dat）合计能到 60~70MB，这次拷贝还发生在 `systemctl stop` **之前**——面板与 xray 都在正常提供服务，是这台机器内存占用的峰值时刻。小内存 VPS 上 `/tmp` 装不下，会让 `backup_xray_assets` 本身失败，而它是 §6 表里唯一 fail close 的一步，代价是管理员从此彻底无法更新面板。改用 `mktemp -d /usr/local/a-ui-xray-backup-XXXXXX`：与 `/usr/local/a-ui/` 同级但不同名的兄弟目录，不占 tmpfs 配额，也不会被 `rm /usr/local/a-ui/ -rf`（结尾的 `/` 只删这一棵目录树）误删。
+- **拉取成功之后要验一次核心能不能跑（最终修复轮补上）。** 有了上面那条原子写之后仍有一类失败挡不住：拉到的核心能解包但跑不起来（发布包损坏、架构不匹配），此时 `a-ui xray` 退出 0，脚本一句话都不打，而这份核心紧接着被 `chmod +x`，`Process.Start()` 又从不回传启动失败（`/server/status` 仍返回 `running`），只有用户报节点不通才会发现。所以拉取分支改成：拉之前把发版包自带的种子核心存进备份目录（没有就现建一个，前缀与 `backup_xray_assets` 相同，好被同一条清理与卸载脚本的 `rm -rf` 覆盖），拉完跑一次 `"bin/xray-linux-<arch>" -version`；不通过就把种子拷回来再打那句「将使用安装包内自带的版本」——**那时它才是真的**。种子也拷不回来、或它本身跑不起来时打红色告警，明说节点不会通，不假装安装成功；验证通过才打成功提示。
+- **`restore_or_install_xray` 里那条 `cd /usr/local/a-ui` 失败时必须保留备份（最终修复轮）。** 触发条件是上面那个未检查返回值的 `tar zxvf` 解压失败，此刻面板已停、安装目录已被 `rm -rf`，备份里那份核心是管理员钉住的版本在这台机器上仅存的副本——原实现在这条路径上 `rm -rf "${xray_backup_dir}"`，删掉之后他重跑安装只会走拉取分支，再也拿不回原来的版本。现在保留备份并把路径打进错误信息。
+- **拉取分支的提示文案不说「全新安装」（最终修复轮）。** 判据是 §3 那条「有没有备到 `xray-linux-<arch>`」，不是「是不是全新安装」：`/usr/local/a-ui/bin` 存在但核心被管理员删过的机器同样走这条分支，而这次拉取发生在 `systemctl stop` **之后**，最坏 600 秒停机。文案改为「未找到可保留的 xray 核心，正在获取最新版...」，不预设原因。
+- **备份目录不能落在 `/tmp`。** `mktemp -d` 默认给的路径在 systemd 发行版上通常在 `/tmp`，而多数发行版把 `/tmp` 挂成内存 tmpfs。三个待备份文件（xray 核心 + geoip.dat + geosite.dat）合计能到 60~70MB，这次拷贝还发生在 `systemctl stop` **之前**——面板与 xray 都在正常提供服务，是这台机器内存占用的峰值时刻。小内存 VPS 上 `/tmp` 装不下，会让 `backup_xray_assets` 本身失败，而它是 §6 表里唯一 fail close 的一步，代价是管理员从此彻底无法更新面板。改用 `mktemp -d /usr/local/a-ui-xray-backup-XXXXXX`：与 `/usr/local/a-ui/` 同级但不同名的兄弟目录，不占 tmpfs 配额，也不会被 `rm /usr/local/a-ui/ -rf`（结尾的 `/` 只删这一棵目录树）误删。**代价（最终修复轮补上的尾巴）**：搬出 `/tmp` 也就失去了「重启即清」，安装被 Ctrl-C 或信号打断留下的约 66MB 残留会一直留着。`a-ui.sh` / `a-ui_en.sh` 的 `uninstall()` 各加一行 `rm -rf /usr/local/a-ui-xray-backup-*` 收尾——比加 `trap` 便宜，也不引入新的信号处理路径。
 
 ## 6. 失败路径
 
@@ -240,7 +245,7 @@ CLAUDE.md「运维脚本」一节里这句：
 ### 9.1 Go 侧（可自动化）
 
 - `a-ui xray` 的 flag 解析：照 `main_flags_test.go` 的形式加用例，覆盖 `-update latest`、`-update <版本>`、缺参数、未知参数。
-- `openXrayZip` / `extractXrayFiles`：喂一个当场构造的 zip（含 `xray` / `geosite.dat` / `geoip.dat` 三个条目），验证 `openXrayZip` 能读出 reader、`extractXrayFiles` 把三个文件解到显式传入的路径且内容正确；另覆盖条目缺失、zip 本身损坏两种情况。这两层脱网，是本次改动里唯一能被自动化覆盖的实质逻辑（§4.1 把下载单独分出去就是为了这个），落在 `web/service/server_xray_update_test.go`。
+- `openXrayZip` / `extractXrayFiles`：喂一个当场构造的 zip（含 `xray` / `geosite.dat` / `geoip.dat` 三个条目），验证 `openXrayZip` 能读出 reader、`extractXrayFiles` 把三个文件解到显式传入的路径且内容正确；另覆盖条目缺失、zip 本身损坏两种情况。**条目缺失是两条，不是一条**（最终修复轮）：缺 `xray` 与**有 `xray` 但缺 `geosite.dat`**，后者正是原地写实现下会毁掉核心的那条路径，断言三个目标全都原样不动——它在旧实现上确实会红。另加两条断言：解出来的核心带可执行位（`.tmp` + rename 的写法若改用 `os.CreateTemp` 会静默丢掉这一位，而面板「切换版本」装出来的核心从此起不来），以及目录里不留 `.tmp` 残留。这两层脱网，是本次改动里唯一能被自动化覆盖的实质逻辑（§4.1 把下载单独分出去就是为了这个），落在 `web/service/server_xray_update_test.go`。
 - 回归：`UpdateXray` / `ReplaceXrayFiles` 拆分后对外行为不变，这一点靠上一条间接覆盖。
 - `firstReleaseTag`：覆盖空列表、首项空字符串、正常首项三种情况（§4.2）。
 
