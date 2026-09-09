@@ -24,6 +24,13 @@ stopped_web_svc=""
 # 那就还是原来的样子"，直到有人来报节点不通才发现。
 a_ui_stopped=0
 
+# backup_xray_assets 写入、restore_or_install_xray 消费的备份目录路径；
+# 为空表示这次没有可用的备份（全新安装，或 /usr/local/a-ui/bin 本就不存在）。
+# 两个函数不在同一次调用里执行——backup 在 install_a-ui() 里 stop 之前调用
+# 一次，restore 在解压之后再调用一次——所以必须是跨函数的顶层变量，不能
+# 局部化。
+xray_backup_dir=""
+
 # 打印错误并退出，退出前把被本脚本停掉的面板重新拉起来。
 # 只在确实停过时才动 systemctl：全新安装时去 start 一个还没配好的服务，
 # 只会多出一条与真正病因无关的失败日志，把排查带偏。
@@ -1136,12 +1143,21 @@ domain_flow() {
 # 放在 systemctl stop 之前：这一步要写磁盘、可能失败，而失败必须能在面板
 # 尚未停机时干净退出。复制正在被 xray 使用的可执行文件是安全的——cp 读的是
 # 文件内容，不影响已经打开的 inode。
+#
+# 备份目录特意不落在 mktemp -d 的默认位置（/tmp）：systemd 发行版上 /tmp
+# 通常是内存 tmpfs，而 xray 核心 + geoip.dat + geosite.dat 加起来能到
+# 60~70MB，这次拷贝还发生在 systemctl stop 之前——面板与 xray 都在正常
+# 提供服务，正是这台机器内存占用的峰值时刻。小内存 VPS 上 /tmp 装不下就是
+# 本函数唯一的 fail close 路径，会让管理员从此彻底无法更新面板。改落到
+# /usr/local 下、与 a-ui 同级但不同名的兄弟目录：下面 install_a-ui() 里
+# `rm /usr/local/a-ui/ -rf`（注意结尾的 /，只删 a-ui 这一棵目录树）删不到
+# 它，也不占用 tmpfs 的内存配额。
 backup_xray_assets() {
     xray_backup_dir=""
     [[ ! -d /usr/local/a-ui/bin ]] && return 0
 
     local dir
-    dir=$(mktemp -d) || die_restoring_panel "创建 xray 备份目录失败，已中止更新（安装目录未被改动）"
+    dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX) || die_restoring_panel "创建 xray 备份目录失败，已中止更新（安装目录未被改动）"
 
     local f
     for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
@@ -1164,20 +1180,48 @@ backup_xray_assets() {
 # 恢复与拉取两条路径都 fail open——退回发版包里那份 xray 继续安装。它是能用的，
 # 不该为了「装到最新」而让整个安装失败。
 restore_or_install_xray() {
-    cd /usr/local/a-ui || die_restoring_panel "进入安装目录失败"
+    cd /usr/local/a-ui || { rm -rf "${xray_backup_dir}"; die_restoring_panel "进入安装目录失败"; }
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
+        # 分开记核心与 geo 是否真的恢复成功，成功行的措辞与是否打印都要
+        # 按实际结果来——三个 cp 全失败时上面已经打过三条黄色警告，不能
+        # 再无条件补一条绿色「已保留」；只恢复了核心时也不能说「与 geo
+        # 数据」，那两处都是「看起来成功其实失败」，正是本仓库通篇在防的
+        # 情形。
+        local restored_core=0 restored_geo=0
         local f
         for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
             if [[ -f "${xray_backup_dir}/${f}" ]]; then
-                cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}" \
-                    || echo -e "${yellow}警告: 恢复 ${f} 失败，将使用安装包内自带的版本${plain}"
+                if cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}"; then
+                    if [[ "${f}" == "xray-linux-${arch}" ]]; then
+                        restored_core=1
+                    else
+                        restored_geo=1
+                    fi
+                else
+                    echo -e "${yellow}警告: 恢复 ${f} 失败，将使用安装包内自带的版本${plain}"
+                fi
             fi
         done
-        echo -e "${green}已保留原有的 xray 核心与 geo 数据${plain}"
+        if [[ ${restored_core} -eq 1 && ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 xray 核心与 geo 数据${plain}"
+        elif [[ ${restored_core} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 xray 核心（geo 数据使用安装包内自带版本）${plain}"
+        elif [[ ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 geo 数据（xray 核心使用安装包内自带版本）${plain}"
+        fi
     else
         echo "全新安装，正在获取最新版 xray 核心..."
-        if ! /usr/local/a-ui/a-ui xray -update latest; then
+        # 加超时：GitHub 被丢包（而非拒绝连接）时 http.Get 会永久挂住，而此刻面板已停、
+        # 安装目录已删并重铺、systemd 单元还没就位——挂在这里等于把机器留在半死状态。
+        # 10 分钟足够慢速网络拉完 37MB 的核心；超时后走下面的 fail open 分支。
+        local fetch_ok=0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 600 /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        else
+            /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        fi
+        if [[ ${fetch_ok} -ne 1 ]]; then
             echo -e "${yellow}警告: 获取最新版 xray 失败，将使用安装包内自带的版本${plain}"
             echo -e "${yellow}      装好后可在面板首页「切换版本」手动升级${plain}"
         fi

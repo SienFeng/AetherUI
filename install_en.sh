@@ -30,6 +30,14 @@ stopped_web_svc=""
 # someone reports the nodes are down.
 a_ui_stopped=0
 
+# Path written by backup_xray_assets and consumed by restore_or_install_xray;
+# empty means there is no usable backup for this run (a fresh install, or
+# /usr/local/a-ui/bin simply didn't exist yet). The two functions don't run
+# within the same call — backup happens once inside install_a-ui() right
+# before stop, restore happens once more after extraction — so this has to
+# be a top-level variable shared across functions, not a local one.
+xray_backup_dir=""
+
 # Print an error and exit, restarting the panel if this script stopped it.
 # Only touch systemctl when we really did stop it: on a fresh install,
 # starting a service that isn't configured yet just adds a failure log line
@@ -1282,7 +1290,7 @@ domain_flow() {
 # Back up the xray core and geo data so they can be restored after
 # extraction. An empty xray_backup_dir means there is no backup.
 #
-# Why this exists: install.sh does rm -rf on the whole install directory and
+# Why this exists: this script does rm -rf on the whole install directory and
 # then unpacks the release tarball, and the tarball bundles the xray copy
 # checked into this repo (see the packaging step in release.yml). Any core
 # the admin upgraded from the panel, and the Loyalsoldier-enhanced geo data
@@ -1292,12 +1300,24 @@ domain_flow() {
 # failure here must be able to exit cleanly while the panel is still up.
 # Copying an executable that xray currently has open is safe — cp reads file
 # contents and does not disturb the already-open inode.
+#
+# The backup directory deliberately avoids mktemp -d's default location
+# (/tmp): on systemd distros /tmp is usually an in-memory tmpfs, and the
+# xray core plus geoip.dat plus geosite.dat can add up to 60-70MB — and this
+# copy happens before systemctl stop, while the panel and xray are still
+# serving traffic, exactly the peak of this machine's memory usage. On a
+# low-memory VPS, /tmp running out of space is this function's only fail
+# close path, and it would leave the admin permanently unable to update the
+# panel. Put it under /usr/local instead, as a sibling directory next to
+# a-ui but with a different name: the `rm /usr/local/a-ui/ -rf` below (note
+# the trailing /, which only deletes the a-ui tree) cannot reach it, and it
+# does not eat into the tmpfs memory budget either.
 backup_xray_assets() {
     xray_backup_dir=""
     [[ ! -d /usr/local/a-ui/bin ]] && return 0
 
     local dir
-    dir=$(mktemp -d) || die_restoring_panel "Failed to create the xray backup directory, update aborted (install directory left untouched)"
+    dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX) || die_restoring_panel "Failed to create the xray backup directory, update aborted (install directory left untouched)"
 
     local f
     for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
@@ -1324,22 +1344,58 @@ backup_xray_assets() {
 # copy bundled in the release tarball and continuing the install. That copy
 # works fine; the whole install should not fail just to get the latest core.
 restore_or_install_xray() {
-    cd /usr/local/a-ui || die_restoring_panel "Failed to enter the install directory"
+    cd /usr/local/a-ui || { rm -rf "${xray_backup_dir}"; die_restoring_panel "Failed to enter the install directory"; }
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
+        # Track whether the core and geo data were actually restored
+        # separately, and only print — and word — the success line based on
+        # what really happened. If all three cp calls failed, three yellow
+        # warnings were already printed above; an unconditional green
+        # "kept" line on top of that, or a "kept ... and geo data" line
+        # when only the core was restored, would both be exactly the
+        # "looks like it succeeded but actually failed" pattern this repo
+        # guards against everywhere else.
+        local restored_core=0 restored_geo=0
         local f
         for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
             if [[ -f "${xray_backup_dir}/${f}" ]]; then
-                cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}" \
-                    || echo -e "${yellow}Warning: failed to restore ${f}, falling back to the bundled version${plain}"
+                if cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}"; then
+                    if [[ "${f}" == "xray-linux-${arch}" ]]; then
+                        restored_core=1
+                    else
+                        restored_geo=1
+                    fi
+                else
+                    echo -e "${yellow}Warning: failed to restore ${f}, falling back to the bundled version${plain}"
+                fi
             fi
         done
-        echo -e "${green}Kept the existing xray core and geo data${plain}"
+        if [[ ${restored_core} -eq 1 && ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}Kept the existing xray core and geo data${plain}"
+        elif [[ ${restored_core} -eq 1 ]]; then
+            echo -e "${green}Kept the existing xray core (geo data falls back to the bundled version)${plain}"
+        elif [[ ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}Kept the existing geo data (xray core falls back to the bundled version)${plain}"
+        fi
     else
         echo "Fresh install, fetching the latest xray core..."
-        if ! /usr/local/a-ui/a-ui xray -update latest; then
+        # Add a timeout: if GitHub is being blackholed (packets dropped, not
+        # a refused connection), http.Get would hang forever right when the
+        # panel is stopped, the install directory has been wiped and
+        # re-extracted, and the systemd unit isn't in place yet — hanging
+        # here is exactly the half-dead state this whole feature exists to
+        # avoid. 10 minutes is generous enough for a slow link to pull down
+        # a ~37MB core; on timeout, fall through to the fail-open branch
+        # below.
+        local fetch_ok=0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 600 /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        else
+            /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        fi
+        if [[ ${fetch_ok} -ne 1 ]]; then
             echo -e "${yellow}Warning: failed to fetch the latest xray, falling back to the bundled version${plain}"
-            echo -e "${yellow}      You can upgrade manually from the panel homepage after installation${plain}"
+            echo -e "${yellow}         You can upgrade manually later using \"切换版本\" (Switch Version) on the panel homepage${plain}"
         fi
     fi
 

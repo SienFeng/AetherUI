@@ -339,6 +339,12 @@ func main() {
 		runCmd.Usage()
 		fmt.Println()
 		v2uiCmd.Usage()
+		// 退出码必须非零：install.sh 的 restore_or_install_xray 靠
+		// `a-ui xray -update latest` 的退出码判断拉取是否成功，一个装了
+		// v1.6.0 之前旧二进制（没有 xray 子命令）的机器会落进这个分支——
+		// 退出码 0 会被误判成"拉取成功"，fail open 的警告一句都不打，
+		// 静默留下一份根本没被替换的 xray。
+		os.Exit(1)
 	}
 }
 
