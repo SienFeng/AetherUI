@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"time"
 	"a-ui/logger"
+	"a-ui/util/common"
 	"a-ui/util/sys"
 	"a-ui/xray"
 )
@@ -322,6 +323,63 @@ func (s *ServerService) UpdateXray(version string) error {
 			logger.Error("start xray failed:", err)
 		}
 	}()
+
+	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
+}
+
+// latestXrayReleaseURL 取的是 /releases/latest 而不是 GetXrayVersions 用的
+// /releases：后者含 prerelease 与 draft，面板上让管理员自己挑没问题，
+// 自动安装则不该把 pre-release 装到生产机上。
+const latestXrayReleaseURL = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+
+// parseLatestTag 从 /releases/latest 的响应里取出 tag。
+//
+// 单独成函数是为了能脱网测试。空 tag 必须报错：GitHub 限流时返回的是一个
+// 带 message 字段的 JSON 对象，反序列化不会失败，放过去就会拿空字符串去拼
+// 下载 URL，最终得到一个 404 页面被当成 zip。
+func parseLatestTag(body []byte) (string, error) {
+	release := new(Release)
+	if err := json.Unmarshal(body, release); err != nil {
+		return "", err
+	}
+	if release.TagName == "" {
+		return "", common.NewError("GitHub 未返回 xray 版本号，可能是超出 API 限制:", string(body))
+	}
+	return release.TagName, nil
+}
+
+// LatestXrayVersion 返回 xray 的最新稳定版 tag。
+func (s *ServerService) LatestXrayVersion() (string, error) {
+	resp, err := http.Get(latestXrayReleaseURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return parseLatestTag(body)
+}
+
+// ReplaceXrayFiles 下载指定版本并替换 bin/ 下的三个文件，不停也不启核心。
+//
+// 供 a-ui xray 子命令使用：那是个一次性进程，它用 os/exec 起的 xray 会随
+// 进程退出一起死掉，所以绝不能在这里重启核心。安装脚本随后的
+// systemctl restart a-ui 会让面板自己把核心拉起来。
+func (s *ServerService) ReplaceXrayFiles(version string) error {
+	zipFileName, err := s.downloadXRay(version)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(zipFileName)
+
+	r, closeZip, err := openXrayZip(zipFileName)
+	if err != nil {
+		return err
+	}
+	defer closeZip()
 
 	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
 }

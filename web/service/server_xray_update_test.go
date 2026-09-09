@@ -118,3 +118,30 @@ func TestOpenXrayZipRejectsCorruptFile(t *testing.T) {
 		t.Fatal("损坏的 zip 期望报错，实际成功")
 	}
 }
+
+// GitHub /releases/latest 的响应里 tag_name 是唯一需要的字段。
+func TestParseLatestTag(t *testing.T) {
+	t.Run("正常响应", func(t *testing.T) {
+		got, err := parseLatestTag([]byte(`{"tag_name":"v26.9.9","name":"Xray v26.9.9"}`))
+		if err != nil {
+			t.Fatalf("parseLatestTag: %v", err)
+		}
+		if got != "v26.9.9" {
+			t.Fatalf("期望 v26.9.9，实际 %q", got)
+		}
+	})
+
+	t.Run("tag_name 为空要报错", func(t *testing.T) {
+		// GitHub 限流时会返回一个带 message 字段的 JSON 对象而不是 release，
+		// 解析本身不会失败，必须靠这一条挡住——否则会拿空字符串去拼下载 URL。
+		if _, err := parseLatestTag([]byte(`{"message":"API rate limit exceeded"}`)); err == nil {
+			t.Fatal("tag_name 缺失，期望报错，实际成功")
+		}
+	})
+
+	t.Run("非 JSON 要报错", func(t *testing.T) {
+		if _, err := parseLatestTag([]byte(`<html>502</html>`)); err == nil {
+			t.Fatal("非 JSON，期望报错，实际成功")
+		}
+	})
+}
