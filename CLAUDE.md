@@ -39,8 +39,12 @@ go mod tidy && go vet ./...
 ./a-ui setting -show                     # 只读打印当前端口/监听地址/根路径/账号密码，不写库
 ./a-ui setting -reset                    # 清空 settings 表（回落到默认值）
 ./a-ui v2-ui -db /etc/v2-ui/v2-ui.db     # 从 v2-ui 迁移 inbound
+./a-ui tc-clear                          # 清除本面板下发的全部 tc 限速规则（限速把网络掐断时的救援入口）
 ./a-ui bootstrap -mode caddy ...         # 安装脚本用：写入面板配置并按需创建入站，见「安装向导与 Caddy 拓扑」
+./a-ui xray -update latest               # 安装脚本用：装 xray 最新发布版（也可 -update <版本号>），见「运维脚本」
 ```
+
+这份清单与 `main.go` 的 `flag.Usage` 必须一致——两处都是管理员唯一能看到子命令的地方。
 
 环境变量：`XUI_DEBUG=true`（调试模式，见下）、`XUI_LOG_LEVEL=debug|info|warn|error`。变量名沿用上游的 `XUI_` 前缀，未随品牌改名。
 
@@ -422,7 +426,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 **`Updatable` 前置检查挡住 Docker 与本地开发**（非 Linux / 找不到 `/usr/local/a-ui/a-ui` / 找不到 systemd 单元 / 没有 `systemd-run`）。在容器里跑 `install.sh` 是纯粹的破坏。`UnsupportedReason` 要具体到哪一条没过并原样显示给管理员。
 
-**回退有两个后果，必须写进二次确认框**：① xray 核心会跟着回退——`install.sh` 解压的发版包带着 `bin/xray-linux-<arch>`，会覆盖机器上现有的那份（v1.2.8 之前的包里是 Xray 1.4.x 构建，没有 `RoutingService` 符号，配置热更新会静默失效）；② 数据库不回滚，`AutoMigrate` 只加列不删列，数据不丢但新功能失效。另有一条不写进 UI 但要记住的偏差：`install.sh` 无论装哪个版本，它自己和 `/usr/bin/a-ui` 都是从 **main 分支**拉的最新版，所以回退得到的是「旧二进制 + 新管理脚本」——改动 `a-ui bootstrap` / `a-ui setting` 的参数时要考虑这一点。
+**回退只有一个后果需要写进二次确认框：数据库不回滚**，`AutoMigrate` 只加列不删列，数据不丢但新功能失效。xray 核心不再是回退的后果——`install.sh` 的 `restore_or_install_xray` 会在解压新版面板前把机器上现有的 `xray-linux-<arch>`/geo 数据备份好再原样恢复（见「运维脚本」一节），回退到 v1.2.8 之前的面板也不再会把核心一并拖回没有 `RoutingService` 符号的 Xray 1.4.x——这是本次改造顺带修掉的一个坑，`web/assets/js/util/panel-version.js` 的二次确认框文案已同步改写，不要把这条后果加回去。另有一条不写进 UI 但要记住的偏差：`install.sh` 无论装哪个版本，它自己和 `/usr/bin/a-ui` 都是从 **main 分支**拉的最新版，所以回退得到的是「旧二进制 + 新管理脚本」——改动 `a-ui bootstrap` / `a-ui setting` 的参数时要考虑这一点。
 
 **回退的目标版本很可能根本没有 `/server/panelVersion`——`pollUpgrade` 必须把 404 与「连不上」分开处理。** 版本管理本身是 v1.6.0 才加的接口，回退列表里更早的版本一条都没有，所以这不是边缘情况而是回退的常态。面板 stop 期间不会出现 404：装了 Caddy 的拓扑下 upstream 拒绝连接是 502，没装 Caddy 的 REALITY 拓扑下连接直接被拒、axios 连 `response` 都拿不到。因此 404 是一个可靠信号——有进程正在这个地址上服务，只是它没有这条路由，据此直接判定「面板已就绪」。把 404 并回「连不上 = 正在重启」那一支（改动前就是如此），界面会白转满 3 分钟再报一句「更新可能失败」，而回退其实早就成功了：实测 v1.6.0 → v1.5.0 从下发到新进程就绪只用 4 秒。此路径下版本号无从核对，`done` 的文案**不能**沿用「更新完成，当前版本 X」——那里显示的 `panelVersion.current` 仍是更新前的旧值，照原样显示等于报一个假版本号，改为报 `upgradeTarget` 并说明侧栏版本入口会随之消失、此后只能 `a-ui update`。
 
@@ -438,11 +442,13 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 - `install.sh` / `install_en.sh` — 一键安装，从 GitHub Release 下载 tar.gz 解压到 `/usr/local/a-ui/`，安装管理脚本到 `/usr/bin/a-ui`，注册 systemd。有域名分支（`setup_wizard` → `domain_flow`）还会装 Caddy（官方源优先）并让它接管 80/443。若这两个端口已被 nginx/apache/caddy 占用，脚本走 `handle_existing_web_server`：列出对方当前服务的站点、备份其配置目录到 `/root/<name>-backup-<时间戳>.tar.gz`、**停用而非卸载**（`systemctl stop`+`disable`，软件包与配置全部保留，`systemctl enable --now <name>` 一条命令即可回滚），且必须输入完整的 `yes`（不是 `y`）才继续；占用者是未识别的进程则直接中止，不做任何猜测性操作。
 
-**`a-ui update` 会把仓库里的 `bin/xray-*` 覆盖到用户机器上，所以那两个二进制的版本是发版内容的一部分。** `update()` 直接调 `install.sh`，而 `install.sh` 在解压前先 `rm -rf /usr/local/a-ui/`，再把发版包整个铺开——发版包里就带着 `bin/xray-linux-<arch>`（见 `release.yml` 的打包步骤）。后果是：管理员先前通过面板「安装 xray」升级过的核心，会在每次面板更新后被**降级回仓库里那一份**。
+**`bin/xray-*` 现在是发版包里的兜底种子，不再是用户机器上实际运行的核心。** 全新安装（`bin/` 下没有旧核心可备份）由 `restore_or_install_xray` 调 `a-ui xray -update latest` 去装 GitHub 上的最新发布；更新或降级面板时，`backup_xray_assets`（`systemctl stop` **之前**执行，见函数注释）把机器上现有的 `xray-linux-<arch>`/`geoip.dat`/`geosite.dat` 备到 `/usr/local/a-ui-xray-backup-*`（刻意不用 `/tmp`：这三个文件加起来能到 60~70MB，systemd 发行版的 `/tmp` 常是内存 tmpfs，小内存 VPS 装不下就会 fail close），解压新版面板后原样恢复回去。两条路径都**不会**让实际运行的核心退回到仓库里那一份——`bin/xray-*` 只在恢复失败或首次安装时的兜底拉取也失败时才会真正派上用场（fail open，退回能用的旧版本而不是让安装失败）。`ReplaceXrayFiles`（`web/service/server.go`，供 `a-ui xray` 子命令调用）与面板「切换版本」按钮走的 `UpdateXray` 共用 `openXrayZip`/`extractXrayFiles` 这两个包级函数，区别只是前者不碰进程（一次性子进程，起的 xray 会随进程退出一起死掉）、后者会停核心再重启。
 
-这条一直是隐性的，直到配置热更新上线才暴露：仓库里的两个 Linux xray 二进制从 `first commit` 起就没动过，是 Xray 1.4.x 时代（go1.16.2）的构建，**里面根本没有 `RoutingService` 符号**，路由热下发在它上面必然连不上、退回整进程重启（`tryHotApply` 的失败兜底按预期工作，所以不报错、只是功能静默失效）。v1.2.8 起已把它们更新到与 `go.mod` 里 `xray-core` 同 commit 的 26.7.28。
+这条链路上有两处**看起来多余、实际都在防同一件事**（核心已经坏了而每一层都说成功），改动时不要顺手简化掉：`extractXrayFiles` 是**全有或全无**的——三个条目先写成同目录的 `.tmp` 再一起 `os.Rename`，中途失败一个目标文件都不动；原地写的话，写坏的核心会被安装脚本 `chmod +x`，还配上一句「将使用安装包内自带的版本」，而自带的那份恰恰已经被这次失败的写入吃掉了。安装脚本的拉取分支则在拉完之后跑一次 `xray -version`：`a-ui xray` 退出 0 只说明文件写下来了，发布包损坏与架构不匹配照样是 0，而这两种核心装上去之后 `Process.Start()` 不回传失败、`/server/status` 照样返回 `running`。
 
-**因此升级 `xray-core` 依赖时，必须同时把 `bin/xray-linux-amd64` 与 `bin/xray-linux-arm64` 换成同版本的官方构建**，否则面板内的 `infra/conf` 与用户机器上实际运行的核心会错版。`web/service/xray_hot_reload_e2e_test.go` 的 `requireXrayRoutingService` 守着这条：核心不提供 `RoutingService` 时它跳过并说明原因，而不是以「PID 变了」这种和真实缺陷无法区分的形式失败。核对版本用 `go version -m bin/xray-linux-arm64`（读 Go 构建信息，不需要在目标平台上执行）。
+**改造之前，「发版包会覆盖用户机器上的核心」这条一直是隐性的**，直到配置热更新上线才暴露：仓库里的两个 Linux xray 二进制从 `first commit` 起就没动过，是 Xray 1.4.x 时代（go1.16.2）的构建，**里面根本没有 `RoutingService` 符号**，路由热下发在它上面必然连不上、退回整进程重启（`tryHotApply` 的失败兜底按预期工作，所以不报错、只是功能静默失效）。v1.2.8 起已把它们更新到与 `go.mod` 里 `xray-core` 同 commit 的 26.7.28。**这个坑现在连带修掉了一半**：降级面板到 v1.2.8 之前不再会把核心也拖回 Xray 1.4.x（核心不受降级影响，见上段）；仍然可能踩到它的唯一路径是一台从未装过面板、直接冷启动跑旧版仓库代码的机器。
+
+**仍然建议 `bin/xray-linux-amd64` / `bin/xray-linux-arm64` 与 `go.mod` 的 `xray-core` 同版本，但耦合方向只有一个：面板旧、核心新是安全侧，反过来才危险。** 面板内的 `infra/conf` 负责把管理员在界面上填的配置编译成 typed message 再下发给 gRPC（`xray/api.go` 的控制面热应用）——「面板旧 + 核心新」顶多是核心的新协议/新字段用不上；「面板新 + 核心用旧版 `infra/conf` 编译」才会生成核心读不懂的配置，而且这条链路上没有任何一层会报错。`web/service/xray_hot_reload_e2e_test.go` 的 `requireXrayRoutingService` 守着测试环境这一侧：核心不提供 `RoutingService` 时它跳过并说明原因，而不是以「PID 变了」这种和真实缺陷无法区分的形式失败。核对版本用 `go version -m bin/xray-linux-arm64`（读 Go 构建信息，不需要在目标平台上执行）。**不要为了「保持同版本」去主动降级用户机器上已经在跑的核心**——那正是这次改造要防的事，`bin/xray-*` 只是种子，不是需要与用户机器同步的镜像。
 - `a-ui.sh` / `a-ui_en.sh` — 安装后的管理菜单（0-17 项：安装/更新/卸载、重置账号密码、端口、启停、开机自启、BBR、acme 申请 SSL、定时任务）。同时支持 `a-ui start|stop|restart|status|log|update|clear|geo|cron` 等直接子命令。
 
 脚本里硬编码了仓库地址 `SienFeng/AetherUI`，fork 后需一并修改。
@@ -451,7 +457,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 - **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
 - 用户密码在数据库中**明文存储**，登录失败日志还会打印明文用户名密码（`web/controller/index.go`）。这是既有行为，涉及认证的改动请提高审查标准。
-- `go.mod` 声明 `go 1.27.0`，CI（`.github/workflows/ci.yml`）用 `actions/setup-go` 的 `go-version-file: go.mod` 读同一个版本构建，不在工作流里另行硬编码。`xray-core` 锁定在 `v1.260327.1-0.20260728075948-5ca6f4b7d4dc`，与 `bin/xray-*` 的 26.7.28 是同一个 commit，**必须与 `bin/xray-*` 保持同版本**——它不再只是 gRPC stats 客户端：`xray/api.go` 的控制面热应用还依赖它的 `infra/conf` 把面板发出的 JSON 编译成 typed message 再下发给 gRPC，用旧版本的解析器编译不出新协议/新字段的配置。gin 仍是 1.7.1。代价是二进制体积从约 24 MB 增长到约 40 MB（darwin/arm64 本地实测约 39 MB）。
+- `go.mod` 声明 `go 1.27.0`，CI（`.github/workflows/ci.yml`）用 `actions/setup-go` 的 `go-version-file: go.mod` 读同一个版本构建，不在工作流里另行硬编码。`xray-core` 锁定在 `v1.260327.1-0.20260728075948-5ca6f4b7d4dc`，与仓库里 `bin/xray-*` 那份种子核心的 26.7.28 同一个 commit。它不再只是 gRPC stats 客户端：`xray/api.go` 的控制面热应用还依赖它的 `infra/conf` 把面板发出的 JSON 编译成 typed message 再下发给 gRPC，用旧版本的解析器编译不出新协议/新字段的配置——但**这条耦合的另一端是用户机器上实际运行的核心，不再是 `bin/xray-*`**（`install.sh` 现在会保留机器上已有的核心，`bin/xray-*` 只是兜底种子），耦合方向与「仍然建议同版本」的确切含义见「运维脚本」一节。gin 仍是 1.7.1。代价是二进制体积从约 24 MB 增长到约 40 MB（darwin/arm64 本地实测约 39 MB）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
 - **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题。`web/html_test.go` 的 `TestAllTemplatesParse` 走同样的遍历但不忽略错误，改完模板跑它即可。
 - **Vue 指令写在根元素之外是死代码，且完全静默。** Vue 2 只编译 `el` 指向的那棵子树。分流页的三个 `<a-modal>` 曾整块落在 `<a-layout id="app">` 之后——页面渲染完全正常、数据也照常加载，但所有「添加 / 编辑」按钮点了毫无反应（`visible = true` 改的是没有任何绑定的数据），控制台不报任何错。弹窗要么留在 `#app` 内，要么照 `inbound_modal.html` 的做法给它自己的根元素和 `new Vue({el:'#xxx'})`。`web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 对所有顶层页面守这条不变量（用 `golang.org/x/net/html` 解析渲染结果，比对 `v-*` / `@*` / `:*` 属性的位置）。

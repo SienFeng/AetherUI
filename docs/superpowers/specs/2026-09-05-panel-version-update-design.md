@@ -299,6 +299,8 @@ const panelVersionMixin = {
 
 ## 7. 回退的两个后果
 
+> **2026-09-09 批注（本节第 1 条已失效，原文保留不改）**：下面第 1 条「xray 核心会跟着回退」以及本节末尾确认文案里「xray 核心也会一并回退到该版本携带的构建」这半句，已被 `docs/superpowers/specs/2026-09-09-xray-version-persistence-design.md` 取代。`install.sh` 现在会在 `rm -rf /usr/local/a-ui/` **之前**把机器上现有的 `xray-linux-<arch>`/`geoip.dat`/`geosite.dat` 备份下来，解压新版面板后原样恢复，回退面板不再改动核心（连带也不再把核心拖回没有 `RoutingService` 符号的 Xray 1.4.x）。`web/assets/js/util/panel-version.js` 的确认文案已同步改写。本节第 2 条（数据库不回滚）与末尾那条「管理脚本恒取 main 分支」的偏差仍然成立。写于当时的原文按记录保留。
+
 二次确认框里必须写明，这两条都是从代码读出来的事实：
 
 1. **xray 核心会跟着回退。** `install.sh` 解压的发版包里带着 `bin/xray-linux-<arch>`（`release.yml` 打包步骤），会覆盖机器上现有的那份。管理员先前通过面板「安装 xray」升级过的核心也一并被覆盖。

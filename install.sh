@@ -24,6 +24,13 @@ stopped_web_svc=""
 # 那就还是原来的样子"，直到有人来报节点不通才发现。
 a_ui_stopped=0
 
+# backup_xray_assets 写入、restore_or_install_xray 消费的备份目录路径；
+# 为空表示这次没有可用的备份（全新安装，或 /usr/local/a-ui/bin 本就不存在）。
+# 两个函数不在同一次调用里执行——backup 在 install_a-ui() 里 stop 之前调用
+# 一次，restore 在解压之后再调用一次——所以必须是跨函数的顶层变量，不能
+# 局部化。
+xray_backup_dir=""
+
 # 打印错误并退出，退出前把被本脚本停掉的面板重新拉起来。
 # 只在确实停过时才动 systemctl：全新安装时去 start 一个还没配好的服务，
 # 只会多出一条与真正病因无关的失败日志，把排查带偏。
@@ -1127,6 +1134,161 @@ domain_flow() {
     fi
 }
 
+# 备份 xray 核心与 geo 数据，供解压后恢复。xray_backup_dir 为空表示没有备份。
+#
+# 存在的理由：install.sh 会 rm -rf 整个安装目录再铺开发版包，而发版包里带着
+# 仓库中那份 xray（见 release.yml 打包步骤）。管理员在面板里升级过的核心，
+# 以及 a-ui geo 换成的 Loyalsoldier 增强版 geo 数据，都会被静默打回。
+#
+# 放在 systemctl stop 之前：这一步要写磁盘、可能失败，而失败必须能在面板
+# 尚未停机时干净退出。复制正在被 xray 使用的可执行文件是安全的——cp 读的是
+# 文件内容，不影响已经打开的 inode。
+#
+# 备份目录特意不落在 mktemp -d 的默认位置（/tmp）：systemd 发行版上 /tmp
+# 通常是内存 tmpfs，而 xray 核心 + geoip.dat + geosite.dat 加起来能到
+# 60~70MB，这次拷贝还发生在 systemctl stop 之前——面板与 xray 都在正常
+# 提供服务，正是这台机器内存占用的峰值时刻。小内存 VPS 上 /tmp 装不下就是
+# 本函数唯一的 fail close 路径，会让管理员从此彻底无法更新面板。改落到
+# /usr/local 下、与 a-ui 同级但不同名的兄弟目录：下面 install_a-ui() 里
+# `rm /usr/local/a-ui/ -rf`（注意结尾的 /，只删 a-ui 这一棵目录树）删不到
+# 它，也不占用 tmpfs 的内存配额。
+backup_xray_assets() {
+    xray_backup_dir=""
+    [[ ! -d /usr/local/a-ui/bin ]] && return 0
+
+    local dir
+    dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX) || die_restoring_panel "创建 xray 备份目录失败，已中止更新（安装目录未被改动）"
+
+    local f
+    for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+        if [[ -f "/usr/local/a-ui/bin/${f}" ]]; then
+            if ! cp -p "/usr/local/a-ui/bin/${f}" "${dir}/${f}"; then
+                rm -rf "${dir}"
+                die_restoring_panel "备份 ${f} 失败，已中止更新（安装目录未被改动）"
+            fi
+        fi
+    done
+
+    xray_backup_dir="${dir}"
+}
+
+# 恢复备份的 xray 与 geo 数据；没有可恢复的核心则装 GitHub 最新发布版（取
+# /releases 首条，不是看起来更「正确」的 /releases/latest——xray-core
+# 几乎所有发布都标 prerelease，那个端点会给出一个半年前的旧版本）。
+#
+# 判据是 xray 二进制有没有备到，不看 geo：核心诉求是 xray 版本，geo 是附带的，
+# 两者可能只成功一半（管理员删过其中某个文件，或上一次安装本身就是坏的）。
+# 也正因为判据是这个，拉取分支不等于「全新安装」——见分支内的措辞说明。
+#
+# 恢复与拉取两条路径都 fail open——退回发版包里那份 xray 继续安装。它是能用的，
+# 不该为了「装到最新」而让整个安装失败。这个「退回」在拉取分支上是要动手做的
+# （先存种子、失败时拷回来），不是自动成立的：解包是原地替换目标文件。
+restore_or_install_xray() {
+    # 这条 cd 失败基本只有一个来由：上面那个未检查返回值的 tar zxvf 解压失败了。
+    # 此刻面板已停、/usr/local/a-ui/ 已被 rm -rf，备份目录里那份核心是管理员
+    # 钉住的版本在这台机器上仅存的副本——删掉它，他重跑安装就只会走下面的拉取
+    # 分支，再也拿不回原来的版本。所以这条路径上备份必须保留，并把路径打进
+    # 错误信息里，让他知道东西还在哪。
+    if ! cd /usr/local/a-ui; then
+        if [[ -n "${xray_backup_dir}" ]]; then
+            die_restoring_panel "进入安装目录失败（解压很可能没成功）；原有的 xray 核心与 geo 数据已保留在 ${xray_backup_dir}，重装完成后可手工拷回 /usr/local/a-ui/bin/"
+        fi
+        die_restoring_panel "进入安装目录失败（解压很可能没成功）"
+    fi
+
+    if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
+        # 分开记核心与 geo 是否真的恢复成功，成功行的措辞与是否打印都要
+        # 按实际结果来——三个 cp 全失败时上面已经打过三条黄色警告，不能
+        # 再无条件补一条绿色「已保留」；只恢复了核心时也不能说「与 geo
+        # 数据」，那两处都是「看起来成功其实失败」，正是本仓库通篇在防的
+        # 情形。
+        local restored_core=0 restored_geo=0
+        local f
+        for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+            if [[ -f "${xray_backup_dir}/${f}" ]]; then
+                if cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}"; then
+                    if [[ "${f}" == "xray-linux-${arch}" ]]; then
+                        restored_core=1
+                    else
+                        restored_geo=1
+                    fi
+                else
+                    echo -e "${yellow}警告: 恢复 ${f} 失败，将使用安装包内自带的版本${plain}"
+                fi
+            fi
+        done
+        if [[ ${restored_core} -eq 1 && ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 xray 核心与 geo 数据${plain}"
+        elif [[ ${restored_core} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 xray 核心（geo 数据使用安装包内自带版本）${plain}"
+        elif [[ ${restored_geo} -eq 1 ]]; then
+            echo -e "${green}已保留原有的 geo 数据（xray 核心使用安装包内自带版本）${plain}"
+        fi
+    else
+        # 措辞不预设「全新安装」：判据是有没有备到 xray 二进制，不是装没装过。
+        # /usr/local/a-ui/bin 存在但核心文件被管理员删过的机器同样会走到这里，
+        # 而这次拉取发生在 systemctl stop 之后，最坏要停机 600 秒——说成「全新
+        # 安装」会让他把一次真实的停机当成不可能发生的事。
+        echo "未找到可保留的 xray 核心，正在获取最新版..."
+        # 拉取之前先把发版包自带的那份种子核心留一份。解包是原地替换目标文件，
+        # 拉取失败或拉到一份跑不起来的核心之后，「将使用安装包内自带的版本」
+        # 这句话必须真的能兑现——否则打的是一句安慰话，而机器上那份核心已经
+        # 不是它了。种子放进备份目录（没有就现建一个，前缀刻意与 backup_xray_assets
+        # 相同，函数末尾的清理与 a-ui.sh 卸载时那条 rm -rf 都能一并覆盖到）。
+        if [[ -z "${xray_backup_dir}" ]]; then
+            xray_backup_dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX 2>/dev/null) || xray_backup_dir=""
+        fi
+        local seed_core=""
+        if [[ -n "${xray_backup_dir}" ]] && cp -pf "/usr/local/a-ui/bin/xray-linux-${arch}" "${xray_backup_dir}/seed-xray-linux-${arch}"; then
+            seed_core="${xray_backup_dir}/seed-xray-linux-${arch}"
+        fi
+
+        # 加超时：GitHub 被丢包（而非拒绝连接）时 http.Get 会永久挂住，而此刻面板已停、
+        # 安装目录已删并重铺、systemd 单元还没就位——挂在这里等于把机器留在半死状态。
+        # 10 分钟足够慢速网络拉完 37MB 的核心；超时后走下面的 fail open 分支。
+        local fetch_ok=0
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 600 /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        else
+            /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
+        fi
+
+        # 退出码 0 只说明文件写下来了，不说明它能跑。损坏的发布、架构不匹配
+        # 这类情况下 a-ui xray 照样退出 0，而这份核心紧接着就被 chmod +x，
+        # 面板的 Process.Start() 又从不回传启动失败（/server/status 仍返回
+        # running），管理员完全看不出来，只有用户报节点不通才会发现。所以拉完
+        # 要真的跑一次——先补 chmod +x，否则「没有可执行位」会和「核心损坏」
+        # 混成同一个失败，看不出是哪一个。
+        if [[ ${fetch_ok} -eq 1 ]]; then
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if ! "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}警告: 获取到的 xray 核心无法运行，可能是发布包损坏或架构不匹配${plain}"
+                fetch_ok=0
+            fi
+        fi
+
+        if [[ ${fetch_ok} -ne 1 ]]; then
+            # 先把种子核心拷回来再打这句话，顺序不能反：拉取压根没开始时这一步
+            # 是无害的空操作，拉了一半或拉到坏文件时它才是这句话成立的前提。
+            [[ -n "${seed_core}" ]] && cp -pf "${seed_core}" "/usr/local/a-ui/bin/xray-linux-${arch}"
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}警告: 获取最新版 xray 失败，将使用安装包内自带的版本${plain}"
+                echo -e "${yellow}      装好后可在面板首页「切换版本」手动升级${plain}"
+            else
+                echo -e "${red}警告: 获取最新版 xray 失败，且安装包内自带的核心也跑不起来${plain}"
+                echo -e "${red}      面板装好后请在首页「切换版本」重新安装 xray 核心，否则节点不会通${plain}"
+            fi
+        else
+            echo -e "${green}已安装最新版 xray 核心${plain}"
+        fi
+    fi
+
+    chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}"
+    [[ -n "${xray_backup_dir}" ]] && rm -rf "${xray_backup_dir}"
+    xray_backup_dir=""
+}
+
 install_a-ui() {
     # 端口探测必须在 stop 之前做：current_panel_port() 的探测分支靠
     # systemctl show -p MainPID 找正在跑的 a-ui 进程，服务一旦被下面这行
@@ -1165,6 +1327,8 @@ install_a-ui() {
     # 了，留下一台面板已停止、且不会自己起来的机器——而这两步恰恰是整个
     # 安装流程里最依赖外部网络、最容易失败的两步。端口探测必须在 stop 之前
     # 完成，上面那段已经做过了，这里改动顺序不影响它。
+    backup_xray_assets
+
     systemctl stop a-ui
     a_ui_stopped=1
 
@@ -1176,6 +1340,7 @@ install_a-ui() {
     rm a-ui-linux-${arch}.tar.gz -f
     cd a-ui
     chmod +x a-ui bin/xray-linux-${arch}
+    restore_or_install_xray
     cp -f a-ui.service /etc/systemd/system/
     # 管理脚本先下到临时文件，确认下载成功且非空，再落到 /usr/bin/a-ui。
     # wget -O 会先把目标文件清空再写：直接对着 /usr/bin/a-ui 下载，一旦失败
