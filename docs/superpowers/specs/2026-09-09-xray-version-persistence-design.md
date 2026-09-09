@@ -8,8 +8,8 @@
 
 管理员在面板首页点「切换版本」把 xray 核心升到 26.9.9 之后，只要更新一次面板（或降级一次），核心就会**静默退回发版包里那份 26.7.28**。整条链路是：
 
-1. `ServerService.UpdateXray` 把新核心写进 `bin/xray-linux-<arch>`（`web/service/server.go:243`）。
-2. 任何一次面板更新／降级最终都执行 `install.sh` 的 `install_a-ui()`，它先 `rm -rf /usr/local/a-ui/`，再把发版包整个铺开（`install.sh:1171-1175`）。
+1. `ServerService.UpdateXray` 把新核心写进 `bin/xray-linux-<arch>`（设计阶段读到的位置是 `web/service/server.go:243`——那是改动前的单一大函数，Task 1 已把它拆成 `openXrayZip`/`extractXrayFiles`/`UpdateXray` 三层，见 §4.1，当前源码里已经没有一段连续代码对应这里描述的行为）。
+2. 任何一次面板更新／降级最终都执行 `install.sh` 的 `install_a-ui()`，它先 `rm -rf /usr/local/a-ui/`，再把发版包整个铺开（设计阶段读到的位置是 `install.sh:1171-1175`；这段代码本身没变，只是因为 §5 新增的 `backup_xray_assets`/`restore_or_install_xray` 插在它前面，当前位置是 `install.sh:1278-1282`）。
 3. 发版包的 `bin/` 里带着**仓库中那份** `bin/xray-linux-<arch>`（`.github/workflows/release.yml` 打包步骤）。
 
 管理员对此没有任何提示：面板首页的版本号会安静地变回旧值，`Process.Start()` 又从不回传启动失败，出问题时首页照样显示 `running`。
@@ -19,7 +19,8 @@
 ### 目标
 
 - 更新／降级 a-ui 之后，机器上原有的 xray 核心与 geo 数据**原样保留**。
-- 全新安装时直接装 GitHub 上的**最新稳定版** xray，而不是发版包里的快照。
+- 全新安装时直接装 GitHub 上的**最新发布版** xray，而不是发版包里的快照。
+  > **这条目标在实施中被 §4.2 的实测数据修正过**：最初写的是「最新稳定版」，设想用 GitHub 语义上代表稳定发布的 `/releases/latest`。2026-09-09 实测发现 xray-core 几乎把所有发布都标记成 `prerelease`（最近 15 个里 14 个），`/releases/latest` 因此会稳定给出一个比发版包自带核心（26.7.28）还旧的版本——「装到最新稳定版」这个目标本身就建立在一个不成立的前提上（这个项目没有「经常发布的稳定版」）。目标改写为「与面板『切换版本』列表首项同源的最新发布版」，实现细节见 §4.2。
 - 上述两件事都不引入「安装可能失败」的新路径：拉不到就退回发版包那份。
 
 ### 非目标
@@ -36,14 +37,14 @@
 | 事实 | 出处 |
 |---|---|
 | 发版包的 `bin/` 里带着仓库中的 xray 与三个 dat | `release.yml` 打包步骤：`cp bin/xray-linux-${ARCH} bin/geoip.dat bin/geosite.dat bin/ipdb.dat dist/a-ui/bin/` |
-| `install.sh` 先 `rm -rf /usr/local/a-ui/` 再解压发版包 | `install.sh:1171-1175` |
-| 解压后 `cd a-ui`，此后 pwd 即 `/usr/local/a-ui` | `install.sh:1177` |
+| `install.sh` 先 `rm -rf /usr/local/a-ui/` 再解压发版包 | 设计阶段：`install.sh:1171-1175`；实施后（同一段代码，被 §5 新增函数顶到后面）：`install.sh:1278-1282` |
+| 解压后 `cd a-ui`，此后 pwd 即 `/usr/local/a-ui` | 设计阶段：`install.sh:1177`；实施后：`install.sh:1284` |
 | 面板一键更新／回退下发的是 **main 分支**的 `install.sh` | `web/service/panel_version.go:31` `installScriptURL` |
 | `a-ui update` 同样 `curl` main 分支的 `install.sh` | `a-ui.sh:107`、`a-ui.sh:126` |
-| `die_restoring_panel` 在 `a_ui_stopped=1` 时会把面板重新拉起再 `exit 1` | `install.sh:30-41` |
-| `UpdateXray` 会 `StopXray()` → 覆盖三个文件 → `defer RestartXray(true)` | `web/service/server.go:243-305` |
-| `downloadXRay` 把 zip 落在**当前工作目录**（`os.Create(fileName)`），架构名映射 `amd64→64`、`arm64→arm64-v8a` | `web/service/server.go:204-241` |
-| `GetXrayVersions` 拉的是 `/releases`，**含 prerelease** | `web/service/server.go:177-202` |
+| `die_restoring_panel` 在 `a_ui_stopped=1` 时会把面板重新拉起再 `exit 1` | 设计阶段：`install.sh:30-41`；实施后：`install.sh:37-48` |
+| **（设计阶段的旧实现）** `UpdateXray` 会 `StopXray()` → 覆盖三个文件 → `defer RestartXray(true)` | `web/service/server.go:243-305`（改动前的单函数实现；Task 1 已拆成 `openXrayZip`（251）/`extractXrayFiles`（276）/`UpdateXray`（306），当前没有一段连续代码对应这一行描述的行为，见 §4.1） |
+| `downloadXRay` 把 zip 落在**当前工作目录**（`os.Create(fileName)`），架构名映射 `amd64→64`、`arm64→arm64-v8a` | 设计阶段：`web/service/server.go:204-241`；实施后（新增 `archive/zip` import 使全文件整体下移一行）：`web/service/server.go:205-242` |
+| `GetXrayVersions` 拉的是 `/releases`，**含 prerelease** | 设计阶段：`web/service/server.go:177-202`；实施后：`web/service/server.go:178-203` |
 | `StopXray()` 在核心未运行时返回 error，但 `UpdateXray` 丢弃该返回值 | `web/service/xray.go:233-241` |
 | xray 相关路径全是相对 `bin/` 的 | `xray/process.go:30-44` |
 | 面板与核心的版本耦合是**单向**的 | `xray/api.go:76-78` 注释：「老版本的解析器编译不出新协议的入站」 |
@@ -51,9 +52,9 @@
 | `a-ui geo` 拉的是 **Loyalsoldier/v2ray-rules-dat**，不是 xray 官方 geo 数据 | `a-ui.sh:15-16` |
 | `a-ui` 菜单可开启 geo 数据的 cron 自动更新 | `a-ui.sh:687` `enable_auto_update_geo` |
 | 子命令退出码 0 会被 `install.sh` 误判为成功，是本项目要严防的静默失败 | `main.go:321` 注释 |
-| `clearTrafficShaping` 是「不连数据库的子命令」的现成样板 | `main.go:382-408` |
+| `clearTrafficShaping` 是「不连数据库的子命令」的现成样板 | `main.go:391-417`（Fix Round 1 更正：原写 `382-408`，是本次改动之外的位移，与 xray 版本保留无关） |
 | CI 只跑 `make verify`（vet + test + build），不覆盖任何 shell 脚本 | `.github/workflows/ci.yml` |
-| `web/service/server.go` 目前没有任何测试 | 仓库中不存在 `web/service/server*_test.go` |
+| `web/service/server.go` 目前没有任何测试 | 仓库中不存在 `web/service/server*_test.go`（实施后已有 `web/service/server_xray_update_test.go`，见 §9.1） |
 
 ### 2.1 单向耦合的方向（本设计成立的前提）
 
@@ -87,7 +88,7 @@ tar zxvf → cd a-ui
 systemctl restart a-ui  (面板启动时自己拉起核心)
 ```
 
-**备份放在 `systemctl stop` 之前**，与 `install.sh:1163-1168` 那段注释同源：最容易失败的步骤要排在停机之前，免得留下一台面板已停、又没起来的机器。复制正在被运行中进程使用的可执行文件在 Linux 上是安全的（`cp` 读的是文件内容，不影响已打开的 inode）。
+**备份放在 `systemctl stop` 之前**，与 `install.sh:1163-1168`（实施后同一段注释被顶到了 `install.sh:1268-1272`）那段注释同源：最容易失败的步骤要排在停机之前，免得留下一台面板已停、又没起来的机器。复制正在被运行中进程使用的可执行文件在 Linux 上是安全的（`cp` 读的是文件内容，不影响已打开的 inode）。
 
 这条分岔的关键性质：**更新 a-ui 绝不顺手改动 xray 版本**。升级时机仍归管理员，只是不再会被打回去。
 
@@ -154,9 +155,9 @@ func (s *ServerService) ReplaceXrayFiles(version string) error {
 
 `downloadXRay` 不动。它把 zip 落在当前工作目录，而 `install.sh` 走到调用点时 pwd 正好是 `/usr/local/a-ui`，`bin/` 相对路径天然对得上。
 
-### 4.2 解析「最新稳定版」
+### 4.2 解析「最新发布版」
 
-**这一节的初始设计被实测数据推翻了，把过程留下来——它比结论本身更值得后人复核。**
+**这一节的初始设计被实测数据推翻了，把过程留下来——它比结论本身更值得后人复核。**（标题用的是最终结论「最新发布版」；下面这段「最初设想」用的是被推翻前的措辞「最新稳定版」，两者不是同一件事，别被字面相似绕进去。）
 
 最初设想是新增一个只取最新稳定版的函数，不复用 `GetXrayVersions`——后者拉 `/releases`（含 prerelease、draft），面板上让管理员自己挑没问题，自动安装则不该装 pre-release，于是打算改用 GitHub 保证语义的 `/repos/XTLS/Xray-core/releases/latest`（该端点只返回 `prerelease=false` 且非 draft 的最新一条）。
 
@@ -175,7 +176,7 @@ func (s *ServerService) ReplaceXrayFiles(version string) error {
 
 ### 4.3 新增子命令 `a-ui xray`
 
-照 `clearTrafficShaping`（`main.go:382`）的样子写——**不连数据库**，因为 `ReplaceXrayFiles` 不需要：
+照 `clearTrafficShaping`（`main.go:391`）的样子写——**不连数据库**，因为 `ReplaceXrayFiles` 不需要：
 
 ```
 a-ui xray -update latest      # 装 GitHub 最新发布版（§4.2 改用 GetXrayVersions() 首项，与面板「切换版本」列表同源，可能是 prerelease）
@@ -249,7 +250,7 @@ CLAUDE.md「运维脚本」一节里这句：
 
 验证必须在一台**干净的 VPS 或容器**上做完整链路，不能拿生产机当第一个试验场：
 
-1. 全新安装 → 确认装上的是 GitHub 最新稳定版 xray，不是发版包里那份。
+1. 全新安装 → 确认装上的是 GitHub 最新**发布版** xray（不是「最新稳定版」——xray-core 把大多数发布都标记成 `prerelease`，这是这个项目的发布惯例而不是不稳定的信号，装到 `prerelease` 是设计要的行为，见 §4.2），不是发版包里那份。核对方法：`go version -m /usr/local/a-ui/bin/xray-linux-<arch>` 读出的版本，应与 GitHub API `/repos/XTLS/Xray-core/releases`（**不是** `/releases/latest`）返回列表的**首条** `tag_name` 一致——也是面板首页「切换版本」列表的第一项。
 2. 面板里「切换版本」切到一个更旧的版本 → 更新 a-ui → 确认核心仍是那个旧版本（证明保留生效，且方向上不是「总是装最新」）。
 3. 降级 a-ui 到上一个 tag → 确认核心不变。
 4. 断网（或把 GitHub 域名指到黑洞）后全新安装 → 确认退回发版包那份且安装成功。
