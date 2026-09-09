@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让管理员升级过的 xray 核心与 geo 数据在 a-ui 更新／降级后原样保留，全新安装则直接装 GitHub 最新稳定版。
+**Goal:** 让管理员升级过的 xray 核心与 geo 数据在 a-ui 更新／降级后原样保留，全新安装则直接装 GitHub 最新发布版（可能标着 prerelease，见 Task 2 的更正批注与 spec §4.2）。
 
-**Architecture:** `install.sh` 在 `rm -rf` 安装目录之前把 `bin/` 下的 xray 与两个 geo 数据文件备份出来，解压后按「xray 二进制有没有备到」分岔：备到了就恢复，没备到（全新安装）就调用新增的 `a-ui xray -update latest` 子命令拉最新稳定版。Go 侧把现有 `ServerService.UpdateXray` 的下载／解包／停机三件事拆开，让解包成为一个接受显式目标路径的包级函数，供面板按钮与新子命令共用，并且能脱网单测。
+**Architecture:** `install.sh` 在 `rm -rf` 安装目录之前把 `bin/` 下的 xray 与两个 geo 数据文件备份出来，解压后按「xray 二进制有没有备到」分岔：备到了就恢复，没备到（全新安装）就调用新增的 `a-ui xray -update latest` 子命令拉最新发布版。Go 侧把现有 `ServerService.UpdateXray` 的下载／解包／停机三件事拆开，让解包成为一个接受显式目标路径的包级函数，供面板按钮与新子命令共用，并且能脱网单测。
 
 **Tech Stack:** Go 1.27（`go.mod` 为唯一事实来源）、`archive/zip`、`flag`、Bash（install.sh）
 
@@ -743,7 +743,7 @@ geo 数据，此前都会被静默打回，面板上还看不出来。
 
 按 spec §9.2 逐项跑，每项记录实际结果：
 
-1. 全新安装 → `go version -m /usr/local/a-ui/bin/xray-linux-<arch>` 或面板首页确认装上的是 GitHub 最新稳定版，不是发版包里那份。
+1. 全新安装 → `go version -m /usr/local/a-ui/bin/xray-linux-<arch>` 或面板首页确认装上的是 GitHub 最新**发布版**（不是「最新稳定版」——xray-core 几乎所有发布都标 prerelease，核对应与 `/releases` 首条比对，不是 `/releases/latest`；以 spec §9.2 现在的说法为准），不是发版包里那份。
 2. 面板「切换版本」切到一个**更旧**的版本 → `a-ui update` → 确认核心仍是那个旧版本。这一项证明的是「保留」而不是「总是装最新」。
 3. 降级 a-ui 到上一个 tag → 确认核心不变。
 4. 把 `api.github.com` 指到黑洞（`echo '0.0.0.0 api.github.com' >> /etc/hosts`）后全新安装 → 确认打印警告、退回发版包那份、**安装照常成功**；验证完记得把这行删掉。
