@@ -240,43 +240,45 @@ func (s *ServerService) downloadXRay(version string) (string, error) {
 	return fileName, nil
 }
 
-func (s *ServerService) UpdateXray(version string) error {
-	zipFileName, err := s.downloadXRay(version)
+// openXrayZip 打开并验证一个 xray 发布 zip，返回 reader 与清理函数。
+//
+// 与解包分成两步，是为了让调用方能在「包已确认可读」和「开始写文件」之间
+// 插入自己的动作——UpdateXray 正是在这个缝隙里停核心的：下载几十 MB 和
+// 包损坏检测都发生在停机之前，用户完全不断流。
+//
+// 清理函数只关闭文件句柄，不删除 zip：zip 是谁下载的谁负责删。
+func openXrayZip(zipPath string) (*zip.Reader, func(), error) {
+	f, err := os.Open(zipPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-
-	zipFile, err := os.Open(zipFileName)
+	stat, err := f.Stat()
 	if err != nil {
-		return err
+		f.Close()
+		return nil, nil, err
 	}
-	defer func() {
-		zipFile.Close()
-		os.Remove(zipFileName)
-	}()
-
-	stat, err := zipFile.Stat()
+	r, err := zip.NewReader(f, stat.Size())
 	if err != nil {
-		return err
+		f.Close()
+		return nil, nil, err
 	}
-	reader, err := zip.NewReader(zipFile, stat.Size())
-	if err != nil {
-		return err
-	}
+	return r, func() { f.Close() }, nil
+}
 
-	s.xrayService.StopXray()
-	defer func() {
-		err := s.xrayService.RestartXray(true)
-		if err != nil {
-			logger.Error("start xray failed:", err)
-		}
-	}()
-
+// extractXrayFiles 把 zip 里的 xray / geosite.dat / geoip.dat 解到三个显式
+// 给出的路径。
+//
+// 目标路径是参数而不是直接取 xray.GetBinaryPath()：那些是相对路径，而本包
+// 的测试会 chdir 到仓库根，写死就等于让测试覆盖仓库里真实的 xray 二进制。
+//
+// 条目不存在时在删除目标文件之前就返回，所以缺条目不会破坏已有的核心。
+func extractXrayFiles(r *zip.Reader, binPath, geositePath, geoipPath string) error {
 	copyZipFile := func(zipName string, fileName string) error {
-		zipFile, err := reader.Open(zipName)
+		zipFile, err := r.Open(zipName)
 		if err != nil {
 			return err
 		}
+		defer zipFile.Close()
 		os.Remove(fileName)
 		file, err := os.OpenFile(fileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, fs.ModePerm)
 		if err != nil {
@@ -287,21 +289,41 @@ func (s *ServerService) UpdateXray(version string) error {
 		return err
 	}
 
-	err = copyZipFile("xray", xray.GetBinaryPath())
-	if err != nil {
+	if err := copyZipFile("xray", binPath); err != nil {
 		return err
 	}
-	err = copyZipFile("geosite.dat", xray.GetGeositePath())
-	if err != nil {
+	if err := copyZipFile("geosite.dat", geositePath); err != nil {
 		return err
 	}
-	err = copyZipFile("geoip.dat", xray.GetGeoipPath())
-	if err != nil {
-		return err
-	}
+	return copyZipFile("geoip.dat", geoipPath)
+}
 
-	return nil
+// UpdateXray 是面板「切换版本」按钮的入口：下载 → 验证 → 停核心 → 解包 → 重启。
+//
+// StopXray 必须排在 openXrayZip 之后：下载几十 MB 与包损坏检测都不该让用户
+// 白断一次流。
+func (s *ServerService) UpdateXray(version string) error {
+	zipFileName, err := s.downloadXRay(version)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(zipFileName)
 
+	r, closeZip, err := openXrayZip(zipFileName)
+	if err != nil {
+		return err
+	}
+	defer closeZip()
+
+	s.xrayService.StopXray()
+	defer func() {
+		err := s.xrayService.RestartXray(true)
+		if err != nil {
+			logger.Error("start xray failed:", err)
+		}
+	}()
+
+	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
 }
 
 // GetNewX25519Cert 生成一对 REALITY 用的 X25519 密钥。
