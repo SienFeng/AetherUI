@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,34 @@ func TestExtractXrayFilesWritesAllThreeTargets(t *testing.T) {
 			t.Fatalf("%s 内容期望 %q，实际 %q", path, want, string(got))
 		}
 	}
+
+	// 核心必须带可执行位：改成「先写临时文件再 rename」之后，权限由临时
+	// 文件带过去，用 os.CreateTemp（0600）之类的写法会静默丢掉这一位，
+	// 而面板「切换版本」装出来的核心从此起不来——起不来又不回传，只有
+	// 用户断流才看得见。
+	info, err := os.Stat(binPath)
+	if err != nil {
+		t.Fatalf("stat 核心: %v", err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("核心缺少可执行位，实际权限 %v", info.Mode().Perm())
+	}
+
+	assertNoTempResidue(t, dir)
+}
+
+// assertNoTempResidue 断言目录里没有留下 .tmp 中间文件。
+func assertNoTempResidue(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读取目录 %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("解包结束后仍残留临时文件 %s", e.Name())
+		}
+	}
 }
 
 // zip 里缺 xray 条目时必须报错，且不能破坏已经存在的目标文件——
@@ -104,6 +133,56 @@ func TestExtractXrayFilesMissingBinaryLeavesTargetsIntact(t *testing.T) {
 	if string(got) != "OLD-BINARY" {
 		t.Fatalf("解包失败时旧二进制被破坏，实际内容 %q", string(got))
 	}
+
+	assertNoTempResidue(t, dir)
+}
+
+// zip 里**有 xray 但缺 geosite.dat**——这正是修复前会毁掉核心的那条路径：
+// 三个条目各写各的，等到第二个条目报错时核心已经被原地换掉了，「缺条目不会
+// 破坏已有的核心」只对 xray 这一个条目成立。改成先全部写临时文件、全部成功
+// 才 rename 之后，这里三个目标必须一个都没变。
+func TestExtractXrayFilesMissingGeositeLeavesAllTargetsIntact(t *testing.T) {
+	zipPath := writeTestZip(t, map[string]string{
+		"xray":      "NEW-BINARY",
+		"geoip.dat": "NEW-GEOIP",
+	})
+
+	r, closeZip, err := openXrayZip(zipPath)
+	if err != nil {
+		t.Fatalf("openXrayZip: %v", err)
+	}
+	defer closeZip()
+
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "xray-linux-amd64")
+	geositePath := filepath.Join(dir, "geosite.dat")
+	geoipPath := filepath.Join(dir, "geoip.dat")
+	old := map[string]string{
+		binPath:     "OLD-BINARY",
+		geositePath: "OLD-GEOSITE",
+		geoipPath:   "OLD-GEOIP",
+	}
+	for path, content := range old {
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("预置 %s: %v", path, err)
+		}
+	}
+
+	if err := extractXrayFiles(r, binPath, geositePath, geoipPath); err == nil {
+		t.Fatal("zip 缺 geosite.dat 条目，期望报错，实际成功")
+	}
+
+	for path, want := range old {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("读取 %s: %v", path, readErr)
+		}
+		if string(got) != want {
+			t.Fatalf("解包失败时 %s 被改动，期望 %q，实际 %q", path, want, string(got))
+		}
+	}
+
+	assertNoTempResidue(t, dir)
 }
 
 // 损坏的 zip 必须在 openXrayZip 这一步就被拒绝——UpdateXray 靠这一步
