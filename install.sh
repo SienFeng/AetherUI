@@ -1127,6 +1127,67 @@ domain_flow() {
     fi
 }
 
+# 备份 xray 核心与 geo 数据，供解压后恢复。xray_backup_dir 为空表示没有备份。
+#
+# 存在的理由：install.sh 会 rm -rf 整个安装目录再铺开发版包，而发版包里带着
+# 仓库中那份 xray（见 release.yml 打包步骤）。管理员在面板里升级过的核心，
+# 以及 a-ui geo 换成的 Loyalsoldier 增强版 geo 数据，都会被静默打回。
+#
+# 放在 systemctl stop 之前：这一步要写磁盘、可能失败，而失败必须能在面板
+# 尚未停机时干净退出。复制正在被 xray 使用的可执行文件是安全的——cp 读的是
+# 文件内容，不影响已经打开的 inode。
+backup_xray_assets() {
+    xray_backup_dir=""
+    [[ ! -d /usr/local/a-ui/bin ]] && return 0
+
+    local dir
+    dir=$(mktemp -d) || die_restoring_panel "创建 xray 备份目录失败，已中止更新（安装目录未被改动）"
+
+    local f
+    for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+        if [[ -f "/usr/local/a-ui/bin/${f}" ]]; then
+            if ! cp -p "/usr/local/a-ui/bin/${f}" "${dir}/${f}"; then
+                rm -rf "${dir}"
+                die_restoring_panel "备份 ${f} 失败，已中止更新（安装目录未被改动）"
+            fi
+        fi
+    done
+
+    xray_backup_dir="${dir}"
+}
+
+# 恢复备份的 xray 与 geo 数据；全新安装则装 GitHub 最新稳定版。
+#
+# 判据是 xray 二进制有没有备到，不看 geo：核心诉求是 xray 版本，geo 是附带的，
+# 两者可能只成功一半（管理员删过其中某个文件，或上一次安装本身就是坏的）。
+#
+# 恢复与拉取两条路径都 fail open——退回发版包里那份 xray 继续安装。它是能用的，
+# 不该为了「装到最新」而让整个安装失败。
+restore_or_install_xray() {
+    cd /usr/local/a-ui || die_restoring_panel "进入安装目录失败"
+
+    if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
+        local f
+        for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+            if [[ -f "${xray_backup_dir}/${f}" ]]; then
+                cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}" \
+                    || echo -e "${yellow}警告: 恢复 ${f} 失败，将使用安装包内自带的版本${plain}"
+            fi
+        done
+        echo -e "${green}已保留原有的 xray 核心与 geo 数据${plain}"
+    else
+        echo "全新安装，正在获取最新版 xray 核心..."
+        if ! /usr/local/a-ui/a-ui xray -update latest; then
+            echo -e "${yellow}警告: 获取最新版 xray 失败，将使用安装包内自带的版本${plain}"
+            echo -e "${yellow}      装好后可在面板首页「切换版本」手动升级${plain}"
+        fi
+    fi
+
+    chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}"
+    [[ -n "${xray_backup_dir}" ]] && rm -rf "${xray_backup_dir}"
+    xray_backup_dir=""
+}
+
 install_a-ui() {
     # 端口探测必须在 stop 之前做：current_panel_port() 的探测分支靠
     # systemctl show -p MainPID 找正在跑的 a-ui 进程，服务一旦被下面这行
@@ -1165,6 +1226,8 @@ install_a-ui() {
     # 了，留下一台面板已停止、且不会自己起来的机器——而这两步恰恰是整个
     # 安装流程里最依赖外部网络、最容易失败的两步。端口探测必须在 stop 之前
     # 完成，上面那段已经做过了，这里改动顺序不影响它。
+    backup_xray_assets
+
     systemctl stop a-ui
     a_ui_stopped=1
 
@@ -1176,6 +1239,7 @@ install_a-ui() {
     rm a-ui-linux-${arch}.tar.gz -f
     cd a-ui
     chmod +x a-ui bin/xray-linux-${arch}
+    restore_or_install_xray
     cp -f a-ui.service /etc/systemd/system/
     # 管理脚本先下到临时文件，确认下载成功且非空，再落到 /usr/bin/a-ui。
     # wget -O 会先把目标文件清空再写：直接对着 /usr/bin/a-ui 下载，一旦失败
