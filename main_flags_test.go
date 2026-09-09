@@ -124,3 +124,41 @@ func TestCurrentSettingsIsReadOnly(t *testing.T) {
 		t.Fatalf("currentSettings 不应写入，用户信息被改了：%+v -> %+v", beforeUser, afterUser)
 	}
 }
+
+func TestParseXrayFlags(t *testing.T) {
+	t.Run("update latest", func(t *testing.T) {
+		f, err := parseXrayFlags([]string{"-update", "latest"})
+		if err != nil {
+			t.Fatalf("parseXrayFlags: %v", err)
+		}
+		if f.Update != "latest" {
+			t.Fatalf("期望 latest，实际 %q", f.Update)
+		}
+	})
+
+	t.Run("update 指定版本", func(t *testing.T) {
+		f, err := parseXrayFlags([]string{"-update", "v26.9.9"})
+		if err != nil {
+			t.Fatalf("parseXrayFlags: %v", err)
+		}
+		if f.Update != "v26.9.9" {
+			t.Fatalf("期望 v26.9.9，实际 %q", f.Update)
+		}
+	})
+
+	t.Run("未传 -update 时为空", func(t *testing.T) {
+		f, err := parseXrayFlags(nil)
+		if err != nil {
+			t.Fatalf("parseXrayFlags: %v", err)
+		}
+		if f.Update != "" {
+			t.Fatalf("期望空串，实际 %q", f.Update)
+		}
+	})
+
+	t.Run("未知参数要报错", func(t *testing.T) {
+		if _, err := parseXrayFlags([]string{"-nope"}); err == nil {
+			t.Fatal("未知参数期望报错，实际成功")
+		}
+	})
+}

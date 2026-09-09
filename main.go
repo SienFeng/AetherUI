@@ -277,6 +277,7 @@ func main() {
 		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset/-show）")
 		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
 		fmt.Println("    bootstrap      安装脚本用：写入面板配置并按需创建入站")
+		fmt.Println("    xray           安装/更新 xray 核心（-update latest | -update <版本号>）")
 	}
 
 	flag.Parse()
@@ -330,8 +331,10 @@ func main() {
 		}
 	case "bootstrap":
 		runBootstrap(os.Args[2:])
+	case "xray":
+		runXrayUpdate(os.Args[2:])
 	default:
-		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' or 'bootstrap' subcommands")
+		fmt.Println("except 'run' or 'v2-ui' or 'setting' or 'tc-clear' or 'bootstrap' or 'xray' subcommands")
 		fmt.Println()
 		runCmd.Usage()
 		fmt.Println()
@@ -405,4 +408,62 @@ func clearTrafficShaping() {
 	if iface != "" {
 		fmt.Println("网卡:", iface)
 	}
+}
+
+type xrayFlags struct {
+	Update string
+}
+
+// parseXrayFlags 用 ContinueOnError 而不是 ExitOnError，是为了让上面那组
+// 测试能拿到 error 而不是让进程直接退出；退出码语义由调用方 runXrayUpdate
+// 按错误类型补齐，与 parseSettingFlags 的处理方式一致。
+func parseXrayFlags(args []string) (xrayFlags, error) {
+	var f xrayFlags
+	cmd := flag.NewFlagSet("xray", flag.ContinueOnError)
+	cmd.StringVar(&f.Update, "update", "", "更新 xray 核心，值为 latest 或具体版本号（如 v26.9.9）")
+	if err := cmd.Parse(args); err != nil {
+		return f, err
+	}
+	return f, nil
+}
+
+// runXrayUpdate 是安装脚本用来装 xray 核心的入口。
+//
+// 不连数据库：ReplaceXrayFiles 不需要。也刻意不重启核心——这是个一次性
+// 进程，它起的 xray 会随进程退出一起死掉，安装脚本随后的
+// systemctl restart a-ui 会让面板自己把核心拉起来。
+//
+// 依赖当前工作目录：xray.GetBinaryPath() 返回的是相对路径 bin/xray-…，
+// 与 systemd 的 WorkingDirectory=/usr/local/a-ui/ 一致，所以调用方必须
+// 先 cd 到安装根目录。
+func runXrayUpdate(args []string) {
+	f, err := parseXrayFlags(args)
+	if err != nil {
+		// flag 包在 ContinueOnError 下已经打印过错误与 usage，这里只补退出码。
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		os.Exit(2)
+	}
+
+	if f.Update == "" {
+		fmt.Println("用法: a-ui xray -update latest | -update <版本号>")
+		os.Exit(2)
+	}
+
+	var serverService service.ServerService
+	version := f.Update
+	if version == "latest" {
+		version, err = serverService.LatestXrayVersion()
+		if err != nil {
+			fmt.Println("获取 xray 最新版本失败:", err)
+			os.Exit(1)
+		}
+	}
+
+	if err := serverService.ReplaceXrayFiles(version); err != nil {
+		fmt.Println("更新 xray 失败:", err)
+		os.Exit(1)
+	}
+	fmt.Println("xray 核心已更新到", version)
 }
