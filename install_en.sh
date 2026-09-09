@@ -1279,6 +1279,75 @@ domain_flow() {
     fi
 }
 
+# Back up the xray core and geo data so they can be restored after
+# extraction. An empty xray_backup_dir means there is no backup.
+#
+# Why this exists: install.sh does rm -rf on the whole install directory and
+# then unpacks the release tarball, and the tarball bundles the xray copy
+# checked into this repo (see the packaging step in release.yml). Any core
+# the admin upgraded from the panel, and the Loyalsoldier-enhanced geo data
+# a-ui geo replaced it with, would otherwise be silently rolled back.
+#
+# Placed before systemctl stop: this step writes to disk and can fail, and a
+# failure here must be able to exit cleanly while the panel is still up.
+# Copying an executable that xray currently has open is safe — cp reads file
+# contents and does not disturb the already-open inode.
+backup_xray_assets() {
+    xray_backup_dir=""
+    [[ ! -d /usr/local/a-ui/bin ]] && return 0
+
+    local dir
+    dir=$(mktemp -d) || die_restoring_panel "Failed to create the xray backup directory, update aborted (install directory left untouched)"
+
+    local f
+    for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+        if [[ -f "/usr/local/a-ui/bin/${f}" ]]; then
+            if ! cp -p "/usr/local/a-ui/bin/${f}" "${dir}/${f}"; then
+                rm -rf "${dir}"
+                die_restoring_panel "Failed to back up ${f}, update aborted (install directory left untouched)"
+            fi
+        fi
+    done
+
+    xray_backup_dir="${dir}"
+}
+
+# Restore the backed-up xray and geo data; on a fresh install, fetch the
+# latest stable release from GitHub instead.
+#
+# The decision is based on whether the xray binary was backed up, not geo:
+# the xray version is the core requirement, geo data just comes along for
+# the ride, and the two can succeed only partially (the admin may have
+# deleted one of the files, or the previous install was already broken).
+#
+# Both the restore and the fetch path fail open — falling back to the xray
+# copy bundled in the release tarball and continuing the install. That copy
+# works fine; the whole install should not fail just to get the latest core.
+restore_or_install_xray() {
+    cd /usr/local/a-ui || die_restoring_panel "Failed to enter the install directory"
+
+    if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
+        local f
+        for f in "xray-linux-${arch}" geoip.dat geosite.dat; do
+            if [[ -f "${xray_backup_dir}/${f}" ]]; then
+                cp -pf "${xray_backup_dir}/${f}" "/usr/local/a-ui/bin/${f}" \
+                    || echo -e "${yellow}Warning: failed to restore ${f}, falling back to the bundled version${plain}"
+            fi
+        done
+        echo -e "${green}Kept the existing xray core and geo data${plain}"
+    else
+        echo "Fresh install, fetching the latest xray core..."
+        if ! /usr/local/a-ui/a-ui xray -update latest; then
+            echo -e "${yellow}Warning: failed to fetch the latest xray, falling back to the bundled version${plain}"
+            echo -e "${yellow}      You can upgrade manually from the panel homepage after installation${plain}"
+        fi
+    fi
+
+    chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}"
+    [[ -n "${xray_backup_dir}" ]] && rm -rf "${xray_backup_dir}"
+    xray_backup_dir=""
+}
+
 install_a-ui() {
     # The port probe must happen before stop: current_panel_port()'s probe
     # branch relies on systemctl show -p MainPID to find the running a-ui
@@ -1322,6 +1391,8 @@ install_a-ui() {
     # on its own — and those two steps are precisely the ones that depend on
     # external network and fail most often. The port probe must still run before
     # the stop; the block above already did that, so reordering is safe.
+    backup_xray_assets
+
     systemctl stop a-ui
     a_ui_stopped=1
 
@@ -1333,6 +1404,7 @@ install_a-ui() {
     rm a-ui-linux-${arch}-english.tar.gz -f
     cd a-ui
     chmod +x a-ui bin/xray-linux-${arch}
+    restore_or_install_xray
     cp -f a-ui.service /etc/systemd/system/
     # Download the management script to a temp file first, confirm it
     # succeeded and is non-empty, then move it into /usr/bin/a-ui.
