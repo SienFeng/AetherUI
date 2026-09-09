@@ -145,6 +145,12 @@ uninstall() {
     systemctl reset-failed
     rm /etc/a-ui/ -rf
     rm /usr/local/a-ui/ -rf
+    # install.sh's xray backup directory is a sibling of /usr/local/a-ui/, so the
+    # line above does not reach it. A normal install cleans it up in
+    # restore_or_install_xray, but a Ctrl-C or a signal in the middle leaves
+    # ~66MB behind — it was deliberately moved out of /tmp into /usr/local to
+    # avoid tmpfs, and the price of that is it no longer disappears on reboot.
+    rm -rf /usr/local/a-ui-xray-backup-*
 
     echo ""
     echo -e "uninstall a-ui succeed,you can delete this script by ${green}rm /usr/bin/a-ui -f${plain}"

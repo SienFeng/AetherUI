@@ -1332,22 +1332,40 @@ backup_xray_assets() {
     xray_backup_dir="${dir}"
 }
 
-# Restore the backed-up xray and geo data; on a fresh install, fetch the
-# latest release from GitHub instead (the first entry of /releases, not
-# the seemingly more "correct" /releases/latest -- xray-core marks nearly
-# every release as prerelease, so that endpoint would return a build from
-# half a year ago).
+# Restore the backed-up xray and geo data; when there is no core to keep,
+# fetch the latest release from GitHub instead (the first entry of
+# /releases, not the seemingly more "correct" /releases/latest -- xray-core
+# marks nearly every release as prerelease, so that endpoint would return a
+# build from half a year ago).
 #
 # The decision is based on whether the xray binary was backed up, not geo:
 # the xray version is the core requirement, geo data just comes along for
 # the ride, and the two can succeed only partially (the admin may have
 # deleted one of the files, or the previous install was already broken).
+# And precisely because that is the decision, the fetch branch is not the
+# same thing as "a fresh install" -- see the wording note inside it.
 #
 # Both the restore and the fetch path fail open — falling back to the xray
 # copy bundled in the release tarball and continuing the install. That copy
 # works fine; the whole install should not fail just to get the latest core.
+# On the fetch path that fallback has to be actively arranged (stash a seed
+# first, copy it back on failure); it does not hold by itself, because
+# extraction replaces the target file in place.
 restore_or_install_xray() {
-    cd /usr/local/a-ui || { rm -rf "${xray_backup_dir}"; die_restoring_panel "Failed to enter the install directory"; }
+    # This cd basically only fails for one reason: the unchecked tar zxvf
+    # above failed to extract. At this point the panel is stopped and
+    # /usr/local/a-ui/ has been rm -rf'd, so the core in the backup
+    # directory is the only remaining copy of the version the admin pinned
+    # -- delete it and re-running the installer will just take the fetch
+    # branch below, and he can never get that version back. So this path
+    # must keep the backup, and put its path in the error message so he
+    # knows where it is.
+    if ! cd /usr/local/a-ui; then
+        if [[ -n "${xray_backup_dir}" ]]; then
+            die_restoring_panel "Failed to enter the install directory (extraction probably failed); the existing xray core and geo data were kept in ${xray_backup_dir}, you can copy them back into /usr/local/a-ui/bin/ after reinstalling"
+        fi
+        die_restoring_panel "Failed to enter the install directory (extraction probably failed)"
+    fi
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
         # Track whether the core and geo data were actually restored
@@ -1381,7 +1399,31 @@ restore_or_install_xray() {
             echo -e "${green}Kept the existing geo data (xray core falls back to the bundled version)${plain}"
         fi
     else
-        echo "Fresh install, fetching the latest xray core..."
+        # The wording deliberately does not assume "fresh install": the
+        # decision is whether an xray binary was backed up, not whether the
+        # panel was ever installed. A machine whose /usr/local/a-ui/bin
+        # exists but whose core file the admin deleted lands here too, and
+        # this fetch happens after systemctl stop -- up to 600 seconds of
+        # downtime. Calling it a fresh install would make him dismiss a very
+        # real outage as something that cannot happen.
+        echo "No xray core to keep was found, fetching the latest release..."
+        # Stash the seed core bundled in the release tarball before fetching.
+        # Extraction replaces the target file in place, so after a failed
+        # fetch — or one that produced a core that cannot run — the line
+        # "falling back to the bundled version" has to actually be true;
+        # otherwise it is just a soothing message while the file on disk is
+        # no longer that version. The seed goes into the backup directory
+        # (creating one if there is none, deliberately reusing the same
+        # prefix so both the cleanup at the end of this function and the
+        # rm -rf in a-ui.sh's uninstall cover it).
+        if [[ -z "${xray_backup_dir}" ]]; then
+            xray_backup_dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX 2>/dev/null) || xray_backup_dir=""
+        fi
+        local seed_core=""
+        if [[ -n "${xray_backup_dir}" ]] && cp -pf "/usr/local/a-ui/bin/xray-linux-${arch}" "${xray_backup_dir}/seed-xray-linux-${arch}"; then
+            seed_core="${xray_backup_dir}/seed-xray-linux-${arch}"
+        fi
+
         # Add a timeout: if GitHub is being blackholed (packets dropped, not
         # a refused connection), http.Get would hang forever right when the
         # panel is stopped, the install directory has been wiped and
@@ -1396,9 +1438,39 @@ restore_or_install_xray() {
         else
             /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
         fi
+
+        # Exit code 0 only says the file was written, not that it can run.
+        # A corrupted release or an architecture mismatch still exits 0,
+        # that core is chmod +x'd right afterwards, and the panel's
+        # Process.Start() never reports a startup failure back
+        # (/server/status keeps returning running) — the admin sees nothing
+        # until users report dead nodes. So actually run it once. chmod +x
+        # first, otherwise "not executable" and "broken core" collapse into
+        # the same failure and you cannot tell which one happened.
+        if [[ ${fetch_ok} -eq 1 ]]; then
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if ! "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}Warning: the fetched xray core cannot run, the release may be corrupted or the architecture may not match${plain}"
+                fetch_ok=0
+            fi
+        fi
+
         if [[ ${fetch_ok} -ne 1 ]]; then
-            echo -e "${yellow}Warning: failed to fetch the latest xray, falling back to the bundled version${plain}"
-            echo -e "${yellow}         You can upgrade manually later using \"切换版本\" (Switch Version) on the panel homepage${plain}"
+            # Copy the seed core back before printing the line, not after:
+            # when the fetch never started this is a harmless no-op, and
+            # when it wrote half a file or a broken one it is exactly what
+            # makes the line true.
+            [[ -n "${seed_core}" ]] && cp -pf "${seed_core}" "/usr/local/a-ui/bin/xray-linux-${arch}"
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}Warning: failed to fetch the latest xray, falling back to the bundled version${plain}"
+                echo -e "${yellow}         You can upgrade manually later using \"切换版本\" (Switch Version) on the panel homepage${plain}"
+            else
+                echo -e "${red}Warning: failed to fetch the latest xray, and the bundled core cannot run either${plain}"
+                echo -e "${red}         Reinstall the xray core from \"切换版本\" (Switch Version) on the panel homepage once it is up, otherwise no node will work${plain}"
+            fi
+        else
+            echo -e "${green}Installed the latest xray core${plain}"
         fi
     fi
 

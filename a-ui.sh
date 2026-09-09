@@ -145,6 +145,11 @@ uninstall() {
     systemctl reset-failed
     rm /etc/a-ui/ -rf
     rm /usr/local/a-ui/ -rf
+    # install.sh 的 xray 备份目录是 /usr/local/a-ui/ 的兄弟目录，上面那行删不到它。
+    # 安装正常走完时 restore_or_install_xray 会自己清掉，但中途被 Ctrl-C 或信号
+    # 打断就会留下约 66MB 残留——它当初特意从 /tmp 挪到 /usr/local 来躲开 tmpfs，
+    # 代价正是不再重启即清，所以卸载时要顺手扫掉。
+    rm -rf /usr/local/a-ui-xray-backup-*
 
     echo ""
     echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/a-ui -f${plain} 进行删除"

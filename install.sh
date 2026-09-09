@@ -1172,17 +1172,29 @@ backup_xray_assets() {
     xray_backup_dir="${dir}"
 }
 
-# 恢复备份的 xray 与 geo 数据；全新安装则装 GitHub 最新发布版（取
+# 恢复备份的 xray 与 geo 数据；没有可恢复的核心则装 GitHub 最新发布版（取
 # /releases 首条，不是看起来更「正确」的 /releases/latest——xray-core
 # 几乎所有发布都标 prerelease，那个端点会给出一个半年前的旧版本）。
 #
 # 判据是 xray 二进制有没有备到，不看 geo：核心诉求是 xray 版本，geo 是附带的，
 # 两者可能只成功一半（管理员删过其中某个文件，或上一次安装本身就是坏的）。
+# 也正因为判据是这个，拉取分支不等于「全新安装」——见分支内的措辞说明。
 #
 # 恢复与拉取两条路径都 fail open——退回发版包里那份 xray 继续安装。它是能用的，
-# 不该为了「装到最新」而让整个安装失败。
+# 不该为了「装到最新」而让整个安装失败。这个「退回」在拉取分支上是要动手做的
+# （先存种子、失败时拷回来），不是自动成立的：解包是原地替换目标文件。
 restore_or_install_xray() {
-    cd /usr/local/a-ui || { rm -rf "${xray_backup_dir}"; die_restoring_panel "进入安装目录失败"; }
+    # 这条 cd 失败基本只有一个来由：上面那个未检查返回值的 tar zxvf 解压失败了。
+    # 此刻面板已停、/usr/local/a-ui/ 已被 rm -rf，备份目录里那份核心是管理员
+    # 钉住的版本在这台机器上仅存的副本——删掉它，他重跑安装就只会走下面的拉取
+    # 分支，再也拿不回原来的版本。所以这条路径上备份必须保留，并把路径打进
+    # 错误信息里，让他知道东西还在哪。
+    if ! cd /usr/local/a-ui; then
+        if [[ -n "${xray_backup_dir}" ]]; then
+            die_restoring_panel "进入安装目录失败（解压很可能没成功）；原有的 xray 核心与 geo 数据已保留在 ${xray_backup_dir}，重装完成后可手工拷回 /usr/local/a-ui/bin/"
+        fi
+        die_restoring_panel "进入安装目录失败（解压很可能没成功）"
+    fi
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
         # 分开记核心与 geo 是否真的恢复成功，成功行的措辞与是否打印都要
@@ -1213,7 +1225,24 @@ restore_or_install_xray() {
             echo -e "${green}已保留原有的 geo 数据（xray 核心使用安装包内自带版本）${plain}"
         fi
     else
-        echo "全新安装，正在获取最新版 xray 核心..."
+        # 措辞不预设「全新安装」：判据是有没有备到 xray 二进制，不是装没装过。
+        # /usr/local/a-ui/bin 存在但核心文件被管理员删过的机器同样会走到这里，
+        # 而这次拉取发生在 systemctl stop 之后，最坏要停机 600 秒——说成「全新
+        # 安装」会让他把一次真实的停机当成不可能发生的事。
+        echo "未找到可保留的 xray 核心，正在获取最新版..."
+        # 拉取之前先把发版包自带的那份种子核心留一份。解包是原地替换目标文件，
+        # 拉取失败或拉到一份跑不起来的核心之后，「将使用安装包内自带的版本」
+        # 这句话必须真的能兑现——否则打的是一句安慰话，而机器上那份核心已经
+        # 不是它了。种子放进备份目录（没有就现建一个，前缀刻意与 backup_xray_assets
+        # 相同，函数末尾的清理与 a-ui.sh 卸载时那条 rm -rf 都能一并覆盖到）。
+        if [[ -z "${xray_backup_dir}" ]]; then
+            xray_backup_dir=$(mktemp -d /usr/local/a-ui-xray-backup-XXXXXX 2>/dev/null) || xray_backup_dir=""
+        fi
+        local seed_core=""
+        if [[ -n "${xray_backup_dir}" ]] && cp -pf "/usr/local/a-ui/bin/xray-linux-${arch}" "${xray_backup_dir}/seed-xray-linux-${arch}"; then
+            seed_core="${xray_backup_dir}/seed-xray-linux-${arch}"
+        fi
+
         # 加超时：GitHub 被丢包（而非拒绝连接）时 http.Get 会永久挂住，而此刻面板已停、
         # 安装目录已删并重铺、systemd 单元还没就位——挂在这里等于把机器留在半死状态。
         # 10 分钟足够慢速网络拉完 37MB 的核心；超时后走下面的 fail open 分支。
@@ -1223,9 +1252,35 @@ restore_or_install_xray() {
         else
             /usr/local/a-ui/a-ui xray -update latest && fetch_ok=1
         fi
+
+        # 退出码 0 只说明文件写下来了，不说明它能跑。损坏的发布、架构不匹配
+        # 这类情况下 a-ui xray 照样退出 0，而这份核心紧接着就被 chmod +x，
+        # 面板的 Process.Start() 又从不回传启动失败（/server/status 仍返回
+        # running），管理员完全看不出来，只有用户报节点不通才会发现。所以拉完
+        # 要真的跑一次——先补 chmod +x，否则「没有可执行位」会和「核心损坏」
+        # 混成同一个失败，看不出是哪一个。
+        if [[ ${fetch_ok} -eq 1 ]]; then
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if ! "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}警告: 获取到的 xray 核心无法运行，可能是发布包损坏或架构不匹配${plain}"
+                fetch_ok=0
+            fi
+        fi
+
         if [[ ${fetch_ok} -ne 1 ]]; then
-            echo -e "${yellow}警告: 获取最新版 xray 失败，将使用安装包内自带的版本${plain}"
-            echo -e "${yellow}      装好后可在面板首页「切换版本」手动升级${plain}"
+            # 先把种子核心拷回来再打这句话，顺序不能反：拉取压根没开始时这一步
+            # 是无害的空操作，拉了一半或拉到坏文件时它才是这句话成立的前提。
+            [[ -n "${seed_core}" ]] && cp -pf "${seed_core}" "/usr/local/a-ui/bin/xray-linux-${arch}"
+            chmod +x "/usr/local/a-ui/bin/xray-linux-${arch}" 2>/dev/null
+            if "/usr/local/a-ui/bin/xray-linux-${arch}" -version >/dev/null 2>&1; then
+                echo -e "${yellow}警告: 获取最新版 xray 失败，将使用安装包内自带的版本${plain}"
+                echo -e "${yellow}      装好后可在面板首页「切换版本」手动升级${plain}"
+            else
+                echo -e "${red}警告: 获取最新版 xray 失败，且安装包内自带的核心也跑不起来${plain}"
+                echo -e "${red}      面板装好后请在首页「切换版本」重新安装 xray 核心，否则节点不会通${plain}"
+            fi
+        else
+            echo -e "${green}已安装最新版 xray 核心${plain}"
         fi
     fi
 
