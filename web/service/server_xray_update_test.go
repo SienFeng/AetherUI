@@ -119,29 +119,30 @@ func TestOpenXrayZipRejectsCorruptFile(t *testing.T) {
 	}
 }
 
-// GitHub /releases/latest 的响应里 tag_name 是唯一需要的字段。
-func TestParseLatestTag(t *testing.T) {
-	t.Run("正常响应", func(t *testing.T) {
-		got, err := parseLatestTag([]byte(`{"tag_name":"v26.9.9","name":"Xray v26.9.9"}`))
+// GetXrayVersions 拉的是 /releases，首项即最新发布（含 prerelease）。
+func TestFirstReleaseTag(t *testing.T) {
+	t.Run("正常列表返回首项", func(t *testing.T) {
+		got, err := firstReleaseTag([]string{"v26.9.9", "v26.7.28", "v26.3.27"})
 		if err != nil {
-			t.Fatalf("parseLatestTag: %v", err)
+			t.Fatalf("firstReleaseTag: %v", err)
 		}
 		if got != "v26.9.9" {
 			t.Fatalf("期望 v26.9.9，实际 %q", got)
 		}
 	})
 
-	t.Run("tag_name 为空要报错", func(t *testing.T) {
-		// GitHub 限流时会返回一个带 message 字段的 JSON 对象而不是 release，
-		// 解析本身不会失败，必须靠这一条挡住——否则会拿空字符串去拼下载 URL。
-		if _, err := parseLatestTag([]byte(`{"message":"API rate limit exceeded"}`)); err == nil {
-			t.Fatal("tag_name 缺失，期望报错，实际成功")
+	t.Run("空列表要报错", func(t *testing.T) {
+		// GitHub 限流时返回的是带 message 字段的 JSON 对象，GetXrayVersions
+		// 对它反序列化会失败，但空数组同样合法解析出一个长度为 0 的 slice，
+		// 必须靠这一条挡住——否则会拿空字符串去拼下载 URL。
+		if _, err := firstReleaseTag([]string{}); err == nil {
+			t.Fatal("列表为空，期望报错，实际成功")
 		}
 	})
 
-	t.Run("非 JSON 要报错", func(t *testing.T) {
-		if _, err := parseLatestTag([]byte(`<html>502</html>`)); err == nil {
-			t.Fatal("非 JSON，期望报错，实际成功")
+	t.Run("首项为空串要报错", func(t *testing.T) {
+		if _, err := firstReleaseTag([]string{""}); err == nil {
+			t.Fatal("首项为空串，期望报错，实际成功")
 		}
 	})
 }

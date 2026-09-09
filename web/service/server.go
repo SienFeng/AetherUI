@@ -327,40 +327,33 @@ func (s *ServerService) UpdateXray(version string) error {
 	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
 }
 
-// latestXrayReleaseURL 取的是 /releases/latest 而不是 GetXrayVersions 用的
-// /releases：后者含 prerelease 与 draft，面板上让管理员自己挑没问题，
-// 自动安装则不该把 pre-release 装到生产机上。
-const latestXrayReleaseURL = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-
-// parseLatestTag 从 /releases/latest 的响应里取出 tag。
+// firstReleaseTag 从版本列表里取第一项，并挡住两种空值。
 //
-// 单独成函数是为了能脱网测试。空 tag 必须报错：GitHub 限流时返回的是一个
-// 带 message 字段的 JSON 对象，反序列化不会失败，放过去就会拿空字符串去拼
-// 下载 URL，最终得到一个 404 页面被当成 zip。
-func parseLatestTag(body []byte) (string, error) {
-	release := new(Release)
-	if err := json.Unmarshal(body, release); err != nil {
-		return "", err
+// 单独成函数是为了能脱网测试。GitHub 限流时 GetXrayVersions 会因为响应是
+// 对象而非数组而解析失败，但列表为空或首项为空串这两种情况它不会报错，
+// 放过去就会拿空字符串去拼下载 URL，最终把一个 404 页面当成 zip 下载下来。
+func firstReleaseTag(versions []string) (string, error) {
+	if len(versions) == 0 {
+		return "", common.NewError("GitHub 未返回任何 xray 版本，可能是超出 API 限制")
 	}
-	if release.TagName == "" {
-		return "", common.NewError("GitHub 未返回 xray 版本号，可能是超出 API 限制:", string(body))
+	if versions[0] == "" {
+		return "", common.NewError("GitHub 返回的 xray 版本号为空")
 	}
-	return release.TagName, nil
+	return versions[0], nil
 }
 
-// LatestXrayVersion 返回 xray 的最新稳定版 tag。
+// LatestXrayVersion 返回 xray 最新发布的 tag，即面板「切换版本」列表的第一项。
+//
+// 刻意不用 /releases/latest：xray-core 几乎把所有发布都标记为 prerelease
+// （2026-09-09 实测，最近 15 个里 14 个），那个端点只返回非 prerelease，
+// 会稳定地给出半年前的 v26.3.27——比发版包自带的核心还旧。在这个项目里
+// prerelease 是发布惯例，不表示不稳定。
 func (s *ServerService) LatestXrayVersion() (string, error) {
-	resp, err := http.Get(latestXrayReleaseURL)
+	versions, err := s.GetXrayVersions()
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	return parseLatestTag(body)
+	return firstReleaseTag(versions)
 }
 
 // ReplaceXrayFiles 下载指定版本并替换 bin/ 下的三个文件，不停也不启核心。
