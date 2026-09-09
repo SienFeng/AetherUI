@@ -95,47 +95,90 @@ systemctl restart a-ui  (面板启动时自己拉起核心)
 
 ### 4.1 拆分 `UpdateXray`
 
-`web/service/server.go`：
-
-拆成三层，**下载与解包必须分开**，否则替换逻辑无法脱离网络测试（§9.1）：
+`web/service/server.go`：**实现比这份草稿早期版本多拆了一层**——最初设想的两层（下载、解包）会把「包已下载」和「包已验证可读」混在一起，`StopXray` 要插的缝隙其实是「验证完、还没开始写文件」，不是「下载完」。所以最终是三层：
 
 ```go
-// extractXrayFiles 把一个已经下载好的 zip 解到 bin/ 下，不联网、不碰进程。
-// 这是唯一一处知道「zip 里的 xray / geosite.dat / geoip.dat 该落到哪」的代码，
-// 也是本次改动中唯一可以脱网单测的一层。
-func extractXrayFiles(zipPath string) error
+// openXrayZip 打开并验证一个 xray 发布 zip，返回 reader 与清理函数。
+//
+// 与解包分成两步，是为了让调用方能在「包已确认可读」和「开始写文件」之间
+// 插入自己的动作——UpdateXray 正是在这个缝隙里停核心的：下载几十 MB 和
+// 包损坏检测都发生在停机之前，用户完全不断流。
+//
+// 清理函数只关闭文件句柄，不删除 zip：zip 是谁下载的谁负责删。
+func openXrayZip(zipPath string) (*zip.Reader, func(), error)
 
-// replaceXrayFiles = 下载 + 解包，不碰进程。
-// 面板按钮与 a-ui xray 子命令共用它——架构名映射只应该存在于一处。
-func (s *ServerService) replaceXrayFiles(version string) error {
-	zipPath, err := s.downloadXRay(version)  // 已有实现，不动
-	// ... defer 清理 zip
-	return extractXrayFiles(zipPath)
+// extractXrayFiles 把 zip 里的 xray / geosite.dat / geoip.dat 解到三个显式
+// 给出的路径。
+//
+// 目标路径是参数而不是直接取 xray.GetBinaryPath()：那些是相对路径，而本包
+// 的测试会 chdir 到仓库根，写死就等于让测试覆盖仓库里真实的 xray 二进制。
+//
+// 条目不存在时在删除目标文件之前就返回，所以缺条目不会破坏已有的核心。
+func extractXrayFiles(r *zip.Reader, binPath, geositePath, geoipPath string) error
+
+// UpdateXray 是面板「切换版本」按钮的入口：下载 → 验证 → 停核心 → 解包 → 重启。
+//
+// StopXray 必须排在 openXrayZip 之后：下载几十 MB 与包损坏检测都不该让用户
+// 白断一次流。
+func (s *ServerService) UpdateXray(version string) error {
+	zipFileName, err := s.downloadXRay(version)
+	// ... defer os.Remove(zipFileName)
+
+	r, closeZip, err := openXrayZip(zipFileName)
+	// ... defer closeZip()
+
+	s.xrayService.StopXray()
+	defer func() { s.xrayService.RestartXray(true) }()
+
+	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
 }
 
-// UpdateXray 是面板按钮的入口，对外行为不变：停核心 → 替换 → 重启核心。
-func (s *ServerService) UpdateXray(version string) error {
-	// StopXray / defer RestartXray(true) 保持原样
-	return s.replaceXrayFiles(version)
+// ReplaceXrayFiles 下载指定版本并替换 bin/ 下的三个文件，不停也不启核心。
+//
+// 导出（而不是像早期草稿设想的那样是包内私有），因为它要被 main 包的
+// a-ui xray 子命令跨包调用。供该子命令使用：那是个一次性进程，它用
+// os/exec 起的 xray 会随进程退出一起死掉，所以绝不能在这里重启核心。
+// 安装脚本随后的 systemctl restart a-ui 会让面板自己把核心拉起来。
+func (s *ServerService) ReplaceXrayFiles(version string) error {
+	zipFileName, err := s.downloadXRay(version)
+	// ... defer os.Remove(zipFileName)
+
+	r, closeZip, err := openXrayZip(zipFileName)
+	// ... defer closeZip()
+
+	return extractXrayFiles(r, xray.GetBinaryPath(), xray.GetGeositePath(), xray.GetGeoipPath())
 }
 ```
 
-`extractXrayFiles` 不挂在 `ServerService` 上：它不需要任何服务状态，做成包级函数能让测试直接调，不必构造 service。
+`openXrayZip` / `extractXrayFiles` 都不挂在 `ServerService` 上：都不需要任何服务状态，做成包级函数能让测试直接调，不必构造 service；`extractXrayFiles` 收显式路径参数而不是内部调 `xray.GetBinaryPath()`，是为了让测试能重定向到临时目录（见函数注释）。
 
 `downloadXRay` 不动。它把 zip 落在当前工作目录，而 `install.sh` 走到调用点时 pwd 正好是 `/usr/local/a-ui`，`bin/` 相对路径天然对得上。
 
 ### 4.2 解析「最新稳定版」
 
-新增一个只取最新稳定版的函数，**不复用 `GetXrayVersions`**——后者拉 `/releases`（含 prerelease、draft），面板上让管理员自己挑没问题，自动安装则不该装 pre-release。改用 GitHub 保证语义的 `/repos/XTLS/Xray-core/releases/latest`。
+**这一节的初始设计被实测数据推翻了，把过程留下来——它比结论本身更值得后人复核。**
+
+最初设想是新增一个只取最新稳定版的函数，不复用 `GetXrayVersions`——后者拉 `/releases`（含 prerelease、draft），面板上让管理员自己挑没问题，自动安装则不该装 pre-release，于是打算改用 GitHub 保证语义的 `/repos/XTLS/Xray-core/releases/latest`（该端点只返回 `prerelease=false` 且非 draft 的最新一条）。
+
+实现前先拿真实数据核了一遍（2026-09-09 实测）：
+
+| 端点 | 返回 | `prerelease` | 发布时间 |
+|---|---|---|---|
+| `/releases/latest` | `v26.3.27` | `false` | 2026-03-27 |
+| `/releases`（首条） | `v26.9.9` | `true` | 2026-09-08 |
+
+再往前翻，xray-core 最近 15 个发布里 **14 个标记为 `prerelease`**，唯一的正式版就是那个半年前的 `v26.3.27`。也就是说 `/releases/latest` 在这个仓库上不是「偶尔滞后」，而是**稳定地**给出一个比发版包自带的兜底核心（26.7.28）还旧的版本——全新安装装到的核心反而比不做这个功能更旧，直接违反 §1 的目标。根子在于 xray-core 把 `prerelease` 当成发布流程的常规标记而不是「不稳定」的信号，这个项目的惯例与 `/releases/latest` 端点的语义假设（prerelease=测试版、非 prerelease=推荐版）不匹配。
+
+**改用 `GetXrayVersions()` 取首项**（`firstReleaseTag`，`web/service/server.go`），与面板「切换版本」列表同源、同口径：两者看到的「最新」是同一个东西，不会出现「子命令装的版本」与「面板列表第一项」对不上的怪现象。新增的只有 `firstReleaseTag` 这一层薄壳，专门挡两种 `GetXrayVersions` 本身不会报错但会导致下载 404 的空值：列表为空（GitHub 限流时响应是对象不是数组，`GetXrayVersions` 会在 `Unmarshal` 处报错，这里挡不到；但限流之外还有别的空列表可能）、首项是空字符串。
 
 `GetXrayVersions` 与面板「切换版本」的行为完全不变。
 
 ### 4.3 新增子命令 `a-ui xray`
 
-照 `clearTrafficShaping`（`main.go:382`）的样子写——**不连数据库**，因为 `replaceXrayFiles` 不需要：
+照 `clearTrafficShaping`（`main.go:382`）的样子写——**不连数据库**，因为 `ReplaceXrayFiles` 不需要：
 
 ```
-a-ui xray -update latest      # 装 GitHub 最新稳定版
+a-ui xray -update latest      # 装 GitHub 最新发布版（§4.2 改用 GetXrayVersions() 首项，与面板「切换版本」列表同源，可能是 prerelease）
 a-ui xray -update v26.9.9     # 装指定版本
 ```
 
@@ -156,6 +199,12 @@ a-ui xray -update v26.9.9     # 装指定版本
 
 代价：仓库里更新过的 geo 数据从此推不到已有机器。可接受，因为 `a-ui geo` 与面板「安装 xray」两个独立入口都能拿到。
 
+### 5.1 实施中新增的三处细化（草稿阶段未预见）
+
+- **`install_en.sh` 必须同步改。** CLAUDE.md「运维脚本」一节明文要求四个 shell 脚本成对维护——`install.sh`/`install_en.sh` 一对，`a-ui.sh`/`a-ui_en.sh` 另一对。这两个函数只加进 `install.sh` 的话，英文安装包用户完全拿不到本设计的功能，而且是静默的（脚本不报错，只是行为退回改动前）。最终两个脚本都加了同构的 `backup_xray_assets` / `restore_or_install_xray`。
+- **拉取要有超时。** `web/service/server.go` 里 `downloadXRay`／`GetXrayVersions` 用的是 Go 默认 `http.Client`，没有 `Timeout`。GitHub 只是被丢包（不是拒绝连接）时，`http.Get` 会永久挂住——而 `restore_or_install_xray` 走到调用 `a-ui xray -update latest` 这一步时，面板已经停了、`/usr/local/a-ui/` 已经删了重铺、systemd 单元还没起来，挂住就是把机器留在这个半死状态里出不来。调用点因此包一层 `timeout 600`（`command -v timeout` 判断该命令是否存在，不存在就退化成直接调用——不能让「没有 `timeout` 命令」这种边缘情况变成安装失败）。600 秒足够慢速网络拉完约 37MB 的核心；超时后走 §6 表里「拉取失败」那一行的既有 fail open 分支。
+- **备份目录不能落在 `/tmp`。** `mktemp -d` 默认给的路径在 systemd 发行版上通常在 `/tmp`，而多数发行版把 `/tmp` 挂成内存 tmpfs。三个待备份文件（xray 核心 + geoip.dat + geosite.dat）合计能到 60~70MB，这次拷贝还发生在 `systemctl stop` **之前**——面板与 xray 都在正常提供服务，是这台机器内存占用的峰值时刻。小内存 VPS 上 `/tmp` 装不下，会让 `backup_xray_assets` 本身失败，而它是 §6 表里唯一 fail close 的一步，代价是管理员从此彻底无法更新面板。改用 `mktemp -d /usr/local/a-ui-xray-backup-XXXXXX`：与 `/usr/local/a-ui/` 同级但不同名的兄弟目录，不占 tmpfs 配额，也不会被 `rm /usr/local/a-ui/ -rf`（结尾的 `/` 只删这一棵目录树）误删。
+
 ## 6. 失败路径
 
 | 环节 | 处理 | 理由 |
@@ -163,8 +212,9 @@ a-ui xray -update v26.9.9     # 装指定版本
 | 备份失败（磁盘满等） | `die_restoring_panel`，**不执行 `rm -rf`** | 唯一必须 fail close 的一步：删掉就找不回来了。此时尚未 `systemctl stop`，`a_ui_stopped=0`，面板从头到尾没停过 |
 | 恢复失败（`cp` 报错） | 打印警告，保留发版包那份，继续安装 | 那份能用，不该为此中断整个安装 |
 | `a-ui xray -update latest` 失败 | 打印警告，保留发版包那份，继续安装 | 同上。与 `routing_validate.go` 的 fail open 同取向：辅助手段自身故障不能把用户锁在门外 |
+| 目标机器装的是 v1.6.0 之前的旧 `a-ui` 二进制（没有 `xray` 子命令） | `a-ui xray -update latest` 落进 `main.go` 的 `default:` 分支，**必须以非 0 退出** | 实施中发现的第四处裁决：`default:` 分支原本 `return`（退出码 0）。旧二进制吃到未知子命令时打印一段 usage 提示就正常退出，`install.sh` 的 `if ! a-ui xray -update latest` 会把这个 0 判成「拉取成功」——退回上面「同上」那一行的 fail open 警告一句都不会打，静默留下一份根本没被替换的 xray，且没有任何提示。改成 `os.Exit(1)` 后，这种情况会正确落进上面那两行「拉取/更新失败」的 fail open 分支，打印警告、保留发版包那份 |
 
-三条合起来的性质：**这次改动不新增任何「安装可能失败」的路径**，只新增一条「安装可能失败」的路径被堵死（备份失败时不再往下走）。
+四条合起来的性质：**这次改动不新增任何「安装可能失败」的路径**，只新增一条「安装可能失败」的路径被堵死（备份失败时不再往下走），并堵上一个旧二进制场景下会误判成功的退出码空子。
 
 ## 7. 一个正面的副作用与一处残余风险
 
@@ -182,13 +232,16 @@ CLAUDE.md「运维脚本」一节里这句：
 
 「已知偏差与注意事项」一节里关于 `a-ui update` 会把 xray 降级的那段，改成描述新行为。
 
+**已落实**（Task 5）：CLAUDE.md「运维脚本」一节这两段都已改写，并补上 §4.2 那次推翻 `/releases/latest` 的实测结论；「面板版本与一键更新」一节「回退有两个后果」也一并改写为一条（xray 核心不再是回退的后果）；`web/assets/js/util/panel-version.js` 的二次确认框文案同步改写。「已知偏差与注意事项」一节实际没有相关段落——`a-ui update` 那段原文落在「运维脚本」节内，一并处理。
+
 ## 9. 测试与验证
 
 ### 9.1 Go 侧（可自动化）
 
 - `a-ui xray` 的 flag 解析：照 `main_flags_test.go` 的形式加用例，覆盖 `-update latest`、`-update <版本>`、缺参数、未知参数。
-- `extractXrayFiles`：喂一个当场构造的 zip（含 `xray` / `geosite.dat` / `geoip.dat` 三个条目），验证三个文件确实落到 `bin/` 下且内容正确。这一层脱网，是本次改动里唯一能被自动化覆盖的实质逻辑（§4.1 把下载单独分出去就是为了这个）。
-- 回归：`UpdateXray` 拆分后对外行为不变，这一点靠上一条间接覆盖。
+- `openXrayZip` / `extractXrayFiles`：喂一个当场构造的 zip（含 `xray` / `geosite.dat` / `geoip.dat` 三个条目），验证 `openXrayZip` 能读出 reader、`extractXrayFiles` 把三个文件解到显式传入的路径且内容正确；另覆盖条目缺失、zip 本身损坏两种情况。这两层脱网，是本次改动里唯一能被自动化覆盖的实质逻辑（§4.1 把下载单独分出去就是为了这个），落在 `web/service/server_xray_update_test.go`。
+- 回归：`UpdateXray` / `ReplaceXrayFiles` 拆分后对外行为不变，这一点靠上一条间接覆盖。
+- `firstReleaseTag`：覆盖空列表、首项空字符串、正常首项三种情况（§4.2）。
 
 ### 9.2 install.sh（无法自动化，必须人工验证）
 

@@ -73,8 +73,8 @@ const panelVersionMixin = {
             const goingBack = isRollback && tag !== this.panelVersion.latest;
             const content = goingBack
                 ? ('确定要回退到 ' + tag + ' 吗？\n\n'
-                    + '回退会一并把 xray 核心换成该版本携带的构建，新版新增的功能会失效。'
-                    + '数据库和已有配置不会丢失。\n\n'
+                    + '回退只替换面板本身，不会改动你已安装的 xray 核心。'
+                    + '数据库和已有配置不会丢失，但新版新增的功能会失效。\n\n'
                     // 「新版新增的功能会失效」里最要紧的一项是这个入口自己，
                     // 值得单独点名：回退到早于版本管理上线的版本后，界面上
                     // 再也找不到切换版本的地方，只能 SSH 上去。前端无从判断

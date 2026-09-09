@@ -297,6 +297,8 @@ UpdateXray 的行为不变，尤其保持 StopXray 排在 zip 验证之后——
 
 ### Task 2: 加「下载 + 解包但不碰进程」与「最新稳定版」两个入口
 
+> **实施后更正（裁决 1，见 task-5-report）**：下面这个 Task 的 `/releases/latest` + `parseLatestTag` 方案在实现阶段被实测数据推翻，**没有落地**。2026-09-09 实测 `/releases/latest` 返回 `v26.3.27`（`prerelease=false`，2026-03-27 发布），而 xray-core 最近 15 个发布里 14 个标记为 `prerelease`——`/releases/latest` 会稳定给出一个比发版包自带核心（26.7.28）还旧的版本，直接违反本任务的目标。最终实现改为 `LatestXrayVersion()` 复用已有的 `GetXrayVersions()`（`/releases`）取首项（`firstReleaseTag`），与面板「切换版本」列表同源，见 `web/service/server.go`。下面的 Step 1/3/4 描述的 `parseLatestTag`／`latestXrayReleaseURL`／`/releases/latest` 均为**未采用的历史设计**，保留原文只为存执行记录，不代表最终行为——最终行为以 `docs/superpowers/specs/2026-09-09-xray-version-persistence-design.md` §4.2 与 `web/service/server.go` 为准。
+
 **Files:**
 - Modify: `web/service/server.go`（在 Task 1 新增的两个函数之后追加）
 - Modify: `web/service/server_xray_update_test.go`
