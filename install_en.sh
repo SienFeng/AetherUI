@@ -1333,7 +1333,10 @@ backup_xray_assets() {
 }
 
 # Restore the backed-up xray and geo data; on a fresh install, fetch the
-# latest stable release from GitHub instead.
+# latest release from GitHub instead (the first entry of /releases, not
+# the seemingly more "correct" /releases/latest -- xray-core marks nearly
+# every release as prerelease, so that endpoint would return a build from
+# half a year ago).
 #
 # The decision is based on whether the xray binary was backed up, not geo:
 # the xray version is the core requirement, geo data just comes along for

@@ -1172,7 +1172,9 @@ backup_xray_assets() {
     xray_backup_dir="${dir}"
 }
 
-# 恢复备份的 xray 与 geo 数据；全新安装则装 GitHub 最新稳定版。
+# 恢复备份的 xray 与 geo 数据；全新安装则装 GitHub 最新发布版（取
+# /releases 首条，不是看起来更「正确」的 /releases/latest——xray-core
+# 几乎所有发布都标 prerelease，那个端点会给出一个半年前的旧版本）。
 #
 # 判据是 xray 二进制有没有备到，不看 geo：核心诉求是 xray 版本，geo 是附带的，
 # 两者可能只成功一半（管理员删过其中某个文件，或上一次安装本身就是坏的）。
