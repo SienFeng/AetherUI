@@ -67,3 +67,35 @@ func TestIsRegistrable(t *testing.T) {
 		}
 	}
 }
+
+// IsMeterable 是计量池的准入闸门，比 IsRegistrable 多放行一类：IP 字面量。
+// 第三期给 IP 目标发 ip 条件的计量规则（设计 §4.1），所以它们必须能进池。
+func TestIsMeterable(t *testing.T) {
+	yes := []string{
+		"doubleclick.net",
+		"example.co.uk",
+		"1.2.3.4",       // IPv4 字面量：第三期新放行
+		"72.235.209.83", // 触发本期立项的那个目标
+		"2001:db8::1",   // IPv6 字面量
+		"::1",           // IPv6 简写
+	}
+	for _, d := range yes {
+		if !IsMeterable(d) {
+			t.Errorf("IsMeterable(%q) = false，期望 true", d)
+		}
+	}
+	no := []string{
+		"",                // 空
+		"com",             // 公共后缀本身：domain:com 会命中全部 .com
+		"co.uk",           // 多级公共后缀本身
+		"localhost",       // 不含点的主机名
+		"www.example.com", // 子域名不是注册域名，池里只放归并后的结果
+		"example.com.",    // 带末尾点：Registrable 已经剥过
+		"EXAMPLE.COM",     // 大写：domain:EXAMPLE.COM 是永不命中的哑规则
+	}
+	for _, d := range no {
+		if IsMeterable(d) {
+			t.Errorf("IsMeterable(%q) = true，期望 false", d)
+		}
+	}
+}

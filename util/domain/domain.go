@@ -72,3 +72,29 @@ func IsRegistrable(d string) bool {
 	etld1, err := publicsuffix.EffectiveTLDPlusOne(d)
 	return err == nil && etld1 == d
 }
+
+// IsMeterable 判断一个归并后的目标能否进计量池。
+//
+// 比 IsRegistrable 多放行一类：IP 字面量。第二期把它们挡在外面是因为当时
+// 计量规则只有 domain: 一种形态，而 domain 条件对 IP 目标永不命中、白占一个
+// 槽位；第三期给 IP 成员发 ip 条件的规则（设计 §4.2），它们因此有了资格。
+// 这不是一个可有可无的放宽：立项时那台生产机上，某入站 24 小时 2.53 GB 的
+// 上传里绝大部分打向一个没有域名的目标，域名池再大也抓不到它。
+//
+// 仍然拒绝公共后缀本身（"com"）与不含点的主机名（"localhost"）：前者会生成
+// domain:com 这种命中全部 .com 的规则，把该入站几乎全部流量吸进一个计量出站，
+// 榜单从此只有一行。
+//
+// 与 IsRegistrable 并列而不是改它的语义：那个函数回答「是不是注册域名」，
+// 池以外的地方也在用，改它会在看不见的地方产生副作用。
+func IsMeterable(d string) bool {
+	if d == "" {
+		return false
+	}
+	// 不做归一化，只判定——与 IsRegistrable 同规。Registrable 已经在
+	// 上游把大小写和末尾点处理过了。
+	if net.ParseIP(d) != nil {
+		return true
+	}
+	return IsRegistrable(d)
+}
