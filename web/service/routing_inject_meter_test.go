@@ -393,3 +393,103 @@ func TestInjectKeepsIPLiteralPoolRows(t *testing.T) {
 		}
 	}
 }
+
+// meterRuleOf 找出指向某个计量出站的那条规则，找不到直接失败——返回零值
+// 会让后续断言在一个空 map 上「通过」。
+func meterRuleOf(t *testing.T, cfg *xray.Config, tag string) map[string]any {
+	t.Helper()
+	for _, r := range decodeRules(t, cfg) {
+		if got, _ := r["outboundTag"].(string); got == tag {
+			return r
+		}
+	}
+	t.Fatalf("找不到 outboundTag = %q 的规则", tag)
+	return nil
+}
+
+// meterRuleIndexOf 返回该规则在规则数组里的下标，找不到直接失败。
+func meterRuleIndexOf(t *testing.T, cfg *xray.Config, tag string) int {
+	t.Helper()
+	for i, r := range decodeRules(t, cfg) {
+		if got, _ := r["outboundTag"].(string); got == tag {
+			return i
+		}
+	}
+	t.Fatalf("找不到 outboundTag = %q 的规则", tag)
+	return -1
+}
+
+// IP 成员发 ip 条件的规则，且不带 ip 守卫。
+//
+// 守卫（"ip":["0.0.0.0/0","::/0"]）是给**域名**规则用的：它让计量规则在
+// 第一遍匹配必然不命中（域名目标此时还没有 IP），从而不屏蔽掉模板里
+// geoip:private → blocked 这类只能在第二遍命中的 CIDR 规则。IP 规则本身
+// 就是 IP 条件，加守卫是同义反复。
+func TestInjectIPMeterRuleUsesIPConditionWithoutGuard(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32012)
+	putPoolRow(t, in.Id, "72.235.209.83", 0)
+	// 打开两遍匹配：这时域名规则会带守卫，而 IP 规则仍然不该带。
+	if err := (&SettingService{}).setString("ipRuleResolveDomain", "1"); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	rule := meterRuleOf(t, cfg, model.MeterTag(in.Id, "72.235.209.83"))
+	if got := rule["domain"]; got != nil {
+		t.Errorf("IP 计量规则不该有 domain 条件，得到 %v", got)
+	}
+	ips, _ := rule["ip"].([]any)
+	if len(ips) != 1 || ips[0] != "72.235.209.83/32" {
+		t.Errorf(`ip 条件 = %v，期望 ["72.235.209.83/32"]（掩码必须补齐，`+
+			`否则生成结果不逐字节确定）`, ips)
+	}
+}
+
+// IPv6 补 /128。
+func TestInjectIPv6MeterRuleCarries128Mask(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32013)
+	putPoolRow(t, in.Id, "2001:db8::1", 0)
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	rule := meterRuleOf(t, cfg, model.MeterTag(in.Id, "2001:db8::1"))
+	ips, _ := rule["ip"].([]any)
+	if len(ips) != 1 || ips[0] != "2001:db8::1/128" {
+		t.Errorf(`ip 条件 = %v，期望 ["2001:db8::1/128"]`, ips)
+	}
+}
+
+// 域名计量规则必须全部排在 IP 计量规则之前。
+//
+// 两遍匹配下，域名目标在第一遍先命中域名规则、归到域名行；只有归不到
+// 域名的才落到 IP 行（设计 §4.3）。顺序反了会让 IP 行吸走本该归到域名的
+// 流量，而两边的数字看上去都还是「对的」，没有任何一层会报错。
+//
+// 池按 (inboundId asc, domain asc) 排序，"7..." 排在 "z..." 之前，
+// 所以按池序天然生成的话 IP 会跑到域名前面——这条测试守的就是那个。
+func TestInjectMeterDomainRulesComeBeforeIPRules(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32014)
+	putPoolRow(t, in.Id, "72.235.209.83", 0)
+	putPoolRow(t, in.Id, "zeta.com", 0)
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	domainIdx := meterRuleIndexOf(t, cfg, model.MeterTag(in.Id, "zeta.com"))
+	ipIdx := meterRuleIndexOf(t, cfg, model.MeterTag(in.Id, "72.235.209.83"))
+	if domainIdx > ipIdx {
+		t.Errorf("域名规则(下标 %d)排在了 IP 规则(下标 %d)之后", domainIdx, ipIdx)
+	}
+}
