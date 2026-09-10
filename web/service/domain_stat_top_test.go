@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -232,7 +233,7 @@ func TestTopDomainsBreakdownAccountsForEveryByte(t *testing.T) {
 	loc, _ := (&SettingService{}).GetTimeLocation()
 	bucket := model.AlignHour(now, loc)
 
-	putTrafficBucket(t, in.Id, bucket, 1000, 0)             // 入站计数器：总量 1000
+	putTrafficBucket(t, in.Id, bucket, 1000, 0)               // 入站计数器：总量 1000
 	putDomainStat(t, in.Id, "acspubs.org", bucket, 1, 600, 0) // 已归因 600
 	putPoolRow(t, in.Id, "acspubs.org", 0)                    // 让 Metered 为 true
 
@@ -275,5 +276,45 @@ func TestTopDomainsBreakdownClampsNegativeRemainder(t *testing.T) {
 	}
 	if got.Breakdown.OverheadBytes < 0 {
 		t.Errorf("协议开销 = %d，必须钳到 0", got.Breakdown.OverheadBytes)
+	}
+}
+
+// 规则行：Kind 是 rule，Label 是「规则备注 → 出站备注」；规则已删则退化成
+// 「规则 #N（已删除）」而不是整行消失——字节是真实发生过的，隐藏它等于把
+// 差额塞回「未归因」。
+func TestTopDomainsLabelsRuleRows(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := mkTrafficInbound(t, 31831, "甲")
+	now := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
+	loc, _ := (&SettingService{}).GetTimeLocation()
+	bucket := model.AlignHour(now, loc)
+	_, rule := seedProxiedFixture(t, []int{in.Id}, "AI 分流", "domain:chatgpt.com",
+		`{"protocol":"freedom","settings":{}}`, model.ActionProxy, 1)
+	putDomainStat(t, in.Id, model.RuleStatKey(rule.Id), bucket, 0, 1000, 5000)
+	putDomainStat(t, in.Id, model.RuleStatKey(rule.Id+1000), bucket, 0, 1, 1) // 已删规则
+	putPoolRow(t, in.Id, "acspubs.org", 0)
+	putDomainStat(t, in.Id, "acspubs.org", bucket, 5, 10, 20) // 域名行，对照
+
+	got, err := (&DomainStatService{}).TopDomains(in.Id, TopRange1h, TopOrderDown, 10, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byDomain := map[string]TopDomainRow{}
+	for _, r := range got.List {
+		byDomain[r.Domain] = r
+	}
+	r := byDomain[model.RuleStatKey(rule.Id)]
+	if r.Kind != "rule" {
+		t.Errorf("Kind = %q，期望 rule", r.Kind)
+	}
+	if r.Label != "AI 分流 规则 → AI 分流 节点" {
+		t.Errorf("Label = %q", r.Label)
+	}
+	gone := byDomain[model.RuleStatKey(rule.Id+1000)]
+	if gone.Kind != "rule" || !strings.Contains(gone.Label, "已删除") {
+		t.Errorf("已删规则的行 = %+v，期望 Kind=rule 且 Label 含「已删除」", gone)
+	}
+	if d := byDomain["acspubs.org"]; d.Kind != "domain" || d.Label != "" {
+		t.Errorf("域名行不该有 Label：%+v", d)
 	}
 }

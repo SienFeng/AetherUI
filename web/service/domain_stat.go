@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -292,14 +293,22 @@ type TopDomainRow struct {
 	// 形态本身已经是完备的判据；加一列只会多出一处需要与推导保持一致的
 	// 真相源，而它们一旦漂移，界面上的类型标签会和实际生成的规则形态对不上。
 	// 推导用的 net.ParseIP 与 buildMeterRules 选规则形态用的是同一个判据。
-	Kind  string `json:"kind"`
+	Kind string `json:"kind"`
+	// Label 只对 rule 行非空：「规则备注 → 出站备注」。规则或出站已删时退化成
+	// 带「已删除」的说明，行不消失——字节是真实发生过的，隐藏它等于把差额
+	// 塞回「未归因」。
+	Label string `json:"label"`
 	Count int64  `json:"count"`
 	Up    int64  `json:"up"`
 	Down  int64  `json:"down"`
 }
 
-// topDomainKind 由目标的形态推导它的类型。
+// topDomainKind 由目标的形态推导它的类型：先判 rule: 前缀再判 IP，否则域名。
+// 三类都是推导值，与 buildMeterRules / buildRule 选出站形态用的是同一套判据。
 func topDomainKind(d string) string {
+	if model.IsRuleStatKey(d) {
+		return "rule"
+	}
 	if net.ParseIP(d) != nil {
 		return "ip"
 	}
@@ -483,8 +492,12 @@ func (s *DomainStatService) TopDomains(
 		return nil, err
 	}
 	if rows != nil {
+		labels := s.ruleLabels(rows)
 		for i := range rows {
 			rows[i].Kind = topDomainKind(rows[i].Domain)
+			if rows[i].Kind == "rule" {
+				rows[i].Label = labels[rows[i].Domain]
+			}
 		}
 		result.List = rows
 	}
@@ -561,6 +574,63 @@ func (s *DomainStatService) coverage(
 		out.Ratio = &ratio
 	}
 	return out, nil
+}
+
+// ruleLabels 为榜单里的规则行生成「规则备注 → 出站备注」。一次把涉及的
+// 规则与出站都查出来，不在循环里逐行查库。
+func (s *DomainStatService) ruleLabels(rows []TopDomainRow) map[string]string {
+	labels := make(map[string]string)
+	ids := make([]int, 0)
+	for _, r := range rows {
+		if id, ok := model.ParseRuleStatKey(r.Domain); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return labels
+	}
+	var rules []model.RoutingRule
+	if err := database.GetDB().Where("id in ?", ids).Find(&rules).Error; err != nil {
+		logger.Warning("榜单取规则备注失败:", err)
+	}
+	var nodes []model.OutboundNode
+	if err := database.GetDB().Find(&nodes).Error; err != nil {
+		logger.Warning("榜单取出站备注失败:", err)
+	}
+	nodeRemark := make(map[int]string, len(nodes))
+	for _, n := range nodes {
+		nodeRemark[n.Id] = n.Remark
+	}
+	byId := make(map[int]model.RoutingRule, len(rules))
+	for _, r := range rules {
+		byId[r.Id] = r
+	}
+	for _, id := range ids {
+		key := model.RuleStatKey(id)
+		rule, ok := byId[id]
+		if !ok {
+			labels[key] = fmt.Sprintf("规则 #%d（已删除）", id)
+			continue
+		}
+		name := rule.Remark
+		if name == "" {
+			name = fmt.Sprintf("规则 #%d", id)
+		}
+		var target string
+		switch rule.Action {
+		case model.ActionDirect:
+			target = "直连"
+		case model.ActionProxy:
+			target = nodeRemark[rule.OutboundId]
+			if target == "" {
+				target = fmt.Sprintf("出站 #%d（已删除）", rule.OutboundId)
+			}
+		default:
+			target = rule.Action
+		}
+		labels[key] = name + " → " + target
+	}
+	return labels
 }
 
 // breakdown 由 coverage 已经算好的两个精确值再拆出估算项与余项。
