@@ -234,11 +234,13 @@ IPv6 用冒号，所以两者都能正确反查，**这个函数不用改**。
 `IsMeterTag` 判前缀，同样不用改。因此 `model.IsReservedTag` 在分配端 / 生成端 /
 导入端 / 校验端的四道 fail-close 防线自动继承，无需任何改动。
 
-> **未验证的假设**：IPv6 的 tag 会含冒号（`a-ui-meter-7-2001:db8::1`）。
-> xray 对 tag 的字符集很宽松（含中文都 `Configuration OK`），但冒号未实测。
-> 实施时必须先用真实 xray 验证；若不接受，退路是对 IPv6 做一次确定性转写
-> （冒号换成短横线以外的字符），**绝不能**换成短横线——`ParseMeterTag`
-> 按第一个短横线切分，那会让反查静默错位。
+> **已验证（2026-09-09）**：IPv6 的 tag 含冒号（`a-ui-meter-7-2001:db8::1`），
+> Xray 26.7.28 对含 IPv4/IPv6 两种计量 tag 的完整生成配置返回 `Configuration OK`。
+> 回归测试 `TestIPMeterRulesAreAcceptedByRealXray`（`meter_rule_e2e_test.go`）
+> 钉住了它，核心升级换掉解析器时会变红。
+>
+> 万一将来不再被接受，退路是对 IPv6 做一次确定性转写，**绝不能**换成短横线
+> ——`ParseMeterTag` 按第一个短横线切分，那会让反查静默错位。
 
 ### 4.5 池排序、换池、死计数器：全部不变
 
@@ -417,6 +419,15 @@ a-ui-meter-r-<inboundId>-<ruleId>      例：a-ui-meter-r-7-9
 ---
 
 ## 6. 数据模型
+
+> **分期说明（2026-09-09 实施改动 A 后修订）**：本节的 `Kind` 列与索引扩展
+> **只属于改动 B**。改动 A 实施时确认不需要它们——`DomainStat.Domain` 从第一期
+> 起就「IP 字面量原样」存，`MeterDomain` 的唯一索引 `(inbound_id, domain)`
+> 对 IP 同样成立，而榜单的类型标签用 `net.ParseIP` 推导即可（多一处存储就是
+> 多一处会漂移的真相源，而推导用的正是 `buildMeterRules` 选规则形态的同一个
+> 判据）。因此**改动 A 零数据模型变更、零迁移风险**，下面那条 GORM
+> `AutoMigrate` 不修改已存在索引的静默失败，只在改动 B 实施时才需要面对。
+
 
 ### 6.1 `model.DomainStat` 新增 `Kind` 列
 
