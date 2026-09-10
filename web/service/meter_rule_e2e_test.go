@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"path/filepath"
 	"testing"
 	"time"
@@ -186,4 +187,45 @@ func socksReadDomain(proxyAddr, host string, port int) string {
 		return ""
 	}
 	return string(buf[:n])
+}
+
+// IP 计量规则与 IPv6 的计量 tag 必须能被真实 xray 接受。
+//
+// IPv6 那条是设计 §4.4 标记的未验证假设：tag 会含冒号
+//（a-ui-meter-7-2001:db8::1）。xray 对 tag 字符集很宽松（含中文都
+// Configuration OK），但冒号此前没有实测过。这条测试就是那个假设的验收。
+//
+// 若它失败，**不要自行改 tag 形态**：退路是对 IPv6 做一次确定性转写，而
+// 绝不能把冒号换成短横线——ParseMeterTag 按第一个短横线切分，那会让反查
+// 静默错位（把 a-ui-meter-7-2001-db8--1 反查成入站 7、目标 "2001-db8--1"，
+// 与池表里的键对不上，字节永远归不进去且没有任何一层会报错）。
+func TestIPMeterRulesAreAcceptedByRealXray(t *testing.T) {
+	requireXrayBinary(t)
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32021)
+	putPoolRow(t, in.Id, "72.235.209.83", 0)
+	putPoolRow(t, in.Id, "2001:db8::1", 0)
+	putPoolRow(t, in.Id, "acspubs.org", 0)
+	// 打开两遍匹配：域名规则会带守卫、IP 规则不带，两种形态同时送检。
+	if err := (&SettingService{}).setString("ipRuleResolveDomain", "1"); err != nil {
+		t.Fatalf("setString: %v", err)
+	}
+
+	data, err := generatedConfigJSON()
+	if err != nil {
+		t.Fatalf("生成配置: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "meter-ip.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("写临时配置: %v", err)
+	}
+
+	out, err := exec.Command(xray.GetBinaryPath(), "run", "-test", "-c", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("真实 xray 拒绝了含 IP 计量规则的配置: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Configuration OK") {
+		t.Fatalf("xray 没有给出 Configuration OK，输出：\n%s", out)
+	}
+	t.Logf("xray 接受了含 IPv4/IPv6 计量 tag 的配置：%s", strings.TrimSpace(string(out)))
 }

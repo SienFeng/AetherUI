@@ -121,8 +121,9 @@
             <div v-else style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
                 <div v-if="accessLogModal.topCoverageText">[[ accessLogModal.topCoverageText ]]</div>
                 <div>
-                    字节数只统计<b>走直连出去</b>的流量：被你自己的分流规则带走（走出站节点或被封禁）的部分不在其中。
-                    计量的域名集合每小时自动调整一次，刚上线时排序主要来自访问次数，运行一段时间后才由实测流量主导。
+                    字节数只统计<b>走直连出去</b>的流量：被你自己的分流规则带走（走出站节点）的部分不在其中，
+                    被封禁的部分见下方分解。计量的目标集合每小时自动调整一次，刚上线时排序主要来自访问次数，
+                    运行一段时间后才由实测流量主导。
                 </div>
                 <div>
                     「访问次数」按<b>连接建立</b>时刻归类，「上传/下载」按<b>流量发生</b>时刻归类，
@@ -136,6 +137,11 @@
                 <template slot="rank" slot-scope="text, row, index">
                     [[ index + 1 ]]
                 </template>
+                <template slot="topKind" slot-scope="text, row">
+                    <a-tag :color="row.kind === 'ip' ? 'orange' : 'blue'">
+                        [[ row.kind === 'ip' ? 'IP' : '域名' ]]
+                    </a-tag>
+                </template>
                 <template slot="domain" slot-scope="text, row">
                     <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
                 </template>
@@ -146,6 +152,19 @@
                     [[ sizeFormat(row.down) ]]
                 </template>
             </a-table>
+            <div v-if="accessLogModal.topBreakdown" style="margin-top: 12px; font-size: 12px; line-height: 1.9">
+                <div style="color: rgba(0,0,0,.45); margin-bottom: 2px">
+                    用量分解（总量 [[ sizeFormat(accessLogModal.topBreakdown.totalBytes) ]]）
+                </div>
+                <div>已归因合计　<b>[[ sizeFormat(accessLogModal.topBreakdown.attributedBytes) ]]</b>
+                    <span style="color: rgba(0,0,0,.45)">上表各行之和，精确</span></div>
+                <div>被封禁丢弃　<b>[[ accessLogModal.topBreakdown.blockedConns ]] 次连接</b>
+                    <span style="color: rgba(0,0,0,.45)">字节数不可得，已计入总量</span></div>
+                <div style="color: rgba(0,0,0,.65)">协议封装开销　约 [[ sizeFormat(accessLogModal.topBreakdown.overheadBytes) ]]
+                    <span style="color: rgba(0,0,0,.45)">估算：入站计加密流、出站计明文流，结构性差 3~8%</span></div>
+                <div style="color: rgba(0,0,0,.65)">未归因　　　　[[ sizeFormat(accessLogModal.topBreakdown.unattributedBytes) ]]
+                    <span style="color: rgba(0,0,0,.45)">余项：计量池外的长尾目标</span></div>
+            </div>
         </a-tab-pane>
     </a-tabs>
 </a-modal>
@@ -208,6 +227,7 @@
         // 比不显示更糟。
         topMetered: false,
         topCoverageText: '',
+        topBreakdown: null,
         topColumns: [],
 
         show({ dbInbound, ip }) {
@@ -225,6 +245,7 @@
             this.topOrder = 'count';
             this.topMetered = false;
             this.topCoverageText = '';
+            this.topBreakdown = null;
             this.rebuildTopColumns();
             this.visible = true;
             this.load();
@@ -341,7 +362,10 @@
                 title: "#", align: 'center', width: 60,
                 scopedSlots: { customRender: 'rank' },
             }, {
-                title: "域名", align: 'left',
+                title: "类型", align: 'center', width: 72,
+                scopedSlots: { customRender: 'topKind' },
+            }, {
+                title: "目标", align: 'left',
                 scopedSlots: { customRender: 'domain' },
             }, {
                 title: "访问次数", align: 'right', width: 110, dataIndex: "count",
@@ -395,6 +419,7 @@
                 this.topOrder = 'count';
             }
             this.topCoverageText = this.formatCoverage(msg.obj.coverage);
+            this.topBreakdown = msg.obj.breakdown || null;
             this.rebuildTopColumns();
             this.topLoaded = true;
         },

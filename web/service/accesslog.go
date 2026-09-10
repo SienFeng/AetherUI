@@ -344,6 +344,29 @@ func (s *AccessLogService) RecentSources(inboundId int, limit int) ([]RecentSour
 	return list, nil
 }
 
+// CountByRoute 统计某入站在 since（Unix **秒**）之后、经由某个出站的连接数。
+//
+// 给差额分解里「被封禁丢弃」那一行用。只能给出连接数，拿不到字节：
+// blackhole 不调用 Dial（proxy/blackhole/blackhole.go 的 Process 对 TCP
+// 直接 common.Interrupt(link.Reader)），而出站计数器是包在 Dial 返回的
+// 连接上的（app/proxyman/outbound/handler.go 的 getStatCouterConnection），
+// 所以那个计数器从来没被装上、恒为 0。这些字节确实发生过、也确实计在
+// 入站计数器里，只是无法单独摘出来。
+//
+// 注意 AccessLog.Time 是**毫秒**，而调用方给的 since 是秒（与 DomainStat
+// 的 BucketStart 同单位），换算在这里做——两处单位不一致是这张表的老坑。
+func (s *AccessLogService) CountByRoute(inboundId int, route string, since int64) (int64, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return 0, nil
+	}
+	var n int64
+	err := db.Model(&model.AccessLog{}).
+		Where("inbound_id = ? and route = ? and time >= ?", inboundId, route, since*1000).
+		Count(&n).Error
+	return n, err
+}
+
 func (s *AccessLogService) Cleanup(retentionDays int, now time.Time) (int64, error) {
 	db := database.GetAccessLogDB()
 	if db == nil || retentionDays <= 0 {

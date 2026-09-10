@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -285,9 +286,24 @@ const (
 // 显示一列恒为 0 的「上传」会被当成「他没上传过」，比不显示更糟。
 type TopDomainRow struct {
 	Domain string `json:"domain"`
-	Count  int64  `json:"count"`
-	Up     int64  `json:"up"`
-	Down   int64  `json:"down"`
+	// Kind 是 "domain" 或 "ip"，由 Domain 的形态推导，不落库。
+	//
+	// 不加数据库列：DomainStat.Domain 从第一期起就「IP 字面量原样」存，
+	// 形态本身已经是完备的判据；加一列只会多出一处需要与推导保持一致的
+	// 真相源，而它们一旦漂移，界面上的类型标签会和实际生成的规则形态对不上。
+	// 推导用的 net.ParseIP 与 buildMeterRules 选规则形态用的是同一个判据。
+	Kind  string `json:"kind"`
+	Count int64  `json:"count"`
+	Up    int64  `json:"up"`
+	Down  int64  `json:"down"`
+}
+
+// topDomainKind 由目标的形态推导它的类型。
+func topDomainKind(d string) string {
+	if net.ParseIP(d) != nil {
+		return "ip"
+	}
+	return "domain"
 }
 
 // TopDomainOrder 是榜单的排序维度。
@@ -336,6 +352,33 @@ type TopDomainCoverage struct {
 	Ratio *float64 `json:"ratio"`
 }
 
+// meterOverheadRatio 是协议封装开销的估算比例。
+//
+// 入站计数器量的是 VMess+WS+TLS 封装后的加密流，出站计数器量的是解封装后
+// 的明文流，两者结构性地差 3~8%。取中值 5%。
+//
+// 做成常量而不是设置项：新增设置项要同步改 5 处（漏掉 models.js 那处会让
+// 整个保存配置接口失败），而这个数只影响一行展示文字，不值得那个代价。
+// 不同协议的封装开销差别不小（vless+vision+reality 与 vmess+ws+tls 不是
+// 一个量级），所以 UI 上必须标明它是估算。
+const meterOverheadRatio = 0.05
+
+// TopDomainBreakdown 把总用量拆成有名字的几块，而不是让差额无声消失在
+// 一句「约 0% 已归因」里——那句话除了让人以为系统坏了之外没有任何信息量。
+//
+// 只有 TotalBytes 与 AttributedBytes 是精确值（都直接来自计数器）；
+// OverheadBytes 是按比例估的，UnattributedBytes 是减法余项。前端必须在
+// 视觉上把估算值与精确值分开，否则整份数据的可信度会被那个估算拖下水。
+type TopDomainBreakdown struct {
+	TotalBytes      int64 `json:"totalBytes"`      // 入站计数器，精确
+	AttributedBytes int64 `json:"attributedBytes"` // 计量出站合计，精确
+	// BlockedConns 是被封禁的连接数。**字节数不可得**，理由见
+	// AccessLogService.CountByRoute。这些字节已经计在 TotalBytes 里。
+	BlockedConns      int64 `json:"blockedConns"`
+	OverheadBytes     int64 `json:"overheadBytes"`     // 协议封装开销，估算
+	UnattributedBytes int64 `json:"unattributedBytes"` // 余项，减法得出
+}
+
 // TopDomainResult 是榜单接口的返回体。
 type TopDomainResult struct {
 	// Metered 为 false 表示这批数据只有访问次数，没有字节数。判据是「该入站
@@ -349,6 +392,8 @@ type TopDomainResult struct {
 	List    []TopDomainRow `json:"list"`
 	// Coverage 在 Metered 为 false 时为 nil。
 	Coverage *TopDomainCoverage `json:"coverage"`
+	// Breakdown 同样在 Metered 为 false 时为 nil：没有字节数就无从分解。
+	Breakdown *TopDomainBreakdown `json:"breakdown"`
 }
 
 // topRangeSpec 把档位翻译成（粒度, 回溯时长）。未知档位回落 24h——
@@ -438,6 +483,9 @@ func (s *DomainStatService) TopDomains(
 		return nil, err
 	}
 	if rows != nil {
+		for i := range rows {
+			rows[i].Kind = topDomainKind(rows[i].Domain)
+		}
 		result.List = rows
 	}
 
@@ -452,6 +500,7 @@ func (s *DomainStatService) TopDomains(
 			return nil, err
 		}
 		result.Coverage = coverage
+		result.Breakdown = s.breakdown(inboundId, since, coverage)
 	}
 	return result, nil
 }
@@ -512,6 +561,40 @@ func (s *DomainStatService) coverage(
 		out.Ratio = &ratio
 	}
 	return out, nil
+}
+
+// breakdown 由 coverage 已经算好的两个精确值再拆出估算项与余项。
+//
+// 不重新查库取总量与已归因：两处独立取数会在并发写入下给出对不上的两组
+// 数字，而这块 UI 的全部意义就是「账要平」。
+//
+// 不返回 error：被封禁的连接数取不到不算失败（访问日志是独立库，它不可用时
+// 分解的其余部分仍然成立），显示一个 0 比整块不显示要好。
+func (s *DomainStatService) breakdown(
+	inboundId int, since int64, coverage *TopDomainCoverage,
+) *TopDomainBreakdown {
+	out := &TopDomainBreakdown{
+		TotalBytes:      coverage.TotalBytes,
+		AttributedBytes: coverage.MeteredBytes,
+	}
+	if n, err := (&AccessLogService{}).CountByRoute(inboundId, model.BlockOutboundTag, since); err != nil {
+		logger.Warning("差额分解取不到封禁连接数:", err)
+	} else {
+		out.BlockedConns = n
+	}
+	out.OverheadBytes = int64(float64(out.TotalBytes) * meterOverheadRatio)
+	out.UnattributedBytes = out.TotalBytes - out.AttributedBytes - out.OverheadBytes
+	if out.UnattributedBytes < 0 {
+		// 口径差的方向并不固定（采集窗口错位也会造成已归因超过总量）。显示
+		// 一个负的「未归因」会让整块数据当场失去可信度，所以钳到 0，并把
+		// 溢出量让给开销那一项——它本来就是估算，吸收误差是它的职责。
+		out.OverheadBytes = out.TotalBytes - out.AttributedBytes
+		if out.OverheadBytes < 0 {
+			out.OverheadBytes = 0
+		}
+		out.UnattributedBytes = 0
+	}
+	return out
 }
 
 // Cleanup 删除某一级中早于保留期的行，返回删除行数。

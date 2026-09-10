@@ -311,3 +311,34 @@ func TestPoolExcludesRowsWhoseCooldownAlreadyExpired(t *testing.T) {
 		t.Errorf("Pool = %+v，期望 %+v——只有 cooldown_until = 0 的行才在池内", got, want)
 	}
 }
+
+// 冷启动时按访问次数选池，IP 字面量必须与域名一起参与竞争。
+//
+// 立项时那台生产机上，某入站 24 小时 2.53 GB 的上传里绝大部分打向
+// 72.235.209.83 这个没有域名的目标（2171 次直连、全天不间断）。它进池
+// 只需要一个槽位，但第二期的准入判定让它连参选资格都没有——所以上传
+// 归因率是 0.014%，而把池从 12 扩到 600 也只能抬到 0.02%。
+func TestRecomputeAdmitsIPLiterals(t *testing.T) {
+	setupMeterPoolTest(t)
+	SetStaleMeterCounters(0)
+	in := mkTrafficInbound(t, 31651, "IP 目标")
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	bucket := now.Add(-time.Hour).Unix()
+	putDomainStat(t, in.Id, "72.235.209.83", bucket, 2495, 0, 0)
+	putDomainStat(t, in.Id, "2001:db8::1", bucket, 300, 0, 0)
+	putDomainStat(t, in.Id, "acspubs.org", bucket, 131, 0, 0)
+
+	if _, err := (&MeterPoolService{}).Recompute(now); err != nil {
+		t.Fatalf("Recompute: %v", err)
+	}
+
+	got := make(map[string]bool)
+	for _, r := range poolRows(t, in.Id) {
+		got[r.Domain] = true
+	}
+	for _, want := range []string{"72.235.209.83", "2001:db8::1", "acspubs.org"} {
+		if !got[want] {
+			t.Errorf("%q 没能进池，池内容：%v", want, got)
+		}
+	}
+}

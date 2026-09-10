@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"time"
 
@@ -195,9 +196,11 @@ func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEn
 		if _, ok := inboundTagById[e.InboundId]; !ok {
 			continue
 		}
-		if !domain.IsRegistrable(e.Domain) {
-			logger.Warning("跳过池里不再是注册域名的条目（可能是 publicsuffix 表升级导致），入站:",
-				e.InboundId, "域名:", e.Domain)
+		// 判定必须与 buildMeterCandidates 的准入用同一个函数：两处漂移会让
+		// 池行进得了池、占得住槽位，却在生成期被静默丢掉，而池表看着是满的。
+		if !domain.IsMeterable(e.Domain) {
+			logger.Warning("跳过池里已不可计量的条目（可能是 publicsuffix 表升级导致），入站:",
+				e.InboundId, "目标:", e.Domain)
 			continue
 		}
 		out = append(out, e)
@@ -285,17 +288,39 @@ func meterRuleNeedsIPGuard(strategy any) bool {
 
 // buildMeterRules 生成计量规则。调用方必须把它们追加在所有其它规则之后。
 //
-// 这里刻意把 domain 与 ip 并进同一条规则，看上去违反了「绝不把两类条件并进
-// 同一条（那是 AND）」那条不变量——必须解释清楚，否则将来一定会有人来「修」它。
-// 那条不变量约束的是**管理员表达的**规则：管理员说「这批域名**或**这批 IP 走
-// B」，写成一条就变成 AND、几乎永不命中。这里的 AND 是刻意要的——「域名是 X
-// **且** 目标已经解析出 IP」，第二个合取项不是匹配条件，是一个遍次闸门。
-// buildRule 生成管理员规则时仍然严格拆成两条，一个字节都不改。
+// 返回值里**域名规则全部排在 IP 规则之前**（设计 §4.3）：两遍匹配下，
+// 域名目标在第一遍先命中域名规则、归到域名行，只有归不到域名的才落到 IP 行。
+// 顺序反了会让 IP 行吸走本该归到域名的流量，而两边的数字看上去都还是对的，
+// 没有任何一层会报错。注意池是按 (inboundId asc, domain asc) 排的，
+// "72.235.209.83" 天然排在 "zeta.com" 之前——不显式分组就会踩到这个。
+//
+// 域名规则这里刻意把 domain 与 ip 并进同一条，看上去违反了「绝不把两类条件
+// 并进同一条（那是 AND）」那条不变量——必须解释清楚，否则将来一定会有人来
+// 「修」它。那条不变量约束的是**管理员表达的**规则：管理员说「这批域名**或**
+// 这批 IP 走 B」，写成一条就变成 AND、几乎永不命中。这里的 AND 是刻意要的
+// ——「域名是 X **且** 目标已经解析出 IP」，第二个合取项不是匹配条件，
+// 是一个遍次闸门。buildRule 生成管理员规则时仍然严格拆成两条。
+//
+// IP 规则则不带守卫：守卫的作用就是让规则在第一遍必然不命中，而 IP 规则
+// 本身就是 IP 条件、第一遍对 IP 字面量目标直接命中——那正是要的行为。
 func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard bool) []any {
-	rules := make([]any, 0, len(pool))
+	domainRules := make([]any, 0, len(pool))
+	ipRules := make([]any, 0, len(pool))
 	for _, e := range pool {
 		// pool 已由 filterMeterPool 过滤过，这里必然取得到。
 		tag := inboundTagById[e.InboundId]
+		outboundTag := model.MeterTag(e.InboundId, e.Domain)
+
+		if cidr, ok := meterIPCondition(e.Domain); ok {
+			ipRules = append(ipRules, map[string]any{
+				"type":        "field",
+				"inboundTag":  []string{tag},
+				"ip":          []string{cidr},
+				"outboundTag": outboundTag,
+			})
+			continue
+		}
+
 		rule := map[string]any{
 			"type":       "field",
 			"inboundTag": []string{tag},
@@ -303,14 +328,31 @@ func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard boo
 			//（infra/conf/router.go:175 的 defaultType 是 Domain_Substr），
 			// doubleclick.net 会命中 notdoubleclick.net.evil。
 			"domain":      []string{"domain:" + e.Domain},
-			"outboundTag": model.MeterTag(e.InboundId, e.Domain),
+			"outboundTag": outboundTag,
 		}
 		if guard {
 			rule["ip"] = []string{"0.0.0.0/0", "::/0"}
 		}
-		rules = append(rules, rule)
+		domainRules = append(domainRules, rule)
 	}
-	return rules
+	return append(domainRules, ipRules...)
+}
+
+// meterIPCondition 把池成员翻译成 ip 条件里的 CIDR，第二个返回值说明它
+// 是不是 IP 字面量。
+//
+// 掩码必须补齐：infra/conf 两种写法都收，但它们产生不同的配置字节，
+// 而 Config.Equals 对 RouterConfig 是逐字节比较的——不补齐就等于把
+// 「生成逐字节确定」这条不变量交给上游的实现细节去保证。
+func meterIPCondition(d string) (string, bool) {
+	ip := net.ParseIP(d)
+	if ip == nil {
+		return "", false
+	}
+	if ip.To4() != nil {
+		return d + "/32", true
+	}
+	return d + "/128", true
 }
 
 func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, map[int]string, string, error) {
