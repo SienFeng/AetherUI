@@ -195,9 +195,11 @@ func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEn
 		if _, ok := inboundTagById[e.InboundId]; !ok {
 			continue
 		}
-		if !domain.IsRegistrable(e.Domain) {
-			logger.Warning("跳过池里不再是注册域名的条目（可能是 publicsuffix 表升级导致），入站:",
-				e.InboundId, "域名:", e.Domain)
+		// 判定必须与 buildMeterCandidates 的准入用同一个函数：两处漂移会让
+		// 池行进得了池、占得住槽位，却在生成期被静默丢掉，而池表看着是满的。
+		if !domain.IsMeterable(e.Domain) {
+			logger.Warning("跳过池里已不可计量的条目（可能是 publicsuffix 表升级导致），入站:",
+				e.InboundId, "目标:", e.Domain)
 			continue
 		}
 		out = append(out, e)

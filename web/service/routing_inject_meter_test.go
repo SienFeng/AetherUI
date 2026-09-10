@@ -365,3 +365,31 @@ func TestInjectSkipsPoolRowsThatAreNoLongerRegistrableDomains(t *testing.T) {
 		}
 	}
 }
+
+// 生成期的二次过滤必须与池的准入判定保持同一套标准。
+//
+// 两处一旦漂移，IP 行会进池、占着槽位、却在生成期被静默丢掉——池表看着是
+// 满的，配置里没有它，而且没有任何一层会报错。
+func TestInjectKeepsIPLiteralPoolRows(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := newTestInbound(t, 32011)
+	putPoolRow(t, in.Id, "72.235.209.83", 0)
+	putPoolRow(t, in.Id, "2001:db8::1", 0)
+
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	got := make(map[string]bool)
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); model.IsMeterTag(tag) {
+			got[tag] = true
+		}
+	}
+	for _, d := range []string{"72.235.209.83", "2001:db8::1"} {
+		if want := model.MeterTag(in.Id, d); !got[want] {
+			t.Errorf("IP 池行 %q 在生成期被丢掉了，已生成的计量出站：%v", d, got)
+		}
+	}
+}
