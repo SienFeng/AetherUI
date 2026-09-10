@@ -6,11 +6,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"strings"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"a-ui/database/model"
 	"a-ui/xray"
 )
 
@@ -192,7 +193,7 @@ func socksReadDomain(proxyAddr, host string, port int) string {
 // IP 计量规则与 IPv6 的计量 tag 必须能被真实 xray 接受。
 //
 // IPv6 那条是设计 §4.4 标记的未验证假设：tag 会含冒号
-//（a-ui-meter-7-2001:db8::1）。xray 对 tag 字符集很宽松（含中文都
+// （a-ui-meter-7-2001:db8::1）。xray 对 tag 字符集很宽松（含中文都
 // Configuration OK），但冒号此前没有实测过。这条测试就是那个假设的验收。
 //
 // 若它失败，**不要自行改 tag 形态**：退路是对 IPv6 做一次确定性转写，而
@@ -228,4 +229,143 @@ func TestIPMeterRulesAreAcceptedByRealXray(t *testing.T) {
 		t.Fatalf("xray 没有给出 Configuration OK，输出：\n%s", out)
 	}
 	t.Logf("xray 接受了含 IPv4/IPv6 计量 tag 的配置：%s", strings.TrimSpace(string(out)))
+}
+
+// 开关打开后分流结果必须一个字节不变：被规则带走的流量仍从原出站的克隆
+// 出去，且字节记在 B 类计量出站的计数器上。
+//
+// 这是「计量出站承载真实分流流量」那个风险的唯一防线。判据：真实出站是
+// freedom 指向本地 listener（回 HELLO），默认出站是黑洞。「读到 HELLO」=
+// 流量确实走了那条路；开关开与关都必须读到 HELLO。再用 statsquery 确认
+// 开关开时 B 类出站的计数器非零。
+//
+// 若「开关开」那条读不到 HELLO，**停下来**——那意味着克隆出站没有把流量
+// 送回原来的地方，是本期设计的根本性失败，不要试着在测试里绕。
+func TestProxiedMeterKeepsRoutingAgainstRealXray(t *testing.T) {
+	requireXrayBinary(t)
+
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go func() {
+		for {
+			c, err := target.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("HELLO"))
+			c.Close()
+		}
+	}()
+	targetPort := target.Addr().(*net.TCPAddr).Port
+
+	run := func(t *testing.T, proxied bool) (string, map[string]int64) {
+		t.Helper()
+		socksPort := freePort(t)
+		apiPort := freePort(t)
+		const relayTag = "a-ui-relay"
+		ruleOut := relayTag
+		relay := map[string]any{"tag": relayTag, "protocol": "freedom",
+			"settings": map[string]any{"domainStrategy": "UseIP"}}
+		outbounds := []any{
+			map[string]any{"tag": "a-ui-default", "protocol": "blackhole", "settings": map[string]any{}},
+			relay,
+		}
+		if proxied {
+			// 与 appendProxiedMeterOutbounds 同一种克隆：深拷贝真实出站、只换 tag。
+			ruleOut = model.MeterRuleTag(1, 9)
+			clone := map[string]any{}
+			raw, _ := json.Marshal(relay)
+			_ = json.Unmarshal(raw, &clone)
+			clone["tag"] = ruleOut
+			outbounds = append(outbounds, clone)
+		}
+		cfg := map[string]any{
+			"log":    map[string]any{"loglevel": "warning"},
+			"api":    map[string]any{"tag": "api", "services": []string{"StatsService"}},
+			"stats":  map[string]any{},
+			"policy": map[string]any{"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true}},
+			"dns": map[string]any{
+				"hosts":   map[string]any{"meter.test": "127.0.0.1"},
+				"servers": []any{"localhost"},
+			},
+			"inbounds": []any{
+				map[string]any{"tag": "in", "listen": "127.0.0.1", "port": socksPort, "protocol": "socks",
+					"settings": map[string]any{"auth": "noauth", "udp": false}},
+				map[string]any{"tag": "api", "listen": "127.0.0.1", "port": apiPort, "protocol": "dokodemo-door",
+					"settings": map[string]any{"address": "127.0.0.1"}},
+			},
+			"outbounds": outbounds,
+			"routing": map[string]any{"rules": []any{
+				map[string]any{"type": "field", "inboundTag": []string{"api"}, "outboundTag": "api"},
+				map[string]any{"type": "field", "inboundTag": []string{"in"},
+					"domain": []string{"domain:meter.test"}, "outboundTag": ruleOut},
+			}},
+		}
+		encoded, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(cfgPath, encoded, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(xray.GetBinaryPath(), "run", "-c", cfgPath)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("启动 xray: %v", err)
+		}
+		defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+		waitForPort(t, socksPort)
+		got := socksReadDomain(fmt.Sprintf("127.0.0.1:%d", socksPort), "meter.test", targetPort)
+
+		// 读出站计数器。value 在 protobuf 的 JSON 里是字符串。
+		out, err := exec.Command(xray.GetBinaryPath(), "api", "statsquery",
+			fmt.Sprintf("--server=127.0.0.1:%d", apiPort)).Output()
+		if err != nil {
+			t.Fatalf("statsquery: %v", err)
+		}
+		var resp struct {
+			Stat []struct {
+				Name  string `json:"name"`
+				Value any    `json:"value"`
+			} `json:"stat"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			t.Fatalf("解析 statsquery: %v\n%s", err, out)
+		}
+		stats := map[string]int64{}
+		for _, s := range resp.Stat {
+			parts := strings.Split(s.Name, ">>>")
+			if len(parts) != 4 || parts[0] != "outbound" {
+				continue
+			}
+			var v int64
+			switch x := s.Value.(type) {
+			case string:
+				fmt.Sscan(x, &v)
+			case float64:
+				v = int64(x)
+			}
+			stats[parts[1]] += v
+		}
+		return got, stats
+	}
+
+	t.Run("开关关：走真实出站", func(t *testing.T) {
+		got, _ := run(t, false)
+		if got != "HELLO" {
+			t.Fatalf("读到 %q，期望 HELLO", got)
+		}
+	})
+	t.Run("开关开：仍走真实出站的克隆，且计量出站有字节", func(t *testing.T) {
+		got, stats := run(t, true)
+		if got != "HELLO" {
+			t.Fatalf("读到 %q，期望 HELLO——开关打开改变了分流结果，这是本期最严重的失败模式", got)
+		}
+		if stats[model.MeterRuleTag(1, 9)] == 0 {
+			t.Errorf("B 类计量出站没有字节，统计：%v", stats)
+		}
+	})
 }
