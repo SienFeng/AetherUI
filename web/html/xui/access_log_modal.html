@@ -163,7 +163,7 @@
                 <div style="color: rgba(0,0,0,.65)">协议封装开销　约 [[ sizeFormat(accessLogModal.topBreakdown.overheadBytes) ]]
                     <span style="color: rgba(0,0,0,.45)">估算：入站计加密流、出站计明文流，结构性差 3~8%</span></div>
                 <div style="color: rgba(0,0,0,.65)">未归因　　　　[[ sizeFormat(accessLogModal.topBreakdown.unattributedBytes) ]]
-                    <span style="color: rgba(0,0,0,.45)">余项：计量池外的长尾目标</span></div>
+                    <span style="color: rgba(0,0,0,.45)">余项：被分流规则带走的（上表里 0 B 的那些行）+ 计量池外的长尾</span></div>
             </div>
         </a-tab-pane>
     </a-tabs>
