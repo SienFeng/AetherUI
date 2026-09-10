@@ -121,9 +121,8 @@
             <div v-else style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
                 <div v-if="accessLogModal.topCoverageText">[[ accessLogModal.topCoverageText ]]</div>
                 <div>
-                    字节数只统计<b>走直连出去</b>的流量：被你自己的分流规则带走（走出站节点）的部分不在其中，
-                    被封禁的部分见下方分解。计量的目标集合每小时自动调整一次，刚上线时排序主要来自访问次数，
-                    运行一段时间后才由实测流量主导。
+                    字节数统计<b>走直连出去</b>的流量；打开「面板设置 → 计量被分流带走的流量」后，被你的分流规则带去出站节点的部分也会以「规则」行给出字节数（按规则合计，不拆到单个域名）。
+                    被封禁的部分见下方分解。计量的目标集合每小时自动调整一次，刚上线时排序主要来自访问次数，运行一段时间后才由实测流量主导。
                 </div>
                 <div>
                     「访问次数」按<b>连接建立</b>时刻归类，「上传/下载」按<b>流量发生</b>时刻归类，
@@ -138,12 +137,16 @@
                     [[ index + 1 ]]
                 </template>
                 <template slot="topKind" slot-scope="text, row">
-                    <a-tag :color="row.kind === 'ip' ? 'orange' : 'blue'">
-                        [[ row.kind === 'ip' ? 'IP' : '域名' ]]
+                    <a-tag :color="row.kind === 'rule' ? 'purple' : (row.kind === 'ip' ? 'orange' : 'blue')">
+                        [[ row.kind === 'rule' ? '规则' : (row.kind === 'ip' ? 'IP' : '域名') ]]
                     </a-tag>
                 </template>
                 <template slot="domain" slot-scope="text, row">
-                    <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
+                    <span v-if="row.kind === 'rule'">[[ row.label ]]</span>
+                    <a v-else style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
+                </template>
+                <template slot="topCount" slot-scope="text, row">
+                    [[ row.kind === 'rule' ? '—' : row.count ]]
                 </template>
                 <template slot="up" slot-scope="text, row">
                     [[ sizeFormat(row.up) ]]
@@ -163,7 +166,7 @@
                 <div style="color: rgba(0,0,0,.65)">协议封装开销　约 [[ sizeFormat(accessLogModal.topBreakdown.overheadBytes) ]]
                     <span style="color: rgba(0,0,0,.45)">估算：入站计加密流、出站计明文流，结构性差 3~8%</span></div>
                 <div style="color: rgba(0,0,0,.65)">未归因　　　　[[ sizeFormat(accessLogModal.topBreakdown.unattributedBytes) ]]
-                    <span style="color: rgba(0,0,0,.45)">余项：被分流规则带走的（上表里 0 B 的那些行）+ 计量池外的长尾</span></div>
+                    <span style="color: rgba(0,0,0,.45)">余项：计量池外的长尾 + 未打开分流计量时被规则带走的部分</span></div>
             </div>
         </a-tab-pane>
     </a-tabs>
@@ -368,7 +371,8 @@
                 title: "目标", align: 'left',
                 scopedSlots: { customRender: 'domain' },
             }, {
-                title: "访问次数", align: 'right', width: 110, dataIndex: "count",
+                title: "访问次数", align: 'right', width: 110,
+                scopedSlots: { customRender: 'topCount' },
             }];
             if (this.topMetered) {
                 columns.push({

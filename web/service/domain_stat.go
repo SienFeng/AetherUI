@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -292,14 +293,22 @@ type TopDomainRow struct {
 	// 形态本身已经是完备的判据；加一列只会多出一处需要与推导保持一致的
 	// 真相源，而它们一旦漂移，界面上的类型标签会和实际生成的规则形态对不上。
 	// 推导用的 net.ParseIP 与 buildMeterRules 选规则形态用的是同一个判据。
-	Kind  string `json:"kind"`
+	Kind string `json:"kind"`
+	// Label 只对 rule 行非空：「规则备注 → 出站备注」。规则或出站已删时退化成
+	// 带「已删除」的说明，行不消失——字节是真实发生过的，隐藏它等于把差额
+	// 塞回「未归因」。
+	Label string `json:"label"`
 	Count int64  `json:"count"`
 	Up    int64  `json:"up"`
 	Down  int64  `json:"down"`
 }
 
-// topDomainKind 由目标的形态推导它的类型。
+// topDomainKind 由目标的形态推导它的类型：先判 rule: 前缀再判 IP，否则域名。
+// 三类都是推导值，与 buildMeterRules / buildRule 选出站形态用的是同一套判据。
 func topDomainKind(d string) string {
+	if model.IsRuleStatKey(d) {
+		return "rule"
+	}
 	if net.ParseIP(d) != nil {
 		return "ip"
 	}
@@ -483,8 +492,12 @@ func (s *DomainStatService) TopDomains(
 		return nil, err
 	}
 	if rows != nil {
+		labels := s.ruleLabels(rows)
 		for i := range rows {
 			rows[i].Kind = topDomainKind(rows[i].Domain)
+			if rows[i].Kind == "rule" {
+				rows[i].Label = labels[rows[i].Domain]
+			}
 		}
 		result.List = rows
 	}
@@ -563,6 +576,63 @@ func (s *DomainStatService) coverage(
 	return out, nil
 }
 
+// ruleLabels 为榜单里的规则行生成「规则备注 → 出站备注」。一次把涉及的
+// 规则与出站都查出来，不在循环里逐行查库。
+func (s *DomainStatService) ruleLabels(rows []TopDomainRow) map[string]string {
+	labels := make(map[string]string)
+	ids := make([]int, 0)
+	for _, r := range rows {
+		if id, ok := model.ParseRuleStatKey(r.Domain); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return labels
+	}
+	var rules []model.RoutingRule
+	if err := database.GetDB().Where("id in ?", ids).Find(&rules).Error; err != nil {
+		logger.Warning("榜单取规则备注失败:", err)
+	}
+	var nodes []model.OutboundNode
+	if err := database.GetDB().Find(&nodes).Error; err != nil {
+		logger.Warning("榜单取出站备注失败:", err)
+	}
+	nodeRemark := make(map[int]string, len(nodes))
+	for _, n := range nodes {
+		nodeRemark[n.Id] = n.Remark
+	}
+	byId := make(map[int]model.RoutingRule, len(rules))
+	for _, r := range rules {
+		byId[r.Id] = r
+	}
+	for _, id := range ids {
+		key := model.RuleStatKey(id)
+		rule, ok := byId[id]
+		if !ok {
+			labels[key] = fmt.Sprintf("规则 #%d（已删除）", id)
+			continue
+		}
+		name := rule.Remark
+		if name == "" {
+			name = fmt.Sprintf("规则 #%d", id)
+		}
+		var target string
+		switch rule.Action {
+		case model.ActionDirect:
+			target = "直连"
+		case model.ActionProxy:
+			target = nodeRemark[rule.OutboundId]
+			if target == "" {
+				target = fmt.Sprintf("出站 #%d（已删除）", rule.OutboundId)
+			}
+		default:
+			target = rule.Action
+		}
+		labels[key] = name + " → " + target
+	}
+	return labels
+}
+
 // breakdown 由 coverage 已经算好的两个精确值再拆出估算项与余项。
 //
 // 不重新查库取总量与已归因：两处独立取数会在并发写入下给出对不上的两组
@@ -629,6 +699,44 @@ func (s *DomainStatService) PruneOrphans() (int64, error) {
 	tx := db.Where("inbound_id != 0")
 	if len(ids) > 0 {
 		tx = tx.Where("inbound_id not in ?", ids)
+	}
+	result := tx.Delete(&model.DomainStat{})
+	return result.RowsAffected, result.Error
+}
+
+// DeleteByRule 删除某条分流规则的全部 B 类计量数据（两级都删）。
+//
+// 必须在删除规则时调用。SQLite 会复用被删除的自增 id，不删的话下一条新建
+// 的规则会继承上一条的字节数，而且因为引用不再悬空，任何「跳过悬空引用」
+// 式的防线都拦不住它。
+func (s *DomainStatService) DeleteByRule(ruleId int) error {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return nil
+	}
+	return db.Where("domain = ?", model.RuleStatKey(ruleId)).Delete(&model.DomainStat{}).Error
+}
+
+// PruneOrphanRules 清掉规则表里已不存在的规则遗留的 B 类计量行，返回行数。
+//
+// DeleteByRule 的兜底：面板崩溃在删规则与删计量之间、或直接改库删规则，
+// 都会留下孤儿。挂在 TrafficCleanupJob 里每小时跑一次。
+func (s *DomainStatService) PruneOrphanRules() (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return 0, nil
+	}
+	var ids []int
+	if err := database.GetDB().Model(model.RoutingRule{}).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	keys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		keys = append(keys, model.RuleStatKey(id))
+	}
+	tx := db.Where("domain like ?", "rule:%")
+	if len(keys) > 0 {
+		tx = tx.Where("domain not in ?", keys)
 	}
 	result := tx.Delete(&model.DomainStat{})
 	return result.RowsAffected, result.Error

@@ -51,6 +51,7 @@ type AllSetting struct {
 	ConcurrencyIdleTimeout   int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
 	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
+	MeterProxiedTraffic int `json:"meterProxiedTraffic" form:"meterProxiedTraffic"`
 
 	DNSServers string `json:"dnsServers" form:"dnsServers"`
 
@@ -274,6 +275,9 @@ func (s *AllSetting) CheckValid() error {
 	// 而那会让整份配置加载失败——全员断网。
 	if s.IPRuleResolveDomain != 0 && s.IPRuleResolveDomain != 1 {
 		return common.NewError("「IP 规则匹配域名目标」只能是 0 或 1:", s.IPRuleResolveDomain)
+	}
+	if s.MeterProxiedTraffic != 0 && s.MeterProxiedTraffic != 1 {
+		return common.NewError("「计量被分流带走的流量」只能是 0 或 1:", s.MeterProxiedTraffic)
 	}
 
 	// 空表示不启用，是正常状态。
