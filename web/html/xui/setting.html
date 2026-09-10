@@ -170,6 +170,9 @@
                                 <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
                                                    desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
                                                    v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
+                                <setting-list-item type="switch" title="计量被分流带走的流量"
+                                                   desc="关闭时访问日志的「Top 域名」只对走直连的流量给出字节数，被你的分流规则带去出站节点的部分只有访问次数、字节恒为 0。打开后按「入站 × 分流规则」计量（如「ChatGPT 组 → IProyal」一行），流量走向不变。代价：每条分流规则按入站展开，每晚那次 xray 整进程重启多花约 10~15 秒。出问题关掉即恢复"
+                                                   v-model="allSetting.meterProxiedTraffic"></setting-list-item>
                                 <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
                                                    desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
                                                    v-model="allSetting.dnsServers"></setting-list-item>

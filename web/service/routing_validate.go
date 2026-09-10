@@ -373,7 +373,8 @@ func ValidateInboundReplacing(ib map[string]any, replacedTag string) error {
 // 面板首页 running、errorMsg 为空，而机器上所有用户已经断网。有了这一步，
 // 同一个错误在保存那一刻就被顶回来，还带着 xray 自己的报错原文。
 //
-// 只对真正会进入生成配置的设置项做这一步：dnsServers 与 ipRuleResolveDomain。
+// 只对真正会进入生成配置的设置项做这一步：dnsServers、ipRuleResolveDomain 与
+// meterProxiedTraffic。
 // 端口、时区、保留天数这些压根不进 xray 配置，为它们 exec 一次真实 xray 只是
 // 给每一次保存平白加上一秒延迟和一个临时文件。
 //
@@ -425,8 +426,17 @@ func settingsAffectXrayConfig(candidate *entity.AllSetting) bool {
 	if err != nil {
 		return true
 	}
+	oldProxied, err := settingService.GetMeterProxiedTraffic()
+	if err != nil {
+		return true
+	}
+	// meterProxiedTraffic 翻转时 apply 回调不为它做任何事：开关会重排整段
+	// routing 并克隆一批出站，正确重算得把整条注入链再走一遍——那正是
+	// xrayTemplateConfig 刻意不走这一步的同一个理由。这里校验的是「当前生成
+	// 的配置」；克隆体与已通过校验的真实出站只差一个 tag，不引入新的非法性。
 	return candidate.DNSServers != oldServers ||
-		(candidate.IPRuleResolveDomain == 1) != oldResolve
+		(candidate.IPRuleResolveDomain == 1) != oldResolve ||
+		(candidate.MeterProxiedTraffic == 1) != oldProxied
 }
 
 // templateSection 取候选模板里某个顶层键的原值。第二个返回值为 false 表示
