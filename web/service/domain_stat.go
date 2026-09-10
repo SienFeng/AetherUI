@@ -634,6 +634,44 @@ func (s *DomainStatService) PruneOrphans() (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
+// DeleteByRule 删除某条分流规则的全部 B 类计量数据（两级都删）。
+//
+// 必须在删除规则时调用。SQLite 会复用被删除的自增 id，不删的话下一条新建
+// 的规则会继承上一条的字节数，而且因为引用不再悬空，任何「跳过悬空引用」
+// 式的防线都拦不住它。
+func (s *DomainStatService) DeleteByRule(ruleId int) error {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return nil
+	}
+	return db.Where("domain = ?", model.RuleStatKey(ruleId)).Delete(&model.DomainStat{}).Error
+}
+
+// PruneOrphanRules 清掉规则表里已不存在的规则遗留的 B 类计量行，返回行数。
+//
+// DeleteByRule 的兜底：面板崩溃在删规则与删计量之间、或直接改库删规则，
+// 都会留下孤儿。挂在 TrafficCleanupJob 里每小时跑一次。
+func (s *DomainStatService) PruneOrphanRules() (int64, error) {
+	db := database.GetTrafficDB()
+	if db == nil {
+		return 0, nil
+	}
+	var ids []int
+	if err := database.GetDB().Model(model.RoutingRule{}).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	keys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		keys = append(keys, model.RuleStatKey(id))
+	}
+	tx := db.Where("domain like ?", "rule:%")
+	if len(keys) > 0 {
+		tx = tx.Where("domain not in ?", keys)
+	}
+	result := tx.Delete(&model.DomainStat{})
+	return result.RowsAffected, result.Error
+}
+
 // DeleteByInbound 删除某入站的全部域名统计（两级都删）。
 //
 // 必须在删除入站时调用，理由见 PruneOrphans。

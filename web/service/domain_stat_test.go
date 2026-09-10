@@ -1092,3 +1092,62 @@ func TestDeleteByInboundAndPruneOrphans(t *testing.T) {
 		t.Errorf("仍剩 %d 行", len(rows))
 	}
 }
+
+// 删规则必须连带删它的 B 类计量数据：SQLite 复用自增 id，残留的 rule:9 行会
+// 绑到下一条新建的规则上，而引用不再悬空、生成期防线拦不住。
+func TestDeleteByRuleRemovesOnlyThatRule(t *testing.T) {
+	setupDomainStatTest(t)
+	putDomainStat(t, 1, model.RuleStatKey(9), 1000, 0, 100, 200)
+	putDomainStat(t, 1, model.RuleStatKey(10), 1000, 0, 100, 200)
+	putDomainStat(t, 1, "google.com", 1000, 5, 0, 0)
+
+	if err := (&DomainStatService{}).DeleteByRule(9); err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	database.GetTrafficDB().Model(&model.DomainStat{}).Order("domain").Pluck("domain", &left)
+	if len(left) != 2 || left[0] != "google.com" || left[1] != model.RuleStatKey(10) {
+		t.Errorf("剩余 %v，期望 [google.com rule:10]", left)
+	}
+}
+
+// 兜底：规则表里已经不存在的 rule:<id> 行被清掉，其余不动。
+func TestPruneOrphanRulesDropsRowsOfDeletedRules(t *testing.T) {
+	setupDomainStatTest(t)
+	in := newTestInbound(t, 33001)
+	_, alive := seedProxiedFixture(t, []int{in.Id}, "组", "domain:a.com",
+		`{"protocol":"freedom","settings":{}}`, model.ActionProxy, 1)
+	putDomainStat(t, in.Id, model.RuleStatKey(alive.Id), 1000, 0, 1, 1)
+	putDomainStat(t, in.Id, model.RuleStatKey(alive.Id+1000), 1000, 0, 1, 1) // 不存在的规则
+	putDomainStat(t, in.Id, "google.com", 1000, 5, 0, 0)
+
+	n, err := (&DomainStatService{}).PruneOrphanRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("清理了 %d 行，期望 1", n)
+	}
+	var left []string
+	database.GetTrafficDB().Model(&model.DomainStat{}).Order("domain").Pluck("domain", &left)
+	if len(left) != 2 {
+		t.Errorf("剩余 %v，期望 google.com 与存活规则各一行", left)
+	}
+}
+
+// RoutingRuleService.Del 走到 DeleteByRule：删规则后它的计量行不能留下。
+func TestRoutingRuleDelClearsMeterRows(t *testing.T) {
+	setupDomainStatTest(t)
+	in := newTestInbound(t, 33002)
+	_, rule := seedProxiedFixture(t, []int{in.Id}, "组", "domain:a.com",
+		`{"protocol":"freedom","settings":{}}`, model.ActionProxy, 1)
+	putDomainStat(t, in.Id, model.RuleStatKey(rule.Id), 1000, 0, 1, 1)
+	if err := (&RoutingRuleService{}).Del(rule.Id); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	database.GetTrafficDB().Model(&model.DomainStat{}).Where("domain = ?", model.RuleStatKey(rule.Id)).Count(&n)
+	if n != 0 {
+		t.Errorf("删规则后仍有 %d 条计量行", n)
+	}
+}
