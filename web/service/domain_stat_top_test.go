@@ -185,3 +185,38 @@ func TestTopDomainsCoverageClampsAboveOne(t *testing.T) {
 		t.Errorf("Ratio = %v，期望钳到 1", got.Coverage.Ratio)
 	}
 }
+
+// 榜单要能区分域名与 IP 两类目标。
+//
+// 类型是推导值不是存储值：DomainStat.Domain 从第一期起就「IP 字面量原样」存，
+// 形态本身已经是完备的判据。加一列 kind 只会多出一处需要与推导保持一致的
+// 真相源，两者一旦漂移，界面上的类型标签会和实际生成的规则形态对不上。
+func TestTopDomainsMarksIPLiterals(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := mkTrafficInbound(t, 31811, "甲")
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	loc, _ := (&SettingService{}).GetTimeLocation()
+	bucket := model.AlignHour(now, loc)
+
+	putDomainStat(t, in.Id, "72.235.209.83", bucket, 2495, 0, 0)
+	putDomainStat(t, in.Id, "2001:db8::1", bucket, 300, 0, 0)
+	putDomainStat(t, in.Id, "acspubs.org", bucket, 131, 0, 0)
+
+	got, err := (&DomainStatService{}).TopDomains(in.Id, TopRange1h, TopOrderCount, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	kinds := make(map[string]string, len(got.List))
+	for _, row := range got.List {
+		kinds[row.Domain] = row.Kind
+	}
+	for _, c := range []struct{ target, want string }{
+		{"72.235.209.83", "ip"},
+		{"2001:db8::1", "ip"},
+		{"acspubs.org", "domain"},
+	} {
+		if kinds[c.target] != c.want {
+			t.Errorf("%q 的 Kind = %q，期望 %q", c.target, kinds[c.target], c.want)
+		}
+	}
+}

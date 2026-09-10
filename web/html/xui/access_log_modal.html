@@ -136,6 +136,11 @@
                 <template slot="rank" slot-scope="text, row, index">
                     [[ index + 1 ]]
                 </template>
+                <template slot="topKind" slot-scope="text, row">
+                    <a-tag :color="row.kind === 'ip' ? 'orange' : 'blue'">
+                        [[ row.kind === 'ip' ? 'IP' : '域名' ]]
+                    </a-tag>
+                </template>
                 <template slot="domain" slot-scope="text, row">
                     <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
                 </template>
@@ -341,7 +346,10 @@
                 title: "#", align: 'center', width: 60,
                 scopedSlots: { customRender: 'rank' },
             }, {
-                title: "域名", align: 'left',
+                title: "类型", align: 'center', width: 72,
+                scopedSlots: { customRender: 'topKind' },
+            }, {
+                title: "目标", align: 'left',
                 scopedSlots: { customRender: 'domain' },
             }, {
                 title: "访问次数", align: 'right', width: 110, dataIndex: "count",

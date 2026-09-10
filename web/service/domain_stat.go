@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net"
 	"sync"
 	"time"
 
@@ -285,9 +286,24 @@ const (
 // 显示一列恒为 0 的「上传」会被当成「他没上传过」，比不显示更糟。
 type TopDomainRow struct {
 	Domain string `json:"domain"`
-	Count  int64  `json:"count"`
-	Up     int64  `json:"up"`
-	Down   int64  `json:"down"`
+	// Kind 是 "domain" 或 "ip"，由 Domain 的形态推导，不落库。
+	//
+	// 不加数据库列：DomainStat.Domain 从第一期起就「IP 字面量原样」存，
+	// 形态本身已经是完备的判据；加一列只会多出一处需要与推导保持一致的
+	// 真相源，而它们一旦漂移，界面上的类型标签会和实际生成的规则形态对不上。
+	// 推导用的 net.ParseIP 与 buildMeterRules 选规则形态用的是同一个判据。
+	Kind  string `json:"kind"`
+	Count int64  `json:"count"`
+	Up    int64  `json:"up"`
+	Down  int64  `json:"down"`
+}
+
+// topDomainKind 由目标的形态推导它的类型。
+func topDomainKind(d string) string {
+	if net.ParseIP(d) != nil {
+		return "ip"
+	}
+	return "domain"
 }
 
 // TopDomainOrder 是榜单的排序维度。
@@ -438,6 +454,9 @@ func (s *DomainStatService) TopDomains(
 		return nil, err
 	}
 	if rows != nil {
+		for i := range rows {
+			rows[i].Kind = topDomainKind(rows[i].Domain)
+		}
 		result.List = rows
 	}
 
