@@ -714,3 +714,40 @@ func TestInjectProxiedMeterClonesRenamedDefaultForDirect(t *testing.T) {
 	}
 	t.Error("没有生成 direct 的计量出站")
 }
+
+// 找不到克隆来源必须让整份配置生成失败，绝不跳过：规则已经改成引用计量
+// 出站了，出站却没克隆出来就是悬空引用——xray 对悬空 outboundTag 静默回落
+// 默认出站，本该走 IProyal 的 ChatGPT 会静默走直连，而面板首页显示 running。
+// 生成失败时 xray 保持原状继续跑，是安全的一侧。
+func TestAppendProxiedMeterOutboundsFailsOnMissingTarget(t *testing.T) {
+	outbounds := []any{map[string]any{"protocol": "freedom", "tag": "a-ui-default"}}
+	_, err := appendProxiedMeterOutbounds(outbounds, []proxiedMeterNeed{
+		{InboundId: 7, RuleId: 9, TargetTag: "a-ui-gone"},
+	})
+	if err == nil {
+		t.Fatal("克隆来源不存在时必须返回错误")
+	}
+}
+
+// 克隆是深拷贝：改克隆体不影响原出站。同一 (入站, 规则) 只克隆一次。
+func TestAppendProxiedMeterOutboundsDeepCopiesAndDedups(t *testing.T) {
+	src := map[string]any{"protocol": "vmess", "tag": "a-ui-relay",
+		"settings": map[string]any{"vnext": []any{map[string]any{"address": "1.2.3.4"}}}}
+	outbounds := []any{map[string]any{"protocol": "freedom", "tag": "a-ui-default"}, src}
+	need := proxiedMeterNeed{InboundId: 7, RuleId: 9, TargetTag: "a-ui-relay"}
+	got, err := appendProxiedMeterOutbounds(outbounds, []proxiedMeterNeed{need, need})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("出站数 %d，期望 3（重复的需求只克隆一次）", len(got))
+	}
+	clone := got[2].(map[string]any)
+	if clone["tag"] != model.MeterRuleTag(7, 9) {
+		t.Errorf("tag = %v", clone["tag"])
+	}
+	clone["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)["address"] = "changed"
+	if src["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)["address"] != "1.2.3.4" {
+		t.Error("不是深拷贝：改克隆体影响了原出站")
+	}
+}

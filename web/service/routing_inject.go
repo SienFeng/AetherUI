@@ -61,17 +61,23 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if err != nil {
 		return err
 	}
+
+	// 规则要在出站序列化之前生成：B 类计量的克隆来源由规则决定（开关打开时
+	// 每条规则对每个入站要一份真实出站的拷贝），所以「先出站后规则」的顺序
+	// 在这里反过来一次。出站数组在下面追加完克隆体之后再序列化。
+	blockRules, routeRules, proxiedNeeds, err := s.buildRules(inboundTagById, usableOutboundTags, defaultOutboundTag)
+	if err != nil {
+		return err
+	}
+	outbounds, err = appendProxiedMeterOutbounds(outbounds, proxiedNeeds)
+	if err != nil {
+		return err
+	}
 	encodedOutbounds, err := json.Marshal(outbounds)
 	if err != nil {
 		return err
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encodedOutbounds)
-
-	blockRules, routeRules, proxiedNeeds, err := s.buildRules(inboundTagById, usableOutboundTags, defaultOutboundTag)
-	if err != nil {
-		return err
-	}
-	_ = proxiedNeeds // 出站克隆见 appendProxiedMeterOutbounds（下一提交）
 
 	routing := map[string]any{}
 	if len(cfg.RouterConfig) > 0 {
@@ -257,6 +263,62 @@ func appendMeterOutbounds(outbounds []any, pool []MeterEntry) ([]any, []MeterEnt
 		outbounds = append(outbounds, clone)
 	}
 	return outbounds, pool, nil
+}
+
+// appendProxiedMeterOutbounds 按 needs 把真实出站深拷贝成 B 类计量出站追加到末尾。
+//
+// 克隆而不是 proxySettings 链式（设计 §5.4）：与 appendMeterOutbounds「深拷贝
+// 默认出站」完全同构，转发路径与原出站一字不差、无额外转发层；配置不会漂移，
+// 生成期每次重新从 outbounds 里取最新的那份来拷。
+//
+// 找不到来源时返回错误让整份配置生成失败，绝不跳过：规则已经改成引用计量
+// 出站了，出站没克隆出来就是悬空引用，xray 对悬空 outboundTag 静默回落默认
+// 出站，本该走 IProyal 的 ChatGPT 会静默走直连而面板首页显示 running。
+// 生成失败时 xray 保持原状继续跑，是安全的一侧。
+//
+// 同一份 (入站, 规则) 只克隆一次：buildRule 对同一入站不会提两次需求，
+// 但这里仍按 tag 去重，防线不依赖上游的调用纪律。
+func appendProxiedMeterOutbounds(outbounds []any, needs []proxiedMeterNeed) ([]any, error) {
+	if len(needs) == 0 {
+		return outbounds, nil
+	}
+	byTag := make(map[string][]byte, len(outbounds))
+	for _, item := range outbounds {
+		ob, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag, _ := ob["tag"].(string)
+		if tag == "" {
+			continue
+		}
+		encoded, err := json.Marshal(ob)
+		if err != nil {
+			return nil, err
+		}
+		byTag[tag] = encoded
+	}
+	seen := make(map[string]bool, len(needs))
+	for _, n := range needs {
+		meterTag := model.MeterRuleTag(n.InboundId, n.RuleId)
+		if seen[meterTag] {
+			continue
+		}
+		seen[meterTag] = true
+		encoded, ok := byTag[n.TargetTag]
+		if !ok {
+			return nil, common.NewError("B 类计量出站的克隆来源不存在, 入站:", n.InboundId,
+				"规则:", n.RuleId, "目标 tag:", n.TargetTag,
+				"（规则已改成引用计量出站，来源缺失会造成悬空引用，整份配置拒绝生成）")
+		}
+		var clone map[string]any
+		if err := json.Unmarshal(encoded, &clone); err != nil {
+			return nil, err
+		}
+		clone["tag"] = meterTag
+		outbounds = append(outbounds, clone)
+	}
+	return outbounds, nil
 }
 
 // meterRuleNeedsIPGuard 判断计量规则要不要带 ip 守卫。
