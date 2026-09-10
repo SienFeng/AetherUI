@@ -220,3 +220,60 @@ func TestTopDomainsMarksIPLiterals(t *testing.T) {
 		}
 	}
 }
+
+// 差额分解必须把总用量拆完：已归因 + 协议开销(估) + 未归因 = 总量。
+//
+// 未归因是余项、用减法得出，它天然吸收全部估算误差——这正是它作为最后
+// 一项的意义，把它做成「精确测量值」反而是假的。
+func TestTopDomainsBreakdownAccountsForEveryByte(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := mkTrafficInbound(t, 31821, "甲")
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	loc, _ := (&SettingService{}).GetTimeLocation()
+	bucket := model.AlignHour(now, loc)
+
+	putTrafficBucket(t, in.Id, bucket, 1000, 0)             // 入站计数器：总量 1000
+	putDomainStat(t, in.Id, "acspubs.org", bucket, 1, 600, 0) // 已归因 600
+	putPoolRow(t, in.Id, "acspubs.org", 0)                    // 让 Metered 为 true
+
+	got, err := (&DomainStatService{}).TopDomains(in.Id, TopRange1h, TopOrderUp, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	b := got.Breakdown
+	if b == nil {
+		t.Fatal("Breakdown 为 nil")
+	}
+	if b.TotalBytes != 1000 || b.AttributedBytes != 600 {
+		t.Fatalf("总量/已归因 = %d/%d，期望 1000/600", b.TotalBytes, b.AttributedBytes)
+	}
+	if sum := b.AttributedBytes + b.OverheadBytes + b.UnattributedBytes; sum != b.TotalBytes {
+		t.Errorf("三项之和 %d != 总量 %d，差额没被拆完", sum, b.TotalBytes)
+	}
+}
+
+// 已归因超过总量时（口径差的方向并不固定，采集窗口错位也会造成），
+// 未归因必须钳到 0 而不是负数。显示一个负的「未归因」会让整块数据当场
+// 失去可信度。
+func TestTopDomainsBreakdownClampsNegativeRemainder(t *testing.T) {
+	setupMeterPoolTest(t)
+	in := mkTrafficInbound(t, 31822, "甲")
+	now := time.Date(2026, 9, 9, 12, 30, 0, 0, time.UTC)
+	loc, _ := (&SettingService{}).GetTimeLocation()
+	bucket := model.AlignHour(now, loc)
+
+	putTrafficBucket(t, in.Id, bucket, 100, 0)
+	putDomainStat(t, in.Id, "acspubs.org", bucket, 1, 990, 0) // 已归因 > 总量
+	putPoolRow(t, in.Id, "acspubs.org", 0)
+
+	got, err := (&DomainStatService{}).TopDomains(in.Id, TopRange1h, TopOrderUp, 10, now)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if got.Breakdown.UnattributedBytes < 0 {
+		t.Errorf("未归因 = %d，必须钳到 0", got.Breakdown.UnattributedBytes)
+	}
+	if got.Breakdown.OverheadBytes < 0 {
+		t.Errorf("协议开销 = %d，必须钳到 0", got.Breakdown.OverheadBytes)
+	}
+}
