@@ -234,34 +234,3 @@ func TestSettingsAffectXrayConfigOnlyForRelevantKeys(t *testing.T) {
 		t.Error("改了 ipRuleResolveDomain 必须触发 xray 校验")
 	}
 }
-
-// 开关默认关：「升级后行为零变化」靠这一条。它打破了「计量不能改变分流
-// 结果」的原有不变量，出错后果从「统计不准」升级为「用户断网」，必须由
-// 管理员显式打开。
-func TestMeterProxiedTrafficDefaultsToOff(t *testing.T) {
-	setupDB(t)
-	all, err := (&SettingService{}).GetAllSetting()
-	if err != nil {
-		t.Fatalf("GetAllSetting: %v", err)
-	}
-	if all.MeterProxiedTraffic != 0 {
-		t.Errorf("MeterProxiedTraffic = %d, want 0", all.MeterProxiedTraffic)
-	}
-	if on, err := (&SettingService{}).GetMeterProxiedTraffic(); err != nil || on {
-		t.Errorf("GetMeterProxiedTraffic = (%v, %v)，期望 (false, nil)", on, err)
-	}
-	if err := (&SettingService{}).setString("meterProxiedTraffic", "1"); err != nil {
-		t.Fatalf("setString: %v", err)
-	}
-	if on, _ := (&SettingService{}).GetMeterProxiedTraffic(); !on {
-		t.Error("写 1 之后应为开")
-	}
-}
-
-func TestCheckValidRejectsOutOfRangeMeterProxiedTraffic(t *testing.T) {
-	all := validBaseSetting()
-	all.MeterProxiedTraffic = 2
-	if err := all.CheckValid(); err == nil {
-		t.Error("expected error for a value other than 0/1")
-	}
-}

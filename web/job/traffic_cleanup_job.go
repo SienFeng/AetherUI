@@ -91,11 +91,6 @@ func (j *TrafficCleanupJob) Run() {
 	} else if pruned > 0 {
 		logger.Warningf("清理了 %v 条已删除入站遗留的域名统计", pruned)
 	}
-	if pruned, err := j.domainStatService.PruneOrphanRules(); err != nil {
-		logger.Warning("清理孤儿规则计量数据失败:", err)
-	} else if pruned > 0 {
-		logger.Warningf("清理了 %v 条已删除分流规则遗留的计量数据", pruned)
-	}
 
 	// 计量池与域名统计同库，孤儿清理挂在同一个任务里，理由同上。
 	if pruned, err := j.meterPoolService.PruneOrphans(); err != nil {

@@ -3,7 +3,6 @@ package service
 import (
 	"encoding/json"
 	"net"
-	"sort"
 	"strings"
 	"time"
 
@@ -61,23 +60,16 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if err != nil {
 		return err
 	}
-
-	// 规则要在出站序列化之前生成：B 类计量的克隆来源由规则决定（开关打开时
-	// 每条规则对每个入站要一份真实出站的拷贝），所以「先出站后规则」的顺序
-	// 在这里反过来一次。出站数组在下面追加完克隆体之后再序列化。
-	blockRules, routeRules, proxiedNeeds, err := s.buildRules(inboundTagById, usableOutboundTags, defaultOutboundTag)
-	if err != nil {
-		return err
-	}
-	outbounds, err = appendProxiedMeterOutbounds(outbounds, proxiedNeeds)
-	if err != nil {
-		return err
-	}
 	encodedOutbounds, err := json.Marshal(outbounds)
 	if err != nil {
 		return err
 	}
 	cfg.OutboundConfigs = json_util.RawMessage(encodedOutbounds)
+
+	blockRules, routeRules, err := s.buildRules(inboundTagById, usableOutboundTags, defaultOutboundTag)
+	if err != nil {
+		return err
+	}
 
 	routing := map[string]any{}
 	if len(cfg.RouterConfig) > 0 {
@@ -265,62 +257,6 @@ func appendMeterOutbounds(outbounds []any, pool []MeterEntry) ([]any, []MeterEnt
 	return outbounds, pool, nil
 }
 
-// appendProxiedMeterOutbounds 按 needs 把真实出站深拷贝成 B 类计量出站追加到末尾。
-//
-// 克隆而不是 proxySettings 链式（设计 §5.4）：与 appendMeterOutbounds「深拷贝
-// 默认出站」完全同构，转发路径与原出站一字不差、无额外转发层；配置不会漂移，
-// 生成期每次重新从 outbounds 里取最新的那份来拷。
-//
-// 找不到来源时返回错误让整份配置生成失败，绝不跳过：规则已经改成引用计量
-// 出站了，出站没克隆出来就是悬空引用，xray 对悬空 outboundTag 静默回落默认
-// 出站，本该走 IProyal 的 ChatGPT 会静默走直连而面板首页显示 running。
-// 生成失败时 xray 保持原状继续跑，是安全的一侧。
-//
-// 同一份 (入站, 规则) 只克隆一次：buildRule 对同一入站不会提两次需求，
-// 但这里仍按 tag 去重，防线不依赖上游的调用纪律。
-func appendProxiedMeterOutbounds(outbounds []any, needs []proxiedMeterNeed) ([]any, error) {
-	if len(needs) == 0 {
-		return outbounds, nil
-	}
-	byTag := make(map[string][]byte, len(outbounds))
-	for _, item := range outbounds {
-		ob, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		tag, _ := ob["tag"].(string)
-		if tag == "" {
-			continue
-		}
-		encoded, err := json.Marshal(ob)
-		if err != nil {
-			return nil, err
-		}
-		byTag[tag] = encoded
-	}
-	seen := make(map[string]bool, len(needs))
-	for _, n := range needs {
-		meterTag := model.MeterRuleTag(n.InboundId, n.RuleId)
-		if seen[meterTag] {
-			continue
-		}
-		seen[meterTag] = true
-		encoded, ok := byTag[n.TargetTag]
-		if !ok {
-			return nil, common.NewError("B 类计量出站的克隆来源不存在, 入站:", n.InboundId,
-				"规则:", n.RuleId, "目标 tag:", n.TargetTag,
-				"（规则已改成引用计量出站，来源缺失会造成悬空引用，整份配置拒绝生成）")
-		}
-		var clone map[string]any
-		if err := json.Unmarshal(encoded, &clone); err != nil {
-			return nil, err
-		}
-		clone["tag"] = meterTag
-		outbounds = append(outbounds, clone)
-	}
-	return outbounds, nil
-}
-
 // meterRuleNeedsIPGuard 判断计量规则要不要带 ip 守卫。
 //
 // 守卫是 ip: ["0.0.0.0/0", "::/0"]：匹配任意 IP，但**要求目标已经有 IP**。
@@ -479,54 +415,33 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 // 对等的分流动作，都只是「把命中的流量送到某个出站」，谁在前由管理员设的
 // 优先级决定。只有 block 需要单独提前，那是硬约束：违规域名的封禁不能被
 // 任何一条分流规则绕过。
-// proxiedMeterNeed 是 buildRule 在开关打开时提出的「需要一个计量出站」的请求：
-// 把 TargetTag 那个出站深拷贝一份、tag 换成 MeterRuleTag(InboundId, RuleId)。
-//
-// 由 buildRule 提需求、appendProxiedMeterOutbounds 统一满足，而不是在 buildRule
-// 里直接改出站数组：规则生成与出站生成的顺序是「先出站后规则」（规则要引用
-// 出站的 tag），B 类计量反过来要求「先知道规则才知道要克隆谁」，所以出站数组
-// 的最终序列化被挪到了 buildRules 之后。
-type proxiedMeterNeed struct {
-	InboundId int
-	RuleId    int
-	TargetTag string
-}
-
 func (s *RoutingInjector) buildRules(
 	inboundTagById map[int]string,
 	outboundTagById map[int]string,
 	defaultOutboundTag string,
-) ([]any, []any, []proxiedMeterNeed, error) {
+) ([]any, []any, error) {
 	rules, err := s.ruleService.GetEnabled()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if len(rules) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil
 	}
-	expand, err := s.settingService.GetMeterProxiedTraffic()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	// 全局规则展开用的入站列表，按 id 升序——这是「生成逐字节确定」的一部分，
-	// 禁止改用遍历 map 产生顺序。
-	allInboundIds := make([]int, 0, len(inboundTagById))
-	for id := range inboundTagById {
-		allInboundIds = append(allInboundIds, id)
-	}
-	sort.Ints(allInboundIds)
-
+	// inboundTagById 由 Inject 算好传进来：计量规则也要用它，各自查一次
+	// GetAllInbounds 会让每次配置生成多读一遍带 JSON 大字段的整张表。
 	blockRules := make([]any, 0)
 	routeRules := make([]any, 0)
-	needs := make([]proxiedMeterNeed, 0)
 	for _, rule := range rules {
-		generated, isBlock, ruleNeeds, skip := s.buildRule(rule, inboundTagById, outboundTagById,
-			defaultOutboundTag, expand, allInboundIds)
+		generated, isBlock, skip := s.buildRule(rule, inboundTagById, outboundTagById, defaultOutboundTag)
 		if skip != nil {
+			// 设计 §5.3 接受这道防线的理由是「宁可规则不生效，用户能察觉」。
+			// 跳过若不记日志，用户其实察觉不到：规则表照常渲染，生成的配置里
+			// 却没有这条规则，流量默默走了默认出站。
 			logger.Warning("skip routing rule, id:", rule.Id, "remark:", rule.Remark,
 				"reason:", skip)
 			continue
 		}
+		// 一条数据库规则最多产出两条 xray 规则（域名一条、IP 一条）。
 		// 顺序由 buildRule 固定（domain 在前），这里原样追加，不重排。
 		for _, g := range generated {
 			if isBlock {
@@ -535,9 +450,8 @@ func (s *RoutingInjector) buildRules(
 				routeRules = append(routeRules, g)
 			}
 		}
-		needs = append(needs, ruleNeeds...)
 	}
-	return blockRules, routeRules, needs, nil
+	return blockRules, routeRules, nil
 }
 
 // buildRule 生成 0~2 条 xray 规则，或说明为什么必须整条丢弃。
@@ -563,15 +477,13 @@ func (s *RoutingInjector) buildRule(
 	inboundTagById map[int]string,
 	outboundTagById map[int]string,
 	defaultOutboundTag string,
-	expand bool,
-	allInboundIds []int,
-) ([]map[string]any, bool, []proxiedMeterNeed, error) {
+) ([]map[string]any, bool, error) {
 	groupIds, err := DecodeDomainGroupIds(rule.DomainGroupIds)
 	if err != nil {
-		return nil, false, nil, common.NewError("规则的分流组数据损坏, id:", rule.Id, "err:", err)
+		return nil, false, common.NewError("规则的分流组数据损坏, id:", rule.Id, "err:", err)
 	}
 	if len(groupIds) == 0 {
-		return nil, false, nil, common.NewError("规则没有指定任何分流组, id:", rule.Id,
+		return nil, false, common.NewError("规则没有指定任何分流组, id:", rule.Id,
 			"（条件为空会让规则退化成劫持该入站全部流量）")
 	}
 
@@ -638,14 +550,14 @@ func (s *RoutingInjector) buildRule(
 	domains := MergeDomains(domainLists...)
 	cidrs := MergeDomains(cidrLists...)
 	if len(domains) == 0 && len(cidrs) == 0 {
-		return nil, false, nil, common.NewError("规则的分流组全部不存在或为空, rule id:", rule.Id,
+		return nil, false, common.NewError("规则的分流组全部不存在或为空, rule id:", rule.Id,
 			"group ids:", groupIds,
 			"（条件为空会让规则退化成劫持该入站全部流量）")
 	}
 
 	inboundIds, err := DecodeInboundIds(rule.InboundIds)
 	if err != nil {
-		return nil, false, nil, common.NewError("规则的入站数据损坏, id:", rule.Id, "err:", err)
+		return nil, false, common.NewError("规则的入站数据损坏, id:", rule.Id, "err:", err)
 	}
 	var inboundTags []string
 	if len(inboundIds) > 0 {
@@ -664,7 +576,7 @@ func (s *RoutingInjector) buildRule(
 			// inboundTag: [] 当作「不限制」而非「不匹配任何入站」——一条本该
 			// 只覆盖甲的规则会劫持所有人的流量，且 Configuration OK、
 			// 面板首页照样显示 running。
-			return nil, false, nil, common.NewError("规则指定的入站全部不存在或已禁用, ids:", inboundIds)
+			return nil, false, common.NewError("规则指定的入站全部不存在或已禁用, ids:", inboundIds)
 		}
 		if len(missing) > 0 {
 			// 部分失效不整条丢弃：剩下的入站仍该按规则走。但必须记录，
@@ -686,7 +598,7 @@ func (s *RoutingInjector) buildRule(
 	case model.ActionProxy:
 		tag, ok := outboundTagById[rule.OutboundId]
 		if !ok {
-			return nil, false, nil, common.NewError("出站节点不存在、已禁用或未写入配置, id:",
+			return nil, false, common.NewError("出站节点不存在、已禁用或未写入配置, id:",
 				rule.OutboundId)
 		}
 		outboundTag = tag
@@ -698,42 +610,15 @@ func (s *RoutingInjector) buildRule(
 		// 唯一一处后果不严重的地方，破一次例就等于把它降级成建议。而且
 		// 一旦模板的默认出站不再是 freedom，这个巧合会当场变成静默错误。
 		if defaultOutboundTag == "" {
-			return nil, false, nil, common.NewError("模板里没有可引用的默认出站，直连规则无法生成, rule id:",
+			return nil, false, common.NewError("模板里没有可引用的默认出站，直连规则无法生成, rule id:",
 				rule.Id)
 		}
 		outboundTag = defaultOutboundTag
 	default:
-		return nil, false, nil, common.NewError("未知的动作:", rule.Action)
+		return nil, false, common.NewError("未知的动作:", rule.Action)
 	}
 
-	// 开关关，或 block 动作：走原来的形态，一个字节不变。
-	if !expand || isBlock {
-		return emitRules(domains, cidrs, inboundTags, outboundTag), isBlock, nil, nil
-	}
-
-	// 开关开：按入站展开。每个入站一份规则（domain 一条 + ip 一条），
-	// outboundTag 换成该入站专属的计量出站，真实出站的 tag 作为克隆来源
-	// 通过 needs 交给 appendProxiedMeterOutbounds。
-	//
-	// 展开顺序：显式指定入站的按 inboundTags（已由 InboundIds 升序保证）；
-	// 全局规则按 allInboundIds（调用方已排序）。两者都是逐字节确定的。
-	targetIds := inboundIdsOf(inboundTags, inboundTagById, allInboundIds)
-	generated := make([]map[string]any, 0, len(targetIds)*2)
-	needs := make([]proxiedMeterNeed, 0, len(targetIds))
-	for _, id := range targetIds {
-		meterTag := model.MeterRuleTag(id, rule.Id)
-		generated = append(generated, emitRules(domains, cidrs, []string{inboundTagById[id]}, meterTag)...)
-		needs = append(needs, proxiedMeterNeed{InboundId: id, RuleId: rule.Id, TargetTag: outboundTag})
-	}
-	return generated, false, needs, nil
-}
-
-// emitRules 把条件与出站组装成 0~2 条 xray 规则，domain 在前、ip 在后。
-//
-// 从 buildRule 里抽出来是因为展开时要对每个入站各调一次；形态与抽出前
-// 逐字节相同。空数组绝不写进配置（见 buildRule 的注释）：inboundTags 为空
-// 表示这是一条全局规则，此时正确的做法是压根不输出 inboundTag 这个键。
-func emitRules(domains, cidrs, inboundTags []string, outboundTag string) []map[string]any {
+	// 顺序固定：domain 在前、ip 在后。这是「生成逐字节确定」的一部分。
 	generated := make([]map[string]any, 0, 2)
 	emit := func(conditionKey string, values []string) {
 		g := map[string]any{
@@ -741,6 +626,8 @@ func emitRules(domains, cidrs, inboundTags []string, outboundTag string) []map[s
 			conditionKey:  values,
 			"outboundTag": outboundTag,
 		}
+		// 空数组绝不写进配置（见函数注释）。inboundTags 为空表示这是一条
+		// 全局规则，此时正确的做法是压根不输出 inboundTag 这个键。
 		if len(inboundTags) > 0 {
 			g["inboundTag"] = inboundTags
 		}
@@ -752,24 +639,7 @@ func emitRules(domains, cidrs, inboundTags []string, outboundTag string) []map[s
 	if len(cidrs) > 0 {
 		emit("ip", cidrs)
 	}
-	return generated
-}
-
-// inboundIdsOf 把 buildRule 算出的 inboundTags 还原成入站 id 列表；
-// 空（全局规则）时返回全部启用入站。两种来源都已经是升序。
-func inboundIdsOf(inboundTags []string, inboundTagById map[int]string, allInboundIds []int) []int {
-	if len(inboundTags) == 0 {
-		return allInboundIds
-	}
-	tagToId := make(map[string]int, len(inboundTagById))
-	for id, tag := range inboundTagById {
-		tagToId[tag] = id
-	}
-	ids := make([]int, 0, len(inboundTags))
-	for _, tag := range inboundTags {
-		ids = append(ids, tagToId[tag])
-	}
-	return ids
+	return generated, isBlock, nil
 }
 
 // buildGeoRules 生成地区限制规则，并把允许集写进 bin/a-ui-geo.dat。

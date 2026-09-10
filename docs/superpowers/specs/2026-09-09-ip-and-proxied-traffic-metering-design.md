@@ -303,9 +303,6 @@ IP 目标作为普通候选参与同一套竞争。
 同一条规则展开出来的 N 条按**入站 id 升序**。否则 `Config.Equals` 恒为 false，
 那个 10 秒的消费任务会不停重启 xray。
 
-实施时把规则组装抽成 `emitRules`，展开时对每个入站各调一次；形态与抽出前逐字节相同
-（`TestInjectProxiedMeterOffIsByteIdentical` 钉住）。
-
 ### 5.4 计量出站的构造：克隆，不用链式
 
 两条路都验证过：
@@ -372,8 +369,8 @@ a-ui-meter-r-<inboundId>-<ruleId>      例：a-ui-meter-r-7-9
 
 `r-` 这一段把 B 类与 A 类（`a-ui-meter-<inboundId>-<target>`）区分开。
 `ParseMeterTag` 需要扩展以识别这个形态——**这是本期唯一需要改动的 tag 解析逻辑**，
-**实施后确认 `RecordMetered` 不需要改**：`ParseMeterTag` 对 B 类 tag 返回的第二个值
-就是 `rule:<id>`，采集链路把它当键原样写库，A 类 B 类自动分流。
+必须同时更新 `RecordMetered`（`meter_collect.go:87`）的归因分支，
+否则 B 类计数器会因「形态不对的 tag」被静默丢弃（那条 `logger.Debug` 只在 debug 级可见）。
 
 **SQLite 会复用被删除的自增 id**（CLAUDE.md「已知偏差」）。规则被删除后新建的规则
 可能拿到同一个 id，让残留的计量数据绑到一条毫不相干的规则上——而引用不再悬空，
@@ -423,12 +420,13 @@ a-ui-meter-r-<inboundId>-<ruleId>      例：a-ui-meter-r-7-9
 
 ## 6. 数据模型
 
-> **本节作废（2026-09-10 实施改动 B 后确认）**：A、B 两期都不需要 `Kind` 列。
-> A 类的 IP 字面量与 B 类的 `rule:<规则id>` 都直接作为 `DomainStat.Domain` 的键，
-> 类型由键的形态推导（`topDomainKind`：先判 `rule:` 前缀，再判 IP，否则域名）；
-> `rule:` 不可能与真实目标撞车——`Domain` 列的值全部来自 `domain.Registrable()`，
-> 输出永远是注册域名或 IP。`MeterDomain` 池表不参与 B 类计量。下文描述的 GORM
-> `AutoMigrate` 不修改已存在索引那个风险因此不复存在。
+> **分期说明（2026-09-09 实施改动 A 后修订）**：本节的 `Kind` 列与索引扩展
+> **只属于改动 B**。改动 A 实施时确认不需要它们——`DomainStat.Domain` 从第一期
+> 起就「IP 字面量原样」存，`MeterDomain` 的唯一索引 `(inbound_id, domain)`
+> 对 IP 同样成立，而榜单的类型标签用 `net.ParseIP` 推导即可（多一处存储就是
+> 多一处会漂移的真相源，而推导用的正是 `buildMeterRules` 选规则形态的同一个
+> 判据）。因此**改动 A 零数据模型变更、零迁移风险**，下面那条 GORM
+> `AutoMigrate` 不修改已存在索引的静默失败，只在改动 B 实施时才需要面对。
 
 
 ### 6.1 `model.DomainStat` 新增 `Kind` 列

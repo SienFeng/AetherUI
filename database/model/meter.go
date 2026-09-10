@@ -22,85 +22,17 @@ func MeterTag(inboundId int, domain string) string {
 	return MeterOutboundTagPrefix + strconv.Itoa(inboundId) + "-" + domain
 }
 
-// meterRuleTagInfix 是 B 类（按分流规则计量）tag 在前缀之后的标记段。
-// 它把 a-ui-meter-r-7-9 与 a-ui-meter-7-google.com 区分开：后者前缀之后
-// 直接是数字，前者是字母 r。
-const meterRuleTagInfix = "r-"
-
-// MeterRuleTag 拼出 (入站, 分流规则) 对应的计量出站 tag，形如 a-ui-meter-r-7-9。
+// ParseMeterTag 从计量出站 tag 反查出 (入站 id, 注册域名)。
 //
-// 带的是规则 id 而不是规则备注：备注可空、可重复、可改，id 才是稳定的键。
-// SQLite 会复用被删除的自增 id，所以 RoutingRuleService.Del 必须连带删掉
-// 该规则的计量数据（DomainStatService.DeleteByRule），否则残留的 rule:9 行
-// 会绑到下一条新建的规则上。
-func MeterRuleTag(inboundId, ruleId int) string {
-	return MeterOutboundTagPrefix + meterRuleTagInfix + strconv.Itoa(inboundId) + "-" + strconv.Itoa(ruleId)
-}
-
-// ruleStatKeyPrefix 是 B 类计量在 DomainStat.Domain 里的键前缀。
-//
-// 不加数据库列，用键的形态区分类型，与 A 类的 IP 字面量同一套推导式判定。
-// 它不可能与真实目标撞车：Domain 列的值全部来自 domain.Registrable，
-// 那个函数的输出是注册域名或 IP，不会以 rule: 开头。
-const ruleStatKeyPrefix = "rule:"
-
-// RuleStatKey 是分流规则在 DomainStat.Domain 里的键。
-func RuleStatKey(ruleId int) string {
-	return ruleStatKeyPrefix + strconv.Itoa(ruleId)
-}
-
-// IsRuleStatKey 判断一个 DomainStat.Domain 的值是不是 B 类计量的键。
-func IsRuleStatKey(s string) bool {
-	_, ok := ParseRuleStatKey(s)
-	return ok
-}
-
-// ParseRuleStatKey 从 rule:<id> 反查规则 id。形态不对一律拒绝。
-func ParseRuleStatKey(s string) (int, bool) {
-	rest, ok := strings.CutPrefix(s, ruleStatKeyPrefix)
-	if !ok || rest == "" {
-		return 0, false
-	}
-	id, err := strconv.Atoi(rest)
-	if err != nil || id <= 0 {
-		return 0, false
-	}
-	return id, true
-}
-
-// ParseMeterTag 从计量出站 tag 反查出 (入站 id, 键)。
-//
-// 两种形态：
-//   - A 类 a-ui-meter-<入站id>-<目标>：键是注册域名或 IP 字面量。按**第一个**
-//     短横线切开——inboundId 是十进制数字不含短横线，其后全部是目标。目标本身
-//     可以含短横线（some-cdn.example.com），所以绝不能从右边切。
-//   - B 类 a-ui-meter-r-<入站id>-<规则id>：键是 rule:<规则id>（RuleStatKey）。
-//     两个数字之间恰好一个短横线。
-//
-// 返回的键直接被 RecordMetered 当 DomainStat.Domain 写，所以 B 类返回的是
-// rule:9 这个键而不是裸的规则 id——采集链路因此不需要知道两类的区别。
+// 按**第一个**短横线切开：inboundId 是十进制数字不含短横线，其后全部是
+// 域名。域名本身可以含短横线（some-cdn.example.com），所以绝不能从右边切。
 //
 // 拒绝一切形态不对的输入而不是尽力猜：采集路径上一个猜错的 tag 会把字节
-// 静默记到别的目标头上，而榜单会渲染得完全正常。
+// 静默记到别的域名头上，而榜单会渲染得完全正常。
 func ParseMeterTag(tag string) (int, string, bool) {
 	rest, ok := strings.CutPrefix(tag, MeterOutboundTagPrefix)
 	if !ok {
 		return 0, "", false
-	}
-	if ruleRest, isRule := strings.CutPrefix(rest, meterRuleTagInfix); isRule {
-		idStr, ruleStr, ok := strings.Cut(ruleRest, "-")
-		if !ok || idStr == "" || ruleStr == "" {
-			return 0, "", false
-		}
-		id, err := strconv.Atoi(idStr)
-		if err != nil || id <= 0 {
-			return 0, "", false
-		}
-		ruleId, err := strconv.Atoi(ruleStr)
-		if err != nil || ruleId <= 0 {
-			return 0, "", false
-		}
-		return id, RuleStatKey(ruleId), true
 	}
 	idStr, dom, ok := strings.Cut(rest, "-")
 	if !ok || idStr == "" || dom == "" {

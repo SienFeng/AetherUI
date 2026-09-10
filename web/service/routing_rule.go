@@ -387,12 +387,6 @@ func (s *RoutingRuleService) AttachInbound(tx *gorm.DB, inboundId int) error {
 }
 
 func (s *RoutingRuleService) Del(id int) error {
-	// 先删计量数据再删规则，与 DomainGroupService.Del「先删子行再删组」同序：
-	// 反过来的话两步之间崩溃会留下一条已删规则的孤儿计量行，等着被复用的 id
-	// 认领。PruneOrphanRules 是兜底，不是替代。
-	if err := (&DomainStatService{}).DeleteByRule(id); err != nil {
-		return err
-	}
 	db := database.GetDB()
 	return db.Delete(model.RoutingRule{}, id).Error
 }

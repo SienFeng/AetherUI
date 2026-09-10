@@ -208,7 +208,6 @@ class AllSetting {
         this.trafficDayRetentionDays = 365;
         this.concurrencyIdleTimeout = 120;
         this.ipRuleResolveDomain = 0;
-        this.meterProxiedTraffic = 0;
         this.dnsServers = "";
         this.tcInterface = "";
 

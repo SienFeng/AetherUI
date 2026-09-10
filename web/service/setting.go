@@ -41,7 +41,6 @@ var defaultValueMap = map[string]string{
 	"trafficDayRetentionDays":  "365",
 	"concurrencyIdleTimeout":   "120",
 	"ipRuleResolveDomain":      "0",
-	"meterProxiedTraffic":      "0",
 	"dnsServers":               "",
 	"tcInterface":              "",
 	"defaultDomain":            "",
@@ -498,20 +497,6 @@ func (s *SettingService) GetConcurrencyIdleTimeout() (int, error) {
 // 全部规则都没命中时，把域名解析成 IP 再跑第二遍（app/router/router.go:261）。
 func (s *SettingService) GetIPRuleResolveDomain() (bool, error) {
 	v, err := s.getInt("ipRuleResolveDomain")
-	if err != nil {
-		return false, err
-	}
-	return v != 0, nil
-}
-
-// GetMeterProxiedTraffic 报告是否对被分流规则带走的流量也做计量（第三期改动 B）。
-//
-// 为真时生成期把每条非 block 分流规则按入站展开，outboundTag 改成克隆自真实
-// 出站的计量出站。默认 0：这一项打破了「计量不能改变分流结果」的原有不变量，
-// 出错后果从「统计不准」升级为「用户断网」，所以必须由管理员显式打开，
-// 且关掉即恢复——下一个生成周期走热应用，不重启。
-func (s *SettingService) GetMeterProxiedTraffic() (bool, error) {
-	v, err := s.getInt("meterProxiedTraffic")
 	if err != nil {
 		return false, err
 	}
