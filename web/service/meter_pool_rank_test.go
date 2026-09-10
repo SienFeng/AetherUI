@@ -55,17 +55,37 @@ func TestMeterAvgBytesPerConn(t *testing.T) {
 	}
 }
 
-func TestBuildMeterCandidatesFiltersNonRegistrable(t *testing.T) {
+// 候选过滤只放行「可计量」的目标。
+//
+// **IP 字面量从第三期起是放行的**（此前这条测试钉的是相反的契约）：第二期
+// 拒绝它们，是因为当时计量规则只有 domain: 一种形态，domain 条件对 IP 目标
+// 永不命中、白占槽位；第三期给 IP 成员发 ip 条件的规则，它们因此有了资格。
+// 触发这次变更的是一台生产机：某入站 24 小时 2.53 GB 的上传里绝大部分打向
+// 一个没有域名的目标，域名池再大也抓不到它。
+//
+// 公共后缀本身与子域名仍然拒绝，理由没有变。
+func TestBuildMeterCandidatesFiltersUnmeterable(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	aggs := []meterAgg{
 		{Domain: "doubleclick.net", Bytes: 100, Count: 1},
 		{Domain: "com", Bytes: 999, Count: 9},             // 公共后缀本身：domain:com 会吸走全部 .com
-		{Domain: "1.2.3.4", Bytes: 999, Count: 9},         // IP 字面量：domain 条件对它永不命中
+		{Domain: "1.2.3.4", Bytes: 999, Count: 9},         // IPv4 字面量：第三期放行，发 ip 条件的规则
+		{Domain: "2001:db8::1", Bytes: 999, Count: 9},     // IPv6 字面量：同上
 		{Domain: "www.example.com", Bytes: 999, Count: 9}, // 子域名：池里只放归并后的注册域名
 	}
 	cands := buildMeterCandidates(aggs, nil, nil, nil, now)
-	if len(cands) != 1 || cands[0].Domain != "doubleclick.net" {
-		t.Fatalf("候选 = %+v，期望只剩 doubleclick.net", cands)
+	got := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		got[c.Domain] = true
+	}
+	want := []string{"doubleclick.net", "1.2.3.4", "2001:db8::1"}
+	if len(cands) != len(want) {
+		t.Fatalf("候选 = %+v，期望恰好 %v", cands, want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("%q 不在候选里：%+v", w, cands)
+		}
 	}
 }
 
