@@ -14,6 +14,15 @@ import (
 	"a-ui/xray"
 )
 
+// xrayTestTimeout 是单次 run -test 的上限。做成变量而不是常量，是为了让
+// 测试能覆盖超时那条 fail open 分支——它是本文件里唯一一条「校验没有真的
+// 执行过」的路径，却又必须放行，不测就没人知道它还在不在。
+//
+// 20 秒不是随手取的：校验失败时会再跑一次 baseline（生产机日志里那两条相隔
+// 11 秒的 timed out 就是同一次校验的两跑），最坏耗时是这个值的两倍；而摘掉
+// 计量出站之后单次约 6 秒，20 秒给配置继续增长留了余量。
+var xrayTestTimeout = 20 * time.Second
+
 // runXrayTest 把一份配置交给真实的 xray 做语法与语义校验。
 //
 // 采用 fail open：只有 xray 明确判定配置非法时才返回错误。二进制缺失、
@@ -53,7 +62,7 @@ func runXrayTest(cfg map[string]any) error {
 	}()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(xrayTestTimeout):
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
@@ -140,12 +149,16 @@ func validateWithFullConfig(apply func(cfg map[string]any), minimal map[string]a
 	}
 
 	apply(prospective)
+	stripMeterOutbounds(prospective)
 	testErr := runXrayTest(prospective)
 	if testErr == nil {
 		return nil
 	}
 
 	baseline, err := decodeConfig(data)
+	if err == nil {
+		stripMeterOutbounds(baseline)
+	}
 	if err == nil && runXrayTest(baseline) != nil {
 		logger.Warning("config was already invalid before this change, allowing the save:", testErr)
 		return nil
@@ -178,6 +191,55 @@ func removeOutboundByTag(cfg map[string]any, tag string) {
 		cfg["outbounds"] = append(outbounds[:i:i], outbounds[i+1:]...)
 		return
 	}
+}
+
+// stripMeterOutbounds 摘掉配置里全部计量出站，以及引用它们的路由规则。
+//
+// 送检前必须做这一步，否则校验会因为超时而静默失效：计量出站占了 run -test
+// 耗时的主体（一台 16 入站的生产机实测：75 个计量出站约 9.7 秒，整次校验
+// 15.68 秒），一旦越过 xrayTestTimeout，runXrayTest 就走 fail open 放行——
+// 入站开了 TLS 却没填证书路径这类事故从此没有任何一层拦得住，而管理员看到的
+// 是「保存成功」。
+//
+// 摘掉它们不削弱校验强度：计量出站的形态由注入器固定生成（freedom + 一条
+// domain 规则），不含任何管理员输入；而 a-ui-meter- 这整个前缀命名空间被
+// model.IsReservedTag 在分配端（allocTag）、生成端（buildOutbounds）、导入端
+// 与校验端（removeOutboundByTag）四处 fail-close 挡死，管理员没有任何路径能
+// 造出与之撞名的对象。所以「组合层面的冲突」在这一段上不存在。
+//
+// 只摘 outbounds 与 routing.rules 两处，routing 下的其它键（尤其
+// domainStrategy——它决定计量规则要不要带 ip 守卫）一个字节都不动：送检的
+// 配置在语义上必须与真正下发的那份保持一致，只是少了不需要校验的部分。
+func stripMeterOutbounds(cfg map[string]any) {
+	if outbounds, ok := cfg["outbounds"].([]any); ok {
+		cfg["outbounds"] = filterOutMeterTag(outbounds, "tag")
+	}
+	routing, ok := cfg["routing"].(map[string]any)
+	if !ok {
+		return
+	}
+	if rules, ok := routing["rules"].([]any); ok {
+		routing["rules"] = filterOutMeterTag(rules, "outboundTag")
+	}
+}
+
+// filterOutMeterTag 返回一个去掉了「指定键为计量 tag」的新切片，顺序不变。
+//
+// 不复用底层数组（[:0:0]）：出站数组的首位是 xray 的默认出站，原地压缩会
+// 在调用方仍持有原切片时改写它，而那正是注入器第一条不变量依赖的位置。
+// 无法断言成对象的项一律保留——这里的职责只是摘计量出站，判定一份畸形配置
+// 合不合法是 xray 自己的事。
+func filterOutMeterTag(items []any, key string) []any {
+	kept := items[:0:0]
+	for _, item := range items {
+		if obj, ok := item.(map[string]any); ok {
+			if tag, _ := obj[key].(string); model.IsMeterTag(tag) {
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func minimalOutboundConfig(ob map[string]any) map[string]any {

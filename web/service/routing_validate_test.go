@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"a-ui/database/model"
 	"a-ui/xray"
@@ -167,5 +168,113 @@ func TestValidateCidrsAcceptsValidList(t *testing.T) {
 	setupDB(t)
 	if err := ValidateCidrs([]string{"1.2.3.0/24", "geoip:private"}); err != nil {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// 送检的配置里必须不含计量出站。它们占了校验耗时的主体（这台生产机上
+// 75 个计量出站 ≈ 9.7 秒 / 全部 15.68 秒），却完全不需要真实 xray 把关：
+// 形态是注入器自己生成的固定 freedom + 一条规则，而管理员没有任何路径能
+// 造出 a-ui-meter-* 的对象——model.IsReservedTag 内含 IsMeterTag，在分配端
+// （routing_outbound.allocTag）、生成端（routing_inject.buildOutbounds）、
+// 导入端（routing_portable）与校验端（removeOutboundByTag）四处都是 fail-close。
+// 所以摘掉它们不会漏掉任何组合层面的冲突。
+func TestStripMeterOutboundsRemovesOnlyMeterEntries(t *testing.T) {
+	cfg := map[string]any{
+		"outbounds": []any{
+			map[string]any{"protocol": "freedom"}, // 数组首位的默认出站，天然无 tag
+			map[string]any{"protocol": "vmess", "tag": "a-ui-relay"},
+			map[string]any{"protocol": "freedom", "tag": "a-ui-meter-7-google.com"},
+			map[string]any{"protocol": "blackhole", "tag": "a-ui-block"},
+			map[string]any{"protocol": "freedom", "tag": "a-ui-meter-7-apple.com"},
+		},
+		"routing": map[string]any{
+			"domainStrategy": "IPIfNonMatch",
+			"rules": []any{
+				map[string]any{"outboundTag": "a-ui-block", "domain": []any{"bad.com"}},
+				map[string]any{"outboundTag": "a-ui-meter-7-google.com", "domain": []any{"domain:google.com"}},
+				map[string]any{"outboundTag": "a-ui-relay", "domain": []any{"geosite:openai"}},
+				map[string]any{"outboundTag": "a-ui-meter-7-apple.com", "domain": []any{"domain:apple.com"}},
+			},
+		},
+	}
+
+	stripMeterOutbounds(cfg)
+
+	// 出站：只剩三条非计量的，且原有顺序不变（数组首位仍是默认出站，
+	// 这是注入器第一条不变量所依赖的）。
+	outbounds, _ := cfg["outbounds"].([]any)
+	wantTags := []string{"", "a-ui-relay", "a-ui-block"}
+	if len(outbounds) != len(wantTags) {
+		t.Fatalf("出站数 = %d，期望 %d：%v", len(outbounds), len(wantTags), outbounds)
+	}
+	for i, want := range wantTags {
+		ob, _ := outbounds[i].(map[string]any)
+		got, _ := ob["tag"].(string)
+		if got != want {
+			t.Errorf("第 %d 个出站 tag = %q，期望 %q", i, got, want)
+		}
+	}
+
+	// 规则：引用计量出站的两条被摘掉，其余保持原顺序。
+	routing, _ := cfg["routing"].(map[string]any)
+	rules, _ := routing["rules"].([]any)
+	wantRuleTags := []string{"a-ui-block", "a-ui-relay"}
+	if len(rules) != len(wantRuleTags) {
+		t.Fatalf("规则数 = %d，期望 %d：%v", len(rules), len(wantRuleTags), rules)
+	}
+	for i, want := range wantRuleTags {
+		r, _ := rules[i].(map[string]any)
+		got, _ := r["outboundTag"].(string)
+		if got != want {
+			t.Errorf("第 %d 条规则 outboundTag = %q，期望 %q", i, got, want)
+		}
+	}
+
+	// routing 下的其它键不能被牵连——domainStrategy 决定计量规则要不要带
+	// ip 守卫，摘错了会让送检配置与真正下发的那份产生语义差异。
+	if routing["domainStrategy"] != "IPIfNonMatch" {
+		t.Errorf("domainStrategy 被改动了：%v", routing["domainStrategy"])
+	}
+}
+
+// 缺字段、空配置都不能 panic：validateWithFullConfig 的输入来自
+// GetXrayConfig() 的序列化结果，模板被管理员改坏时任何一段都可能缺失，
+// 而这条路径上的 panic 会直接杀掉正在处理请求的 goroutine。
+func TestStripMeterOutboundsToleratesMissingSections(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  map[string]any
+	}{
+		{"空配置", map[string]any{}},
+		{"只有 outbounds", map[string]any{"outbounds": []any{}}},
+		{"routing 不是对象", map[string]any{"routing": "nonsense"}},
+		{"rules 不是数组", map[string]any{"routing": map[string]any{"rules": 42}}},
+		{"出站项不是对象", map[string]any{"outbounds": []any{"nonsense", nil}}},
+		{"规则引用了不存在的计量出站", map[string]any{
+			"routing": map[string]any{"rules": []any{
+				map[string]any{"outboundTag": "a-ui-meter-9-gone.com"},
+			}},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stripMeterOutbounds(c.cfg) // 不 panic 即可
+		})
+	}
+}
+
+// 超时必须 fail open。校验器自身的故障绝不能变成「管理员保存不了配置」——
+// 那会把他锁在门外，连修复用的操作都做不了。
+func TestRunXrayTestFailsOpenOnTimeout(t *testing.T) {
+	requireXrayBinary(t)
+	old := xrayTestTimeout
+	xrayTestTimeout = time.Nanosecond
+	defer func() { xrayTestTimeout = old }()
+
+	err := runXrayTest(map[string]any{
+		"outbounds": []any{map[string]any{"protocol": "freedom"}},
+	})
+	if err != nil {
+		t.Fatalf("超时必须放行，得到错误: %v", err)
 	}
 }
