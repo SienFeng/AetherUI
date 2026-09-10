@@ -160,10 +160,10 @@ func buildMeterCandidates(
 
 	cands := make([]meterCandidate, 0, len(names))
 	for _, d := range names {
-		// 只收真正的注册域名：domain:com 会命中全部 .com，把该入站几乎全部
-		// 流量吸进一个计量出站，榜单从此只有一行；IP 字面量则需要 ip 条件，
-		// domain 条件对它永不命中，白占一个槽位。
-		if !domain.IsRegistrable(d) {
+		// 收注册域名与 IP 字面量两类：前者生成 domain: 规则，后者生成 ip 规则
+		//（设计 §4.2）。仍然拒绝 domain:com 那种命中全部 .com 的公共后缀，
+		// 它会把该入站几乎全部流量吸进一个计量出站，榜单从此只有一行。
+		if !domain.IsMeterable(d) {
 			continue
 		}
 		if cooling[d] || retired[d] {
