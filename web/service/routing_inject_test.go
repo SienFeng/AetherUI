@@ -421,7 +421,7 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 		{"直连但配置里没有默认出站", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionDirect}, ""},
 	}
 	for _, tc := range cases {
-		generated, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{}, tc.defaultTag)
+		generated, _, _, skip := inj.buildRule(tc.rule, map[int]string{}, map[int]string{}, tc.defaultTag, false, nil)
 		if generated != nil {
 			t.Errorf("%s: expected the rule to be skipped, got %v", tc.name, generated)
 		}

@@ -1,7 +1,10 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"a-ui/database"
@@ -492,4 +495,222 @@ func TestInjectMeterDomainRulesComeBeforeIPRules(t *testing.T) {
 	if domainIdx > ipIdx {
 		t.Errorf("域名规则(下标 %d)排在了 IP 规则(下标 %d)之后", domainIdx, ipIdx)
 	}
+}
+
+// ---- B 类计量（分流流量按入站 × 规则）----
+
+// seedProxiedFixture 建一个出站节点与一条引用它的 proxy 规则，直接落库
+// 绕过 service 的冲突校验——这里测的是生成期，不是写入路径。
+func seedProxiedFixture(t *testing.T, inboundIds []int, groupRemark, domain, nodeConfig string, action string, priority int) (*model.OutboundNode, *model.RoutingRule) {
+	t.Helper()
+	g := newTestGroupWithDomains(t, groupRemark, []string{domain})
+	var node *model.OutboundNode
+	outboundId := 0
+	if action == model.ActionProxy {
+		node = &model.OutboundNode{Tag: "a-ui-relay-" + groupRemark, Remark: groupRemark + " 节点",
+			Protocol: "freedom", Enable: true, Config: nodeConfig}
+		if err := database.GetDB().Save(node).Error; err != nil {
+			t.Fatalf("save node: %v", err)
+		}
+		outboundId = node.Id
+	}
+	inbounds := "[]"
+	if len(inboundIds) > 0 {
+		inbounds = mustEncodeIds(t, inboundIds)
+	}
+	rule := &model.RoutingRule{Remark: groupRemark + " 规则", InboundIds: inbounds,
+		DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: action,
+		OutboundId: outboundId, Priority: priority, Enable: true}
+	if err := database.GetDB().Save(rule).Error; err != nil {
+		t.Fatalf("save rule: %v", err)
+	}
+	return node, rule
+}
+
+// injectToBytes 跑一次注入并把出站与路由序列化，供逐字节比较。
+func injectToBytes(t *testing.T) []byte {
+	t.Helper()
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+	return append(append([]byte{}, cfg.OutboundConfigs...), cfg.RouterConfig...)
+}
+
+func proxiedMeterRules(t *testing.T, cfg *xray.Config) []map[string]any {
+	t.Helper()
+	var got []map[string]any
+	for _, r := range decodeRules(t, cfg) {
+		if tag, _ := r["outboundTag"].(string); strings.HasPrefix(tag, "a-ui-meter-r-") {
+			got = append(got, r)
+		}
+	}
+	return got
+}
+
+// 开关关时生成结果逐字节不变——「升级后行为零变化」唯一可验证的形式。
+func TestInjectProxiedMeterOffIsByteIdentical(t *testing.T) {
+	setupMeterPoolTest(t)
+	inA := newTestInbound(t, 32031)
+	inB := newTestInbound(t, 32032)
+	seedProxiedFixture(t, []int{inA.Id, inB.Id}, "ChatGPT", "domain:chatgpt.com",
+		`{"protocol":"freedom","settings":{}}`, model.ActionProxy, 1)
+
+	before := injectToBytes(t)
+	if err := (&SettingService{}).setString("meterProxiedTraffic", "0"); err != nil {
+		t.Fatal(err)
+	}
+	after := injectToBytes(t)
+	if !bytes.Equal(before, after) {
+		t.Fatalf("开关关时两次生成不一致:\n%s\n---\n%s", before, after)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(proxiedMeterRules(t, cfg)); n != 0 {
+		t.Errorf("开关关时不该有 B 类规则，得到 %d 条", n)
+	}
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); strings.HasPrefix(tag, "a-ui-meter-r-") {
+			t.Errorf("开关关时不该有 B 类出站 %q", tag)
+		}
+	}
+}
+
+// 开关开：一条覆盖两个入站的规则拆成两条，各指向自己的计量出站，
+// 计量出站是真实出站的克隆、只换 tag。
+func TestInjectProxiedMeterSplitsRulePerInbound(t *testing.T) {
+	setupMeterPoolTest(t)
+	inA := newTestInbound(t, 32033)
+	inB := newTestInbound(t, 32034)
+	node, rule := seedProxiedFixture(t, []int{inA.Id, inB.Id}, "ChatGPT", "domain:chatgpt.com",
+		`{"protocol":"freedom","settings":{"domainStrategy":"UseIP"}}`, model.ActionProxy, 1)
+	if err := (&SettingService{}).setString("meterProxiedTraffic", "1"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	got := proxiedMeterRules(t, cfg)
+	if len(got) != 2 {
+		t.Fatalf("B 类规则 %d 条，期望 2：%v", len(got), got)
+	}
+	wantTags := []string{model.MeterRuleTag(inA.Id, rule.Id), model.MeterRuleTag(inB.Id, rule.Id)}
+	for i, r := range got {
+		if r["outboundTag"] != wantTags[i] {
+			t.Errorf("第 %d 条 outboundTag = %v，期望 %s", i, r["outboundTag"], wantTags[i])
+		}
+		if ib, _ := r["inboundTag"].([]any); len(ib) != 1 {
+			t.Errorf("第 %d 条 inboundTag = %v，期望恰好一个", i, ib)
+		}
+		if d, _ := r["domain"].([]any); len(d) != 1 || d[0] != "domain:chatgpt.com" {
+			t.Errorf("第 %d 条 domain = %v，条件不该被改动", i, d)
+		}
+	}
+	for _, r := range decodeRules(t, cfg) {
+		if r["outboundTag"] == node.Tag {
+			t.Error("开关开时不该再有直接指向真实出站的分流规则")
+		}
+	}
+	outbounds := map[string]map[string]any{}
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); tag != "" {
+			outbounds[tag] = ob
+		}
+	}
+	for _, tag := range wantTags {
+		clone, ok := outbounds[tag]
+		if !ok {
+			t.Fatalf("缺计量出站 %s", tag)
+		}
+		if clone["protocol"] != "freedom" {
+			t.Errorf("%s protocol = %v，克隆不完整", tag, clone["protocol"])
+		}
+		if settings, _ := clone["settings"].(map[string]any); settings["domainStrategy"] != "UseIP" {
+			t.Errorf("%s settings 没有克隆到（%v）", tag, settings)
+		}
+	}
+	if _, ok := outbounds[node.Tag]; !ok {
+		t.Error("真实出站不该被移除")
+	}
+}
+
+// 全局规则（InboundIds 为空）按当前全部启用入站展开，入站 id 升序，停用的不算。
+func TestInjectProxiedMeterExpandsGlobalRule(t *testing.T) {
+	setupMeterPoolTest(t)
+	inA := newTestInbound(t, 32035)
+	inB := newTestInbound(t, 32036)
+	inC := newTestInbound(t, 32037)
+	inC.Enable = false
+	if err := database.GetDB().Save(inC).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, rule := seedProxiedFixture(t, nil, "Claude", "domain:claude.ai",
+		`{"protocol":"freedom","settings":{}}`, model.ActionProxy, 1)
+	if err := (&SettingService{}).setString("meterProxiedTraffic", "1"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var tags []string
+	for _, r := range proxiedMeterRules(t, cfg) {
+		tags = append(tags, r["outboundTag"].(string))
+	}
+	want := []string{model.MeterRuleTag(inA.Id, rule.Id), model.MeterRuleTag(inB.Id, rule.Id)}
+	if !reflect.DeepEqual(tags, want) {
+		t.Errorf("展开结果 %v，期望 %v（停用的入站 C 不该出现，且按 id 升序）", tags, want)
+	}
+}
+
+// block 规则不拆、不计量。
+func TestInjectProxiedMeterLeavesBlockRulesAlone(t *testing.T) {
+	setupMeterPoolTest(t)
+	inA := newTestInbound(t, 32038)
+	seedProxiedFixture(t, []int{inA.Id}, "Netflix", "domain:netflix.com", "", model.ActionBlock, 0)
+	if err := (&SettingService{}).setString("meterProxiedTraffic", "1"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTemplateConfig(t)
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := proxiedMeterRules(t, cfg); len(got) != 0 {
+		t.Errorf("block 规则不该被拆成 B 类计量规则：%v", got)
+	}
+}
+
+// direct 动作克隆的是默认出站实际生效的那个（tagDefaultOutbound），不硬编码。
+func TestInjectProxiedMeterClonesRenamedDefaultForDirect(t *testing.T) {
+	setupMeterPoolTest(t)
+	inA := newTestInbound(t, 32039)
+	seedProxiedFixture(t, []int{inA.Id}, "直连组", "domain:example.org", "", model.ActionDirect, 1)
+	if err := (&SettingService{}).setString("meterProxiedTraffic", "1"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTemplateConfig(t)
+	var obs []map[string]any
+	if err := json.Unmarshal(cfg.OutboundConfigs, &obs); err != nil {
+		t.Fatal(err)
+	}
+	obs[0]["tag"] = "my-direct"
+	obs[0]["sendThrough"] = "0.0.0.0"
+	raw, _ := json.Marshal(obs)
+	cfg.OutboundConfigs = raw
+	if err := (&RoutingInjector{}).Inject(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, ob := range decodeOutbounds(t, cfg) {
+		if tag, _ := ob["tag"].(string); strings.HasPrefix(tag, "a-ui-meter-r-") {
+			if ob["sendThrough"] != "0.0.0.0" {
+				t.Errorf("direct 的计量出站没有克隆自改过名的默认出站：%v", ob)
+			}
+			return
+		}
+	}
+	t.Error("没有生成 direct 的计量出站")
 }
