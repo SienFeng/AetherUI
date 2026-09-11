@@ -505,3 +505,64 @@ func TestRiskSnapshotUpsertOverwrites(t *testing.T) {
 		t.Errorf("= %+v, want 覆盖成 88/severe", got[1])
 	}
 }
+
+// 升级后的老行，新列在库里是 **NULL 而不是空串/0**——AutoMigrate 加列就是
+// 这个结果，生产上 100% 会遇到（2026-09-11 在美国节点实测：518 行老数据
+// 的 country / identity_version 全部 IS NULL）。
+//
+// 而本文件其余用例都是显式写 IdentityVersion: 0 造的数据，走不到这条路。
+// 若 NULL 扫不进非指针的 int / string 字段，windowRows 会整个报错 →
+// Analyze 返回 error → Evaluate 记一行 warning 后 continue → **该入站永远
+// 没有快照，界面永远显示「学习中」**，而除了一行日志之外没有任何表征。
+func TestWindowRowsReadsNullIdentityColumnsFromUpgradedDB(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+
+	// 模拟升级前写入、随后被 AutoMigrate 加上新列的行：新列一律 NULL。
+	const h = 3600
+	err := db.Exec(`INSERT INTO inbound_ip_hours
+		(inbound_id, ip, hour_start, province, active_seconds, active_bytes, active_up, active_down,
+		 country, city, isp, identity_version)
+		VALUES (1, '1.1.1.1', ?, '江苏省', 1800, ?, 0, 0, NULL, NULL, NULL, NULL)`,
+		10*h, 5<<20).Error
+	if err != nil {
+		t.Fatalf("造老行: %v", err)
+	}
+	// 再加一行升级后的新行。
+	if err := upsertIPHour(db, sharingFlush{
+		InboundId: 1, IP: "2.2.2.2", HourStart: 12 * h, ActiveSeconds: 1800, ActiveBytes: 5 << 20,
+		Meta: NetworkMeta{Country: "中国", Province: "广东省", ISP: "中国移动"},
+	}); err != nil {
+		t.Fatalf("造新行: %v", err)
+	}
+
+	rows, err := (&SharingService{}).windowRows(1, 3650, time.Unix(13*h, 0))
+	if err != nil {
+		t.Fatalf("windowRows 读不出带 NULL 的行: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("读到 %v 行, want 2", len(rows))
+	}
+
+	var old model.InboundIPHour
+	for _, r := range rows {
+		if r.IP == "1.1.1.1" {
+			old = r
+		}
+	}
+	if old.IdentityVersion != 0 {
+		t.Errorf("NULL 的 identity_version 读成了 %v, want 0", old.IdentityVersion)
+	}
+	if old.Country != "" || old.ISP != "" {
+		t.Errorf("NULL 的身份列读成了 country=%q isp=%q, want 空串", old.Country, old.ISP)
+	}
+	// 第一期就在写的 province 必须原样保留——老行仍要服务 /sharing/* 两个接口。
+	if old.Province != "江苏省" {
+		t.Errorf("老行的 Province = %q, want 江苏省", old.Province)
+	}
+
+	// NULL 必须被当成「旧版本」，Epoch 切到它之后。
+	if got, want := identityEpoch(rows), int64(11*h); got != want {
+		t.Errorf("identityEpoch = %v, want %v（NULL 要算作旧版本行）", got, want)
+	}
+}
