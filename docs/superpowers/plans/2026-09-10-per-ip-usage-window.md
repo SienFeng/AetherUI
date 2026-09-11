@@ -121,24 +121,27 @@ func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 10, 5, 0, 0, 0, time.UTC)
 
-	// 第一轮只设基线，不计字节（见 sharingCell 注释）。
-	a.observe(base, []sharingObservation{
-		{InboundId: 1, IP: "1.1.1.1", Up: 500, Down: 900},
-	}, 30)
-	// 第二轮：正常增长。
-	a.observe(base.Add(30*time.Second), []sharingObservation{
-		{InboundId: 1, IP: "1.1.1.1", Up: 1500, Down: 2900},
-	}, 30)
-	// 第三轮：客户端重连，累计值从头开始。
-	flushes := a.observe(base.Add(60*time.Second), []sharingObservation{
-		{InboundId: 1, IP: "1.1.1.1", Up: 100, Down: 200},
-	}, 30)
+	// 轮次与落库时机的关系必须算准，否则断言会落在一个空的返回值上：
+	// step=30、sharingFlushThreshold=60，flush 发生在 seconds-flushedAt>=60
+	// 的那一轮。
+	//   轮1 t=0   新建 cell 只设基线不计字节，seconds=30，30-0 <60  不落库
+	//   轮2 t=30  +1000/+2000，seconds=60，60-0>=60  落库，flushedAt=60
+	//   轮3 t=60  重连回退按全量 +100/+200，seconds=90，90-60=30<60  不落库
+	//   轮4 t=90  无增量，seconds=120，120-60=60>=60  落库 ← 断言这一轮
+	obs := func(up, down int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Up: up, Down: down}}
+	}
+	a.observe(base, obs(500, 900), 30)
+	a.observe(base.Add(30*time.Second), obs(1500, 2900), 30)
+	a.observe(base.Add(60*time.Second), obs(100, 200), 30)
+	flushes := a.observe(base.Add(90*time.Second), obs(100, 200), 30)
 
 	if len(flushes) != 1 {
-		t.Fatalf("落库条数 = %d，期望 1（累计 90 秒已过 60 秒门槛）", len(flushes))
+		t.Fatalf("落库条数 = %d，期望 1（第 4 轮累计 120 秒，距上次落库又满 60 秒）", len(flushes))
 	}
 	f := flushes[0]
-	// 第二轮 +1000/+2000，第三轮回退按全量 +100/+200。
+	// 轮2 的 +1000/+2000，加上轮3 重连按全量计入的 +100/+200。
+	// 若这里出现负数，说明 up/down 没走 deltaBytes 而是直接相减了。
 	if f.ActiveUp != 1100 || f.ActiveDown != 2200 {
 		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 1100/2200", f.ActiveUp, f.ActiveDown)
 	}
@@ -916,7 +919,9 @@ func TestIPUsageBeyondRetentionDegradesWithReason(t *testing.T) {
 // 长尾截断：超过上限时只返回前 N 条，其余合并成 Other，总量不缩水。
 func TestIPUsageTruncatesLongTailWithoutLosingTotal(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 10000000, Granularity: model.GranularityHour}
+	// 窗口跨度必须 <= ipUsageMaxWindowDays(30)，否则 Query 会走 BeyondRetention
+	// 早退、Entries 为空，这条用例就根本测不到截断逻辑。1000~100000 约 1.15 天。
+	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
 
 	var wantUp, wantDown int64
 	total := ipUsageMaxEntries + 30
@@ -1500,69 +1505,128 @@ Total 是 Points 各点之和而不是独立的 SQL SUM：独立 SUM 不受桶�
 
 Run: `ls web/controller/*_test.go && head -30 web/controller/inbound_traffic_reset_test.go`
 
-新建 `web/controller/inbound_ip_usage_test.go`。**本测试只覆盖窗口入参的翻译与钳制**，不起 HTTP 服务（controller 的钳制逻辑全部委托给 `service.ParseWindow`，那里已有单测；这里钉的是「controller 确实把三个入参原样交给了它」）：
+新建 `web/controller/inbound_ip_usage_test.go`。**打真实 HTTP 请求**，复用该包既有的
+`newTrafficRouter`（`traffic_test.go:18`）、`postForm`（`inbound_renew_test.go:48`）、
+`decodeTrafficObj`、`createInbound`——不要自建同样的脚手架，也不要写成只调用
+`service.ParseWindow` 的测试：那样的测试完全不引用 controller 代码，改坏 controller
+它也不会红，给的是虚假的安全感。
 
 ```go
 package controller
 
 import (
 	"testing"
-	"time"
-
-	"a-ui/web/service"
 )
 
-// controller 必须把 range/start/end 三个入参原样交给 ParseWindow，
-// 而不是自己解释其中任何一个。
+// 新接口必须真的挂上路由并返回结构完整的响应体。
 //
-// 自己解释的后果是两处逻辑慢慢漂移：ParseWindow 的单测全绿，而真实请求
-// 走的是 controller 里那份，界面上的「今日」和测试里的「今日」不是同一段
-// 时间，没有任何一层会报错。
-func TestIPUsageFormBindsAllThreeWindowFields(t *testing.T) {
-	loc := time.UTC
-	now := time.Date(2026, 9, 10, 14, 30, 0, 0, loc)
+// 打真实 HTTP 请求而不是直接调 service：这条测试要守的正是「路由注册了、
+// 入参绑定上了、service 接上了」这三件 controller 自己的事，直接调 service
+// 一件都守不到。
+func TestIPUsageEndpointReturnsEntriesShape(t *testing.T) {
+	r := newTrafficRouter(t)
+	in := createInbound(t, 0, true, 0, 0)
 
-	// 与 getIPUsage 内部完全相同的调用形状。这条测试的价值在于：
-	// 将来谁把 controller 改成只传 range，这里会立刻变红。
-	w := service.ParseWindow("custom", "2026-09-01", "2026-09-05", loc, now)
-
-	wantStart := time.Date(2026, 9, 1, 0, 0, 0, 0, loc).Unix()
-	if w.Start != wantStart {
-		t.Errorf("Start = %d，期望 %d", w.Start, wantStart)
+	msg := postForm(t, r, "/aui/inbound/ipUsage/"+itoa(in.Id), "range=today")
+	if !msg.Success {
+		t.Fatalf("success = false, msg = %q", msg.Msg)
 	}
-	if w.End <= w.Start {
-		t.Errorf("End = %d 不大于 Start = %d", w.End, w.Start)
+	obj := decodeTrafficObj(t, msg.Obj)
+	if _, ok := obj["entries"]; !ok {
+		t.Errorf("响应里没有 entries 字段: %v", obj)
+	}
+	if _, ok := obj["split"]; !ok {
+		t.Errorf("响应里没有 split 字段: %v", obj)
+	}
+	if _, ok := obj["beyondRetention"]; !ok {
+		t.Errorf("响应里没有 beyondRetention 字段: %v", obj)
 	}
 }
 
-// 越界入参不得让接口报错，一律钳制后照常返回。
-func TestIPUsageWindowClampsInsteadOfFailing(t *testing.T) {
-	loc := time.UTC
-	now := time.Date(2026, 9, 10, 14, 30, 0, 0, loc)
+// range=1y 必须整块降级：按来源 IP 的明细只保留 30 天。
+//
+// 这条同时守住了「start/end 之外的 range 也真的被绑定进来了」——若绑定
+// 标签写错，range 永远是空串、永远回落今日，beyondRetention 就永远是 false。
+func TestIPUsageEndpointDegradesBeyondRetention(t *testing.T) {
+	r := newTrafficRouter(t)
+	in := createInbound(t, 0, true, 0, 0)
 
-	for _, c := range []struct{ name, start, end string }{
-		{"custom", "垃圾", "更多垃圾"},
-		{"custom", "2000-01-01", "2026-09-09"},
-		{"不存在的档位", "", ""},
-		{"custom", "2026-09-09", "2026-09-01"},
+	msg := postForm(t, r, "/aui/inbound/ipUsage/"+itoa(in.Id), "range=1y")
+	if !msg.Success {
+		t.Fatalf("success = false, msg = %q", msg.Msg)
+	}
+	obj := decodeTrafficObj(t, msg.Obj)
+	if obj["beyondRetention"] != true {
+		t.Errorf("beyondRetention = %v，期望 true（1 年超出 30 天保留期）", obj["beyondRetention"])
+	}
+	if obj["reason"] == "" {
+		t.Error("reason 为空——「看不到」必须和「没有」能区分开")
+	}
+}
+
+// 自定义区间的三个入参必须一起绑定上。
+//
+// 只绑 range 不绑 start/end 的话，custom 会因日期不可解析而回落「今日」，
+// 而接口照常返回 success——没有任何一层会报错。这条用一个明确超出 30 天的
+// 区间把它逼出来：绑定成功则 beyondRetention 为 true，绑丢了则为 false。
+func TestIPUsageEndpointBindsCustomStartAndEnd(t *testing.T) {
+	r := newTrafficRouter(t)
+	in := createInbound(t, 0, true, 0, 0)
+
+	msg := postForm(t, r, "/aui/inbound/ipUsage/"+itoa(in.Id),
+		"range=custom&start=2020-01-01&end=2020-12-31")
+	if !msg.Success {
+		t.Fatalf("success = false, msg = %q", msg.Msg)
+	}
+	obj := decodeTrafficObj(t, msg.Obj)
+	if obj["beyondRetention"] != true {
+		t.Errorf("beyondRetention = %v，期望 true——start/end 没有被绑定进来，"+
+			"custom 回落成了「今日」", obj["beyondRetention"])
+	}
+}
+
+// 越界入参一律钳制后照常返回，不得让接口失败。
+func TestIPUsageEndpointClampsInsteadOfFailing(t *testing.T) {
+	r := newTrafficRouter(t)
+	in := createInbound(t, 0, true, 0, 0)
+
+	for _, body := range []string{
+		"range=custom&start=垃圾&end=更多垃圾",
+		"range=custom&start=2000-01-01&end=2026-09-09",
+		"range=不存在的档位",
+		"range=custom&start=2026-09-09&end=2026-09-01",
+		"",
 	} {
-		w := service.ParseWindow(c.name, c.start, c.end, loc, now)
-		if w.End <= w.Start {
-			t.Errorf("range=%q start=%q end=%q 得到空区间 [%d, %d)",
-				c.name, c.start, c.end, w.Start, w.End)
+		msg := postForm(t, r, "/aui/inbound/ipUsage/"+itoa(in.Id), body)
+		if !msg.Success {
+			t.Errorf("body=%q 时 success = false, msg = %q（越界入参应当钳制而非报错）",
+				body, msg.Msg)
 		}
-		if w.End > now.Unix() {
-			t.Errorf("range=%q 的 End = %d 超过了现在 %d", c.name, w.End, now.Unix())
-		}
+	}
+}
+
+// id 不是数字时必须失败——解析要排在表单绑定之前。
+func TestIPUsageEndpointRejectsNonNumericId(t *testing.T) {
+	r := newTrafficRouter(t)
+
+	msg := postForm(t, r, "/aui/inbound/ipUsage/abc", "range=today")
+	if msg.Success {
+		t.Error("id 不是数字时应当失败")
 	}
 }
 ```
 
-- [ ] **Step 2: 运行测试，确认它失败或通过**
+**先确认 `itoa` 这个辅助函数存在**（`traffic_test.go` 在用它）：
 
-Run: `go test ./web/controller/ -run TestIPUsage -v`
+Run: `grep -rn "func itoa" web/controller/`
 
-Expected: PASS（这两条只依赖 Task 2 的 `ParseWindow`，Task 2 完成后即为绿）。它们是**回归护栏**而非驱动实现的红灯——真正驱动实现的是下面 Step 4 的手工验证。
+若不存在，用 `strconv.Itoa` 并补 import。
+
+- [ ] **Step 2: 运行测试，确认它失败**
+
+Run: `go test ./web/controller/ -run TestIPUsageEndpoint -v`
+
+Expected: 全部 FAIL——路由 `/aui/inbound/ipUsage/:id` 还不存在，Gin 返回 404，`msg.Success` 为 false。这是驱动实现的红灯。
 
 - [ ] **Step 3: 加 service 字段与路由**
 
@@ -1977,18 +2041,35 @@ ipUsage 刻意不并进 /onlines/:id：那个接口每 2 秒轮询且按展开�
 
 - [ ] **Step 7: 合并在线与离线两个数据源**
 
-`onlineOf(id)` 现在直接返回 `this.onlines[id]`。改成合并后再返回：
+**`onlineOf` 一个字都不用动**——模板里它有四处用途（`reason` 两处、`supported`、`list`），
+前三处都只该反映在线接口的状态。只把表格的数据源换掉：
+
+第 95 行 `:data-source="onlineOf(dbInbound.id).list"` 改成：
+
+```html
+:data-source="mergedOf(dbInbound.id)"
+```
+
+`:row-key="online => online.ip"` 不用改：离线行也有 `ip`，且 merge 时保证了两边 IP 不重复。
+
+`data` 里再加一个字段：
 
 ```js
-            onlineOf(id) {
-                const base = this.onlines[id] || emptyOnline;
-                return {
-                    supported: base.supported,
-                    reason: base.reason,
-                    list: this.mergeUsage(id, base.list || []),
-                };
+            // inboundId -> 合并后的行数组。**算一次存起来**，而不是在
+            // onlineOf 里每次渲染重算：展开行每 2 秒随轮询重渲染一次，
+            // 而合并要对最多 200 条 entries 重建 map 再 filter。写入点
+            // 只有两个——两个数据源各自加载完之后。
+            mergedOnlines: {},
+```
+
+新增方法：
+
+```js
+            mergedOf(id) {
+                return this.mergedOnlines[id] || [];
             },
-            // 把「当前在线」与「窗口内有用量」两份数据按 IP 做 outer merge。
+            // 把「当前在线」与「窗口内有用量」两份数据按 IP 做 outer merge，
+            // 结果存进 mergedOnlines。两个数据源任一加载完都要调一次。
             //
             // 只列在线的会漏掉窗口内用过、现在不在线的来源：看「近 30 日」
             // 时表里可能只剩一个 IP，而这 30 天有五个用过——管理员看到的是
@@ -1997,8 +2078,11 @@ ipUsage 刻意不并进 /onlines/:id：那个接口每 2 秒轮询且按展开�
             //
             // 归属地不存在冲突：两个接口都走服务端的 locateWithIPDB，对同一
             // 个 IP、同一份库必然给出同一个结果，所以在线侧的直接沿用。
-            mergeUsage(id, onlineList) {
+            recomputeMerged(id) {
+                const base = this.onlines[id] || emptyOnline;
+                const onlineList = base.list || [];
                 const usage = this.ipUsageOf(id);
+
                 const byIP = {};
                 usage.entries.forEach(e => { byIP[e.ip] = e; });
 
@@ -2016,8 +2100,8 @@ ipUsage 刻意不并进 /onlines/:id：那个接口每 2 秒轮询且按展开�
                     });
                 });
 
-                // 剩下的就是「窗口内用过、当前不在线」的。按用量降序排在后面
-                // ——服务端已经排好序，这里按同一顺序取即可。
+                // byIP 里剩下的就是「窗口内用过、当前不在线」的。服务端已按
+                // 用量降序排好，这里按 entries 的原顺序取即可。
                 const offline = usage.entries
                     .filter(e => byIP[e.ip] !== undefined)
                     .map(e => ({
@@ -2033,15 +2117,57 @@ ipUsage 刻意不并进 /onlines/:id：那个接口每 2 秒轮询且按展开�
 
                 // 在线的在前，离线的在后，两者不混排：管理员一眼要能分出
                 //「现在有几个人在连」。
-                return merged.concat(offline);
+                this.$set(this.mergedOnlines, id, merged.concat(offline));
             },
 ```
 
-`a-table` 的 `:row-key` 若当前是 `ip`，离线行与在线行的 IP 不会重复（merge 时已 delete），不用改。**确认一下**：
+两个加载方法的末尾各加一行 `this.recomputeMerged(id);`：
 
-Run: `grep -n 'row-key' web/html/xui/inbounds.html`
+- `loadOnlines` 里**三处** `$set(this.onlines, ...)` 之后都要调（成功、失败、异常三条路径都得让表格反映出来）。最省事的写法是把整个 `try/catch` 包进一个内层函数，在 `loadOnlines` 结尾统一调一次：
 
-若 row-key 用的是别的字段且离线行没有该字段，改成 `:row-key="r => r.ip"`。
+```js
+            async loadOnlines(id) {
+                // 这里刻意不用 HttpUtil：它会把每次失败都弹成 message，
+                // 而这个接口每 2 秒轮询一次，失败时会刷屏。错误就地显示在展开行里。
+                try {
+                    const resp = await axios.post(`/aui/inbound/onlines/${id}`);
+                    const data = resp.data;
+                    if (data && data.success) {
+                        this.$set(this.onlines, id, data.obj);
+                    } else {
+                        this.$set(this.onlines, id, {
+                            supported: false,
+                            reason: (data && data.msg) || '读取在线明细失败',
+                            list: [],
+                        });
+                    }
+                } catch (e) {
+                    this.$set(this.onlines, id, { supported: false, reason: e.toString(), list: [] });
+                }
+                // 三条路径都要落到这里：失败时表格也该反映出来，而不是
+                // 停在上一轮的数据上。
+                this.recomputeMerged(id);
+            },
+```
+
+- `loadIPUsage` 的 `$set(this.ipUsages, ...)` 之后：
+
+```js
+            async loadIPUsage(id) {
+                const msg = await HttpUtil.post('/aui/inbound/ipUsage/' + id, this.windowParamsOf(id));
+                if (!msg.success) {
+                    return;
+                }
+                this.$set(this.ipUsages, id, msg.obj);
+                this.recomputeMerged(id);
+            },
+```
+
+`onExpand` 的折叠分支里再加一行清理：
+
+```js
+                    this.$delete(this.mergedOnlines, dbInbound.id);
+```
 
 - [ ] **Step 8: 跑模板测试**
 

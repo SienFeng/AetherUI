@@ -21,6 +21,8 @@ type InboundController struct {
 	geoService            service.GeoService
 	trafficHistoryService service.TrafficHistoryService
 	sharingService        service.SharingService
+	ipUsageService        service.IPUsageService
+	settingService        service.SettingService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -47,6 +49,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/recentSources/:id", a.getRecentSources)
 	g.POST("/traffic/history/:id", a.getTrafficHistory)
 	g.POST("/traffic/overview", a.getTrafficOverview)
+	g.POST("/ipUsage/:id", a.getIPUsage)
 	g.POST("/sharing/summary", a.getSharingSummary)
 	g.POST("/sharing/detail/:id", a.getSharingDetail)
 	g.POST("/provinces", a.getProvinces)
@@ -330,19 +333,39 @@ func (a *InboundController) getTrafficHistory(c *gin.Context) {
 	// transformRequest，那时 headers['Content-Type'] 还是 undefined，于是
 	// setContentTypeIfUnset 打上 application/json;charset=utf-8，随后的
 	// merge 里胜过 axios-init.js 给 post 设的 urlencoded。Gin 因此走的是
-	// JSON 绑定，range 能绑上是因为 struct 字段没写 json tag 时
+	// JSON 绑定，range/start/end 能绑上是因为 struct 字段没写 json tag 时
 	// encoding/json 按大小写不敏感匹配字段名——这不是缺陷，与 getAccessLogs
 	// 等既有接口完全一致。form tag 留着是为了与既有接口保持一致，且在真的
 	// urlencoded 场景下同样能绑定；不改成 json tag（会改变绑定行为，不在
 	// 发版前做）。
 	form := struct {
 		Range string `form:"range"`
+		Start string `form:"start"`
+		End   string `form:"end"`
 	}{}
 	if err := c.ShouldBind(&form); err != nil {
 		jsonMsg(c, "获取用量历史", err)
 		return
 	}
-	result, err := a.trafficHistoryService.History(id, service.TrafficRange(form.Range), time.Now())
+	loc, err := a.settingService.GetTimeLocation()
+	if err != nil {
+		jsonMsg(c, "获取用量历史", err)
+		return
+	}
+	// 三个入参原样交给 ParseWindow，这里不自己解释其中任何一个：全部钳制
+	// （认不出的档位、不可解析的日期、start>end、跨度超 366 天、End 超过
+	// 现在）都在那个纯函数里，两处各写一份迟早会漂移，而漂移之后界面上的
+	// 「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
+	//
+	// now 取一次存下来给两处用，不调两次 time.Now()：HistoryWindow 要拿它
+	// 与窗口起点比较，判断该不该从小时桶回落日桶。两个 now 必须是同一个
+	// 时刻——起点恰好压在保留期边界上的窗口（管理员选了「正好 30 天前的
+	// 那一天」），两次调用之间哪怕只差几纳秒，也会让窗口按前一个 now 算、
+	// 判据按后一个 now 判，同一次请求里得出互相矛盾的结论，而没有任何一层
+	// 会报错。
+	now := time.Now()
+	w := service.ParseWindow(form.Range, form.Start, form.End, loc, now)
+	result, err := a.trafficHistoryService.HistoryWindow(id, w, now)
 	if err != nil {
 		jsonMsg(c, "获取用量历史", err)
 		return
@@ -368,6 +391,48 @@ func (a *InboundController) getTrafficOverview(c *gin.Context) {
 	result, err := a.trafficHistoryService.Overview(service.TrafficRange(form.Range), form.Top, time.Now())
 	if err != nil {
 		jsonMsg(c, "获取用量总览", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getIPUsage 返回某入站在指定窗口内各来源 IP 的用量。
+//
+// 刻意不并进 /onlines/:id：那个接口每 2 秒轮询一次，且按展开的入站数逐个
+// 请求（inbounds.html 的 syncOnlineTimer）。并进去等于每 2 秒对一张 30 天
+// 的表做一次聚合查询再乘以展开的入站数。这边的数据每 60 秒才可能变一次，
+// 切换档位时拉一次就够。
+func (a *InboundController) getIPUsage(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取来源用量", err)
+		return
+	}
+	form := struct {
+		Range string `form:"range"`
+		Start string `form:"start"`
+		End   string `form:"end"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, "获取来源用量", err)
+		return
+	}
+	loc, err := a.settingService.GetTimeLocation()
+	if err != nil {
+		jsonMsg(c, "获取来源用量", err)
+		return
+	}
+	// 三个入参原样交给 ParseWindow，controller 不自己解释其中任何一个：
+	// 全部钳制都在那个纯函数里，两处各写一份迟早会漂移，而漂移之后界面上
+	// 的「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
+	//
+	// now 取一次存下来给两处用，理由同 getTrafficHistory：Query 要拿它与
+	// 窗口起点比较，判断这段时间是否已经超出按 IP 明细的保留期。
+	now := time.Now()
+	w := service.ParseWindow(form.Range, form.Start, form.End, loc, now)
+	result, err := a.ipUsageService.Query(id, w, now)
+	if err != nil {
+		jsonMsg(c, "获取来源用量", err)
 		return
 	}
 	jsonObj(c, result, nil)

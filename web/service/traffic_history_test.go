@@ -496,3 +496,152 @@ func mustLoadShanghai(t *testing.T) *time.Location {
 	}
 	return loc
 }
+
+// Total 必须严格等于 Points 各点之和，而不是一次独立的 SQL SUM。
+//
+// History 用 bucket_start 精确相等去 join buildSlots 按当前时区重算的刻度，
+// 而独立的 SUM 聚合不受对齐约束。管理员改过面板时区之后（整小时时区切换会
+// 让旧桶与新刻度完全不相交，见 2026-09-04-traffic-history-design.md §3.3），
+// 独立 SUM 会让「图是一条平的 0 线、数字却有值」——那是最难解释的一种不
+// 一致。让 Total 等于图上那些点的和，两者永远自洽。
+func TestHistoryWindowTotalEqualsSumOfPoints(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30301, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	for i, hour := range []int{10, 11, 12} {
+		at := time.Date(2026, 9, 10, hour, 0, 0, 0, sh)
+		writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(at, sh),
+			int64(100*(i+1)), int64(200*(i+1)))
+	}
+
+	w := ParseWindow(WindowToday, "", "", sh, now)
+	res, err := svc.HistoryWindow(in.Id, w, now)
+	if err != nil {
+		t.Fatalf("HistoryWindow: %v", err)
+	}
+
+	var sumUp, sumDown int64
+	for _, p := range res.Points {
+		sumUp += p.Up
+		sumDown += p.Down
+	}
+	if res.Total.Up != sumUp || res.Total.Down != sumDown {
+		t.Errorf("Total = %d/%d，期望等于各点之和 %d/%d",
+			res.Total.Up, res.Total.Down, sumUp, sumDown)
+	}
+	if res.Total.Up != 600 || res.Total.Down != 1200 {
+		t.Errorf("Total = %d/%d，期望 600/1200", res.Total.Up, res.Total.Down)
+	}
+}
+
+// 落在窗口外的桶不能被算进去。
+//
+// 「今日」是本地今天 0 点到现在，昨天那个桶必须落在外面——否则相邻两个
+// 窗口会把边界重复计算，「今日」加「昨日」会大于「近 2 日」。
+func TestHistoryWindowExcludesBucketsOutsideWindow(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30302, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	inside := time.Date(2026, 9, 10, 10, 0, 0, 0, sh)
+	outside := time.Date(2026, 9, 9, 10, 0, 0, 0, sh)
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(inside, sh), 100, 200)
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(outside, sh), 999, 999)
+
+	w := ParseWindow(WindowToday, "", "", sh, now)
+	res, err := svc.HistoryWindow(in.Id, w, now)
+	if err != nil {
+		t.Fatalf("HistoryWindow: %v", err)
+	}
+	if res.Total.Up != 100 || res.Total.Down != 200 {
+		t.Errorf("Total = %d/%d，期望 100/200（昨天那个桶不该算进来）",
+			res.Total.Up, res.Total.Down)
+	}
+}
+
+// 聚合必须带 granularity：小时桶与日桶各自独立累加，日桶不由小时桶汇总
+// 而来，不带条件会把同一段时间算两遍。
+func TestHistoryWindowFiltersByGranularity(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30303, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	// 同一个时刻各写一个粒度的桶，值相同。「今日」走小时粒度，只该命中前者。
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignDay(now, sh), 100, 200)
+	writeBucket(t, model.GranularityDay, in.Id, model.AlignDay(now, sh), 100, 200)
+
+	w := ParseWindow(WindowToday, "", "", sh, now)
+	res, err := svc.HistoryWindow(in.Id, w, now)
+	if err != nil {
+		t.Fatalf("HistoryWindow: %v", err)
+	}
+	if res.Total.Up != 100 {
+		t.Errorf("Total.Up = %d，期望 100（日桶不该被一起算进来）", res.Total.Up)
+	}
+}
+
+// 窗口起点早于小时桶保留期时必须改用日桶——那段时间的小时桶已被清理，
+// 而日桶还在（默认留 365 天）。按跨度选出的小时粒度会查出一片空白，
+// 把「数据明明有」渲染成「没有数据」。
+//
+// ParseWindow 是纯函数、读不到设置项，只能按跨度选粒度；所有档位的 End 都
+// 恒等于 now，所以对它们「跨度小」就等于「起点近」。自定义区间打破了这个
+// 等价：3 个月前的那 3 天跨度只有 3 天，却一个小时桶都查不到。
+func TestHistoryWindowFallsBackToDayBucketsBeyondHourRetention(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30305, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	// 100 天前的那一天，只有日桶（小时桶早被清了，这里根本不写）。
+	old := time.Date(2026, 6, 2, 0, 0, 0, 0, sh)
+	writeBucket(t, model.GranularityDay, in.Id, model.AlignDay(old, sh), 700, 1300)
+
+	// 跨度只有 3 天，ParseWindow 会选小时粒度——但起点在 100 天前。
+	w := ParseWindow(WindowCustom, "2026-06-01", "2026-06-03", sh, now)
+	if w.Granularity != model.GranularityHour {
+		t.Fatalf("前提不成立：ParseWindow 对 3 天跨度应选小时粒度，实际 %v", w.Granularity)
+	}
+
+	res, err := svc.HistoryWindow(in.Id, w, now)
+	if err != nil {
+		t.Fatalf("HistoryWindow: %v", err)
+	}
+	if res.Granularity != "day" {
+		t.Errorf("granularity = %q，期望 day（起点早于小时桶保留期应回落日桶）", res.Granularity)
+	}
+	if res.Total.Up != 700 || res.Total.Down != 1300 {
+		t.Errorf("Total = %d/%d，期望 700/1300——日桶里的数据必须被查到，"+
+			"而不是因为查了已被清理的小时桶而显示成 0", res.Total.Up, res.Total.Down)
+	}
+}
+
+// 旧的 History(range) 签名必须继续可用且行为不变——Overview 与任何未改的
+// 调用方都依赖它。改它的签名会牵动系统状态页，那不在本次范围。
+func TestLegacyHistoryStillWorks(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30304, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	res, err := svc.History(in.Id, Range24h, now)
+	if err != nil {
+		t.Fatalf("History: %v", err)
+	}
+	if len(res.Points) != 24 {
+		t.Errorf("点数 = %d，期望 24", len(res.Points))
+	}
+	// 旧路径也要填 Total，两条路径的语义必须一致。
+	if res.Total.Up != 0 || res.Total.Down != 0 {
+		t.Errorf("Total = %+v，期望零值（库里没写任何桶）", res.Total)
+	}
+}

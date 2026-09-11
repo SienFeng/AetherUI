@@ -219,7 +219,15 @@ type TrafficHistoryResult struct {
 	Granularity string         `json:"granularity"`
 	Labels      []string       `json:"labels"`
 	Points      []TrafficPoint `json:"points"`
-	Reason      string         `json:"reason"`
+	// Total 是 Points 各点之和，**不是一次独立的 SQL SUM**。
+	//
+	// History 用 bucket_start 精确相等去 join 按当前时区重算的刻度，而独立
+	// 的 SUM 聚合不受对齐约束。管理员改过面板时区之后（整小时时区切换会让
+	// 旧桶与新刻度完全不相交），独立 SUM 会让「图是一条平的 0 线、数字却
+	// 有值」——那是最难解释的一种不一致。让它等于图上那些点的和，两者永远
+	// 自洽，数据在保留期内随新数据自愈。
+	Total  TrafficPoint `json:"total"`
+	Reason string       `json:"reason"`
 }
 
 type TrafficOverviewResult struct {
@@ -270,6 +278,106 @@ func buildSlots(g model.TrafficGranularity, now time.Time, loc *time.Location, c
 		slots[i] = end - int64(count-1-i)*3600
 	}
 	return slots
+}
+
+// buildSlotsInWindow 生成窗口内全部刻度的桶起点，升序。
+//
+// 与 buildSlots 的区别是端点来自窗口而不是「从 now 往回数 count 个」。
+// 小时用算术递增；日必须用 AddDate，因为一天不总是 86400 秒。
+func buildSlotsInWindow(g model.TrafficGranularity, w TrafficWindow, loc *time.Location) []int64 {
+	var slots []int64
+	if g == model.GranularityDay {
+		day := time.Unix(model.AlignDay(time.Unix(w.Start, 0).In(loc), loc), 0).In(loc)
+		for day.Unix() < w.End {
+			slots = append(slots, day.Unix())
+			day = day.AddDate(0, 0, 1)
+		}
+		return slots
+	}
+	start := model.AlignHour(time.Unix(w.Start, 0).In(loc), loc)
+	for t := start; t < w.End; t += 3600 {
+		slots = append(slots, t)
+	}
+	return slots
+}
+
+// sumPoints 把各点求和。Total 的唯一来源，见 TrafficHistoryResult.Total 的注释。
+func sumPoints(points []TrafficPoint) TrafficPoint {
+	var total TrafficPoint
+	for _, p := range points {
+		total.Up += p.Up
+		total.Down += p.Down
+	}
+	return total
+}
+
+// HistoryWindow 返回单个入站在给定窗口内的分时用量，刻度稠密（缺失的桶补零）。
+//
+// 与 History 的区别只是范围来自 TrafficWindow 而不是固定档位。History 保留
+// 不动：Overview 与任何未改的调用方仍依赖它，改它的签名会牵动系统状态页。
+func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow, now time.Time) (*TrafficHistoryResult, error) {
+	loc, err := s.settingService.GetTimeLocation()
+	if err != nil {
+		return nil, err
+	}
+
+	// 窗口起点早于小时桶保留期时改用日桶。
+	//
+	// ParseWindow 只按跨度选粒度（它是纯函数，读不到设置项）。对所有 End 恒为
+	// now 的档位这没问题，但自定义区间可以整个落在过去：「3 个月前的那 10 天」
+	// 跨度只有 10 天、选出小时粒度，而小时桶只留 trafficHourRetentionDays 天，
+	// 查出来是一片空白——**同一段时间的日桶其实还在库里**（默认留 365 天），
+	// 只是没被查。「数据明明有却显示没有」比换个粒度画图糟糕得多，所以这里
+	// 覆盖粒度。读不到设置项时不覆盖：那是一次设置读取失败，不该顺带改变
+	// 图的粒度。
+	g := w.Granularity
+	if g == model.GranularityHour {
+		if days, err := s.settingService.GetTrafficHourRetentionDays(); err == nil && days > 0 {
+			if w.Start < now.AddDate(0, 0, -days).Unix() {
+				g = model.GranularityDay
+			}
+		}
+	}
+
+	slots := buildSlotsInWindow(g, w, loc)
+	result := &TrafficHistoryResult{
+		Granularity: granularityName(g),
+		Labels:      formatLabels(g, slots, loc),
+		Points:      make([]TrafficPoint, len(slots)),
+	}
+	for i, start := range slots {
+		result.Points[i] = TrafficPoint{T: start}
+	}
+
+	db := database.GetTrafficDB()
+	if db == nil {
+		result.Reason = trafficDBUnavailable
+		return result, nil
+	}
+	if len(slots) == 0 {
+		return result, nil
+	}
+
+	var rows []model.TrafficBucket
+	// granularity 条件不能省：小时桶与日桶各自独立累加，日桶不由小时桶
+	// 汇总而来，不带条件会把同一段时间算两遍。
+	err = db.Where("granularity = ? and inbound_id = ? and bucket_start >= ? and bucket_start < ?",
+		g, inboundId, slots[0], w.End).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[int64]int, len(slots))
+	for i, start := range slots {
+		index[start] = i
+	}
+	for _, row := range rows {
+		if i, ok := index[row.BucketStart]; ok {
+			result.Points[i].Up = row.Up
+			result.Points[i].Down = row.Down
+		}
+	}
+	result.Total = sumPoints(result.Points)
+	return result, nil
 }
 
 // formatLabels 在服务端把刻度格式化成 x 轴文字。放在服务端是因为时区也在
@@ -325,6 +433,7 @@ func (s *TrafficHistoryService) History(inboundId int, r TrafficRange, now time.
 			result.Points[i].Down = row.Down
 		}
 	}
+	result.Total = sumPoints(result.Points)
 	return result, nil
 }
 
