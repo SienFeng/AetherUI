@@ -27,14 +27,54 @@ type InboundIPHour struct {
 	// tag 就变。相应地，删除入站时必须连带删掉这些行——SQLite 会复用被删除
 	// 的自增 id，不删的话下一个建出来的入站会继承上一个用户的并存记录，
 	// 而且因为引用不再悬空，任何「跳过悬空引用」式的防线都拦不住它。
-	InboundId int    `json:"inboundId" gorm:"uniqueIndex:idx_inbound_ip_hour,priority:1"`
+	//
+	// 除了这条唯一索引，另有两条纯查询索引。它们不是为将来的新功能加的，
+	// 修的是这张表从第一天起就有的两个全扫：
+	//
+	//   idx_iph_inbound_hour (inbound_id, hour_start)
+	//     供 SharingService.Detail 与 DeleteByInbound 那类按入站取窗口的查询。
+	//     唯一索引顶不上——它的第二列是 ip，`inbound_id = ? AND hour_start >= ?`
+	//     只能用上等值的那一段，随后仍要把该入站全部 ip 的条目扫一遍再过滤。
+	//
+	//   idx_iph_hour (hour_start)
+	//     供 Summary 与 Cleanup。Summary **不带入站条件**（它要算全部入站），
+	//     而每次加载入站列表都会调它一次；Cleanup 的 `hour_start < ?` 同理。
+	//     两者在唯一索引上都用不到任何前缀列，只能全表扫。
+	InboundId int    `json:"inboundId" gorm:"uniqueIndex:idx_inbound_ip_hour,priority:1;index:idx_iph_inbound_hour,priority:1"`
 	IP        string `json:"ip" gorm:"uniqueIndex:idx_inbound_ip_hour,priority:2"`
-	HourStart int64  `json:"t" gorm:"uniqueIndex:idx_inbound_ip_hour,priority:3"`
+	HourStart int64  `json:"t" gorm:"uniqueIndex:idx_inbound_ip_hour,priority:3;index:idx_iph_inbound_hour,priority:2;index:idx_iph_hour"`
 
 	// Province 是主判定省份，空串表示归属地未知（IPv6 来源、归属地库未加载、
 	// 或库中查无此段）。空串的行照常入库：IP 维度的并存信息仍有价值，只是
-	// 判定会降级成 IP 口径（见 service.computeCoexist）。
+	// 判定会降级成网络族口径（见 service.computeCoexist）。
 	Province string `json:"province"`
+
+	// Country / City / ISP 与 Province 一起构成**观测当时**的网络画像快照，
+	// 四个字段同属一个数据源（service.networkMetaOf 选定一个主源后整组取值），
+	// 不跨源拼装——拼出来的「江苏 + 上海市」这种组合在界面上是看得见的胡话。
+	//
+	// 为什么要存下来而不是查询时拿当前 ipdb 重算：归属地库会更新，同一个 IP
+	// 上个月判江苏、这个月判上海。重算意味着历史事实跟着数据库更新而改变，
+	// 而风险评分要拿它当判断依据。这与 Province 当初存下来是同一条理由。
+	//
+	// 境外段的 City / Province 恒为空：ipdb.normalize 对非中国只保留 Country
+	// 与知名 IDC 名（util/ipdb/ipdb.go:114）。所以「Province 为空」不等于
+	// 「没有地理信息」，消费侧要按 Country 判断可用性，不能按 Province。
+	//
+	// 刻意**不存网络族前缀**：它是 IP 那一列的纯函数（service.networkFamilyKey），
+	// 存派生列没有收益且有害——聚合级别一旦调整，存下来的值当场变错，而且
+	// 没有任何一层会报错。
+	Country string `json:"country"`
+	City    string `json:"city"`
+	ISP     string `json:"isp"`
+
+	// IdentityVersion 标记上面那组快照是哪一版采集逻辑写的。0 = 升级前写入
+	// 的行，四个字段恒为空。
+	//
+	// **绝不用当前 ipdb 给老行补齐**——那不是当时的画像，补出来的是假的历史
+	// 事实。消费侧改用连续 Epoch 处理：只分析「最后一个旧版本小时之后」那一段
+	// 全部同版本的连续数据，不按行数占比决定时间覆盖，理由见设计文档 §4.2。
+	IdentityVersion int `json:"-"`
 
 	ActiveSeconds int `json:"activeSeconds"`
 

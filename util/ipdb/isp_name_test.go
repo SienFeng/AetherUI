@@ -86,3 +86,37 @@ func TestCanonicalISPKeepsIDCInsideChina(t *testing.T) {
 		}
 	}
 }
+
+// IsKnownIDC 的名单必须与 CanonicalISP 实际会产出的名字一致。两份名单漂开
+// 之后，CanonicalISP 认出来的厂商这里认不出，画像会把一台云服务器当成普通
+// 接入网络，而没有任何一层会报错。
+func TestIsKnownIDCMatchesCanonicalISPOutput(t *testing.T) {
+	cases := []struct {
+		raw     string
+		foreign bool
+		want    bool
+	}{
+		{"Amazon Technologies Inc.", true, true},
+		{"Google LLC", true, true},
+		{"阿里云计算有限公司", false, true},
+		{"腾讯云", false, true},
+		{"中国电信", false, false},
+		{"鹏博士宽带", false, false},
+		{"", false, false},
+	}
+	for _, c := range cases {
+		canonical := CanonicalISP(c.raw, c.foreign)
+		if got := IsKnownIDC(canonical); got != c.want {
+			t.Errorf("IsKnownIDC(CanonicalISP(%q,%v)=%q) = %v, want %v",
+				c.raw, c.foreign, canonical, got, c.want)
+		}
+	}
+}
+
+// 入参必须是归一后的名字。传原始值进去认不出来，这条钉住这个前提，
+// 避免将来有人把 IsKnownIDC 接到未归一的字段上。
+func TestIsKnownIDCRequiresCanonicalInput(t *testing.T) {
+	if IsKnownIDC("Amazon Technologies Inc.") {
+		t.Error("未归一的全称不该命中——IsKnownIDC 只吃 CanonicalISP 的输出")
+	}
+}

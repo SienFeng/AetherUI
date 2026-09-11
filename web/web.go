@@ -339,6 +339,9 @@ func (s *Server) startTask() {
 	s.cron.AddJob("@every 30s", job.NewSharingSampleJob())
 
 	// 每 5 秒把 xray 写下的访问日志读进独立的库；关闭时直接返回
+	// 风险评分：长期行为分析，不是实时防火墙，10 分钟绰绰有余。
+	s.cron.AddJob("@every 10m", job.NewSharingRiskJob())
+
 	s.cron.AddJob("@every 5s", job.NewAccessLogCollectJob())
 
 	// 每小时按保留期清理访问日志
@@ -369,6 +372,17 @@ func (s *Server) startTask() {
 	go func() {
 		time.Sleep(time.Second * 10)
 		job.NewPanelVersionJob().Run()
+	}()
+
+	// 同理，风险评分的首轮也要提前触发：Snapshot 表为空时界面显示的是
+	// 「学习中」，等满 10 分钟纯属没必要。15 秒是为了避开面板刚启动时和
+	// xray 抢资源。
+	//
+	// RunInitial 内部自带 common.Recover，**不要去掉**：这条 goroutine
+	// 不经过 cron，上面那层 cron.Recover 覆盖不到它。
+	go func() {
+		time.Sleep(time.Second * 15)
+		job.NewSharingRiskJob().RunInitial()
 	}()
 }
 

@@ -45,7 +45,7 @@ func TestUpsertIPHourOverwritesInsteadOfAccumulating(t *testing.T) {
 	db := database.GetTrafficDB()
 
 	f := sharingFlush{
-		InboundId: 1, IP: "1.1.1.1", Province: "江苏",
+		InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"),
 		HourStart: 3600, ActiveSeconds: 60,
 	}
 	if err := upsertIPHour(db, f); err != nil {
@@ -69,7 +69,7 @@ func TestUpsertIPHourKeepsDistinctHoursSeparate(t *testing.T) {
 	setupSharingTest(t)
 	db := database.GetTrafficDB()
 
-	base := sharingFlush{InboundId: 1, IP: "1.1.1.1", Province: "江苏", ActiveSeconds: 60}
+	base := sharingFlush{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), ActiveSeconds: 60}
 	base.HourStart = 3600
 	if err := upsertIPHour(db, base); err != nil {
 		t.Fatalf("写入第一小时: %v", err)
@@ -141,7 +141,7 @@ func TestCleanupDropsOnlyExpiredRows(t *testing.T) {
 	stale := now.Add(-(sharingRetentionDays + 1) * 24 * time.Hour)
 	for _, at := range []time.Time{fresh, stale} {
 		f := sharingFlush{
-			InboundId: 1, IP: "1.1.1.1", Province: "江苏",
+			InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"),
 			HourStart: model.AlignHourUTC(at), ActiveSeconds: 60,
 		}
 		if err := upsertIPHour(db, f); err != nil {
@@ -171,7 +171,7 @@ func TestDelInboundRemovesItsSharingRows(t *testing.T) {
 	in := mkSharingInbound(t, 31001, "甲")
 	db := database.GetTrafficDB()
 	f := sharingFlush{
-		InboundId: in.Id, IP: "1.1.1.1", Province: "江苏",
+		InboundId: in.Id, IP: "1.1.1.1", Meta: provinceMeta("江苏"),
 		HourStart: 3600, ActiveSeconds: 60,
 	}
 	if err := upsertIPHour(db, f); err != nil {
@@ -192,7 +192,7 @@ func TestPruneOrphansRemovesRowsOfDeletedInbounds(t *testing.T) {
 	db := database.GetTrafficDB()
 	for _, id := range []int{in.Id, in.Id + 999} { // 后者是不存在的入站
 		f := sharingFlush{
-			InboundId: id, IP: "1.1.1.1", Province: "江苏",
+			InboundId: id, IP: "1.1.1.1", Meta: provinceMeta("江苏"),
 			HourStart: 3600, ActiveSeconds: 60,
 		}
 		if err := upsertIPHour(db, f); err != nil {
@@ -228,7 +228,7 @@ func TestSummaryOnlyReturnsFlaggedInbounds(t *testing.T) {
 		at := now.Add(-time.Duration(i+1) * time.Hour)
 		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
 			f := sharingFlush{
-				InboundId: loud.Id, IP: ip, Province: province,
+				InboundId: loud.Id, IP: ip, Meta: provinceMeta(province),
 				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
 			}
 			if err := upsertIPHour(db, f); err != nil {
@@ -240,7 +240,7 @@ func TestSummaryOnlyReturnsFlaggedInbounds(t *testing.T) {
 	at := now.Add(-time.Hour)
 	for ip, province := range map[string]string{"3.3.3.3": "江苏", "4.4.4.4": "上海"} {
 		f := sharingFlush{
-			InboundId: quiet.Id, IP: ip, Province: province,
+			InboundId: quiet.Id, IP: ip, Meta: provinceMeta(province),
 			HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
 		}
 		if err := upsertIPHour(db, f); err != nil {
@@ -280,7 +280,7 @@ func TestSummaryIgnoresRowsOutsideWindow(t *testing.T) {
 		at := base.Add(-time.Duration(i) * time.Hour)
 		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
 			f := sharingFlush{
-				InboundId: in.Id, IP: ip, Province: province,
+				InboundId: in.Id, IP: ip, Meta: provinceMeta(province),
 				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
 			}
 			if err := upsertIPHour(db, f); err != nil {
@@ -324,7 +324,7 @@ func TestDetailUsesWindowForStatAndRetentionForHours(t *testing.T) {
 		t.Helper()
 		for ip, province := range map[string]string{"1.1.1.1": "江苏", "2.2.2.2": "上海"} {
 			f := sharingFlush{
-				InboundId: in.Id, IP: ip, Province: province,
+				InboundId: in.Id, IP: ip, Meta: provinceMeta(province),
 				HourStart: model.AlignHourUTC(at), ActiveSeconds: 3600,
 			}
 			if err := upsertIPHour(db, f); err != nil {
@@ -349,7 +349,7 @@ func TestDetailUsesWindowForStatAndRetentionForHours(t *testing.T) {
 
 	// 只有单省活跃的一个小时：不构成并存，不该出现在 Hours 里。
 	solo := sharingFlush{
-		InboundId: in.Id, IP: "3.3.3.3", Province: "江苏",
+		InboundId: in.Id, IP: "3.3.3.3", Meta: provinceMeta("江苏"),
 		HourStart: model.AlignHourUTC(now.Add(-3 * time.Hour)), ActiveSeconds: 3600,
 	}
 	if err := upsertIPHour(db, solo); err != nil {
@@ -392,7 +392,7 @@ func TestUpsertIPHourRoundTripsSplitBytes(t *testing.T) {
 	db := database.GetTrafficDB()
 
 	f := sharingFlush{
-		InboundId: 7, IP: "1.2.3.4", Province: "江苏省",
+		InboundId: 7, IP: "1.2.3.4", Meta: provinceMeta("江苏省"),
 		HourStart: 1000, ActiveSeconds: 120,
 		ActiveBytes: 3000, ActiveUp: 1000, ActiveDown: 2000,
 	}
@@ -482,5 +482,70 @@ func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
 	if f.ActiveUp+f.ActiveDown != f.ActiveBytes {
 		t.Errorf("上下行之和 %d 与 ActiveBytes %d 不等",
 			f.ActiveUp+f.ActiveDown, f.ActiveBytes)
+	}
+}
+
+// 身份快照列必须一起进 DoUpdates。漏掉的话只有该 (入站,IP,小时) 的第一次
+// 写入带画像，此后每次覆盖都保留首次那份——而首次恰恰是最可能查不到归属地
+// 的那一次（cell 刚建、归属地库可能还没加载完），于是整行的画像永远停在空。
+func TestUpsertIPHourWritesAndRefreshesIdentitySnapshot(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+
+	f := sharingFlush{
+		InboundId: 1, IP: "1.1.1.1", HourStart: 3600, ActiveSeconds: 60,
+	}
+	// 第一次写入时归属地库还没给出结果，四个字段都是空的。
+	if err := upsertIPHour(db, f); err != nil {
+		t.Fatalf("首次写入: %v", err)
+	}
+	rows := listIPHours(t)
+	if len(rows) != 1 {
+		t.Fatalf("行数 = %v, want 1", len(rows))
+	}
+	if rows[0].IdentityVersion != sharingIdentityVersion {
+		t.Errorf("IdentityVersion = %v, want %v（本期采集的行必须打上版本）",
+			rows[0].IdentityVersion, sharingIdentityVersion)
+	}
+
+	// 第二次写入时查到了。这一份必须覆盖进去。
+	f.Meta = NetworkMeta{Country: "中国", Province: "江苏省", City: "南通市", ISP: "中国电信"}
+	f.ActiveSeconds = 120
+	if err := upsertIPHour(db, f); err != nil {
+		t.Fatalf("二次写入: %v", err)
+	}
+	rows = listIPHours(t)
+	if len(rows) != 1 {
+		t.Fatalf("行数 = %v, want 1", len(rows))
+	}
+	got := NetworkMeta{
+		Country: rows[0].Country, Province: rows[0].Province,
+		City: rows[0].City, ISP: rows[0].ISP,
+	}
+	if got != f.Meta {
+		t.Errorf("覆盖后的画像 = %+v, want %+v", got, f.Meta)
+	}
+}
+
+// 境外来源只有国家与 IDC 名，没有省市（ipdb.normalize 的既定行为）。
+// 这种行必须照常落库：跨国并存完全测得出来，按「没有省份」把它判成降级
+// 会让整个境外来源群失去地理判定能力。
+func TestUpsertIPHourKeepsForeignRowsWithCountryOnly(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+
+	f := sharingFlush{
+		InboundId: 1, IP: "1.1.1.1", HourStart: 3600, ActiveSeconds: 60,
+		Meta: NetworkMeta{Country: "美国", ISP: "Amazon"},
+	}
+	if err := upsertIPHour(db, f); err != nil {
+		t.Fatalf("写入: %v", err)
+	}
+	rows := listIPHours(t)
+	if len(rows) != 1 || rows[0].Country != "美国" || rows[0].ISP != "Amazon" {
+		t.Fatalf("落库结果 = %+v, want 国家美国 / ISP Amazon", rows)
+	}
+	if rows[0].Province != "" || rows[0].City != "" {
+		t.Errorf("境外行不该有省市，得到 Province=%q City=%q", rows[0].Province, rows[0].City)
 	}
 }

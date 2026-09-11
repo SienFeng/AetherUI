@@ -94,7 +94,7 @@ func TestCoexistReportsProvincesSorted(t *testing.T) {
 	}
 }
 
-// 全部归属地未知（IPv6 来源，或归属地库未加载）时降级为 IP 口径。
+// 全部归属地未知（IPv6 来源，或归属地库未加载）时降级为网络族口径。
 func TestCoexistFallsBackToIPWhenNoProvinceKnown(t *testing.T) {
 	const h = 3600
 	rows := []model.InboundIPHour{
@@ -103,11 +103,63 @@ func TestCoexistFallsBackToIPWhenNoProvinceKnown(t *testing.T) {
 	}
 	stat := computeCoexist(rows)
 	if !stat.ByIP {
-		t.Fatal("全部省份为空时应降级为 IP 口径")
+		t.Fatal("全部省份为空时应降级为网络族口径")
 	}
-	if stat.Hours != 1 || stat.IPs != 2 {
-		t.Errorf("Hours=%v IPs=%v, want 1/2", stat.Hours, stat.IPs)
+	if stat.Hours != 1 || stat.Sources != 2 {
+		t.Errorf("Hours=%v Sources=%v, want 1/2", stat.Hours, stat.Sources)
 	}
+}
+
+// 降级口径按网络族而不是原始地址分桶。这条守的是记忆里那个已知缺口：
+// IPv6 每设备一个地址，privacy extensions（RFC 8981）还会在同一个 /64 内
+// 轮换临时地址，按地址数会把一台设备数成好几个来源——双栈入站上几乎每个
+// 活跃用户都会因此挂上橙标。
+func TestCoexistDegradedGroupsByNetworkFamily(t *testing.T) {
+	const h = 3600
+	t.Run("同一个 /64 内的多个临时地址算一个来源", func(t *testing.T) {
+		rows := []model.InboundIPHour{
+			hourRow(1, 0*h, "240e:3b1:2:abcd::1", "", 3600),
+			hourRow(1, 0*h, "240e:3b1:2:abcd:dead:beef:1:2", "", 3600),
+			hourRow(1, 0*h, "240e:3b1:2:abcd:cafe::9", "", 3600),
+		}
+		stat := computeCoexist(rows)
+		if stat.Hours != 0 {
+			t.Errorf("Hours = %v, want 0（只有一个网络族，不构成并存）", stat.Hours)
+		}
+	})
+
+	t.Run("不同 /64 仍然算两个来源", func(t *testing.T) {
+		rows := []model.InboundIPHour{
+			hourRow(1, 0*h, "240e:3b1:2:abcd::1", "", 3600),
+			hourRow(1, 0*h, "240e:3b1:2:ef01::1", "", 3600),
+		}
+		stat := computeCoexist(rows)
+		if stat.Hours != 1 || stat.Sources != 2 {
+			t.Errorf("Hours=%v Sources=%v, want 1/2", stat.Hours, stat.Sources)
+		}
+	})
+
+	t.Run("IPv4 同 /24 算一个来源", func(t *testing.T) {
+		rows := []model.InboundIPHour{
+			hourRow(1, 0*h, "49.86.123.10", "", 3600),
+			hourRow(1, 0*h, "49.86.123.200", "", 3600),
+		}
+		if stat := computeCoexist(rows); stat.Hours != 0 {
+			t.Errorf("Hours = %v, want 0（动态家宽在同一个 /24 内换地址是常态）", stat.Hours)
+		}
+	})
+
+	t.Run("算不出网络族时回退原始地址，不吞掉这一条", func(t *testing.T) {
+		// 吞掉会让并存判定凭空少一个来源，那是把误报换成漏报，方向反了。
+		rows := []model.InboundIPHour{
+			hourRow(1, 0*h, "not-an-ip", "", 3600),
+			hourRow(1, 0*h, "also-not-an-ip", "", 3600),
+		}
+		stat := computeCoexist(rows)
+		if stat.Hours != 1 || stat.Sources != 2 {
+			t.Errorf("Hours=%v Sources=%v, want 1/2", stat.Hours, stat.Sources)
+		}
+	})
 }
 
 // 两种口径绝不混用：只要有一条记录带上了省份，就以省份口径为准。混用会让

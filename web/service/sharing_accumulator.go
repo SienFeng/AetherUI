@@ -21,7 +21,8 @@ const sharingFlushThreshold = 60
 // sharingMaxRowsPerHour 是单入站单小时的行数上限。
 //
 // 不是为正常场景设的（正常一小时 2~3 行），是为被针对性刷时让表的大小有
-// 一个确定的天花板：50 × 24 小时 × 30 天 × 约 100 字节 ≈ 3.6 MB/入站。
+// 一个确定的天花板：50 × 24 小时 × 30 天 × 约 190 字节 ≈ 6.8 MB/入站。
+// （190 而不是最初的 100：Country/City/ISP 三个身份快照列后来加了进来。）
 const sharingMaxRowsPerHour = 50
 
 type sharingKey struct {
@@ -30,7 +31,7 @@ type sharingKey struct {
 }
 
 type sharingCell struct {
-	province  string
+	meta      NetworkMeta
 	seconds   int // 本小时累计活跃秒数
 	flushedAt int // 上次落库时 seconds 的值
 
@@ -57,7 +58,7 @@ type sharingCell struct {
 type sharingObservation struct {
 	InboundId int
 	IP        string
-	Province  string
+	Meta      NetworkMeta
 
 	// Up/Down 是 tracker 给出的**本次在线期间累计**字节，不是本轮增量。
 	Up   int64
@@ -71,7 +72,7 @@ type sharingObservation struct {
 type sharingFlush struct {
 	InboundId     int
 	IP            string
-	Province      string
+	Meta          NetworkMeta
 	HourStart     int64
 	ActiveSeconds int
 	ActiveBytes   int64
@@ -130,7 +131,7 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 				a.cappedWarned[o.InboundId]++
 				continue
 			}
-			cell = &sharingCell{province: o.Province, lastUp: o.Up, lastDown: o.Down}
+			cell = &sharingCell{meta: o.Meta, lastUp: o.Up, lastDown: o.Down}
 			a.cells[key] = cell
 			perInbound[o.InboundId]++
 		} else {
@@ -145,17 +146,23 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 			cell.bytes += du + dd
 			cell.lastUp, cell.lastDown = o.Up, o.Down
 		}
-		// 省份以最近一次判定为准：归属地库更新后同一个 IP 的判定可能变，
-		// 用新的比留着旧的合理。空串不覆盖已知值——一次查库失败不该把
-		// 已经判定出来的省份抹掉。
-		if o.Province != "" {
-			cell.province = o.Province
+		// 画像以最近一次判定为准：归属地库更新后同一个 IP 的判定可能变，
+		// 用新的比留着旧的合理。查不到时不覆盖已知值——一次查库失败（库正在
+		// 热替换、或这一轮恰好没加载完）不该把已经判定出来的画像抹掉。
+		//
+		// **整组替换，不逐字段填**：四个字段必须始终来自同一次查询的同一个
+		// 数据源，逐字段填会在库更新的那一刻拼出「旧省份 + 新城市」这种跨源
+		// 组合，而画像键正是按这一组字段拼的。判据用 HasGeo（Country 非空）
+		// 而不是 Province 非空——境外段的 Province 天然为空，按 Province 判
+		// 会让境外来源的画像永远停在零值。
+		if o.Meta.HasGeo() {
+			cell.meta = o.Meta
 		}
 		cell.seconds += step
 		if cell.seconds-cell.flushedAt >= sharingFlushThreshold {
 			cell.flushedAt = cell.seconds
 			out = append(out, sharingFlush{
-				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
+				InboundId: key.inboundId, IP: key.ip, Meta: cell.meta,
 				HourStart: hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
 				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
 			})
@@ -174,7 +181,7 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 	for key, cell := range a.cells {
 		if cell.seconds >= sharingFlushThreshold && cell.seconds > cell.flushedAt {
 			out = append(out, sharingFlush{
-				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
+				InboundId: key.inboundId, IP: key.ip, Meta: cell.meta,
 				HourStart: a.hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
 				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
 			})
