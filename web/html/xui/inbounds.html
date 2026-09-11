@@ -87,17 +87,47 @@
                                  style="margin-top: 20px"
                                  @change="() => getDBInbounds()">
                             <template slot="expandedRowRender" slot-scope="dbInbound">
+                                <div style="margin-bottom: 12px">
+                                    <a-radio-group size="small" :value="trafficRangeOf(dbInbound.id)"
+                                                   @change="e => changeTrafficRange(dbInbound.id, e.target.value)">
+                                        <a-radio-button value="today">今日</a-radio-button>
+                                        <a-radio-button value="3d">近 3 日</a-radio-button>
+                                        <a-radio-button value="7d">近 7 日</a-radio-button>
+                                        <a-radio-button value="30d">近 30 日</a-radio-button>
+                                        <a-radio-button value="1y">近 1 年</a-radio-button>
+                                    </a-radio-group>
+                                    <a-range-picker size="small" style="margin-left: 8px; width: 240px"
+                                                    :value="customRangeOf(dbInbound.id)"
+                                                    @change="d => changeCustomRange(dbInbound.id, d)"></a-range-picker>
+                                    <span style="margin-left: 16px">
+                                        本段入站用量
+                                        <a-tag color="green">↑ [[ sizeFormat(totalOf(dbInbound.id).up) ]]</a-tag>
+                                        <a-tag color="blue">↓ [[ sizeFormat(totalOf(dbInbound.id).down) ]]</a-tag>
+                                        <a-tooltip>
+                                            <template slot="title">
+                                                来自 xray 的流量统计，是代理转发的应用层字节，与下方按来源 IP 的分项口径不同。
+                                            </template>
+                                            <a-icon type="info-circle"></a-icon>
+                                        </a-tooltip>
+                                    </span>
+                                </div>
                                 <a-alert v-if="onlineOf(dbInbound.id).reason"
                                          type="info" show-icon style="margin-bottom: 12px"
                                          :message="onlineOf(dbInbound.id).reason"></a-alert>
                                 <a-table v-if="onlineOf(dbInbound.id).supported"
                                          :columns="onlineColumns"
-                                         :data-source="onlineOf(dbInbound.id).list"
+                                         :data-source="mergedOf(dbInbound.id)"
                                          :row-key="online => online.ip"
                                          :pagination="false" size="small"
                                          :locale="{ emptyText: '当前没有在线连接。人已离线时，可从左侧「操作 → 访问日志」查看他来过之后留下的记录' }">
                                     <template slot="firstSeen" slot-scope="text, online">
-                                        <template v-if="online.firstSeen">[[ DateUtil.formatMillis(online.firstSeen) ]]</template>
+                                        <template v-if="online.offline">
+                                            <a-tooltip>
+                                                <template slot="title">该来源在所选时段内有用量，但当前不在线。显示的是最后活跃时间。</template>
+                                                <span style="color: rgba(0,0,0,.45)">[[ DateUtil.formatMillis(online.lastSeen) ]]</span>
+                                            </a-tooltip>
+                                        </template>
+                                        <template v-else-if="online.firstSeen">[[ DateUtil.formatMillis(online.firstSeen) ]]</template>
                                         <template v-else>-</template>
                                     </template>
                                     <template slot="onlineIp" slot-scope="text, online">
@@ -132,11 +162,47 @@
                                         <a-tag v-else>未知</a-tag>
                                     </template>
                                     <template slot="speed" slot-scope="text, online">
-                                        <a-tag color="green">↑ [[ sizeFormat(online.upSpeed) ]]/s</a-tag>
-                                        <a-tag color="blue">↓ [[ sizeFormat(online.downSpeed) ]]/s</a-tag>
+                                        <template v-if="online.offline">—</template>
+                                        <template v-else>
+                                            <a-tag color="green">↑ [[ sizeFormat(online.upSpeed) ]]/s</a-tag>
+                                            <a-tag color="blue">↓ [[ sizeFormat(online.downSpeed) ]]/s</a-tag>
+                                        </template>
+                                    </template>
+                                    <template slot="conns" slot-scope="text, online">
+                                        <template v-if="online.offline">—</template>
+                                        <template v-else>[[ online.conns ]]</template>
+                                    </template>
+                                    <template slot="usageTitle">
+                                        本段用量↑|↓
+                                        <a-tooltip>
+                                            <template slot="title">
+                                                来自内核连接表，含 TLS 与 WebSocket 协议开销，<b>与上方入站合计用量不相等</b>（后者是 xray 统计的应用层字节）。各来源 IP 分项之和会略大于或略小于入站合计。
+                                            </template>
+                                            <a-icon type="info-circle"></a-icon>
+                                        </a-tooltip>
                                     </template>
                                     <template slot="onlineTraffic" slot-scope="text, online">
-                                        [[ sizeFormat(online.up) ]] / [[ sizeFormat(online.down) ]]
+                                        <template v-if="ipUsageOf(dbInbound.id).beyondRetention">
+                                            <a-tooltip>
+                                                <template slot="title">[[ ipUsageOf(dbInbound.id).reason ]]</template>
+                                                <span>—</span>
+                                            </a-tooltip>
+                                        </template>
+                                        <template v-else-if="online.usageMissing">
+                                            <a-tooltip>
+                                                <template slot="title">活跃满 1 分钟后开始计入</template>
+                                                <a-tag>统计中</a-tag>
+                                            </a-tooltip>
+                                        </template>
+                                        <template v-else-if="!ipUsageOf(dbInbound.id).split">
+                                            <a-tooltip>
+                                                <template slot="title">该时段为升级前写入的数据，无法拆分上下行，显示的是合计用量</template>
+                                                <span>[[ sizeFormat(online.usageUp + online.usageDown) ]]</span>
+                                            </a-tooltip>
+                                        </template>
+                                        <template v-else>
+                                            [[ sizeFormat(online.usageUp) ]] / [[ sizeFormat(online.usageDown) ]]
+                                        </template>
                                     </template>
                                     <template slot="onlineAction" slot-scope="text, online">
                                         <a-button v-if="online.conns > 0" type="link" size="small"
@@ -148,14 +214,14 @@
                                                   @click="showAccessLog(dbInbound, online.ip)">访问日志</a-button>
                                     </template>
                                 </a-table>
+                                <div v-if="ipUsageOf(dbInbound.id).otherCount > 0"
+                                     style="padding: 8px 16px; color: rgba(0,0,0,.45)">
+                                    其余 [[ ipUsageOf(dbInbound.id).otherCount ]] 个来源共
+                                    ↑ [[ sizeFormat(ipUsageOf(dbInbound.id).otherUp) ]]
+                                    ↓ [[ sizeFormat(ipUsageOf(dbInbound.id).otherDown) ]]
+                                    （按用量排序后未列出的部分）
+                                </div>
                                 <div style="margin-top: 16px">
-                                    <a-radio-group size="small" :value="trafficRangeOf(dbInbound.id)"
-                                                   @change="e => changeTrafficRange(dbInbound.id, e.target.value)">
-                                        <a-radio-button value="24h">24 小时</a-radio-button>
-                                        <a-radio-button value="7d">7 天</a-radio-button>
-                                        <a-radio-button value="30d">30 天</a-radio-button>
-                                        <a-radio-button value="1y">1 年</a-radio-button>
-                                    </a-radio-group>
                                     <a-alert v-if="trafficReasonOf(dbInbound.id)" type="info" show-icon
                                              style="margin-top: 12px"
                                              :message="trafficReasonOf(dbInbound.id)"></a-alert>
@@ -426,16 +492,17 @@
         title: "连接数",
         align: 'center',
         width: 60,
-        dataIndex: "conns",
+        scopedSlots: { customRender: 'conns' },
     }, {
         title: "实时网速",
         align: 'center',
         width: 200,
         scopedSlots: { customRender: 'speed' },
     }, {
-        title: "本次上线用量↑|↓",
+        // slots.title 而不是 title：这一列的列头要带 tooltip，纯字符串做不到。
+        slots: { title: 'usageTitle' },
         align: 'center',
-        width: 140,
+        width: 150,
         scopedSlots: { customRender: 'onlineTraffic' },
     }, {
         title: "操作",
@@ -469,6 +536,18 @@
             expandedKeys: [],
             trafficRanges: {},
             trafficReasons: {},
+            // inboundId -> IPUsageResult。与 onlines 分开存：那个每 2 秒
+            // 刷新一次，这个只在切换档位时拉。
+            ipUsages: {},
+            // inboundId -> [moment, moment]，自定义区间。为空表示走档位。
+            customRanges: {},
+            // inboundId -> {up, down}，入站合计。
+            trafficTotals: {},
+            // inboundId -> 合并后的行数组。**算一次存起来**，而不是在
+            // onlineOf 里每次渲染重算：展开行每 2 秒随轮询重渲染一次，
+            // 而合并要对最多 200 条 entries 重建 map 再 filter。写入点
+            // 只有两个——两个数据源各自加载完之后。
+            mergedOnlines: {},
             onlines: {},
             onlineTimer: null,
             // 列表页那一列：inboundId -> OnlineCount。整个接口失败时用
@@ -699,14 +778,84 @@
             onlineOf(id) {
                 return this.onlines[id] || emptyOnline;
             },
+            ipUsageOf(id) {
+                return this.ipUsages[id] || {
+                    entries: [], split: true, beyondRetention: false,
+                    otherCount: 0, otherUp: 0, otherDown: 0, reason: '',
+                };
+            },
+            totalOf(id) {
+                return this.trafficTotals[id] || { up: 0, down: 0 };
+            },
+            customRangeOf(id) {
+                return this.customRanges[id] || null;
+            },
+            mergedOf(id) {
+                return this.mergedOnlines[id] || [];
+            },
+            // 把「当前在线」与「窗口内有用量」两份数据按 IP 做 outer merge，
+            // 结果存进 mergedOnlines。两个数据源任一加载完都要调一次。
+            //
+            // 只列在线的会漏掉窗口内用过、现在不在线的来源：看「近 30 日」
+            // 时表里可能只剩一个 IP，而这 30 天有五个用过——管理员看到的是
+            //「这个用户只有一个来源」，对「是不是被共享了」给出了反向误导的
+            // 答案，而表格渲染得完全合理。
+            //
+            // 归属地不存在冲突：两个接口都走服务端的 locateWithIPDB，对同一
+            // 个 IP、同一份库必然给出同一个结果，所以在线侧的直接沿用。
+            recomputeMerged(id) {
+                const base = this.onlines[id] || emptyOnline;
+                const onlineList = base.list || [];
+                const usage = this.ipUsageOf(id);
+
+                const byIP = {};
+                usage.entries.forEach(e => { byIP[e.ip] = e; });
+
+                const merged = onlineList.map(o => {
+                    const u = byIP[o.ip];
+                    delete byIP[o.ip];
+                    return Object.assign({}, o, {
+                        usageUp: u ? u.up : 0,
+                        usageDown: u ? u.down : 0,
+                        // 在线但库里还没有这一窗口的记录：显示「统计中」而
+                        // 不是 0——后者会让管理员以为这个正在跑满带宽的连接
+                        // 没有流量。窗口整块降级时这个标记没有意义，跳过。
+                        usageMissing: !u && !usage.beyondRetention,
+                        offline: false,
+                    });
+                });
+
+                // byIP 里剩下的就是「窗口内用过、当前不在线」的。服务端已按
+                // 用量降序排好，这里按 entries 的原顺序取即可。
+                const offline = usage.entries
+                    .filter(e => byIP[e.ip] !== undefined)
+                    .map(e => ({
+                        ip: e.ip,
+                        location: e.location, locationAlt: e.locationAlt,
+                        isp: e.isp, ispAlt: e.ispAlt, sources: e.sources,
+                        conns: 0, upSpeed: 0, downSpeed: 0,
+                        usageUp: e.up, usageDown: e.down,
+                        usageMissing: false,
+                        lastSeen: e.lastSeen,
+                        offline: true,
+                    }));
+
+                // 在线的在前，离线的在后，两者不混排：管理员一眼要能分出
+                //「现在有几个人在连」。
+                this.$set(this.mergedOnlines, id, merged.concat(offline));
+            },
             onExpand(expanded, dbInbound) {
                 if (expanded) {
                     this.expandedKeys = this.expandedKeys.concat([dbInbound.id]);
                     this.loadOnlines(dbInbound.id);
-                    this.loadTrafficChart(dbInbound.id);
+                    this.reloadWindowed(dbInbound.id);
                 } else {
                     this.expandedKeys = this.expandedKeys.filter(id => id !== dbInbound.id);
                     this.$delete(this.onlines, dbInbound.id);
+                    this.$delete(this.ipUsages, dbInbound.id);
+                    this.$delete(this.trafficTotals, dbInbound.id);
+                    this.$delete(this.customRanges, dbInbound.id);
+                    this.$delete(this.mergedOnlines, dbInbound.id);
                     this.destroyTrafficChart(dbInbound.id);
                 }
                 this.syncOnlineTimer();
@@ -729,6 +878,9 @@
                 } catch (e) {
                     this.$set(this.onlines, id, { supported: false, reason: e.toString(), list: [] });
                 }
+                // 三条路径都要落到这里：失败时表格也该反映出来，而不是
+                // 停在上一轮的数据上。
+                this.recomputeMerged(id);
             },
             syncOnlineTimer() {
                 const needTimer = this.expandedKeys.length > 0;
@@ -742,24 +894,56 @@
                 }
             },
             trafficRangeOf(id) {
-                return this.trafficRanges[id] || '24h';
+                return this.trafficRanges[id] || 'today';
             },
             trafficReasonOf(id) {
                 return this.trafficReasons[id] || '';
             },
+            changeCustomRange(id, dates) {
+                this.$set(this.customRanges, id, dates);
+                this.reloadWindowed(id);
+            },
+            // 把档位或自定义区间翻译成请求体。服务端 ParseWindow 认 range
+            // 为 custom 时才看 start/end，所以两者互斥地发出去。
+            windowParamsOf(id) {
+                const dates = this.customRangeOf(id);
+                if (dates && dates.length === 2 && dates[0] && dates[1]) {
+                    return {
+                        range: 'custom',
+                        start: dates[0].format('YYYY-MM-DD'),
+                        end: dates[1].format('YYYY-MM-DD'),
+                    };
+                }
+                return { range: this.trafficRangeOf(id) };
+            },
+            // 档位一变，三个数据区一起重拉——它们必须永远在讲同一段时间。
+            async reloadWindowed(id) {
+                await Promise.all([this.loadTrafficChart(id), this.loadIPUsage(id)]);
+            },
+            async loadIPUsage(id) {
+                const msg = await HttpUtil.post('/aui/inbound/ipUsage/' + id, this.windowParamsOf(id));
+                if (!msg.success) {
+                    return;
+                }
+                this.$set(this.ipUsages, id, msg.obj);
+                this.recomputeMerged(id);
+            },
             changeTrafficRange(id, range) {
                 // Vue 2 无法侦测新增的对象属性，必须走 $set。
                 this.$set(this.trafficRanges, id, range);
-                this.loadTrafficChart(id);
+                // 档位与自定义区间互斥：不清的话点了档位按钮界面纹丝不动，
+                // 因为 windowParamsOf 仍然优先返回那个区间。
+                this.$set(this.customRanges, id, null);
+                this.reloadWindowed(id);
             },
             async loadTrafficChart(id) {
-                const range = this.trafficRangeOf(id);
-                const msg = await HttpUtil.post('/aui/inbound/traffic/history/' + id, { range: range });
+                const msg = await HttpUtil.post('/aui/inbound/traffic/history/' + id, this.windowParamsOf(id));
                 if (!msg.success) {
                     return;
                 }
                 const data = msg.obj;
                 this.$set(this.trafficReasons, id, data.reason || '');
+                this.$set(this.trafficTotals, id, data.total || { up: 0, down: 0 });
                 // 等 Vue 把 canvas 渲染进 DOM 再取它：expandedRowRender 是
                 // 动态渲染的，指令执行时元素还不存在。
                 this.$nextTick(() => {
