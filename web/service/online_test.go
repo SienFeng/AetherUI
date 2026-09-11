@@ -759,3 +759,89 @@ func TestLocateWithIPDBSingleSourceHasNoDisagreement(t *testing.T) {
 		t.Errorf("LocationAlt = %q，单源不该产生分歧", got.LocationAlt)
 	}
 }
+
+// 低于门槛的流量不得刷新活跃时间。
+//
+// 这是「限额=1」能用的前提：不设门槛的话，一个挂在后台没关的客户端靠心跳
+// 保活包（几十到几百字节/秒）就能永久保持活跃、一直占着并发额度，机主的
+// 另一台设备永远连不上。生产实测见 minActiveRate 的注释。
+func TestSubThresholdTrafficDoesNotRefreshActivity(t *testing.T) {
+	tk := newOnlineTracker()
+	base := time.Unix(1000, 0)
+	key := onlineKey{port: testPort, ip: "1.2.3.4"}
+
+	// 第一轮建立基准。
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 1000, 2000)}, testPorts, base)
+	first := tk.ips[key].lastActiveAt
+
+	// 1 秒后只涨了 200 字节（200 B/s，典型心跳量级）。
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 1100, 2100)}, testPorts, base.Add(time.Second))
+
+	if got := tk.ips[key].lastActiveAt; !got.Equal(first) {
+		t.Errorf("lastActiveAt 被刷新了，期望保持不变——200 B/s 属心跳量级，不该算在用")
+	}
+}
+
+// 超过门槛的流量必须刷新活跃时间。
+func TestAboveThresholdTrafficRefreshesActivity(t *testing.T) {
+	tk := newOnlineTracker()
+	base := time.Unix(1000, 0)
+	key := onlineKey{port: testPort, ip: "1.2.3.4"}
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 1000, 2000)}, testPorts, base)
+	first := tk.ips[key].lastActiveAt
+
+	// 1 秒后涨了 4 KB（4 KB/s），远高于门槛。
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 1000+2048, 2000+2048)}, testPorts, base.Add(time.Second))
+
+	if got := tk.ips[key].lastActiveAt; got.Equal(first) {
+		t.Error("lastActiveAt 未被刷新，期望刷新——4 KB/s 是实打实的使用")
+	}
+}
+
+// 门槛必须按**速率**判，不能按单轮的绝对字节数。
+//
+// 并发判定每秒跑一次，但页面轮询也会触发采样（onlineMinSampleInterval 是
+// 500ms），所以采样间隔并不恒定。按绝对字节判的话，同一份流量在不同间隔下
+// 会得出相反的活跃判定，而这个差异完全取决于当时有没有人开着面板页面。
+func TestActivityThresholdIsRateNotAbsoluteBytes(t *testing.T) {
+	base := time.Unix(1000, 0)
+	key := onlineKey{port: testPort, ip: "1.2.3.4"}
+	const chunk = 1500 // 1.5 KB
+
+	// 间隔 1 秒 → 1.5 KB/s，过门槛。
+	fast := newOnlineTracker()
+	fast.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, base)
+	fastFirst := fast.ips[key].lastActiveAt
+	fast.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", chunk, 0)}, testPorts, base.Add(time.Second))
+	if fast.ips[key].lastActiveAt.Equal(fastFirst) {
+		t.Error("1 秒内传 1.5 KB（= 1.5 KB/s）应当算活跃")
+	}
+
+	// 同样 1.5 KB，间隔 5 秒 → 300 B/s，不过门槛。
+	slow := newOnlineTracker()
+	slow.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, base)
+	slowFirst := slow.ips[key].lastActiveAt
+	slow.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", chunk, 0)}, testPorts, base.Add(5*time.Second))
+	if !slow.ips[key].lastActiveAt.Equal(slowFirst) {
+		t.Error("5 秒内传 1.5 KB（= 300 B/s）不应算活跃")
+	}
+}
+
+// 上下行分别低于门槛、合计超过门槛时算活跃：额度判的是这个来源在不在用，
+// 不是某个方向在不在用。
+func TestActivityThresholdUsesCombinedRate(t *testing.T) {
+	tk := newOnlineTracker()
+	base := time.Unix(1000, 0)
+	key := onlineKey{port: testPort, ip: "1.2.3.4"}
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, base)
+	first := tk.ips[key].lastActiveAt
+
+	// 上下行各 700 B/s，单看都不过门槛，合计 1400 B/s 过门槛。
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 700, 700)}, testPorts, base.Add(time.Second))
+
+	if got := tk.ips[key].lastActiveAt; got.Equal(first) {
+		t.Error("上下行合计 1400 B/s 应当算活跃——门槛判的是合计速率")
+	}
+}

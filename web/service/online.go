@@ -25,6 +25,27 @@ const (
 	// 那段时间的平均值不是"实时网速"。
 	onlineMaxSampleGap = 10 * time.Second
 
+	// minActiveRate 是「这个来源还在用」的最低速率（字节/秒），低于它的采样
+	// 轮次不刷新 lastActiveAt，于是该来源会按 concurrencyIdleTimeout 被判闲置、
+	// 不再占用并发额度。
+	//
+	// 不设这道门槛的话，任何一个字节都算活跃，而一个挂在后台没关的客户端靠
+	// 心跳保活包（几十到几百字节/秒）就能永久保持活跃、一直占着额度——把额度
+	// 设成 1 时，机主自己的另一台设备就永远连不上。
+	//
+	// 1 KB/s 这个值来自生产实测（香港节点 5 个真实在用的入站，120 秒逐秒采样）：
+	// 真实代理流量是「长静默 + 突发」，中位速率为 0、67~92% 的采样秒低于 1 KB/s，
+	// 而 p90 落在 0~6.5 KB/s。1 KB/s 能把心跳与真实使用分开；若定到 8 KB/s，
+	// 那五个用户几乎每一秒都会被判成闲置，并发限制整个失效。
+	//
+	// 判的是**速率**不是单轮字节数：采样间隔并不恒定（并发判定每秒一次，而
+	// 页面轮询也会触发采样，下限 onlineMinSampleInterval 是 500ms），按绝对
+	// 字节判会让同一份流量因为「当时有没有人开着面板」而得出相反的结论。
+	//
+	// 刻意不做成设置项：新增设置项要同步改 5 处，漏掉 models.js 那处会让整个
+	// 保存配置接口失败，为一个经验值付这个代价不划算。要调就改这里重新编译。
+	minActiveRate = 1024
+
 	// 超额被拒的 IP 在连接被断开后仍然在展开行里保留这么久。
 	// 不留的话"有人正在被拒绝"这件事对管理员完全不可见——被拒的 IP
 	// 恰恰是连接表里没有的那个。
@@ -225,14 +246,16 @@ func (t *onlineTracker) update(conns []netdiag.Conn, ports map[int]bool, now tim
 		}
 		e.conns = a.conns
 		if hasBaseline {
-			if a.up > 0 || a.down > 0 {
+			seconds := elapsed.Seconds()
+			e.upSpeed = int64(float64(a.up) / seconds)
+			e.downSpeed = int64(float64(a.down) / seconds)
+			// 按上下行**合计**速率判门槛：额度判的是这个来源在不在用，不是
+			// 某一个方向在不在用。顺序也不能反——速率要先算出来才能判。
+			if e.upSpeed+e.downSpeed >= minActiveRate {
 				e.lastActiveAt = now
 			}
 			e.up += a.up
 			e.down += a.down
-			seconds := elapsed.Seconds()
-			e.upSpeed = int64(float64(a.up) / seconds)
-			e.downSpeed = int64(float64(a.down) / seconds)
 		} else {
 			e.upSpeed, e.downSpeed = 0, 0
 		}
