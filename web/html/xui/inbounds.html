@@ -114,12 +114,21 @@
                                 <a-alert v-if="onlineOf(dbInbound.id).reason"
                                          type="info" show-icon style="margin-bottom: 12px"
                                          :message="onlineOf(dbInbound.id).reason"></a-alert>
+                                <!-- 服务端给的降级原因有三种：超出保留期、用量历史库不可用、
+                                     整批数据拆不出上下行。它必须有一个与表格内容无关的出口——
+                                     只在用量列的 tooltip 里说的话，「近 1 年 + 当前无人在线」
+                                     这种组合下表格整个是空的，那句解释一个字都不会出现，
+                                     而 emptyText 说的是「没有来源连接过」，正好相反。
+                                     库不可用时同理：逐行显示「统计中」是在说假话。 -->
+                                <a-alert v-if="ipUsageOf(dbInbound.id).reason" type="info" show-icon
+                                         style="margin-bottom: 12px"
+                                         :message="ipUsageOf(dbInbound.id).reason"></a-alert>
                                 <a-table v-if="onlineOf(dbInbound.id).supported"
                                          :columns="onlineColumns"
                                          :data-source="mergedOf(dbInbound.id)"
                                          :row-key="online => online.ip"
                                          :pagination="false" size="small"
-                                         :locale="{ emptyText: '当前没有在线连接。人已离线时，可从左侧「操作 → 访问日志」查看他来过之后留下的记录' }">
+                                         :locale="{ emptyText: '这段时间内没有来源连接过。若只是数据已过保留期，上方会有说明；更早的记录可从左侧「操作 → 访问日志」查看' }">
                                     <template slot="firstSeen" slot-scope="text, online">
                                         <template v-if="online.offline">
                                             <a-tooltip>
@@ -195,8 +204,11 @@
                                             </a-tooltip>
                                         </template>
                                         <template v-else-if="!ipUsageOf(dbInbound.id).split">
+                                            <!-- 文案直接用服务端给的 reason，不在这里另写一份同义
+                                                 的中文：两份文案会各自演化，而没有任何东西会提醒
+                                                 你它们已经分叉了。 -->
                                             <a-tooltip>
-                                                <template slot="title">该时段为升级前写入的数据，无法拆分上下行，显示的是合计用量</template>
+                                                <template slot="title">[[ ipUsageOf(dbInbound.id).reason ]]</template>
                                                 <span>[[ sizeFormat(online.usageUp + online.usageDown) ]]</span>
                                             </a-tooltip>
                                         </template>
@@ -217,8 +229,17 @@
                                 <div v-if="ipUsageOf(dbInbound.id).otherCount > 0"
                                      style="padding: 8px 16px; color: rgba(0,0,0,.45)">
                                     其余 [[ ipUsageOf(dbInbound.id).otherCount ]] 个来源共
-                                    ↑ [[ sizeFormat(ipUsageOf(dbInbound.id).otherUp) ]]
-                                    ↓ [[ sizeFormat(ipUsageOf(dbInbound.id).otherDown) ]]
+                                    <!-- 与用量列同一套降级：拆不出上下行时服务端把合计全部计进
+                                         otherDown，照原样渲染会显示「↑ 0 B ↓ 20 GB」，而同一张
+                                         表的用量列在同一时刻已经正确显示成合计数——两处对同一批
+                                         数据给出两种口径，且那个 0 会被读成「这些来源没有上行」。 -->
+                                    <template v-if="ipUsageOf(dbInbound.id).split">
+                                        ↑ [[ sizeFormat(ipUsageOf(dbInbound.id).otherUp) ]]
+                                        ↓ [[ sizeFormat(ipUsageOf(dbInbound.id).otherDown) ]]
+                                    </template>
+                                    <template v-else>
+                                        [[ sizeFormat(ipUsageOf(dbInbound.id).otherUp + ipUsageOf(dbInbound.id).otherDown) ]]
+                                    </template>
                                     （按用量排序后未列出的部分）
                                 </div>
                                 <div style="margin-top: 16px">
@@ -820,7 +841,14 @@
                         // 在线但库里还没有这一窗口的记录：显示「统计中」而
                         // 不是 0——后者会让管理员以为这个正在跑满带宽的连接
                         // 没有流量。窗口整块降级时这个标记没有意义，跳过。
-                        usageMissing: !u && !usage.beyondRetention,
+                        //
+                        // 「统计中 / 活跃满 1 分钟后开始计入」只在窗口确实包含
+                        //「现在」时才说得通。所有档位的右端都是此刻，只有自定义
+                        // 区间能整个落在过去：那时查不到某个在线 IP 的记录，原因
+                        // 是他那段时间没用过、或者数据已过保留期，绝不是「才刚
+                        // 上线还没满 1 分钟」。对历史区间显示 0 即可，真正的原因
+                        // 由表格上方那条 a-alert 统一解释。
+                        usageMissing: !u && !usage.beyondRetention && !this.customRangeOf(id),
                         offline: false,
                     });
                 });
@@ -855,6 +883,13 @@
                     this.$delete(this.ipUsages, dbInbound.id);
                     this.$delete(this.trafficTotals, dbInbound.id);
                     this.$delete(this.customRanges, dbInbound.id);
+                    // 日期被清掉了，'custom' 这个标记就不能留下——它不匹配任何
+                    // 一个档位按钮，而 windowParamsOf 在拿不到日期时回落「今日」：
+                    // 重新展开会出现「一个档位都不高亮、显示的却是今日」这种
+                    // 不一致。其余档位保持原样，与改动前一样跨展开折叠记住。
+                    if (this.trafficRangeOf(dbInbound.id) === 'custom') {
+                        this.$set(this.trafficRanges, dbInbound.id, 'today');
+                    }
                     this.$delete(this.mergedOnlines, dbInbound.id);
                     this.destroyTrafficChart(dbInbound.id);
                 }
@@ -900,7 +935,19 @@
                 return this.trafficReasons[id] || '';
             },
             changeCustomRange(id, dates) {
-                this.$set(this.customRanges, id, dates);
+                const has = dates && dates.length === 2 && dates[0] && dates[1];
+                this.$set(this.customRanges, id, has ? dates : null);
+                // 'custom' 不匹配任何一个 a-radio-button 的 value，于是整组都不
+                // 高亮——数据用的是自定义区间，视觉上就不该有哪个档位亮着。
+                //
+                // 清空 trafficRanges 是不行的：trafficRangeOf 有 `|| 'today'`
+                // 兜底，清空后会回落并把「今日」重新点亮。而且这不只是「先点
+                // 档位再选区间」的问题——一进展开行就直接选区间时，「今日」
+                // 本来就是高亮的，因为那是默认值。
+                //
+                // 清掉日期时回到 'today'，让数据与高亮同时回正：只置空会出现
+                //「一个档位都不高亮、显示的却是今日」这第二种不一致。
+                this.$set(this.trafficRanges, id, has ? 'custom' : 'today');
                 this.reloadWindowed(id);
             },
             // 把档位或自定义区间翻译成请求体。服务端 ParseWindow 认 range
@@ -923,6 +970,17 @@
             async loadIPUsage(id) {
                 const msg = await HttpUtil.post('/aui/inbound/ipUsage/' + id, this.windowParamsOf(id));
                 if (!msg.success) {
+                    // 与 loadOnlines 的三条路径对称：那边的成功/失败/异常都落到
+                    // 末尾统一 recomputeMerged，这边不能在失败时直接 return。
+                    // 合并表是 onlines 与 ipUsages 两份数据算出来的，任一份动过
+                    // 就该重算一次；漏掉这一次，表格会停在上一次合并的结果上，
+                    // 与此刻的在线列表都对不上（在线明细每 2 秒才会把它带回来，
+                    // 而那两秒里高亮已经是新档位了）。
+                    //
+                    // 注意这不会把用量数据变新：ipUsages[id] 仍是上一个窗口的
+                    // 结果。真正说明「这次没取到」的是 HttpUtil 自己弹的那条
+                    // message，这里只负责不让两份数据的合并结果继续错位。
+                    this.recomputeMerged(id);
                     return;
                 }
                 this.$set(this.ipUsages, id, msg.obj);
