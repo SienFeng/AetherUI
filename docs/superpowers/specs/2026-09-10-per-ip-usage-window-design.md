@@ -162,12 +162,17 @@ form := struct {
 
 ```go
 type IPUsageEntry struct {
-    IP       string `json:"ip"`
-    Up       int64  `json:"up"`
-    Down     int64  `json:"down"`
-    Location string `json:"location"`  // 离线行也要能显示归属地
-    ISP      string `json:"isp"`
-    LastSeen int64  `json:"lastSeen"`  // 窗口内最后一个有记录的小时（毫秒）
+    IP   string `json:"ip"`
+    Up   int64  `json:"up"`
+    Down int64  `json:"down"`
+    // 归属地五件套与 OnlineIP 同名同义，由同一个 locateWithIPDB 产出，
+    // 离线行因此能和在线行一样显示「存疑」标记。
+    Location    string             `json:"location"`
+    LocationAlt string             `json:"locationAlt"`
+    ISP         string             `json:"isp"`
+    ISPAlt      string             `json:"ispAlt"`
+    Sources     []ipSourceLocation `json:"sources"`
+    LastSeen    int64              `json:"lastSeen"` // 窗口内最后一个有记录的小时（毫秒）
 }
 
 type IPUsageResult struct {
@@ -184,7 +189,7 @@ type IPUsageResult struct {
 
 查询：`WHERE inbound_id = ? AND hour_start >= ? AND hour_start < ?`，按 IP 分组求和。排序：用量降序，同量时按 IP 字节序（与 `online.go:325` 的排序同源，保证确定性）。
 
-`Location` / `ISP` 走 `SharingService.provinceOf` 同源的 `ipdbService.DB().Lookup`——离线 IP 不在连接表快照里，归属地必须重新查。
+归属地**直接复用 `locateWithIPDB`**（`web/service/online.go:419`，包级函数）——离线 IP 不在连接表快照里，必须重新查，而那个函数的注释原话是「在线明细与访问日志的来源列表共用同一套判定，避免三处结论对不上」，这里是第四处。复用它而不是自己写一次单值 lookup，离线行就能和在线行一样显示「存疑」标记，也不会出现同一个 IP 在表格里换一行就换个归属地的情形。
 
 **返回条数上限 200，长尾合并成一行。** `sharingMaxRowsPerHour` 限的是「单入站单小时 50 个 IP」，30 天窗口下去重后的 IP 总数没有上界——一次持续的端口扫描能攒出几千个。表格渲染几千行会把页面卡死，而管理员真正要看的永远是用量最大的那几个。超出的部分不丢弃，合计进 `OtherCount`/`OtherUp`/`OtherDown`，界面渲染成末尾一行「其余 N 个来源共 X GB」——**总量不能静默缩水**，这与 §6 拒绝「只列在线 IP」是同一条理由。上限钳在 controller，与 `getTrafficOverview` 对 `top` 的钳制同源。
 
@@ -213,7 +218,7 @@ Total TrafficPoint `json:"total"`
 因此表格语义扩大为「**窗口内活跃过的来源 IP**」：
 
 - 数据来源是两个：`/onlines/:id`（当前在线，2 秒轮询）与 `/ipUsage/:id`（窗口内用量，低频），前端按 IP 字符串做 outer merge。
-- **merge 冲突时归属地/运营商以 `/onlines/:id` 为准**：它带着 `LocationAlt`/`ISPAlt`/`Sources`（多源分歧的展示依据，`web/html/xui/inbounds.html` 的「存疑」标记靠它），而 `/ipUsage/:id` 只做了一次单值 lookup。离线行没有前者，用后者。
+- **归属地不存在 merge 冲突**：两个接口都走 `locateWithIPDB`，对同一个 IP、同一份库必然给出同一个结果（§5.1）。前端取任意一侧即可，不必分情况——这正是复用那个函数而不是各写一次 lookup 换来的好处。
 - 排序：**在线的在前**（保持现有 IP 字节序），离线的在后（按用量降序）。在线与离线之间不混排——管理员一眼要能分出「现在有几个人在连」。
 - 离线行的列降级：`连接数` 与 `实时↑|↓` 显示 `—`（不是 0）；`上线时间` 改显示窗口内最后活跃的小时；「踢下线」按钮隐藏（对已断开的连接无意义），「访问日志」保留。
 - 离线行仍然显示「已封禁」标记——`IPBan` 是管理员显式设的状态，与在不在线无关。
