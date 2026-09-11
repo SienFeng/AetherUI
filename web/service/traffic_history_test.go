@@ -518,7 +518,7 @@ func TestHistoryWindowTotalEqualsSumOfPoints(t *testing.T) {
 	}
 
 	w := ParseWindow(WindowToday, "", "", sh, now)
-	res, err := svc.HistoryWindow(in.Id, w)
+	res, err := svc.HistoryWindow(in.Id, w, now)
 	if err != nil {
 		t.Fatalf("HistoryWindow: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestHistoryWindowExcludesBucketsOutsideWindow(t *testing.T) {
 	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(outside, sh), 999, 999)
 
 	w := ParseWindow(WindowToday, "", "", sh, now)
-	res, err := svc.HistoryWindow(in.Id, w)
+	res, err := svc.HistoryWindow(in.Id, w, now)
 	if err != nil {
 		t.Fatalf("HistoryWindow: %v", err)
 	}
@@ -578,12 +578,49 @@ func TestHistoryWindowFiltersByGranularity(t *testing.T) {
 	writeBucket(t, model.GranularityDay, in.Id, model.AlignDay(now, sh), 100, 200)
 
 	w := ParseWindow(WindowToday, "", "", sh, now)
-	res, err := svc.HistoryWindow(in.Id, w)
+	res, err := svc.HistoryWindow(in.Id, w, now)
 	if err != nil {
 		t.Fatalf("HistoryWindow: %v", err)
 	}
 	if res.Total.Up != 100 {
 		t.Errorf("Total.Up = %d，期望 100（日桶不该被一起算进来）", res.Total.Up)
+	}
+}
+
+// 窗口起点早于小时桶保留期时必须改用日桶——那段时间的小时桶已被清理，
+// 而日桶还在（默认留 365 天）。按跨度选出的小时粒度会查出一片空白，
+// 把「数据明明有」渲染成「没有数据」。
+//
+// ParseWindow 是纯函数、读不到设置项，只能按跨度选粒度；所有档位的 End 都
+// 恒等于 now，所以对它们「跨度小」就等于「起点近」。自定义区间打破了这个
+// 等价：3 个月前的那 3 天跨度只有 3 天，却一个小时桶都查不到。
+func TestHistoryWindowFallsBackToDayBucketsBeyondHourRetention(t *testing.T) {
+	setupTrafficTest(t)
+	in := mkTrafficInbound(t, 30305, "甲")
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, sh)
+
+	// 100 天前的那一天，只有日桶（小时桶早被清了，这里根本不写）。
+	old := time.Date(2026, 6, 2, 0, 0, 0, 0, sh)
+	writeBucket(t, model.GranularityDay, in.Id, model.AlignDay(old, sh), 700, 1300)
+
+	// 跨度只有 3 天，ParseWindow 会选小时粒度——但起点在 100 天前。
+	w := ParseWindow(WindowCustom, "2026-06-01", "2026-06-03", sh, now)
+	if w.Granularity != model.GranularityHour {
+		t.Fatalf("前提不成立：ParseWindow 对 3 天跨度应选小时粒度，实际 %v", w.Granularity)
+	}
+
+	res, err := svc.HistoryWindow(in.Id, w, now)
+	if err != nil {
+		t.Fatalf("HistoryWindow: %v", err)
+	}
+	if res.Granularity != "day" {
+		t.Errorf("granularity = %q，期望 day（起点早于小时桶保留期应回落日桶）", res.Granularity)
+	}
+	if res.Total.Up != 700 || res.Total.Down != 1300 {
+		t.Errorf("Total = %d/%d，期望 700/1300——日桶里的数据必须被查到，"+
+			"而不是因为查了已被清理的小时桶而显示成 0", res.Total.Up, res.Total.Down)
 	}
 }
 

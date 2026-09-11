@@ -315,15 +315,34 @@ func sumPoints(points []TrafficPoint) TrafficPoint {
 //
 // 与 History 的区别只是范围来自 TrafficWindow 而不是固定档位。History 保留
 // 不动：Overview 与任何未改的调用方仍依赖它，改它的签名会牵动系统状态页。
-func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow) (*TrafficHistoryResult, error) {
+func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow, now time.Time) (*TrafficHistoryResult, error) {
 	loc, err := s.settingService.GetTimeLocation()
 	if err != nil {
 		return nil, err
 	}
-	slots := buildSlotsInWindow(w.Granularity, w, loc)
+
+	// 窗口起点早于小时桶保留期时改用日桶。
+	//
+	// ParseWindow 只按跨度选粒度（它是纯函数，读不到设置项）。对所有 End 恒为
+	// now 的档位这没问题，但自定义区间可以整个落在过去：「3 个月前的那 10 天」
+	// 跨度只有 10 天、选出小时粒度，而小时桶只留 trafficHourRetentionDays 天，
+	// 查出来是一片空白——**同一段时间的日桶其实还在库里**（默认留 365 天），
+	// 只是没被查。「数据明明有却显示没有」比换个粒度画图糟糕得多，所以这里
+	// 覆盖粒度。读不到设置项时不覆盖：那是一次设置读取失败，不该顺带改变
+	// 图的粒度。
+	g := w.Granularity
+	if g == model.GranularityHour {
+		if days, err := s.settingService.GetTrafficHourRetentionDays(); err == nil && days > 0 {
+			if w.Start < now.AddDate(0, 0, -days).Unix() {
+				g = model.GranularityDay
+			}
+		}
+	}
+
+	slots := buildSlotsInWindow(g, w, loc)
 	result := &TrafficHistoryResult{
-		Granularity: granularityName(w.Granularity),
-		Labels:      formatLabels(w.Granularity, slots, loc),
+		Granularity: granularityName(g),
+		Labels:      formatLabels(g, slots, loc),
 		Points:      make([]TrafficPoint, len(slots)),
 	}
 	for i, start := range slots {
@@ -343,7 +362,7 @@ func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow) (*
 	// granularity 条件不能省：小时桶与日桶各自独立累加，日桶不由小时桶
 	// 汇总而来，不带条件会把同一段时间算两遍。
 	err = db.Where("granularity = ? and inbound_id = ? and bucket_start >= ? and bucket_start < ?",
-		w.Granularity, inboundId, slots[0], w.End).Find(&rows).Error
+		g, inboundId, slots[0], w.End).Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}

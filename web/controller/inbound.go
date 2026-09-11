@@ -356,8 +356,16 @@ func (a *InboundController) getTrafficHistory(c *gin.Context) {
 	// （认不出的档位、不可解析的日期、start>end、跨度超 366 天、End 超过
 	// 现在）都在那个纯函数里，两处各写一份迟早会漂移，而漂移之后界面上的
 	// 「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
-	w := service.ParseWindow(form.Range, form.Start, form.End, loc, time.Now())
-	result, err := a.trafficHistoryService.HistoryWindow(id, w)
+	//
+	// now 取一次存下来给两处用，不调两次 time.Now()：HistoryWindow 要拿它
+	// 与窗口起点比较，判断该不该从小时桶回落日桶。两个 now 必须是同一个
+	// 时刻——起点恰好压在保留期边界上的窗口（管理员选了「正好 30 天前的
+	// 那一天」），两次调用之间哪怕只差几纳秒，也会让窗口按前一个 now 算、
+	// 判据按后一个 now 判，同一次请求里得出互相矛盾的结论，而没有任何一层
+	// 会报错。
+	now := time.Now()
+	w := service.ParseWindow(form.Range, form.Start, form.End, loc, now)
+	result, err := a.trafficHistoryService.HistoryWindow(id, w, now)
 	if err != nil {
 		jsonMsg(c, "获取用量历史", err)
 		return
@@ -417,8 +425,12 @@ func (a *InboundController) getIPUsage(c *gin.Context) {
 	// 三个入参原样交给 ParseWindow，controller 不自己解释其中任何一个：
 	// 全部钳制都在那个纯函数里，两处各写一份迟早会漂移，而漂移之后界面上
 	// 的「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
-	w := service.ParseWindow(form.Range, form.Start, form.End, loc, time.Now())
-	result, err := a.ipUsageService.Query(id, w)
+	//
+	// now 取一次存下来给两处用，理由同 getTrafficHistory：Query 要拿它与
+	// 窗口起点比较，判断这段时间是否已经超出按 IP 明细的保留期。
+	now := time.Now()
+	w := service.ParseWindow(form.Range, form.Start, form.End, loc, now)
+	result, err := a.ipUsageService.Query(id, w, now)
 	if err != nil {
 		jsonMsg(c, "获取来源用量", err)
 		return

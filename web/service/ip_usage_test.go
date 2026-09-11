@@ -22,17 +22,33 @@ func seedIPHour(t *testing.T, inboundId int, ip string, hourStart int64, up, dow
 	}
 }
 
+// recentWindow 返回一个「刚刚过去的 N 小时」窗口，以及配套的 now。
+//
+// 用例不能再用 Start:1000 这类绝对小值——新判据按起点与保留期比较，
+// 1970 年的起点会被判成早于保留期而整块降级，每一条用例都会测不到它
+// 本来要测的那段逻辑（而且断言会以「Entries 为空」的形式失败，看不出
+// 真正的原因是窗口本身被判成了历史区间）。
+func recentWindow(hours int) (TrafficWindow, time.Time) {
+	now := time.Now()
+	end := now.Truncate(time.Hour).Add(time.Hour)
+	start := end.Add(-time.Duration(hours) * time.Hour)
+	return TrafficWindow{
+		Start: start.Unix(), End: end.Unix(),
+		Granularity: model.GranularityHour,
+	}, now
+}
+
 // 基本聚合：同一个 IP 的多个小时求和，按用量降序排列。
 func TestIPUsageAggregatesAndSortsByUsage(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
-	seedIPHour(t, 1, "1.1.1.1", 3600, 100, 200)
-	seedIPHour(t, 1, "1.1.1.1", 7200, 300, 400)
-	seedIPHour(t, 1, "2.2.2.2", 3600, 5000, 6000)
+	seedIPHour(t, 1, "1.1.1.1", w.Start, 100, 200)
+	seedIPHour(t, 1, "1.1.1.1", w.Start+3600, 300, 400)
+	seedIPHour(t, 1, "2.2.2.2", w.Start, 5000, 6000)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -47,9 +63,9 @@ func TestIPUsageAggregatesAndSortsByUsage(t *testing.T) {
 		t.Errorf("1.1.1.1 的 Up/Down = %d/%d，期望 400/600（两个小时求和）",
 			got.Entries[1].Up, got.Entries[1].Down)
 	}
-	if got.Entries[1].LastSeen != 7200*1000 {
+	if want := (w.Start + 3600) * 1000; got.Entries[1].LastSeen != want {
 		t.Errorf("LastSeen = %d，期望 %d 毫秒（窗口内最后一个有记录的小时）",
-			got.Entries[1].LastSeen, 7200*1000)
+			got.Entries[1].LastSeen, want)
 	}
 }
 
@@ -59,13 +75,13 @@ func TestIPUsageAggregatesAndSortsByUsage(t *testing.T) {
 // 相加会大于「近 2 日」，而没有任何一层会报错。
 func TestIPUsageWindowIsHalfOpen(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 3600, End: 7200, Granularity: model.GranularityHour}
+	w, now := recentWindow(1)
 
-	seedIPHour(t, 1, "1.1.1.1", 3600, 10, 20) // 在窗口内
-	seedIPHour(t, 1, "1.1.1.1", 7200, 99, 99) // 恰好在右端，不算
+	seedIPHour(t, 1, "1.1.1.1", w.Start, 10, 20) // 在窗口内
+	seedIPHour(t, 1, "1.1.1.1", w.End, 99, 99)   // 恰好在右端，不算
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -80,13 +96,13 @@ func TestIPUsageWindowIsHalfOpen(t *testing.T) {
 // 别人的来源 IP，而表格渲染得完全合理。
 func TestIPUsageIsScopedToInbound(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
-	seedIPHour(t, 1, "1.1.1.1", 3600, 10, 20)
-	seedIPHour(t, 2, "9.9.9.9", 3600, 10, 20)
+	seedIPHour(t, 1, "1.1.1.1", w.Start, 10, 20)
+	seedIPHour(t, 2, "9.9.9.9", w.Start, 10, 20)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -101,12 +117,12 @@ func TestIPUsageIsScopedToInbound(t *testing.T) {
 // ——一条恰好在本小时没有字节增量的新行，与升级前写入的老行长得一模一样。
 func TestIPUsageSplitIsBatchWideNotPerRow(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
 	// 全是老行。
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
 		row := model.InboundIPHour{
-			InboundId: 1, IP: ip, HourStart: 3600,
+			InboundId: 1, IP: ip, HourStart: w.Start,
 			ActiveSeconds: 120, ActiveBytes: 1000, // ActiveUp/ActiveDown 为零值
 		}
 		if err := database.GetTrafficDB().Create(&row).Error; err != nil {
@@ -115,7 +131,7 @@ func TestIPUsageSplitIsBatchWideNotPerRow(t *testing.T) {
 	}
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -138,21 +154,21 @@ func TestIPUsageSplitIsBatchWideNotPerRow(t *testing.T) {
 // 所以这里必须同时断言「降级标志」和「总量」，只断言前者是测不出那个缺陷的。
 func TestIPUsageMixedBatchDegradesAndKeepsTotal(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
 	// 升级前的老行：ActiveBytes 有值，两个新列是零值。
 	old := model.InboundIPHour{
-		InboundId: 1, IP: "1.1.1.1", HourStart: 3600,
+		InboundId: 1, IP: "1.1.1.1", HourStart: w.Start,
 		ActiveSeconds: 120, ActiveBytes: 1000,
 	}
 	if err := database.GetTrafficDB().Create(&old).Error; err != nil {
 		t.Fatalf("写入老行: %v", err)
 	}
 	// 升级后的新行。
-	seedIPHour(t, 1, "2.2.2.2", 7200, 300, 700)
+	seedIPHour(t, 1, "2.2.2.2", w.Start+3600, 300, 700)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -170,7 +186,7 @@ func TestIPUsageMixedBatchDegradesAndKeepsTotal(t *testing.T) {
 	}
 }
 
-// 窗口超出 InboundIPHour 的保留期时整块降级：BeyondRetention 为 true、
+// 窗口起点超出 InboundIPHour 的保留期时整块降级：BeyondRetention 为 true、
 // Entries 为空、Reason 非空。
 //
 // 返回一张看起来正常的空表会让管理员以为这段时间没人用过。
@@ -185,7 +201,7 @@ func TestIPUsageBeyondRetentionDegradesWithReason(t *testing.T) {
 	seedIPHour(t, 1, "1.1.1.1", now.Add(-time.Hour).Unix(), 10, 20)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -200,25 +216,58 @@ func TestIPUsageBeyondRetentionDegradesWithReason(t *testing.T) {
 	}
 }
 
+// 一个跨度很短、但整体落在保留期之前的自定义区间同样必须降级。
+//
+// 这条钉的是判据本身：所有档位（today/3d/7d/30d/1y）的 End 都恒等于 now，
+// 「跨度 > 30 天」与「起点早于 30 天前」对它们是同一件事；自定义区间是
+// 第一次让窗口可以完全落在过去，按跨度判会让「3 个月前的那 10 天」逃过
+// 降级，返回空 Entries + 空 Reason，界面把它渲染成「这个人那段时间没用过」。
+func TestIPUsageShortPastWindowStillDegrades(t *testing.T) {
+	setupSharingTest(t)
+	now := time.Now()
+	start := now.AddDate(0, 0, -100)
+	w := TrafficWindow{
+		Start:       start.Unix(),
+		End:         start.AddDate(0, 0, 10).Unix(), // 跨度只有 10 天
+		Granularity: model.GranularityHour,
+	}
+	if w.SpanDays() > ipUsageMaxWindowDays {
+		t.Fatalf("前提不成立：这条用例要的是一个跨度在上限内的窗口，实际 %d 天", w.SpanDays())
+	}
+
+	var svc IPUsageService
+	got, err := svc.Query(1, w, now)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if !got.BeyondRetention {
+		t.Error("BeyondRetention = false，期望 true——窗口整体落在 30 天保留期之前，" +
+			"按 IP 的明细早已被清理，返回空表等于告诉管理员「没人用过」")
+	}
+	if got.Reason == "" {
+		t.Error("Reason 为空——「看不到」必须和「没有」能区分开")
+	}
+}
+
 // 长尾截断：超过上限时只返回前 N 条，其余合并成 Other，总量不缩水。
 func TestIPUsageTruncatesLongTailWithoutLosingTotal(t *testing.T) {
 	setupSharingTest(t)
-	// 窗口跨度必须 <= ipUsageMaxWindowDays(30)，否则 Query 会走 BeyondRetention
-	// 早退、Entries 为空，这条用例就根本测不到截断逻辑。1000~100000 约 1.15 天。
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	// 窗口起点必须落在 ipUsageMaxWindowDays(30) 之内，否则 Query 会走
+	// BeyondRetention 早退、Entries 为空，这条用例就根本测不到截断逻辑。
+	w, now := recentWindow(3)
 
 	var wantUp, wantDown int64
 	total := ipUsageMaxEntries + 30
 	for i := 0; i < total; i++ {
 		up := int64(total - i) // 递减，保证排序稳定可断言
 		down := up * 2
-		seedIPHour(t, 1, fmt.Sprintf("10.0.%d.%d", i/256, i%256), 3600, up, down)
+		seedIPHour(t, 1, fmt.Sprintf("10.0.%d.%d", i/256, i%256), w.Start, up, down)
 		wantUp += up
 		wantDown += down
 	}
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -245,13 +294,13 @@ func TestIPUsageTruncatesLongTailWithoutLosingTotal(t *testing.T) {
 // 用量相同时按 IP 字节序排，保证同一份输入永远给出同一个次序。
 func TestIPUsageOrderIsDeterministicOnTiedUsage(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
-	seedIPHour(t, 1, "2.2.2.2", 3600, 100, 100)
-	seedIPHour(t, 1, "1.1.1.1", 3600, 100, 100)
+	seedIPHour(t, 1, "2.2.2.2", w.Start, 100, 100)
+	seedIPHour(t, 1, "1.1.1.1", w.Start, 100, 100)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -267,19 +316,19 @@ func TestIPUsageOrderIsDeterministicOnTiedUsage(t *testing.T) {
 // 不该影响口径判定。
 func TestIPUsageZeroByteRowDoesNotForceDegrade(t *testing.T) {
 	setupSharingTest(t)
-	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+	w, now := recentWindow(3)
 
 	zero := model.InboundIPHour{
-		InboundId: 1, IP: "1.1.1.1", HourStart: 3600,
+		InboundId: 1, IP: "1.1.1.1", HourStart: w.Start,
 		ActiveSeconds: 120, ActiveBytes: 0,
 	}
 	if err := database.GetTrafficDB().Create(&zero).Error; err != nil {
 		t.Fatalf("写入零字节行: %v", err)
 	}
-	seedIPHour(t, 1, "2.2.2.2", 7200, 300, 700)
+	seedIPHour(t, 1, "2.2.2.2", w.Start+3600, 300, 700)
 
 	var svc IPUsageService
-	got, err := svc.Query(1, w)
+	got, err := svc.Query(1, w, now)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}

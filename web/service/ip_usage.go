@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"sort"
+	"time"
 
 	"a-ui/database"
 	"a-ui/database/model"
@@ -17,10 +18,14 @@ import (
 // 合计进 OtherCount/OtherUp/OtherDown，界面渲染成末尾一行：总量不能静默缩水。
 const ipUsageMaxEntries = 200
 
-// ipUsageBeyondRetention 是窗口超出 InboundIPHour 保留期时的说明。
+// ipUsageBeyondRetention 是窗口起点超出 InboundIPHour 保留期时的说明。
 //
 // 必须有这句话：返回一张看起来正常的空表，管理员会以为这段时间没人用过。
-const ipUsageBeyondRetention = "按来源 IP 的明细只保留 30 天，更长的区间只有入站合计用量"
+//
+// 文案说的是「更早的时段」而不是「更长的区间」——判据按起点而不是跨度
+//（见 Query），一个跨度只有 10 天但整体落在 3 个月前的自定义区间同样会
+// 降级，说成「更长的区间」会让管理员以为缩短区间就能看到，而那没有用。
+const ipUsageBeyondRetention = "按来源 IP 的明细只保留 30 天，更早的时段只有入站合计用量"
 
 // ipUsageNoSplitReason 是整批数据都来自升级前时的说明。
 //
@@ -98,10 +103,19 @@ func hasUnsplitBytes(rows []model.InboundIPHour) bool {
 //
 // 窗口超出保留期时整块降级（BeyondRetention），而不是返回一张空表：
 //「看不到」和「没有」必须能区分开。
-func (s *IPUsageService) Query(inboundId int, w TrafficWindow) (*IPUsageResult, error) {
+func (s *IPUsageService) Query(inboundId int, w TrafficWindow, now time.Time) (*IPUsageResult, error) {
 	result := &IPUsageResult{Entries: []IPUsageEntry{}}
 
-	if w.SpanDays() > ipUsageMaxWindowDays {
+	// 判据看的是**起点**而不是跨度。
+	//
+	// 所有档位（today/3d/7d/30d/1y）的 End 都恒等于 now，所以对它们而言
+	//「跨度 > 30 天」与「起点早于 30 天前」是同一件事；但自定义区间可以整个
+	// 落在过去——选「3 个月前的那 10 天」时跨度只有 10 天，按跨度判不会降级，
+	// 于是返回一个空 Entries 和空 Reason，界面把它渲染成「没有人用过」，而
+	// 真相是那段时间的行早就被保留期清掉了。按起点判同时覆盖两种情形：
+	// End ≤ now 恒成立（ParseWindow 的钳制五），所以凡跨度超 30 天的，
+	// 起点必然也早于 30 天前，原来那条判据能拦下的现在一条不漏。
+	if w.Start < now.AddDate(0, 0, -ipUsageMaxWindowDays).Unix() {
 		result.BeyondRetention = true
 		result.Reason = ipUsageBeyondRetention
 		return result, nil
