@@ -34,11 +34,14 @@
     </a-descriptions>
 
     <!-- 依据。0 分的是上下文证据，单独标注「不计分」——它们会对几乎每个
-         双设备用户命中，混在计分项里会让管理员以为自己在看证据。 -->
+         双设备用户命中，混在计分项里会让管理员以为自己在看证据。
+         中性标签传 undefined 而不是 'default'：后者不在 antd 的预设色里，会被
+         当成自定义颜色而渲染成白底白字（详见 inbounds.html 的 RISK_LEVEL_COLOR
+         注释），标签完全隐形且不报错。下面那个小时表里的中性标签同理。 -->
     <a-card v-if="sharingModal.risk.evidence.length > 0" size="small" title="风险依据"
             style="margin-bottom: 12px">
         <div v-for="e in sharingModal.risk.evidence" :key="e.code" style="margin-bottom: 8px">
-            <a-tag :color="e.points > 0 ? 'red' : 'default'">
+            <a-tag :color="e.points > 0 ? 'red' : undefined">
                 <template v-if="e.points > 0">+[[ e.points ]]</template>
                 <template v-else>不计分</template>
             </a-tag>
@@ -114,7 +117,7 @@
              :row-key="h => h.t" :pagination="{ pageSize: 10 }" size="small">
         <template slot="label" slot-scope="text, h">[[ h.label ]]</template>
         <template slot="entries" slot-scope="text, h">
-            <a-tag v-for="e in h.entries" :key="e.ip" :color="e.province ? 'red' : 'default'">
+            <a-tag v-for="e in h.entries" :key="e.ip" :color="e.province ? 'red' : undefined">
                 [[ e.province || '归属地未知' ]] · [[ e.ip ]] · [[ sharingModal.minutes(e.activeSeconds) ]] · [[ sizeFormat(e.activeBytes) ]]
             </a-tag>
         </template>
@@ -182,7 +185,9 @@
             return RISK_LEVEL_TEXT[this.risk.level] || this.risk.level;
         },
         riskColor() {
-            return RISK_LEVEL_COLOR[this.risk.level] || 'default';
+            // 未知等级落到 undefined 而不是 'default'，理由见 inbounds.html
+            // 里 RISK_LEVEL_COLOR 上方的注释。
+            return RISK_LEVEL_COLOR[this.risk.level];
         },
         // 画像键是给程序看的（CN|江苏省|中国电信），这里翻成人话。
         profileName(p) {

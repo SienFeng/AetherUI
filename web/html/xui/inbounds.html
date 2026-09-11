@@ -395,11 +395,17 @@
 <script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
 
-    // 等级 → 文案 / 颜色。低风险用中性色，但 ant-design-vue 的 default
-    // 标签是深灰字配浅灰底，对比度远高于 4.5:1——不要换成自定义的浅色，
-    // v1.23.0 踩过一次 1.84:1 的提示等于看不见。
+    // 等级 → 文案 / 颜色。低风险要的是 Tag 的原生中性样式，靠的是**不传 color**
+    // （undefined），**绝不能写 'default'**：ant-design-vue 1.7.2 的 Tag 预设色只有
+    // pink/red/yellow/orange/cyan/green/blue/purple/geekblue/magenta/volcano/gold/lime，
+    // 'default' 不在其中，于是被当成自定义颜色——getTagClassName 加上 ant-tag-has-color
+    // （该类强制 color:#fff、border-color:transparent），而 getTagStyle 吐出的
+    // background-color:default 是无效 CSS 被浏览器丢弃、背景留在 .ant-tag 默认的 #fafafa。
+    // 白底白字无边框，对比度 1.02:1，整个标签在页面上是隐形的，且不会有任何一层报错。
+    // 传 undefined 才落回原生中性样式：rgba(0,0,0,.65) on #fafafa，约 5.6:1。
+    // v1.23.0 为了修 rgba(0,0,0,.25) 的 1.84:1 才换成 'default'，结果对比度反而更低。
     const RISK_LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
-    const RISK_LEVEL_COLOR = { low: 'default', watch: 'orange', medium: 'orange', high: 'red', severe: 'red' };
+    const RISK_LEVEL_COLOR = { low: undefined, watch: 'orange', medium: 'orange', high: 'red', severe: 'red' };
 
     const columns = [{
         title: "操作",
@@ -607,8 +613,10 @@
             },
             riskColorOf(inboundId) {
                 const r = this.riskOf(inboundId);
-                if (r.state !== 'ready') return 'default';
-                return RISK_LEVEL_COLOR[r.level] || 'default';
+                // 非 ready 与未知等级都落到 undefined（不是 'default'，
+                // 理由见 RISK_LEVEL_COLOR 上方的注释）。
+                if (r.state !== 'ready') return undefined;
+                return RISK_LEVEL_COLOR[r.level];
             },
             riskTooltipOf(inboundId) {
                 const r = this.riskOf(inboundId);
