@@ -265,7 +265,9 @@ Total TrafficPoint `json:"total"`
 
 ### 8.3 图表实例的生命周期
 
-沿用现有约定：canvas 在 `$nextTick` 里取（`expandedRowRender` 动态渲染），折叠时 `chart.destroy()`。切换档位时复用同一个实例更新 data，不重建。
+沿用现有约定，一个字不改：canvas 在 `$nextTick` 里取（`expandedRowRender` 是动态渲染的，指令执行时元素还不存在），切换档位时 `destroy()` 再 `new Chart(...)`，折叠时也 `destroy()`。
+
+**刻意不改成「复用实例、只更新 data」**：切换档位不是热路径（一次点击一次重建），而 Chart 实例持有 canvas 引用与 resize 监听，复用要自己管好 data/labels/options 三者的同步，多出一条现在没有的出错路径。现有写法已经正确处理了销毁，不动它。
 
 ## 9. 明确不做
 
@@ -298,10 +300,11 @@ Total TrafficPoint `json:"total"`
 ## 11. 测试
 
 - **数据层**：`InboundIPHour` 加列后的 upsert 往返（含覆盖式更新只改本小时的值）；`sharingCell` 的 `upBytes + downBytes == bytes` 恒等；`deltaBytes` 回退（客户端重连、计数器归零）时两个新列都不产生负增量。
-- **共享检测不变**：一条回归测试，对同一份输入，`computeCoexist` / `hasActiveBytes` / `suggestRegions` 在加列前后结果逐字段一致。
+- **共享检测不变**：判据是**既有测试全绿且一条既有断言都不许改**——`go test ./web/service/ -run 'Sharing|Coexist|IPHour'`。写一条「加列前后一致」的新测试是做不到的：测试跑在加列之后的代码上，拿不到加列之前的行为做对照。任何既有断言变红都意味着改动越界了，改断言去迁就它就是把这道防线拆掉。
 - **区间钳制**：认不出的档位、不可解析的日期、`start > end`、跨度 > 366 天、`end` 超过今天，五种越界入参各一条，断言钳制结果而非报错。
 - **窗口计算**：`today` / `3d` / `7d` 在 UTC+8 下的 `[start, end)`；跨月与跨年边界；`1y` 选日粒度而 `30d` 选小时粒度。
 - **降级**：窗口超 30 天时 `BeyondRetention` 为 true 且 `Entries` 为空；整批老行时 `Split` 为 false；库不可用时 `Reason` 非空而不是返回空列表。
 - **合计自洽**：`Total` 严格等于 `Points` 各点之和（而不是一次独立 `SUM`）。
-- **表格合并**：在线 IP 与离线 IP 的 outer merge，在线在前、离线按用量降序在后；只在线不在库（降级 c）与只在库不在线（离线行）两种单边情形。
+- **表格合并**：本项目**没有前端测试框架**（无打包工具、无 jest/vitest），这一条只能靠手工验证清单，写在实现计划 Task 6 的最后一步里：在线在前、离线在后且标注、只在线不在库显示「统计中」、只在库不在线显示为离线行、切换档位时三个数据区一起变。服务端一侧的排序确定性由 `TestIPUsageOrderIsDeterministicOnTiedUsage` 覆盖。
+- **模板不破**：`go test ./web/ -run 'TestAllTemplatesParse|TestVueDirectivesLiveInsideAVueRoot'`。这是模板改动的唯一自动防线——`getHtmlTemplate` 吞掉 `ParseFS` 错误，语法错误的模板只会在渲染时报 template not found，`go build` 发现不了。
 - **长尾截断**：超过 200 个 IP 时 `Entries` 恰好 200 条，且 `OtherUp + 各条 Up` 等于截断前的总和——**截断不能让总量缩水**。
