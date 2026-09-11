@@ -9,9 +9,17 @@ import "time"
 // DELETE，而 SQLite 一个库只有一把写锁——混在主库里会让面板的每一次普通
 // 操作都去和它抢锁。
 //
-// 它只有一个消费者：判定「同一小时内，不同省份的 IP 是否在同时使用这个
-// 入站」。这个「并存」判据是区分「用户旅游」（位置迁移，不并存）与「节点
-// 被转卖」（位置并存）的唯一可靠信号，见设计文档 §1。
+// 它有两个消费者：
+//
+//  1. 判定「同一小时内，不同省份的 IP 是否在同时使用这个入站」。这个
+//     「并存」判据是区分「用户旅游」（位置迁移，不并存）与「节点被转卖」
+//     （位置并存）的唯一可靠信号，见设计文档 §1。
+//  2. 入站展开行里按来源 IP 的分时段用量（ActiveUp/ActiveDown），见
+//     docs/superpowers/specs/2026-09-10-per-ip-usage-window-design.md。
+//
+// 两个消费者对采集门槛的要求方向相反：并存判定要过滤噪声（60 秒落库门槛、
+// 50 IP/小时上限），用量统计希望不漏。冲突以并存判定为准——用量那一侧
+// 在界面上标注了口径，见该文档 §2.2 与 §8.2。
 type InboundIPHour struct {
 	Id int64 `json:"-" gorm:"primaryKey;autoIncrement"`
 
@@ -43,6 +51,19 @@ type InboundIPHour struct {
 	// 升级前写入的行这一列是 0。computeCoexist 据此整体切换口径而不是逐行
 	// 判断，理由见那里。
 	ActiveBytes int64 `json:"activeBytes"`
+
+	// ActiveUp/ActiveDown 是本小时该来源 IP 的上行、下行字节。
+	//
+	// 与 ActiveBytes 并列而不是取代它：ActiveBytes 是并存判定的门槛判据
+	// （coexistMinActiveBytes），而升级前写入的行这两个新列恒为 0、
+	// ActiveBytes 有值。若把 ActiveBytes 改成由两列相加得出，那批历史行的
+	// 判据会当场失效，共享检测的结论会在升级瞬间整体改变，而界面上没有
+	// 任何东西说明发生了什么。
+	//
+	// 升级前的行这两列恒为 0，消费侧据此整批降级（见 service.hasSplitBytes），
+	// 不逐行判断——理由与 hasActiveBytes 那条完全相同。
+	ActiveUp   int64 `json:"activeUp"`
+	ActiveDown int64 `json:"activeDown"`
 }
 
 // AlignHourUTC 把时刻对齐到它所在 UTC 小时的起点，返回 Unix 秒。

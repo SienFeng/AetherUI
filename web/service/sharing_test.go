@@ -381,3 +381,106 @@ func TestDetailUsesWindowForStatAndRetentionForHours(t *testing.T) {
 			got.Hours[len(got.Hours)-1].HourStart, model.AlignHourUTC(outOfWindow))
 	}
 }
+
+// 新增的上下行两列必须能写进去、读回来，且与 ActiveBytes 一致。
+//
+// 这三个值在采集侧是三个独立累加器（见 sharingCell），数值上恒有
+// up + down == bytes。测试钉住这个恒等式，将来谁把 ActiveBytes 改成
+// 计算值、或漏掉 DoUpdates 里的某一列，都会在这里变红。
+func TestUpsertIPHourRoundTripsSplitBytes(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+
+	f := sharingFlush{
+		InboundId: 7, IP: "1.2.3.4", Province: "江苏省",
+		HourStart: 1000, ActiveSeconds: 120,
+		ActiveBytes: 3000, ActiveUp: 1000, ActiveDown: 2000,
+	}
+	if err := upsertIPHour(db, f); err != nil {
+		t.Fatalf("upsertIPHour: %v", err)
+	}
+
+	rows := listIPHours(t)
+	if len(rows) != 1 {
+		t.Fatalf("行数 = %d，期望 1", len(rows))
+	}
+	got := rows[0]
+	if got.ActiveUp != 1000 || got.ActiveDown != 2000 {
+		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 1000/2000", got.ActiveUp, got.ActiveDown)
+	}
+	if got.ActiveUp+got.ActiveDown != got.ActiveBytes {
+		t.Errorf("上下行之和 %d 与 ActiveBytes %d 不等",
+			got.ActiveUp+got.ActiveDown, got.ActiveBytes)
+	}
+}
+
+// 覆盖式 upsert 必须把两个新列一起覆盖掉。
+//
+// 漏掉 DoUpdates 里的某一列，表现是「上行在涨、下行冻结在第一次写入的值」
+// ——不会报错，只会让分项永远偏小，而且只在同一小时内被写第二次时才出现。
+func TestUpsertIPHourOverwritesSplitBytes(t *testing.T) {
+	setupSharingTest(t)
+	db := database.GetTrafficDB()
+
+	first := sharingFlush{
+		InboundId: 7, IP: "1.2.3.4", HourStart: 1000,
+		ActiveSeconds: 60, ActiveBytes: 300, ActiveUp: 100, ActiveDown: 200,
+	}
+	if err := upsertIPHour(db, first); err != nil {
+		t.Fatalf("第一次 upsert: %v", err)
+	}
+	second := first
+	second.ActiveSeconds, second.ActiveBytes = 120, 900
+	second.ActiveUp, second.ActiveDown = 300, 600
+	if err := upsertIPHour(db, second); err != nil {
+		t.Fatalf("第二次 upsert: %v", err)
+	}
+
+	rows := listIPHours(t)
+	if len(rows) != 1 {
+		t.Fatalf("行数 = %d，期望 1（覆盖而非新增）", len(rows))
+	}
+	if rows[0].ActiveUp != 300 || rows[0].ActiveDown != 600 {
+		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 300/600",
+			rows[0].ActiveUp, rows[0].ActiveDown)
+	}
+}
+
+// 累加器必须并行维护三个计数器，且客户端重连（计数器回退）时不产生负增量。
+//
+// deltaBytes 对回退按全量计入，三个计数器都要走它——只给 bytes 走、
+// 给 up/down 直接相减的话，一次重连会让分项变成负数，界面显示成
+// 「-2.3 GB」而没有任何一层会拦住它。
+func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 10, 5, 0, 0, 0, time.UTC)
+
+	// 轮次与落库时机的关系必须算准，否则断言会落在一个空的返回值上：
+	// step=30、sharingFlushThreshold=60，flush 发生在 seconds-flushedAt>=60
+	// 的那一轮。
+	//   轮1 t=0   新建 cell 只设基线不计字节，seconds=30，30-0 <60  不落库
+	//   轮2 t=30  +1000/+2000，seconds=60，60-0>=60  落库，flushedAt=60
+	//   轮3 t=60  重连回退按全量 +100/+200，seconds=90，90-60=30<60  不落库
+	//   轮4 t=90  无增量，seconds=120，120-60=60>=60  落库 ← 断言这一轮
+	obs := func(up, down int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Up: up, Down: down}}
+	}
+	a.observe(base, obs(500, 900), 30)
+	a.observe(base.Add(30*time.Second), obs(1500, 2900), 30)
+	a.observe(base.Add(60*time.Second), obs(100, 200), 30)
+	flushes := a.observe(base.Add(90*time.Second), obs(100, 200), 30)
+
+	if len(flushes) != 1 {
+		t.Fatalf("落库条数 = %d，期望 1（第 4 轮累计 120 秒，距上次落库又满 60 秒）", len(flushes))
+	}
+	f := flushes[0]
+	// 轮2 的 +1000/+2000，加上轮3 重连按全量计入的 +100/+200。
+	// 若这里出现负数，说明 up/down 没走 deltaBytes 而是直接相减了。
+	if f.ActiveUp != 1100 || f.ActiveDown != 2200 {
+		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 1100/2200", f.ActiveUp, f.ActiveDown)
+	}
+	if f.ActiveUp+f.ActiveDown != f.ActiveBytes {
+		t.Errorf("上下行之和 %d 与 ActiveBytes %d 不等",
+			f.ActiveUp+f.ActiveDown, f.ActiveBytes)
+	}
+}

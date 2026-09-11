@@ -154,12 +154,15 @@ func upsertIPHour(db *gorm.DB, f sharingFlush) error {
 	row := &model.InboundIPHour{
 		InboundId: f.InboundId, IP: f.IP, HourStart: f.HourStart,
 		Province: f.Province, ActiveSeconds: f.ActiveSeconds, ActiveBytes: f.ActiveBytes,
+		ActiveUp: f.ActiveUp, ActiveDown: f.ActiveDown,
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "inbound_id"}, {Name: "ip"}, {Name: "hour_start"},
 		},
-		DoUpdates: clause.AssignmentColumns([]string{"province", "active_seconds", "active_bytes"}),
+		DoUpdates: clause.AssignmentColumns([]string{
+			"province", "active_seconds", "active_bytes", "active_up", "active_down",
+		}),
 	}).Create(row).Error
 }
 

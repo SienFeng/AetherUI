@@ -34,16 +34,23 @@ type sharingCell struct {
 	seconds   int // 本小时累计活跃秒数
 	flushedAt int // 上次落库时 seconds 的值
 
-	// bytes 是本小时累计的上下行字节，lastUp/lastDown 是上一轮观测到的
-	// 累计值——OnlineIP.Up/Down 给的是「本次在线期间的累计量」而不是增量，
-	// 差分必须在这里做。
+	// bytes 是本小时累计的上下行字节，upBytes/downBytes 是它的拆分；
+	// lastUp/lastDown 是上一轮观测到的累计值——OnlineIP.Up/Down 给的是
+	//「本次在线期间的累计量」而不是增量，差分必须在这里做。
+	//
+	// bytes 独立累加而不是写成 upBytes + downBytes：两者数值恒等，但独立
+	// 赋值让「共享检测的输入逐字节不变」这件事在 diff 上看得见，也避免
+	// 将来某次重构顺手把 bytes 删掉——它是 ActiveBytes 的唯一来源，而
+	// ActiveBytes 是并存判定的门槛判据。
 	//
 	// cell 新建那一轮只设基线、不计字节：进入观测之前的流量属于上一个小时
 	// 或上一次在线，算进来就是把别处的流量挪到本小时。代价是每小时的第一个
 	// 采样间隔（30 秒）的流量不计入，相对 1 MB 的判定门槛可以忽略。
-	bytes    int64
-	lastUp   int64
-	lastDown int64
+	bytes     int64
+	upBytes   int64
+	downBytes int64
+	lastUp    int64
+	lastDown  int64
 }
 
 // sharingObservation 是一轮采样里的一条「这个 IP 此刻正在实质使用这个入站」。
@@ -68,6 +75,8 @@ type sharingFlush struct {
 	HourStart     int64
 	ActiveSeconds int
 	ActiveBytes   int64
+	ActiveUp      int64
+	ActiveDown    int64
 }
 
 // sharingAccumulator 在内存里累计各来源 IP 的活跃时长，满门槛才产出落库项。
@@ -127,9 +136,13 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 		} else {
 			// 复用 online.go 的 deltaBytes：内核计数器只会单调增长，出现
 			// 回退只可能是客户端断开重连、计数器从头开始，此时按全量计入，
-			// 绝不产生负增量。
-			cell.bytes += int64(deltaBytes(uint64(o.Up), uint64(cell.lastUp), true))
-			cell.bytes += int64(deltaBytes(uint64(o.Down), uint64(cell.lastDown), true))
+			// 绝不产生负增量。三个计数器都必须走它——只给 bytes 走、给
+			// up/down 直接相减的话，一次重连会让分项变成负数。
+			du := int64(deltaBytes(uint64(o.Up), uint64(cell.lastUp), true))
+			dd := int64(deltaBytes(uint64(o.Down), uint64(cell.lastDown), true))
+			cell.upBytes += du
+			cell.downBytes += dd
+			cell.bytes += du + dd
 			cell.lastUp, cell.lastDown = o.Up, o.Down
 		}
 		// 省份以最近一次判定为准：归属地库更新后同一个 IP 的判定可能变，
@@ -144,6 +157,7 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 			out = append(out, sharingFlush{
 				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
 				HourStart: hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
+				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
 			})
 		}
 	}
@@ -162,6 +176,7 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 			out = append(out, sharingFlush{
 				InboundId: key.inboundId, IP: key.ip, Province: cell.province,
 				HourStart: a.hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
+				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
 			})
 		}
 	}
