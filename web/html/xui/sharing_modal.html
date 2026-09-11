@@ -2,9 +2,75 @@
 <a-modal id="sharing-modal" v-model="sharingModal.visible" :title="sharingModal.title"
          :closable="true" :mask-closable="true" width="900px" :footer="null">
     <a-alert v-if="sharingModal.stat.byIp" type="warning" show-icon style="margin-bottom: 12px"
-             message="当前只能按 IP 判定，不是按地区"
-             description="IP 归属地库未加载，或该入站的来源都是 IPv6（归属地库只收录 IPv4）。这种情况下同一个人的手机与宽带会被算成两个来源，误报率远高于按省份判定。">
+             message="当前只能按来源网络判定，不是按地区"
+             description="IP 归属地库未加载，或该入站的来源都是 IPv6（归属地库只收录 IPv4）。此时按网络段归并来源（IPv4 按 /24、IPv6 按 /64），同一台设备轮换出来的多个地址算一个来源；但同一个人的手机与宽带仍然是两个网络，误报率远高于按省份判定。">
     </a-alert>
+
+    <!-- 状态区。非 ready 时它是全部内容的主角：分数与等级一律不显示，
+         把「测不了」「还没测够」渲染成一个数字是这个功能最要防的错误。 -->
+    <a-alert v-if="sharingModal.risk.state === 'unobservable'" type="info" show-icon
+             style="margin-bottom: 12px"
+             message="这个入站无法评估共享风险"
+             :description="sharingModal.risk.reason + '。共享检测依赖内核连接表，这条路上不会有数据——这不表示该入站没有共享，只表示测不出来。'">
+    </a-alert>
+    <a-alert v-else-if="sharingModal.risk.state === 'learning'" type="info" show-icon
+             style="margin-bottom: 12px"
+             message="数据还不够下结论"
+             :description="'置信度 ' + sharingModal.risk.confidence + ' / 100，达到 60 才会给出风险等级。下面的网络画像与并存明细已经可以看，只是样本还不足以支撑一个分数。'">
+    </a-alert>
+    <a-alert v-else-if="sharingModal.risk.state === 'degraded'" type="warning" show-icon
+             style="margin-bottom: 12px"
+             message="拿不到来源归属地，跨地区判定不可用"
+             :description="'能解析出归属地的记录只占 ' + sharingModal.risk.geoCoverage + '%（归属地库只收录 IPv4）。当前只能按网络段粗判，这个口径的误报率高得多——同一个人的手机与宽带就是两个网络。'">
+    </a-alert>
+
+    <a-descriptions v-else size="small" bordered :column="2" style="margin-bottom: 12px">
+        <a-descriptions-item label="共享风险">
+            <a-tag :color="sharingModal.riskColor()">
+                [[ sharingModal.risk.score ]] / 100 · [[ sharingModal.riskText() ]]
+            </a-tag>
+        </a-descriptions-item>
+        <a-descriptions-item label="置信度">[[ sharingModal.risk.confidence ]] / 100</a-descriptions-item>
+    </a-descriptions>
+
+    <!-- 依据。0 分的是上下文证据，单独标注「不计分」——它们会对几乎每个
+         双设备用户命中，混在计分项里会让管理员以为自己在看证据。 -->
+    <a-card v-if="sharingModal.risk.evidence.length > 0" size="small" title="风险依据"
+            style="margin-bottom: 12px">
+        <div v-for="e in sharingModal.risk.evidence" :key="e.code" style="margin-bottom: 8px">
+            <a-tag :color="e.points > 0 ? 'red' : 'default'">
+                <template v-if="e.points > 0">+[[ e.points ]]</template>
+                <template v-else>不计分</template>
+            </a-tag>
+            <b>[[ e.title ]]</b>
+            <div style="color: rgba(0,0,0,.65); margin-left: 4px">[[ e.detail ]]</div>
+        </div>
+        <div v-if="sharingModal.risk.state === 'ready'" style="border-top: 1px solid #f0f0f0; padding-top: 8px">
+            合计 <b>[[ sharingModal.risk.score ]]</b> / 100
+            <span v-if="sharingModal.cappedByNoCoexist()" style="color: rgba(0,0,0,.65)">
+                （没有异地同时使用的证据，上限 69——错峰与「同一个人在两地规律往返」在网络层分不开）
+            </span>
+        </div>
+    </a-card>
+
+    <!-- 网络画像 -->
+    <a-card v-if="sharingModal.risk.profiles.length > 0" size="small" title="网络画像"
+            style="margin-bottom: 12px">
+        <a-table :columns="sharingModal.profileColumns" :data-source="sharingModal.risk.profiles"
+                 :row-key="p => p.key" :pagination="false" size="small">
+            <template slot="who" slot-scope="text, p">
+                [[ sharingModal.profileName(p) ]]
+                <a-tag v-if="p.hosting" color="purple">机房</a-tag>
+            </template>
+            <template slot="active" slot-scope="text, p">
+                [[ p.activeDays ]] 天 / [[ p.activeHours ]] 小时
+            </template>
+            <template slot="bytes" slot-scope="text, p">
+                [[ sizeFormat(p.bytes) ]]（[[ (p.trafficShare * 100).toFixed(0) ]]%）
+            </template>
+            <template slot="nets" slot-scope="text, p">[[ p.prefixes.length ]]</template>
+        </a-table>
+    </a-card>
 
     <a-descriptions size="small" bordered :column="2" style="margin-bottom: 12px">
         <a-descriptions-item label="并存时长">
@@ -12,7 +78,7 @@
             <span style="color: rgba(0,0,0,.45)">最近 [[ sharingModal.windowDays ]] 天</span>
         </a-descriptions-item>
         <a-descriptions-item :label="sharingModal.stat.byIp ? '涉及来源' : '涉及地区'">
-            <template v-if="sharingModal.stat.byIp">[[ sharingModal.stat.ips ]] 个 IP</template>
+            <template v-if="sharingModal.stat.byIp">[[ sharingModal.stat.ips ]] 个来源网络</template>
             <template v-else>
                 <a-tag v-for="p in sharingModal.stat.provinces" :key="p" color="red">[[ p ]]</a-tag>
             </template>
@@ -81,11 +147,19 @@
 </a-modal>
 <script>
 
+    // RISK_LEVEL_TEXT / RISK_LEVEL_COLOR 定义在 inbounds.html 的脚本里。
+    // 那个 <script> 在 inbounds.html 包含本模板的那一行之前执行，所以
+    // 这里引用得到。（注意：注释里也不能写出模板调用的字面写法，Go 的
+    // html/template 不认 JS 注释，会把它当成真的模板调用，自我递归。）两处共用一份是刻意的——分开定义迟早分叉，而分叉
+    // 之后列表里的「风险 高」与弹窗里的颜色对不上，不会有任何东西提醒你。
+    // **若将来调整 inbounds.html 里脚本与模板包含的先后顺序，这里会因为
+    // 顶层 const 的 TDZ 直接抛错**，不是静默失效。
     const sharingModal = {
         visible: false,
         title: '',
         inboundId: 0,
         stat: { hours: 0, provinces: [], byIp: false, ips: 0 },
+        risk: { state: 'learning', level: '', score: 0, confidence: 0, geoCoverage: 0, reason: '', evidence: [], profiles: [], coexist: { hours: 0 } },
         suggestion: { suggested: [], coexisting: [] },
         hours: [],
         windowDays: 7,
@@ -97,6 +171,29 @@
             { title: '时段', align: 'left', width: 160, scopedSlots: { customRender: 'label' } },
             { title: '同时活跃的来源', align: 'left', scopedSlots: { customRender: 'entries' } },
         ],
+        profileColumns: [
+            { title: '网络', align: 'left', scopedSlots: { customRender: 'who' } },
+            { title: '活跃', align: 'left', width: 140, scopedSlots: { customRender: 'active' } },
+            { title: '流量', align: 'left', width: 150, scopedSlots: { customRender: 'bytes' } },
+            { title: '网络段', align: 'right', width: 80, scopedSlots: { customRender: 'nets' } },
+        ],
+
+        riskText() {
+            return RISK_LEVEL_TEXT[this.risk.level] || this.risk.level;
+        },
+        riskColor() {
+            return RISK_LEVEL_COLOR[this.risk.level] || 'default';
+        },
+        // 画像键是给程序看的（CN|江苏省|中国电信），这里翻成人话。
+        profileName(p) {
+            if (p.province) return p.province + (p.isp ? ' · ' + p.isp : '');
+            if (p.country) return p.country + (p.isp ? ' · ' + p.isp : '');
+            return p.key;
+        },
+        // 钳制是否生效：没有任何异地同时使用的证据时分数上限 69。
+        cappedByNoCoexist() {
+            return this.risk.coexist && this.risk.coexist.hours === 0;
+        },
 
         isCoexisting(province) {
             return this.suggestion.coexisting.indexOf(province) >= 0;
@@ -117,19 +214,24 @@
             // 旧的建议，把甲的省份填进乙的入站——保存时省份名都合法，配置
             // 正常下发，没有任何一层会报错。
             this.stat = { hours: 0, provinces: [], byIp: false, ips: 0 };
+            this.risk = { state: 'learning', level: '', score: 0, confidence: 0, geoCoverage: 0, reason: '', evidence: [], profiles: [], coexist: { hours: 0 } };
             this.suggestion = { suggested: [], coexisting: [] };
             this.hours = [];
             this.visible = true;
 
-            const msg = await HttpUtil.post('/aui/inbound/sharing/detail/' + dbInbound.id);
+            // 一个请求拿全：风险详情内部把第一期的明细一并带上了，
+            // 前端不发两个。
+            const msg = await HttpUtil.post('/aui/inbound/sharing/risk/detail/' + dbInbound.id);
             if (seq !== this.reqSeq || !msg.success) {
                 return;
             }
-            this.stat = msg.obj.stat;
-            this.suggestion = msg.obj.suggestion;
-            this.hours = msg.obj.hours;
-            this.windowDays = msg.obj.windowDays;
-            this.retentionDays = msg.obj.retentionDays;
+            this.risk = msg.obj.risk;
+            const sharing = msg.obj.sharing || {};
+            this.stat = sharing.stat || this.stat;
+            this.suggestion = sharing.suggestion || this.suggestion;
+            this.hours = sharing.hours || [];
+            this.windowDays = sharing.windowDays || this.windowDays;
+            this.retentionDays = sharing.retentionDays || this.retentionDays;
         },
 
         // 只把建议填进编辑框，不直接保存：管理员确认后走现有的保存流程，

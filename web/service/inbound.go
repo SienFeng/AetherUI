@@ -189,6 +189,13 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := (&SharingService{}).DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的共享检测记录失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
+	// 共享风险快照同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个
+	// 建出来的入站会继承上一个用户的风险分——而这次继承来的还是一个带
+	// 「严重」字样的红色标记。失败只告警不阻断，理由同上，残留由每小时一次
+	// 的 PruneOrphans 兜底。
+	if err := (&SharingRiskService{}).DeleteByInbound(id); err != nil {
+		logger.Warning("清理入站的共享风险快照失败, 将由定时清理兜底, id:", id, "err:", err)
+	}
 	// 封禁同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
 	// 入站会凭空继承上一个用户的封禁名单。这里失败要阻断——残留封禁会让
 	// 新用户莫名其妙连不上，且没有定时任务兜底清理孤儿封禁。

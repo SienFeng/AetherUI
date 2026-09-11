@@ -23,6 +23,14 @@ const sharingSampleStep = 30
 // 够长能看出持续并存，够短不会让三个月前的一次旅游一直挂在告警上。
 const sharingWindowDays = 7
 
+// sharingIdentityVersion 标记身份快照（Country/Province/City/ISP）的采集
+// 版本，随行落库。升级前写入的行是 0，那些行的四个字段恒为空。
+//
+// 消费侧靠它切出一段「全部同版本」的连续数据来分析（设计文档 §4.2 的
+// Identity Epoch），而**绝不用当前 ipdb 给老行补齐**——那不是当时的画像。
+// 将来采集口径再变（比如加 ASN）时把它加一，老逻辑不受影响。
+const sharingIdentityVersion = 1
+
 // sharingRetentionDays 是行的保留期，比判定窗口长。
 //
 // 多出来的部分供明细页回溯，判断「一直在共享」还是「上个月出了趟差」。
@@ -82,7 +90,7 @@ func (s *SharingService) Sample(now time.Time) error {
 			obs = append(obs, sharingObservation{
 				InboundId: in.Id,
 				IP:        e.IP,
-				Province:  s.provinceOf(e.IP),
+				Meta:      s.networkMetaOf(e.IP),
 				Up:        e.Up,
 				Down:      e.Down,
 			})
@@ -120,29 +128,31 @@ func sharingObservable(e OnlineIP) bool {
 	return !e.Idle && !e.Blocked
 }
 
-// provinceOf 返回主判定省份，查不到时返回空串。
+// networkMetaOf 返回某个来源地址在此刻的网络画像快照，查不到时返回零值。
 //
-// 多个数据源对同一个 IP 可能给出不同省份，取第一个非空的：Sources() 的
-// 顺序是固定的，所以同一份库对同一个 IP 永远给出同一个答案。这里不能用
-// Multi 的并集语义——那是给地区限制放行用的，而一个 IP 不可能同时属于
-// 两个省，并集在这里没有意义。
+// 这里不能用 Multi 的并集语义——那是给地区限制放行用的，而一个 IP 不可能
+// 同时属于两个省，并集在这里没有意义。选取规则见 selectNetworkMeta：整组
+// 取自同一个源，不跨源拼装。
 //
-// IPv6 恒返回空串：ipdb 只收录 IPv4（util/ipdb/ipdb.go:64）。
-func (s *SharingService) provinceOf(ipStr string) string {
+// IPv6 恒返回零值：ipdb 只收录 IPv4（util/ipdb/ipdb.go:85）。
+func (s *SharingService) networkMetaOf(ipStr string) NetworkMeta {
 	db := s.ipdbService.DB()
 	if db == nil {
-		return ""
+		return NetworkMeta{}
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		return ""
+		return NetworkMeta{}
 	}
-	for _, sl := range db.Lookup(ip) {
-		if sl.Location.Region != "" {
-			return sl.Location.Region
-		}
+	found := db.Lookup(ip)
+	locs := make([]sourceLocation, 0, len(found))
+	for _, sl := range found {
+		locs = append(locs, sourceLocation{
+			Country: sl.Location.Country, Region: sl.Location.Region,
+			City: sl.Location.City, ISP: sl.Location.ISP,
+		})
 	}
-	return ""
+	return selectNetworkMeta(locs)
 }
 
 // upsertIPHour 覆盖式写入一行。
@@ -153,15 +163,21 @@ func (s *SharingService) provinceOf(ipStr string) string {
 func upsertIPHour(db *gorm.DB, f sharingFlush) error {
 	row := &model.InboundIPHour{
 		InboundId: f.InboundId, IP: f.IP, HourStart: f.HourStart,
-		Province: f.Province, ActiveSeconds: f.ActiveSeconds, ActiveBytes: f.ActiveBytes,
+		Province: f.Meta.Province, Country: f.Meta.Country, City: f.Meta.City, ISP: f.Meta.ISP,
+		IdentityVersion: sharingIdentityVersion,
+		ActiveSeconds:   f.ActiveSeconds, ActiveBytes: f.ActiveBytes,
 		ActiveUp: f.ActiveUp, ActiveDown: f.ActiveDown,
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "inbound_id"}, {Name: "ip"}, {Name: "hour_start"},
 		},
+		// 身份快照列必须一起进 DoUpdates。漏掉的话只有该 (入站,IP,小时)
+		// 的**第一次**写入带画像，此后每次覆盖都保留首次那份——而首次
+		// 恰恰是最可能查不到归属地的那一次（cell 刚建、库可能还没加载完）。
 		DoUpdates: clause.AssignmentColumns([]string{
-			"province", "active_seconds", "active_bytes", "active_up", "active_down",
+			"province", "country", "city", "isp", "identity_version",
+			"active_seconds", "active_bytes", "active_up", "active_down",
 		}),
 	}).Create(row).Error
 }

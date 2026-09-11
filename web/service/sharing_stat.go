@@ -37,13 +37,22 @@ type CoexistStat struct {
 	// Provinces 是并存中出现过的省份，升序去重。
 	Provinces []string `json:"provinces"`
 	// ByIP 为 true 表示窗口内所有记录的 Province 都为空（IPv6 来源或归属地
-	// 库未加载），判定降级为 IP 口径：Hours 变成「同一小时有 ≥2 个不同 IP」
-	// 的小时数，IPs 是涉及的 IP 数。
+	// 库未加载），判定降级为**网络族**口径：Hours 变成「同一小时有 ≥2 个
+	// 不同网络族」的小时数，Sources 是涉及的网络族数。
 	//
-	// 降级口径误报率高得多——同一个人的手机和宽带就是两个 IP。界面必须
-	// 明说当前是降级状态，别让管理员以为「3 IP 并存」是抓到了转卖。
+	// 降级口径误报率仍然高得多——同一个人的手机和宽带就是两个网络族。界面
+	// 必须明说当前是降级状态，别让管理员以为「3 个来源并存」是抓到了转卖。
 	ByIP bool `json:"byIp"`
-	IPs  int  `json:"ips"`
+
+	// Sources 是降级口径下涉及的**网络族**数，不是地址数——v4 按 /24、
+	// v6 按 /64 归并（networkFamilyKey）。改动前这里数的是原始地址，而
+	// IPv6 每设备一个地址、privacy extensions 还会轮换临时地址，同一台
+	// 设备能被数成好几个来源。
+	//
+	// json tag 仍是 `ips`：改名会动到 /sharing/summary 与 /sharing/detail
+	// 两个已有接口的契约，而它们的唯一价值就是稳定。Go 侧的字段名按实际
+	// 含义取，让代码里读到的东西是对的。
+	Sources int `json:"ips"`
 }
 
 // Flagged 判断这份统计是否达到显示下限。
@@ -106,17 +115,22 @@ func computeCoexistGated(rows []model.InboundIPHour, byteGate bool) CoexistStat 
 	}
 
 	byHourProvince := map[int64]map[string]bool{}
-	byHourIP := map[int64]map[string]bool{}
+	byHourFamily := map[int64]map[string]bool{}
 	for _, r := range rows {
-		// 省份口径与 IP 降级口径都过这道门槛。降级口径的误报率本来就更高
-		// （同一个人的手机与宽带就是两个 IP），放宽只会让它更不可信。
+		// 省份口径与降级口径都过这道门槛。降级口径的误报率本来就更高
+		// （同一个人的手机与宽带就是两个网络），放宽只会让它更不可信。
 		if byteGate && r.ActiveBytes < coexistMinActiveBytes {
 			continue
 		}
-		if byHourIP[r.HourStart] == nil {
-			byHourIP[r.HourStart] = map[string]bool{}
+		if byHourFamily[r.HourStart] == nil {
+			byHourFamily[r.HourStart] = map[string]bool{}
 		}
-		byHourIP[r.HourStart][r.IP] = true
+		// 按网络族而不是原始地址分桶：IPv6 每设备一个地址，privacy
+		// extensions（RFC 8981）还会在**同一个 /64 内**轮换临时地址，
+		// 按地址数会把一台设备数成好几个来源。算不出网络族时回退原始
+		// 地址——一条认不出的地址仍然是一个来源，吞掉它是把误报换成
+		// 漏报，方向反了。
+		byHourFamily[r.HourStart][networkFamilyOrIP(r.IP)] = true
 		if r.Province == "" {
 			continue
 		}
@@ -129,7 +143,7 @@ func computeCoexistGated(rows []model.InboundIPHour, byteGate bool) CoexistStat 
 	stat := CoexistStat{ByIP: !hasProvince}
 	group := byHourProvince
 	if stat.ByIP {
-		group = byHourIP
+		group = byHourFamily
 	}
 
 	seen := map[string]bool{}
@@ -151,7 +165,7 @@ func computeCoexistGated(rows []model.InboundIPHour, byteGate bool) CoexistStat 
 	}
 	sort.Strings(values)
 	if stat.ByIP {
-		stat.IPs = len(values)
+		stat.Sources = len(values)
 	} else {
 		stat.Provinces = values
 	}

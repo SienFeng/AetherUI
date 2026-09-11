@@ -8,8 +8,19 @@ import (
 	"a-ui/database/model"
 )
 
+// provinceMeta 造一份「中国某省」的画像快照。
+//
+// 带上 Country 而不是只设 Province：生产采集走 selectNetworkMeta，它对中国段
+// 必然同时给出这两个字段，测试输入不该是一个生产上造不出来的形状。
+func provinceMeta(province string) NetworkMeta {
+	if province == "" {
+		return NetworkMeta{}
+	}
+	return NetworkMeta{Country: "中国", Province: province}
+}
+
 func oneObs() []sharingObservation {
-	return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏"}}
+	return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}}
 }
 
 // 入站端口在公网上会被扫。若每个建立过连接的来源都落一行，一次端口扫描
@@ -83,7 +94,7 @@ func TestAccumulatorCapsRowsPerInboundPerHour(t *testing.T) {
 		obs = append(obs, sharingObservation{
 			InboundId: 1,
 			IP:        fmt.Sprintf("10.0.%v.%v", i/256, i%256),
-			Province:  "江苏",
+			Meta:      provinceMeta("江苏"),
 		})
 	}
 	a.observe(base, obs, 30)
@@ -98,7 +109,7 @@ func TestAccumulatorCapsRowsPerInboundPerHour(t *testing.T) {
 func TestAccumulatorCapDoesNotEvictExistingSources(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
-	real := sharingObservation{InboundId: 1, IP: "1.1.1.1", Province: "江苏"}
+	real := sharingObservation{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}
 
 	a.observe(base, []sharingObservation{real}, 30)
 
@@ -107,7 +118,7 @@ func TestAccumulatorCapDoesNotEvictExistingSources(t *testing.T) {
 		flood = append(flood, sharingObservation{
 			InboundId: 1,
 			IP:        fmt.Sprintf("10.0.%v.%v", i/256, i%256),
-			Province:  "江苏",
+			Meta:      provinceMeta("江苏"),
 		})
 	}
 	got := a.observe(base.Add(30*time.Second), flood, 30)
@@ -131,8 +142,8 @@ func TestAccumulatorForgetDropsInboundBeforeRollover(t *testing.T) {
 	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 	obs := []sharingObservation{
-		{InboundId: 1, IP: "1.1.1.1", Province: "江苏"},
-		{InboundId: 2, IP: "2.2.2.2", Province: "上海"},
+		{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")},
+		{InboundId: 2, IP: "2.2.2.2", Meta: provinceMeta("上海")},
 	}
 
 	// 攒到 90 秒：60 秒时落过一次，剩下的 30 秒还挂在内存里。
@@ -169,7 +180,7 @@ func TestAccumulatorAccumulatesByteDeltas(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	obs := func(up, down int64) []sharingObservation {
-		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up, Down: down}}
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up, Down: down}}
 	}
 
 	// 首轮：cell 新建，基线设成 (1000, 2000)，本轮计 0 字节。
@@ -194,7 +205,7 @@ func TestAccumulatorHandlesCounterResetOnReconnect(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	obs := func(up, down int64) []sharingObservation {
-		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up, Down: down}}
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up, Down: down}}
 	}
 
 	a.observe(base, obs(10000, 20000), 30)
@@ -215,7 +226,7 @@ func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
 	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 	obs := func(up int64) []sharingObservation {
-		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Province: "江苏", Up: up}}
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up}}
 	}
 
 	a.observe(h10, obs(0), 30)
@@ -230,5 +241,64 @@ func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
 	}
 	if got[0].ActiveBytes != 9000 {
 		t.Errorf("收尾记录 ActiveBytes = %d, want 9000", got[0].ActiveBytes)
+	}
+}
+
+// 画像必须整组替换，不能逐字段填。逐字段填会在归属地库更新的那一刻拼出
+// 「旧省份 + 新城市」这种跨源组合，而画像键正是按这一组字段拼的。
+func TestAccumulatorReplacesMetaAsAWhole(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+
+	old := NetworkMeta{Country: "中国", Province: "北京市", City: "北京市", ISP: "中国移动"}
+	fresh := NetworkMeta{Country: "中国", Province: "湖北省", City: "武汉市", ISP: "中国联通"}
+
+	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: old}}, 30)
+	got := a.observe(base.Add(30*time.Second),
+		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: fresh}}, 30)
+
+	if len(got) != 1 {
+		t.Fatalf("落库 %v 条, want 1", len(got))
+	}
+	if got[0].Meta != fresh {
+		t.Errorf("Meta = %+v, want 整组换成 %+v（逐字段填会留下旧省份配新城市）", got[0].Meta, fresh)
+	}
+}
+
+// 查不到归属地时不能覆盖已经判定出来的画像：一次查库失败（库正在热替换、
+// 或这一轮恰好没加载完）不该把已知信息抹掉。
+func TestAccumulatorKeepsKnownMetaWhenLookupYieldsNothing(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	known := NetworkMeta{Country: "中国", Province: "江苏省", City: "南通市", ISP: "中国电信"}
+
+	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: known}}, 30)
+	got := a.observe(base.Add(30*time.Second),
+		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: NetworkMeta{}}}, 30)
+
+	if len(got) != 1 {
+		t.Fatalf("落库 %v 条, want 1", len(got))
+	}
+	if got[0].Meta != known {
+		t.Errorf("Meta = %+v, want 保留 %+v", got[0].Meta, known)
+	}
+}
+
+// 境外来源只有 Country（ipdb.normalize 对非中国段丢掉省市），它必须能更新
+// 画像。判据若写成「Province 非空才更新」，境外来源的画像会永远停在零值。
+func TestAccumulatorAcceptsForeignMetaWithoutProvince(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	foreign := NetworkMeta{Country: "美国", ISP: "Amazon"}
+
+	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: NetworkMeta{}}}, 30)
+	got := a.observe(base.Add(30*time.Second),
+		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: foreign}}, 30)
+
+	if len(got) != 1 {
+		t.Fatalf("落库 %v 条, want 1", len(got))
+	}
+	if got[0].Meta != foreign {
+		t.Errorf("Meta = %+v, want %+v", got[0].Meta, foreign)
 	}
 }

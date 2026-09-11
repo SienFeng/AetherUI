@@ -222,6 +222,11 @@ func InitTrafficDB(dbPath string) error {
 	}
 	// 计量池与域名统计同库：重算时要读 DomainStat 的聚合结果，生成期要读
 	// 池，两者始终一起用；孤儿清理也挂在同一个每小时任务里。
+	// 共享风险快照与共享检测的小时桶同库：它是那张表的纯派生物，
+	// traffic 库丢了风险分就该跟着失效。
+	if err := tdb.AutoMigrate(&model.InboundRiskSnapshot{}); err != nil {
+		return err
+	}
 	if err := tdb.AutoMigrate(&model.MeterDomain{}); err != nil {
 		return err
 	}

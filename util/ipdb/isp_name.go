@@ -113,3 +113,32 @@ func CanonicalISP(raw string, foreign bool) string {
 	// 有效信息，映射表不可能穷举。
 	return s
 }
+
+// ChinaCountry 是本包对「中国」这个国家名的写法。
+//
+// 导出出来是因为消费侧要按「是不是中国段」分支：只有中国段带省份
+// （normalize 对境外丢掉 Region/City），而各处自己写一个 "中国" 字面量
+// 迟早与这里漂开，漂开之后的表现是境内段被当成境外段处理——省份信息
+// 凭空消失，而没有任何一层会报错。
+const ChinaCountry = chinaCountry
+
+// idcNames 是 idcKeywords 里全部归一名的集合，供 IsKnownIDC 判定。
+//
+// 从 idcKeywords 生成而不是另写一份：两份名单迟早漂开，而漂开之后
+// CanonicalISP 认出来的厂商这里认不出，画像会把一台云服务器当成普通
+// 接入网络，风险信号静默失效。
+var idcNames = func() map[string]bool {
+	m := make(map[string]bool, len(idcKeywords))
+	for _, e := range idcKeywords {
+		m[e.name] = true
+	}
+	return m
+}()
+
+// IsKnownIDC 判断一个**已经归一过**的运营商名是不是知名 IDC / 云厂商。
+//
+// 入参必须是 CanonicalISP 的输出，不是上游原始值：原始值里
+// "Amazon Technologies Inc." 这类全称在这里不会命中。
+func IsKnownIDC(canonicalISP string) bool {
+	return canonicalISP != "" && idcNames[canonicalISP]
+}

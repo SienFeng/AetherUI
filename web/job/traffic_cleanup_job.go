@@ -20,6 +20,7 @@ type TrafficCleanupJob struct {
 	sharingService    service.SharingService
 	domainStatService service.DomainStatService
 	meterPoolService  service.MeterPoolService
+	riskService       service.SharingRiskService
 }
 
 func NewTrafficCleanupJob() *TrafficCleanupJob {
@@ -97,5 +98,14 @@ func (j *TrafficCleanupJob) Run() {
 		logger.Warning("清理孤儿计量池记录失败:", err)
 	} else if pruned > 0 {
 		logger.Warningf("清理了 %v 条已删除入站遗留的计量池记录", pruned)
+	}
+
+	// 风险快照同库，孤儿清理同样挂这里。残留的快照会绑到下一个建出来的
+	// 入站上，而它带的是一个红色的「严重」标记——比其它几张表的残留更
+	// 容易让管理员做出错误处置。
+	if pruned, err := j.riskService.PruneOrphans(); err != nil {
+		logger.Warning("清理孤儿共享风险快照失败:", err)
+	} else if pruned > 0 {
+		logger.Warningf("清理了 %v 条已删除入站遗留的共享风险快照", pruned)
 	}
 }

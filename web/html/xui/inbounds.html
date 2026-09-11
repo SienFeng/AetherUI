@@ -309,28 +309,20 @@
                                     <a-tag v-for="r in dbInbound.regionList" :key="r" color="purple">[[ r ]]</a-tag>
                                 </template>
                                 <a-tag v-else color="green">不限制</a-tag>
-                                <!-- 并存标记只报事实、不做分级：分级等于面板替管理员
-                                     下判断，而阈值调不好告警就变噪声。 -->
-                                <a-tooltip v-if="coexistOf(dbInbound.id)">
-                                    <template slot="title">
-                                        最近 7 天有 [[ coexistOf(dbInbound.id).hours ]] 小时，
-                                        <template v-if="coexistOf(dbInbound.id).byIp">
-                                            不同 IP 在同时使用这个节点（归属地库未加载，只能按 IP 判定）
-                                        </template>
-                                        <template v-else>
-                                            不同地区的 IP 在同时使用这个节点
-                                        </template>
-                                        。点击查看明细。
-                                    </template>
-                                    <a-tag color="orange" style="cursor: pointer"
+                                <!-- 风险 chip **每个入站都渲染**，包括「低」「学习中」
+                                     「不可评估」。它是这个入站唯一的弹窗入口，只给高风险
+                                     的打标等于让其余状态永远打不开；而「不可评估」恰恰是
+                                     最需要被看到的一个——那表示这条路上永远不会有数据，
+                                     把它显示成「低风险」是一个确信的错误结论。
+
+                                     低风险那几个用中性色，但对比度必须够：v1.23.0 修过一次
+                                     rgba(0,0,0,.25) 的提示，对比度 1.84:1，等于看不见。 -->
+                                <a-tooltip>
+                                    <template slot="title">[[ riskTooltipOf(dbInbound.id) ]]</template>
+                                    <a-tag :color="riskColorOf(dbInbound.id)"
+                                           style="cursor: pointer"
                                            @click.stop="showSharing(dbInbound)">
-                                        并存 [[ coexistOf(dbInbound.id).hours ]]h /
-                                        <template v-if="coexistOf(dbInbound.id).byIp">
-                                            [[ coexistOf(dbInbound.id).ips ]] IP
-                                        </template>
-                                        <template v-else>
-                                            [[ coexistOf(dbInbound.id).provinces.length ]] 省
-                                        </template>
+                                        [[ riskLabelOf(dbInbound.id) ]]
                                     </a-tag>
                                 </a-tooltip>
                             </template>
@@ -402,6 +394,12 @@
 <script src="{{ .base_path }}assets/chart.js/chart.umd.min.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
+
+    // 等级 → 文案 / 颜色。低风险用中性色，但 ant-design-vue 的 default
+    // 标签是深灰字配浅灰底，对比度远高于 4.5:1——不要换成自定义的浅色，
+    // v1.23.0 踩过一次 1.84:1 的提示等于看不见。
+    const RISK_LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
+    const RISK_LEVEL_COLOR = { low: 'default', watch: 'orange', medium: 'orange', high: 'red', severe: 'red' };
 
     const columns = [{
         title: "操作",
@@ -578,7 +576,7 @@
             onlineCountTimer: null,
             // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
             kickBanSeconds: 0,
-            coexistMap: {},
+            riskMap: {},
         },
         methods: {
             loading(spinning=true) {
@@ -592,17 +590,50 @@
                     return;
                 }
                 this.setInbounds(msg.obj);
-                this.loadCoexist();
+                this.loadRisk();
             },
-            coexistOf(inboundId) {
-                return this.coexistMap[inboundId] || null;
+            // 快照缺失时返回 learning，**绝不回落成 low**：面板刚启动、
+            // 入站刚建好、或引擎版本变了都会走到这里，把这些显示成「低风险」
+            // 等于报一个没算过的结论。
+            riskOf(inboundId) {
+                return this.riskMap[inboundId] || { state: 'learning', level: '', score: 0 };
             },
-            // 单独拉一次，不塞进入站列表主接口：这个聚合查询失败时列表要
-            // 照常渲染，只是没有并存标记。
-            async loadCoexist() {
-                const msg = await HttpUtil.post('/aui/inbound/sharing/summary');
+            riskLabelOf(inboundId) {
+                const r = this.riskOf(inboundId);
+                if (r.state === 'unobservable') return '不可评估';
+                if (r.state === 'degraded') return '降级';
+                if (r.state !== 'ready') return '学习中';
+                return '风险 ' + (RISK_LEVEL_TEXT[r.level] || r.level);
+            },
+            riskColorOf(inboundId) {
+                const r = this.riskOf(inboundId);
+                if (r.state !== 'ready') return 'default';
+                return RISK_LEVEL_COLOR[r.level] || 'default';
+            },
+            riskTooltipOf(inboundId) {
+                const r = this.riskOf(inboundId);
+                if (r.state === 'unobservable') {
+                    return (r.reason || '这个入站的传输方式无法从内核连接表观测') + '。点击查看说明。';
+                }
+                if (r.state === 'degraded') {
+                    return '拿不到来源的归属地（归属地库只收录 IPv4），跨地区判定全部不可用，'
+                        + '当前只能按网络段粗判。点击查看明细。';
+                }
+                if (r.state !== 'ready') {
+                    return '数据还不够下结论，正在积累。点击查看当前进度与已观测到的网络。';
+                }
+                return '共享风险 ' + r.score + ' / 100，置信度 ' + r.confidence + ' / 100。点击查看依据。';
+            },
+            // 单独拉一次，不塞进入站列表主接口：这个查询失败时列表要照常
+            // 渲染，只是 chip 全部回落成「学习中」。
+            //
+            // 只读快照、不做任何计算——它每次加载入站列表都跑。列表页不再
+            // 单独拉 /sharing/summary：并存统计已经含在风险评估里，而弹窗的
+            // 那一份来自 risk/detail。那个接口本身保留不动（契约）。
+            async loadRisk() {
+                const msg = await HttpUtil.post('/aui/inbound/sharing/risk/summary');
                 if (msg.success) {
-                    this.coexistMap = msg.obj || {};
+                    this.riskMap = msg.obj || {};
                 }
             },
             // 包一层方法而不是在模板里直接写 sharingModal.show(...)：

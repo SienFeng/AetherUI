@@ -7,6 +7,7 @@ import (
 	"time"
 	"a-ui/database/model"
 	"a-ui/logger"
+	"a-ui/util/common"
 	"a-ui/web/global"
 	"a-ui/web/service"
 	"a-ui/web/session"
@@ -21,6 +22,7 @@ type InboundController struct {
 	geoService            service.GeoService
 	trafficHistoryService service.TrafficHistoryService
 	sharingService        service.SharingService
+	sharingRiskService    service.SharingRiskService
 	ipUsageService        service.IPUsageService
 	settingService        service.SettingService
 }
@@ -52,6 +54,8 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/ipUsage/:id", a.getIPUsage)
 	g.POST("/sharing/summary", a.getSharingSummary)
 	g.POST("/sharing/detail/:id", a.getSharingDetail)
+	g.POST("/sharing/risk/summary", a.getSharingRiskSummary)
+	g.POST("/sharing/risk/detail/:id", a.getSharingRiskDetail)
 	g.POST("/provinces", a.getProvinces)
 }
 
@@ -450,6 +454,59 @@ func (a *InboundController) getSharingSummary(c *gin.Context) {
 		return
 	}
 	jsonObj(c, result, nil)
+}
+
+// getSharingRiskSummary 返回各入站的风险快照。
+//
+// 只读 Snapshot，不做任何计算：它每次加载入站列表都跑。与
+// getSharingSummary 同理，不塞进列表主接口——这样天然 fail open，查询
+// 失败时列表照常渲染。
+func (a *InboundController) getSharingRiskSummary(c *gin.Context) {
+	result, err := a.sharingRiskService.Summary()
+	if err != nil {
+		jsonMsg(c, "获取共享风险统计", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getSharingRiskDetail 返回某入站的风险详情。
+//
+// **现场跑一次完整分析**，与 SharingRiskJob 共用同一条 Analyze 路径，保证
+// 界面上的分数与依据永远同源。单入站按需请求跑一次完全够快，而且拿到的比
+// Snapshot 新（最多差一个 Job 周期）。
+func (a *InboundController) getSharingRiskDetail(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取共享风险明细", err)
+		return
+	}
+	// id 必须为正：SharingService.windowRows 把 0 当作「读全部入站」的
+	// 哨兵值，不挡住会静默返回跨所有入站聚合出来的结果。
+	if id <= 0 {
+		jsonMsg(c, "获取共享风险明细", common.NewError("入站 id 非法:", id))
+		return
+	}
+	inbound, err := a.inboundService.GetInbound(id)
+	if err != nil {
+		jsonMsg(c, "获取共享风险明细", err)
+		return
+	}
+	now := time.Now()
+	risk, err := a.sharingRiskService.Analyze(inbound, now)
+	if err != nil {
+		jsonMsg(c, "获取共享风险明细", err)
+		return
+	}
+	// 把第一期的明细一并带上，前端一次请求拿全，不发两个。取不到时只记
+	// 空值不报错：风险部分本身已经完整，为一段辅助信息让整个弹窗打不开
+	// 不划算。
+	detail, err := a.sharingService.Detail(id, now)
+	if err != nil {
+		logger.Warning("共享风险明细附带的并存明细取不到, 入站", id, ":", err)
+		detail = &service.SharingDetail{Hours: []service.SharingDetailHour{}}
+	}
+	jsonObj(c, gin.H{"risk": risk, "sharing": detail}, nil)
 }
 
 // getSharingDetail 返回某入站的共享检测明细。
