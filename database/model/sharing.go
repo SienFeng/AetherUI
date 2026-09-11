@@ -60,7 +60,7 @@ type InboundIPHour struct {
 	// 判据会当场失效，共享检测的结论会在升级瞬间整体改变，而界面上没有
 	// 任何东西说明发生了什么。
 	//
-	// 升级前的行这两列恒为 0，消费侧据此整批降级（见 service.hasSplitBytes），
+	// 升级前的行这两列恒为 0，消费侧据此整批降级（见 service.hasUnsplitBytes），
 	// 不逐行判断——理由与 hasActiveBytes 那条完全相同。
 	ActiveUp   int64 `json:"activeUp"`
 	ActiveDown int64 `json:"activeDown"`

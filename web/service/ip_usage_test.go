@@ -129,11 +129,18 @@ func TestIPUsageSplitIsBatchWideNotPerRow(t *testing.T) {
 	}
 }
 
-// 只要批里有一行带拆分，整批就按有拆分处理。
-func TestIPUsageSplitTrueWhenAnyRowHasSplit(t *testing.T) {
+// 混合批次（窗口里同时有升级前的老行与升级后的新行）必须整批按合计口径，
+// 且**一个字节都不能丢**。
+//
+// 这条用例是为一个真实缺陷写的：判据曾经是 any 语义（任一行有拆分即
+// Split=true），于是混合批次里老行走了拆分分支，而它的 ActiveUp/ActiveDown
+// 恒为 0，ActiveBytes 从未被计入——流量凭空消失，没有任何一层会报错。
+// 所以这里必须同时断言「降级标志」和「总量」，只断言前者是测不出那个缺陷的。
+func TestIPUsageMixedBatchDegradesAndKeepsTotal(t *testing.T) {
 	setupSharingTest(t)
 	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
 
+	// 升级前的老行：ActiveBytes 有值，两个新列是零值。
 	old := model.InboundIPHour{
 		InboundId: 1, IP: "1.1.1.1", HourStart: 3600,
 		ActiveSeconds: 120, ActiveBytes: 1000,
@@ -141,6 +148,7 @@ func TestIPUsageSplitTrueWhenAnyRowHasSplit(t *testing.T) {
 	if err := database.GetTrafficDB().Create(&old).Error; err != nil {
 		t.Fatalf("写入老行: %v", err)
 	}
+	// 升级后的新行。
 	seedIPHour(t, 1, "2.2.2.2", 7200, 300, 700)
 
 	var svc IPUsageService
@@ -148,8 +156,17 @@ func TestIPUsageSplitTrueWhenAnyRowHasSplit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if !got.Split {
-		t.Error("Split = false，期望 true（批里有带拆分的行）")
+	if got.Split {
+		t.Error("Split = true，期望 false（批里有一行拆不出，整批应按合计口径）")
+	}
+
+	var total int64
+	for _, e := range got.Entries {
+		total += e.Up + e.Down
+	}
+	if total != 2000 {
+		t.Errorf("总量 = %d，期望 2000（老行 1000 + 新行 300+700）——"+
+			"老行的字节不能因为拆不出上下行就凭空消失", total)
 	}
 }
 
@@ -240,5 +257,33 @@ func TestIPUsageOrderIsDeterministicOnTiedUsage(t *testing.T) {
 	}
 	if got.Entries[0].IP != "1.1.1.1" {
 		t.Errorf("同量时第一条 = %s，期望字节序在前的 1.1.1.1", got.Entries[0].IP)
+	}
+}
+
+// 一条「有活跃时长但本小时零字节」的新行不得把整批拖进降级。
+//
+// 它与升级前的老行在数值上完全无法区分（ActiveUp/ActiveDown 都是 0），
+// 但它的 ActiveBytes 也是 0——在两种口径下都贡献 0，不影响求和，也就
+// 不该影响口径判定。
+func TestIPUsageZeroByteRowDoesNotForceDegrade(t *testing.T) {
+	setupSharingTest(t)
+	w := TrafficWindow{Start: 1000, End: 100000, Granularity: model.GranularityHour}
+
+	zero := model.InboundIPHour{
+		InboundId: 1, IP: "1.1.1.1", HourStart: 3600,
+		ActiveSeconds: 120, ActiveBytes: 0,
+	}
+	if err := database.GetTrafficDB().Create(&zero).Error; err != nil {
+		t.Fatalf("写入零字节行: %v", err)
+	}
+	seedIPHour(t, 1, "2.2.2.2", 7200, 300, 700)
+
+	var svc IPUsageService
+	got, err := svc.Query(1, w)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if !got.Split {
+		t.Error("Split = false，期望 true（零字节行不该把纯新数据的批次拖进降级）")
 	}
 }

@@ -74,14 +74,20 @@ type IPUsageService struct {
 	ipdbService IPDBService
 }
 
-// hasSplitBytes 判断这批行里有没有上下行拆分，即该不该按拆分口径显示。
+// hasUnsplitBytes 判断这批行里是否存在「有字节、却拆不出上下行」的行。
 //
-// 判据是「整批数据里有没有拆分」而不是逐行判断——与 hasActiveBytes 那条
-// 完全同构：一条恰好在本小时没有字节增量的新行，与升级前写入的老行长得
-// 一模一样，逐行判会让同一张表里两种口径混排。
-func hasSplitBytes(rows []model.InboundIPHour) bool {
+// 存在即整批按合计口径显示：只要有一行拆不出，这个窗口的上下行拆分就不
+// 可靠，此时给出「↑X ↓Y」这种看起来精确的数字，实际掺着别的行的合计，
+// 比明确降级成一个合计数更糟——本项目一贯宁可降级也不给误导性数据。
+//
+// **必须跳过 ActiveBytes == 0 的行**：一条「满了 60 秒门槛但本小时零字节」
+// 的新行，与升级前写入的老行在数值上完全无法区分（这正是 sharing_stat.go
+// 里 hasActiveBytes 那段注释描述的同一个歧义）。零字节行在两种口径下都
+// 贡献 0、不影响求和，也就不该影响口径判定；不跳过的话它会毒化判据，把
+// 一批纯新数据也拖进降级。
+func hasUnsplitBytes(rows []model.InboundIPHour) bool {
 	for _, r := range rows {
-		if r.ActiveUp > 0 || r.ActiveDown > 0 {
+		if r.ActiveBytes > 0 && r.ActiveUp == 0 && r.ActiveDown == 0 {
 			return true
 		}
 	}
@@ -114,7 +120,7 @@ func (s *IPUsageService) Query(inboundId int, w TrafficWindow) (*IPUsageResult, 
 		return nil, err
 	}
 
-	result.Split = hasSplitBytes(rows)
+	result.Split = !hasUnsplitBytes(rows)
 
 	type agg struct {
 		up, down int64
