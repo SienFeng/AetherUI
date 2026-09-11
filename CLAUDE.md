@@ -343,6 +343,24 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 服务端负责补零、对齐刻度、格式化 x 轴标签、排序 Top N，前端只管画；`top` 的上界钳制在 controller（`InboundController.getTrafficOverview`，1~50，越界回落 12）——controller 是不可信输入的边界，请求体里一个失控的数字不该让 service 拉出远超所需的系列。**标签在服务端格式化**是因为时区也在服务端：让浏览器自己格式化，访问者所在时区一变，图上的时间就和面板设置的时区对不上了。
 
+## 按来源 IP 的分时段用量
+
+入站展开行里每个来源 IP 的用量列，窗口由展开行顶部那个控件决定（今日 / 近 3 日 / 近 7 日 / 近 30 日 / 近 1 年 / 自定义区间）。设计文档在 `docs/superpowers/specs/2026-09-10-per-ip-usage-window-design.md`。
+
+**数据复用 `InboundIPHour`（共享检测那张表）的 `ActiveUp`/`ActiveDown` 两列**，不是新表。`ActiveBytes` 保留为独立累加的字段、**绝不能改成两列之和**：它是并存判定的门槛判据（`coexistMinActiveBytes`），而升级前写入的行两个新列恒为 0，改成计算值会让那批历史行的判据当场失效，共享检测的结论在升级瞬间整体改变而界面上没有任何提示。这张表因此有了第二个消费者，两者对采集门槛的要求方向相反（并存判定要过滤噪声，用量统计希望不漏），冲突一律以并存判定为准。
+
+**按来源 IP 的用量永远对不上入站总量，这是物理约束不是缺陷。** xray 的 Stats API 只有 `inbound`/`outbound`/`user` 三类计数器（`xray/process.go` 的 `parseTraffics`），没有来源 IP 维度，所以按 IP 的用量只能来自内核连接表——那是含 TLS 记录层与 WS 帧开销的链路层字节，与 xray 统计的应用层字节天生差 5~15%。叠加三条采集门槛（每小时漏首个采样间隔约 0.83%、单个 IP 某小时活跃不满 60 秒整段丢弃且不跨小时结转、单入站单小时 50 个 IP 上限），分项之和系统性偏小。**界面上那条列头 tooltip 是这个约束的唯一出口，不要因为觉得啰嗦而删掉它**——删掉之后管理员对不上账时没有任何解释来源。
+
+**窗口翻译与全部钳制在 `service.ParseWindow`（`web/service/traffic_window.go`），controller 只负责调用。** 五类钳制：认不出的档位、不可解析的日期、`start > end`、跨度超 366 天、`End` 超过现在，一律钳制不报错。controller 不得自己解释其中任何一个入参——两处各写一份迟早漂移，而漂移之后界面上的「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
+
+**`TrafficHistoryResult.Total` 是 `Points` 各点之和，不是一次独立的 SQL `SUM`。** `History` 用 `bucket_start` 精确相等去 join 按当前时区重算的刻度，而独立 `SUM` 不受对齐约束——管理员改过时区之后会出现「图是一条平的 0 线、数字却有值」，那是最难解释的一种不一致。
+
+**展开行的表格语义是「窗口内活跃过的来源 IP」，不是「当前在线」。** 只列在线的会让「近 30 日」这种窗口漏掉大半来源，而表格渲染得完全合理——那对「是不是被共享了」给出的是反向误导的答案。在线的排前、离线的排后，两者不混排。离线行的连接数与实时网速显示 `—` 而不是 0。
+
+**新接口 `/aui/inbound/ipUsage/:id` 刻意不并进 `/onlines/:id`**：后者每 2 秒轮询一次且按展开的入站数逐个请求（`inbounds.html` 的 `syncOnlineTimer`），并进去等于每 2 秒对一张 30 天的表做一次聚合查询再乘以展开的入站数。
+
+**系统状态页的总览图（`Overview`）没有跟着改**，仍用旧的 `TrafficRange` 四档滑动窗口。因此面板里同时存在两套时间语义：入站展开行是日历（今日 / 近 N 日），系统状态页是滑动（24 小时 / 7 天 / 30 天 / 1 年）。两个页面之间不互相引用同一个数字，不会产生对账问题，但确实是不一致；将来若把系统状态页也改掉，`rangeSpec` 与 `Range24h` 等常量可以一并退役。
+
 ## 安装向导与 Caddy 拓扑
 
 `install.sh` 的向导（`setup_wizard`）在装好面板后问一次「有没有已解析到本机的域名」，答案决定面板此后的暴露方式；改这条链路前先读 `docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md`，本节只讲落地后的约束和踩过的坑。
@@ -471,3 +489,4 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 - **cron 任务的 panic 现在会被截住，但不是所有 job 都有第二层。** `web/web.go` 的 `cron.New(...)` 已配 `cron.WithChain(cron.Recover(cronLogger{}))`：任何挂在这个 cron 实例上的任务（含每 10 秒的 xray 重启消费任务）发生 panic，都会被这层截住、由 `cronLogger` 带完整堆栈记进面板日志，不再杀掉整个面板进程。目前 `access_log_job.go` 的两个任务、`concurrency_job.go`、`shaping_job.go`、`traffic_cleanup_job.go` 在各自 `Run` 的首行加了 `defer common.Recover("<任务名>")`（`util/common/err.go`）作为更早的一层——它抢在 cron 那层之前拿到 panic，日志里能带上具体任务名，而不是只知道「某个 job 挂了」；`check_inbound_job.go`、`check_xray_running_job.go`、`ipdb_update_job.go` 的 `Run`、`subscription_job.go`、`xray_traffic_job.go` 还没有加这层，完全依赖 cron 那层通用兜底。**`ipdb_update_job.go` 的 `RunInitial` 是个不同的东西**：它由 `Server.startTask` 起的 goroutine 直接调用、根本不经过 cron，所以那层通用兜底覆盖不到，它首行的 `defer common.Recover` 不是「更早的一层」而是**唯一的一层**，去掉就是一个 panic 杀掉整个面板进程。`startTask` 里另一条同形的 goroutine（`PanelVersionJob` 的延迟首次触发）至今没有这层保护。**这不是「新 job 才有、旧 job 没有」的演进结果**——`ipdb_update_job.go`（没有这层）与 `concurrency_job.go`、`shaping_job.go`（都有）是同一个提交（`601a344`）加的，谁有谁没有只是各自实现时的疏漏，不代表任何时间线，不要据此推断「后来加的就补齐了」。**新增 job 一律照带 Recover 的写法办理**：`Run` 首行 `defer common.Recover("<任务名>")`。在这些路径上写代码仍要格外注意 nil map、越界等运行时 panic——多一层 recover 挡住的是「杀死整个进程」，挡不住「这一轮任务后续逻辑没跑完」。
 - **退出计量池的 tag，它在 xray 里的 stats 计数器永远不会被回收。** `app/proxyman/outbound/outbound.go:131` 的 `RemoveHandler` 只从 handler 表里删对象，不注销计数器；`app/stats/command` 的 `StatsService` 也没有任何注销 RPC（`command.proto:85-92` 逐条核对过）。所以每个退过池的 `a-ui-meter-*` tag，它的两个计数器会留到 xray 进程退出为止，并且每次 `QueryStats` 都被返回一遍（值为 0）。好的一面是退池到下一次采集之间的残余字节不会丢；坏的一面是计数器集合只增不减。`MeterPoolService` 用**观测式**上限兜底：`RecordMetered` 数出「带计量前缀但不在当前池内」的条目数，超过 `meterStaleCounterLimit`（2000）就冻结换池（已在池内的域名照常计量），xray 任何一次整进程重启都会清空计数器、自动解冻。观测式而不是记账式，是因为它天然跨重启自愈——记账式要面板去跟踪「上一次重启是什么时候」，而那个状态它其实拿不准。
 - **`DomainStat` 同一行里的 `Count` 与 `Up`/`Down` 不是同一批连接的统计量。** `Count` 来自访问日志，记的是**连接建立**时刻；`Up`/`Down` 来自每 10 秒一次的出站计数器采样，记的是**流量发生**时刻。一条 10:59 建立、传到 11:30 的连接，它的 1 次计数落在 10 点桶，字节分落在 10 点和 11 点两个桶。所以一个域名完全可能出现 `Count=0` 而 `Up=5GB` 的行——这不是 bug，把两者强行对齐需要连接级的字节数，而 xray 不提供（`common/log/access.go` 的 `AccessMessage` 没有任何长度字段，而且这条日志在连接**建立**时就写出了）。
+- **半小时偏移时区下「今日」的边界切不准。** `InboundIPHour` 按 `AlignHourUTC` 对齐到 UTC 整点，而用量窗口的边界按面板时区算。整小时偏移的时区（含 UTC+8）下本地 0 点必然落在 UTC 整点上，能精确切；半小时或一刻钟偏移的时区（Asia/Kolkata、Asia/Tehran）下本地 0 点是 UTC 的半点，**边界那一个小时的字节会整块算进或算出**。刻意不改对齐方式——`database/model/sharing.go` 写了当初选 UTC 的理由：按本地时区对齐会重蹈 `TrafficBucket` 那个「管理员改一次时区、旧桶与新刻度不相交、历史整段消失」的坑。误差上界是窗口边界上的一个小时（「今日」是 1/24，「近 7 日」是 1/168）。
