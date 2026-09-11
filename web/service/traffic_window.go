@@ -55,9 +55,6 @@ type TrafficWindow struct {
 	Start       int64
 	End         int64
 	Granularity model.TrafficGranularity
-	// Label 是给界面显示的范围描述，如「2026-09-04 ~ 2026-09-10」。
-	// 在服务端格式化，理由与 formatLabels 相同：时区的权威在服务端。
-	Label string
 }
 
 // SpanDays 返回窗口覆盖的天数（向上取整）。
@@ -141,7 +138,5 @@ func ParseWindow(name, startDate, endDate string, loc *time.Location, now time.T
 		Start:       start.Unix(),
 		End:         end.Unix(),
 		Granularity: g,
-		Label: start.Format(windowDateLayout) + " ~ " +
-			end.Add(-time.Second).Format(windowDateLayout),
 	}
 }
