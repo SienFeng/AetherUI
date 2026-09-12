@@ -31,15 +31,15 @@
      *   灰 = 未知 / 关闭 / 未配置 / 离线 / 无限制
      * 特别注意「无限制 / 无限期 / 不限速」是中性事实，用 muted 不用 success。 */
     --aui-primary:       #1266D6;   /* 白字 5.39:1（antd 原本的 #1890FF 只有 3.24:1） */
-    --aui-primary-hover: #0F58BC;   /* 白字 6.30:1 */
+    --aui-primary-hover: #0F58BC;   /* 白字 6.68:1 */
     --aui-primary-active:#0B4694;   /* 白字 9.06:1 */
     --aui-primary-soft:  #EFF6FF;   /* 选中行底、轻量 chip 底 */
     --aui-primary-line:  #BFDBFE;
     --aui-ring:          rgba(18, 102, 214, .14);
 
-    --aui-success:       #15803D;   /* 白底 5.4:1 */
-    --aui-warning:       #B45309;   /* 白底 5.3:1 */
-    --aui-danger:        #B91C1C;   /* 白底 7.0:1 */
+    --aui-success:       #15803D;   /* 白底 5.02:1 */
+    --aui-warning:       #B45309;   /* 白底 5.02:1 */
+    --aui-danger:        #B91C1C;   /* 白底 6.47:1 */
     --aui-muted:         #64748B;   /* 白底 4.8:1 */
 
     /* ── Radius ────────────────────────────────────────────────────
@@ -659,7 +659,7 @@ button:focus-visible,
 .stat-card.tone-geek .stat-icon   { color: #2f54eb; background: #f0f5ff; }
 .stat-card.tone-ok .stat-icon     { color: var(--aui-success); background: #F0FDF4; }
 
-/* --aui-danger #B91C1C 在白底上是 7.0:1，比改动前的 #cf1322（5.57:1）更稳。 */
+/* --aui-danger #B91C1C 在白底上是 6.47:1，比改动前的 #cf1322（5.57:1）更稳。 */
 .stat-card.tone-alert {
     border-color: #FECACA;
     background: #FEF2F2;
@@ -872,7 +872,7 @@ button.status-badge:hover {
  * 用橙色而不是红色：分歧是「哪个源可信不确定」，不是错误。实测过一次
  * ip2region 判错、纯真判对，红色会让管理员以为是故障。
  *
- * 现在取 --aui-warning（5.3:1），比改动前的 #d46b08（3.56:1）更稳，
+ * 现在取 --aui-warning（5.02:1），比改动前的 #d46b08（3.56:1）更稳，
  * 同时让「存疑」与全站其他警告态用同一个橙。 */
 .ip-divergent {
     border-bottom: 1px dashed var(--aui-warning);
