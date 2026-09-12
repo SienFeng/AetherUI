@@ -863,6 +863,94 @@ button.status-badge:hover {
     color: var(--aui-text-3);
 }
 
+/* ── 系统状态页：资源条与指标格 ──────────────────────────────────────
+ * 改动前 CPU / 内存 / swap / 硬盘是四个 a-progress type="dashboard" 的大圆环，
+ * 占掉整个首屏。它们回答的是「这台机器累不累」，而管理员打开面板最先要知道
+ * 的是「Xray 还在跑吗、有没有人异常」——CPU 不该是第一视觉焦点。
+ * 现在降级成一行细条，圆环省下来的位置让给业务指标。 */
+.res-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 16px 24px;
+}
+
+.res-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.res-name {
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.res-value {
+    font-size: 13px;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.res-bar {
+    height: 6px;
+    margin-top: 6px;
+    border-radius: 3px;
+    background: var(--aui-line);
+    overflow: hidden;
+}
+
+.res-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--aui-primary);
+    transition: width var(--aui-dur) var(--aui-ease);
+}
+
+/* 三档都按「填充色 vs 槽色 #E2E8F0」过 SC 1.4.11 的 3:1，
+ * 且百分比数字就在正上方——颜色不是唯一的信息来源。 */
+.res-bar-fill.is-warn   { background: var(--aui-warning); }
+.res-bar-fill.is-danger { background: var(--aui-danger); }
+
+@media (prefers-reduced-motion: reduce) {
+    .res-bar-fill { transition: none; }
+}
+
+/* 没有百分比的那些量（负载、连接数、网速、累计流量） */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px 24px;
+}
+
+.metric-name {
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.metric-value {
+    margin-top: 2px;
+    font-size: 15px;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* 卡片分段标题，与展开行的 .row-section-title 同一档视觉重量 */
+.card-section + .card-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.card-section-title {
+    margin-bottom: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
 /* ── 设置页：左侧二级导航 ────────────────────────────────────────────
  * 改动前是 9 个横向 tab，已经排满一行；再加 2FA / 备份 / 告警 / API 这类
  * 分类一定撑不住。antd 1.7.2 的 a-tabs 自带 tab-position="left"，
