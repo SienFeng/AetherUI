@@ -43,6 +43,12 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
+            <div class="page-header">
+                <div class="page-heading">
+                    <h1 class="page-title">面板设置</h1>
+                    <p class="page-description">面板自身、Xray、网络与日志的配置</p>
+                </div>
+            </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
                 <a-space direction="vertical">
                     <a-space direction="horizontal">

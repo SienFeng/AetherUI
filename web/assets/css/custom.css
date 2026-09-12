@@ -369,6 +369,95 @@ button:focus-visible,
     flex: 1 1 auto;
 }
 
+/* ── 侧栏品牌头 ────────────────────────────────────────────────────
+ * 改动前侧栏顶部直接就是第一个菜单项，整个面板没有任何一处写着自己叫什么。
+ * 标识与登录页用同一个内联 SVG（一个字母 A），不引图标字体也不用 emoji。
+ *
+ * 高度 56px 与 antd 菜单项（40px）+ 上下留白对齐，不额外占视觉重量。
+ * 侧栏是 #001529 深底，这里的浅色都要按深底重新核算，不能照搬内页那套。 */
+.sider-brand {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 56px;
+    padding: 0 16px;
+    box-sizing: border-box;
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+
+.sider-brand-mark {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--aui-r-sm);
+    /* 深底上用主色的高亮档，#1266D6 本身在 #001529 上偏暗 */
+    color: #7FB0F0;
+    background: rgba(18, 102, 214, .22);
+    border: 1px solid rgba(127, 176, 240, .28);
+}
+
+/* rgba(255,255,255,.85) 在 #001529 上约 14:1 */
+.sider-brand-name {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+    color: rgba(255, 255, 255, .85);
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* ── 统一页面标题区 ────────────────────────────────────────────────
+ * 改动前四个内页打开后第一个元素直接是内容，全站没有任何一处页面标题。
+ * 侧栏选中态是唯一的「我在哪」线索，而侧栏在 breakpoint="md" 下
+ * collapsed-width="0" 会整个消失——手机上打开面板，屏幕上没有任何一个字
+ * 说明这是哪一页。
+ *
+ * 刻意压扁：标题 20px 而不是 h1 常见的 32px，整块连描述一起约 52px。
+ * 这是管理后台，垂直空间要留给表格。 */
+.page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.page-heading {
+    min-width: 0;
+}
+
+/* 三个属性都必须显式写：antd 的 base reset 里有
+ * h1,h2,...,h6 { margin-bottom:.5em; color:rgba(0,0,0,.85); font-weight:500 }，
+ * 不盖掉的话标题会比正文还灰、还细，底下还多出半个字高的空隙。
+ * 登录页的 .login-title 注释里记过同一个坑。 */
+.page-title {
+    margin: 0;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+.page-description {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--aui-text-2);
+}
+
+.page-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .sider-version {
     flex: 0 0 auto;
     padding: 12px 16px;

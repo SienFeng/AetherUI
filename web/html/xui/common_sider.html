@@ -41,6 +41,20 @@
      腾出来的宽度留给入站列表——那张表的列已经排到十四列。布局是 flex，
      内容区会自动变宽，没有任何一处硬编码过侧栏宽度。 -->
 <a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0" :width="160">
+    <!-- 品牌头。改动前侧栏顶部直接就是第一个菜单项，整个面板没有一处写着
+         自己叫什么。标识与登录页 .panel-brand 用同一个内联 SVG。
+         aria-hidden：紧挨着就是「AetherUI」这几个字，读屏软件念两遍是噪音。 -->
+    <div class="sider-brand">
+        <span class="sider-brand-mark" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
+                <path d="M8.3 14.2h7.4"/>
+            </svg>
+        </span>
+        <span class="sider-brand-name">AetherUI</span>
+    </div>
     <a-menu theme="dark" mode="inline" :selected-keys="['{{ .request_uri }}']"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}

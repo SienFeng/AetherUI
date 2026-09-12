@@ -88,6 +88,12 @@
     {{template "commonSider" .}}
     <a-layout id="content-layout">
         <a-layout-content>
+            <div class="page-header">
+                <div class="page-heading">
+                    <h1 class="page-title">分流管理</h1>
+                    <p class="page-description">按用户与域名把流量分配到不同的出站节点</p>
+                </div>
+            </div>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
                 <transition name="list" appear>
                     <div class="stat-row">
