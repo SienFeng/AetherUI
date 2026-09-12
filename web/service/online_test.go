@@ -630,20 +630,79 @@ func TestLocateWithIPDBReportsNoDisagreementWhenSourcesAgree(t *testing.T) {
 	}
 }
 
-// 归属地与运营商各自独立判定分歧：两个源完全可能在城市名上有出入而运营商
-// 一致（真实数据就是如此——123.171.5.200 在 ip2region 是「聊城市」、
-// 纯真库是「聊城」，而两边的运营商都是电信）。
+// 归属地与运营商各自独立判定分歧：两个源完全可能在城市上有出入而运营商一致
+// （真实数据就是如此），把它们绑成一个判定会让「存疑」失去指向。
+//
+// 载体必须是**实质不同**的两个城市。这条测试原本用「聊城市」/「聊城」做载体，
+// 而那一对现在归一后相等、按设计不再报分歧，见下面那组用例。
 func TestLocateWithIPDBJudgesLocationAndISPIndependently(t *testing.T) {
 	svc := ipdbServiceWithSources(t,
-		buildISPTestDBWithCity(t, "聊城市", "中国电信"),
-		buildISPTestDBWithCity(t, "聊城", "中国电信"))
+		buildISPTestDBWithCity(t, "南京市", "中国电信"),
+		buildISPTestDBWithCity(t, "扬州市", "中国电信"))
 
 	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
 	if got.LocationAlt == "" {
-		t.Error("LocationAlt 为空，城市名不同应当报分歧")
+		t.Error("LocationAlt 为空，两个源指向不同城市时应当报分歧")
 	}
 	if got.ISPAlt != "" {
 		t.Errorf("ISPAlt = %q, 运营商相同时不该报分歧", got.ISPAlt)
+	}
+}
+
+// 同一个城市的两种写法不算分歧。
+//
+// 实测：对 bin/ 下两份真实库随机采样 30 万个 IPv4，双库均命中中国段的
+// 27,662 个样本里 87.9% 会亮「存疑」，其中 59.3% 纯粹是「南京市」与「南京」
+// 差一个字、11.1% 是一方给不出城市。不归一的话这个标签对几乎每个 IP 亮起，
+// 真正的分歧（省份不同或城市实质不同，合计 17.6%）反而淹没在噪音里。
+func TestLocateWithIPDBIgnoresCitySpellingDifferences(t *testing.T) {
+	for _, c := range []struct{ name, a, b string }{
+		{"行政建制后缀", "聊城市", "聊城"},
+		{"自治州全称与简称", "伊犁哈萨克自治州", "伊犁"},
+		{"一方给不出城市", "南京市", ""},
+		{"另一方给不出城市", "", "南京市"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			svc := ipdbServiceWithSources(t,
+				buildISPTestDBWithCity(t, c.a, "中国电信"),
+				buildISPTestDBWithCity(t, c.b, "中国电信"))
+
+			got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+			if got.LocationAlt != "" {
+				t.Errorf("LocationAlt = %q, %q 与 %q 是同一个地方，不该报分歧",
+					got.LocationAlt, c.a, c.b)
+			}
+		})
+	}
+}
+
+// 归一只作用于判定，界面上仍然显示各源的原始写法——管理员要看到的是数据
+// 本来的样子，不是本项目为了比较而造出来的形态。
+func TestLocateWithIPDBKeepsRawTextAfterNormalization(t *testing.T) {
+	svc := ipdbServiceWithSources(t,
+		buildISPTestDBWithCity(t, "南京市", "中国电信"),
+		buildISPTestDBWithCity(t, "南京", "中国电信"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if got.Location != "中国 江苏省 南京市" {
+		t.Errorf("Location = %q, 主判定必须是第一个源的原始写法", got.Location)
+	}
+	if len(got.Sources) != 2 ||
+		got.Sources[0].Location != "中国 江苏省 南京市" ||
+		got.Sources[1].Location != "中国 江苏省 南京" {
+		t.Errorf("Sources = %+v, 每个源的原始写法都必须原样带出来", got.Sources)
+	}
+}
+
+// 省份不同是真分歧，归一不能把它盖掉。
+func TestLocateWithIPDBReportsProvinceDisagreement(t *testing.T) {
+	svc := ipdbServiceWithSources(t,
+		buildLocTestDB(t, "江苏省", "南京市", "中国电信"),
+		buildLocTestDB(t, "湖北省", "武汉市", "中国电信"))
+
+	got := locateWithIPDB(svc, net.ParseIP("1.0.0.1"))
+	if got.LocationAlt != "中国 湖北省 武汉市" {
+		t.Errorf("LocationAlt = %q, 省份不同必须报分歧", got.LocationAlt)
 	}
 }
 
@@ -656,10 +715,15 @@ func buildISPTestDB(t *testing.T, isp string) *ipdb.DB {
 
 func buildISPTestDBWithCity(t *testing.T, city, isp string) *ipdb.DB {
 	t.Helper()
+	return buildLocTestDB(t, "江苏省", city, isp)
+}
+
+func buildLocTestDB(t *testing.T, region, city, isp string) *ipdb.DB {
+	t.Helper()
 	var buf bytes.Buffer
 	recs := []ipdb.Record{{
 		Start: 0x01000000, End: 0x0100FFFF,
-		Country: "中国", Region: "江苏省", City: city, ISP: isp,
+		Country: "中国", Region: region, City: city, ISP: isp,
 	}}
 	if err := ipdb.BuildRecords(recs, &buf, time.Unix(1788000000, 0)); err != nil {
 		t.Fatalf("BuildRecords: %v", err)
