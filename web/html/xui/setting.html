@@ -119,9 +119,15 @@
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-action-item v-for="src in ipdb.sources" :key="src.key"
                                                      :title="src.name" :desc="ipdbSourceDesc(src)">
-                                    <a-tag v-if="!src.enabled">未启用</a-tag>
-                                    <a-tag v-else-if="src.loaded" color="green">已加载</a-tag>
-                                    <a-tag v-else color="red">未下载</a-tag>
+                                    <span v-if="!src.enabled" class="chip">未启用</span>
+                                    <span v-else-if="src.loaded" class="status-badge status-ok">
+                                        <a-icon type="check-circle"/>已加载
+                                    </span>
+                                    <!-- 「未下载」用橙而不是红：源地址填了但还没拉过，
+                                         是新装机器的正常状态，不是故障。 -->
+                                    <span v-else class="status-badge status-warn">
+                                        <a-icon type="exclamation-circle"/>未下载
+                                    </span>
                                     <a-button type="primary" size="small" style="margin-left: 8px"
                                               :disabled="!src.enabled"
                                               :loading="ipdbUpdating === src.key"
@@ -172,10 +178,16 @@
                         <a-tab-pane key="6" tab="端口限速">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-action-item title="限速状态" :desc="shapingDesc()">
-                                    <a-tag v-if="!shaping.supported" color="red">不支持</a-tag>
-                                    <a-tag v-else-if="shaping.rolledBack" color="red">已自动撤销</a-tag>
-                                    <a-tag v-else-if="shaping.active" color="green">已生效</a-tag>
-                                    <a-tag v-else>未启用</a-tag>
+                                    <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
+                                         用中性；「已自动撤销」才是真出了事，保留红。 -->
+                                    <span v-if="!shaping.supported" class="chip">不支持</span>
+                                    <span v-else-if="shaping.rolledBack" class="status-badge status-danger">
+                                        <a-icon type="close-circle"/>已自动撤销
+                                    </span>
+                                    <span v-else-if="shaping.active" class="status-badge status-ok">
+                                        <a-icon type="check-circle"/>已生效
+                                    </span>
+                                    <span v-else class="chip">未启用</span>
                                 </setting-action-item>
                                 <setting-action-item title="清除全部限速"
                                                      desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">

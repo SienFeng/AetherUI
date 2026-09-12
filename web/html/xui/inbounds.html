@@ -42,11 +42,6 @@
             </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
                 <transition name="list" appear>
-                    <a-tag v-if="false" color="red" style="margin-bottom: 10px">
-                        Please go to the panel settings as soon as possible to modify the username and password, otherwise there may be a risk of leaking account information
-                    </a-tag>
-                </transition>
-                <transition name="list" appear>
                     <div class="stat-row">
                         <div class="stat-card tone-blue">
                             <span class="stat-icon"><a-icon type="cloud-upload"/></span>
@@ -306,7 +301,7 @@
                                     </template>
                                     <template slot="onlineAction" slot-scope="text, online">
                                         <a-button v-if="online.conns > 0" type="link" size="small"
-                                                  style="color: #FF4D4F"
+                                                  style="color: var(--aui-danger)"
                                                   @click="kickOnline(dbInbound, online)">踢下线</a-button>
                                         <a-button v-if="online.banned" type="link" size="small"
                                                   @click="unbanOnline(dbInbound, online)">解除封禁</a-button>
@@ -482,7 +477,7 @@
                                             <a-icon type="file-search"></a-icon>访问日志
                                         </a-menu-item>
                                         <a-menu-item key="delete">
-                                            <span style="color: #B91C1C">
+                                            <span style="color: var(--aui-danger)">
                                                 <a-icon type="delete"></a-icon>删除
                                             </span>
                                         </a-menu-item>
@@ -511,11 +506,11 @@
     // 传 undefined 才落回原生中性样式：rgba(0,0,0,.65) on #fafafa，约 5.6:1。
     // v1.23.0 为了修 rgba(0,0,0,.25) 的 1.84:1 才换成 'default'，结果对比度反而更低。
     const RISK_LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
-    const RISK_LEVEL_COLOR = { low: undefined, watch: 'orange', medium: 'orange', high: 'red', severe: 'red' };
-
-    // 一级表格的风险徽标用自己的一套 class（见 custom.css 的 .status-badge），
-    // 不再走 a-tag。上面那个 RISK_LEVEL_COLOR 必须保留——sharing_modal.html
-    // 仍然用它给弹窗里的 a-tag 上色，连同它上方那段关于 'default' 的注释。
+    // 风险徽标用 custom.css 的 .status-badge 一套 class，不再走 a-tag。
+    // 与之配套的 RISK_LEVEL_COLOR（antd a-tag 的预设色名）已随全站 a-tag
+    // 退役一并删除；那条「'default' 不在预设色里、会被当成自定义颜色而渲染
+    // 成白底白字」的结论移进了 CLAUDE.md 的「已知偏差」，因为它约束的是
+    // 将来任何一处 a-tag :color 的写法，不只是风险等级这一处。
     const RISK_LEVEL_TONE = {
         low:    'status-ok',
         watch:  'status-warn',

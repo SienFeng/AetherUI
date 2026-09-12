@@ -25,7 +25,7 @@
                         <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: rgba(0,0,0,.45)">
                             <a-tooltip v-if="accessLogModal.refreshError">
                                 <template slot="title">[[ accessLogModal.refreshError ]]</template>
-                                <span style="color: #f5222d; cursor: help">出错</span>
+                                <span style="color: var(--aui-danger); cursor: help">出错</span>
                             </a-tooltip>
                             <a-tooltip v-else-if="accessLogModal.page > 1">
                                 <template slot="title">
@@ -50,14 +50,17 @@
                         </template>
                         最后出现 [[ DateUtil.formatMillis(src.lastSeen) ]]，共 [[ src.count ]] 条记录
                     </template>
-                    <a-tag style="cursor: pointer; margin-bottom: 4px"
-                           :color="accessLogModal.ip === src.ip ? 'blue' : ''"
-                           @click="accessLogModal.pickSource(src.ip)">
-                        [[ src.ip ]]<span style="opacity: .6"> · [[ src.count ]]</span>
-                    </a-tag>
+                    <!-- 改用 <button>：这一排是过滤器，a-tag 键盘拿不到、
+                         没有焦点环，读屏软件也念不出它可点。 -->
+                    <button type="button" class="chip cell-num"
+                            :class="accessLogModal.ip === src.ip ? 'is-active' : ''"
+                            :aria-pressed="accessLogModal.ip === src.ip ? 'true' : 'false'"
+                            @click="accessLogModal.pickSource(src.ip)">
+                        [[ src.ip ]]<span class="cell-muted"> · [[ src.count ]]</span>
+                    </button>
                 </a-tooltip>
-                <a-tag v-if="accessLogModal.ip" style="cursor: pointer; margin-bottom: 4px"
-                       @click="accessLogModal.pickSource('')">显示全部</a-tag>
+                <button v-if="accessLogModal.ip" type="button" class="chip"
+                        @click="accessLogModal.pickSource('')">显示全部</button>
             </div>
             <a-table :columns="accessLogModal.columns" :data-source="accessLogModal.list"
                      :row-key="row => row.id" size="small" :loading="accessLogModal.loading"
@@ -81,18 +84,25 @@
                         <span class="ip-divergent">[[ row.location ]]<a-icon type="question-circle"/></span>
                     </a-tooltip>
                     <span v-else-if="row.location">[[ row.location ]]</span>
-                    <span v-else style="color: rgba(0,0,0,.25)">-</span>
+                    <span v-else class="cell-muted">-</span>
                 </template>
                 <template slot="target" slot-scope="text, row">
-                    <a-tag v-if="row.network" color="blue">[[ row.network ]]</a-tag>
+                    <span v-if="row.network" class="chip">[[ row.network ]]</span>
                     [[ row.target ]]
                 </template>
                 <template slot="route" slot-scope="text, row">
                     <a-tooltip v-if="row.route">
                         <template slot="title">[[ routeTip(row.route) ]]</template>
-                        <a-tag :color="routeColor(row.route)">[[ routeLabel(row.route) ]]</a-tag>
+                        <!-- 改动前四种走向各一个颜色（红/橙/蓝/绿）。其中只有
+                             「已阻断」和「链式代理」是需要被一眼看见的——前者
+                             是流量被掐断，后者是不常见的拓扑；「直连」与「走了
+                             某个出站节点」都只是分类，蓝绿之分不携带信息。 -->
+                        <span class="status-badge" :class="routeTone(row.route)">
+                            <a-icon v-if="routeIcon(row.route)" :type="routeIcon(row.route)"/>
+                            [[ routeLabel(row.route) ]]
+                        </span>
                     </a-tooltip>
-                    <a-tag v-else>-</a-tag>
+                    <span v-else class="cell-muted">-</span>
                 </template>
             </a-table>
         </a-tab-pane>
@@ -138,9 +148,7 @@
                     [[ index + 1 ]]
                 </template>
                 <template slot="topKind" slot-scope="text, row">
-                    <a-tag :color="row.kind === 'ip' ? 'orange' : 'blue'">
-                        [[ row.kind === 'ip' ? 'IP' : '域名' ]]
-                    </a-tag>
+                    <span class="chip">[[ row.kind === 'ip' ? 'IP' : '域名' ]]</span>
                 </template>
                 <template slot="domain" slot-scope="text, row">
                     <a style="cursor: pointer" @click="accessLogModal.drillDown(row.domain)">[[ row.domain ]]</a>
@@ -513,16 +521,17 @@
             },
         },
         methods: {
-            routeColor(route) {
-                if (routeIsChained(route)) return 'orange';
-                if (route === ROUTE_BLOCK) return 'red';
-                // 计量出站是默认出站的克隆，走向与直连完全相同，用同一个颜色。
-                // 必须排在下面 A_UI_PREFIX 那条之前。
-                if (route === ROUTE_DEFAULT || routeIsMeter(route)) return 'blue';
-                // 其余 a-ui- 开头的都是分流命中的出站节点
-                if (route.startsWith(A_UI_PREFIX)) return 'green';
-                // 用户手写模板里的出站，既不是直连也不是本面板生成的
-                return 'purple';
+            // 只有「阻断」与「链式」上色，其余走向是分类、用中性 chip 底。
+            // 图标与文字各自都能独立读出含义，颜色不是唯一信息来源。
+            routeTone(route) {
+                if (route === ROUTE_BLOCK) return 'status-danger';
+                if (routeIsChained(route)) return 'status-warn';
+                return 'status-neutral';
+            },
+            routeIcon(route) {
+                if (route === ROUTE_BLOCK) return 'stop';
+                if (routeIsChained(route)) return 'swap';
+                return '';
             },
             routeLabel(route) {
                 if (routeIsChained(route)) return route;

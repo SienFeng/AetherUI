@@ -863,6 +863,191 @@ button.status-badge:hover {
     color: var(--aui-text-3);
 }
 
+/* ── 弹窗内的表单分段 ────────────────────────────────────────────────
+ * 入站弹窗改动前是四张嵌套的 a-card（基本信息 / 限制与配额 / 协议参数 /
+ * 传输与安全）。卡片套卡片是本次重构明确要去掉的一种噪声：弹窗本身已经
+ * 是一个浮起的面，里面再画四个带边框和圆角的面，层级读起来是平的，
+ * 却多出四圈描边和四份内边距。改成扁平分段——一条细线加一个小标题。 */
+.form-section + .form-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.form-section-title {
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+/* 可点击的 chip（访问日志里按来源 IP 过滤那一排）。选中态用主色填充，
+ * 未选中是普通 chip——改动前靠 a-tag 的 color 在 'blue' 与 '' 之间切换。 */
+button.chip {
+    cursor: pointer;
+    font-family: inherit;
+}
+
+button.chip:hover {
+    border-color: var(--aui-line-strong);
+}
+
+button.chip.is-active {
+    border-color: var(--aui-primary);
+    background: var(--aui-primary-soft);
+    color: var(--aui-primary-hover);
+}
+
+/* ── 键值明细 ───────────────────────────────────────────────────────
+ * 入站详情弹窗改动前是一面绿标签墙：协议、端口、uuid、密码、path、
+ * 加密方式……每一个值都套一个绿色 a-tag。绿色在全站表示「成功 / 健康」，
+ * 而这些只是**值**，一个 uuid 没有健康与否可言。全绿的另一个后果是
+ * 里面真正需要注意的项（比如 TLS 未启用）一点都不显眼。 */
+.kv {
+    margin: 0;
+}
+
+.kv-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--aui-line);
+}
+
+.kv-row:last-child {
+    border-bottom: 0;
+}
+
+.kv-row dt {
+    flex: 0 0 96px;
+    font-size: 13px;
+    color: var(--aui-text-2);
+}
+
+.kv-row dd {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 13px;
+    color: var(--aui-text);
+    /* uuid、密码、路径都可能很长且不含空格，不给断点会撑破弹窗 */
+    word-break: break-all;
+}
+
+/* 机器可读的值（uuid / 密码 / 路径 / 端口）用等宽，肉眼逐字符核对时
+ * 才分得清 0 和 O、1 和 l。 */
+.kv-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12.5px;
+}
+
+/* ── 共享风险弹窗：让分数成为焦点 ────────────────────────────────────
+ * 改动前 900px 宽的弹窗里 alert → descriptions → card → card → descriptions
+ * → card → table 一路平铺，全部同一层级同样间距；而最重要的那个数字（风险
+ * 分数）被塞进一个 a-tag 里，和旁边的「置信度」等重。 */
+.risk-hero {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-lg);
+    background: var(--aui-surface-soft);
+}
+
+.risk-hero.is-warn   { border-color: #FDE68A; background: #FFFBEB; }
+.risk-hero.is-danger { border-color: #FECACA; background: #FEF2F2; }
+
+.risk-score {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+.risk-score-num {
+    font-size: 40px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.risk-hero.is-warn   .risk-score-num { color: var(--aui-warning); }
+.risk-hero.is-danger .risk-score-num { color: var(--aui-danger); }
+
+.risk-score-max {
+    font-size: 15px;
+    color: var(--aui-text-3);
+}
+
+.risk-hero-meta {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+.risk-hero-level {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.risk-hero-sub {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+/* 证据行：分值靠右对齐成一列，扫读时能直接比大小，
+ * 不必在一堆左对齐的红标签里找数字。 */
+.evidence-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0;
+}
+
+.evidence-item + .evidence-item {
+    border-top: 1px solid var(--aui-line);
+}
+
+.evidence-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.evidence-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.evidence-detail {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--aui-text-2);
+}
+
+.evidence-points {
+    flex: 0 0 auto;
+    min-width: 52px;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-danger);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 0 分的是上下文证据，不计分。它们会对几乎每个双设备用户命中，
+ * 混在计分项里会让管理员以为自己在看证据。 */
+.evidence-points.is-context {
+    font-weight: 400;
+    color: var(--aui-text-3);
+}
+
 /* ── 分流规则：把一行读成一条链路 ────────────────────────────────────
  * 一条规则表达的是「哪些用户 → 访问哪批域名 → 去哪」。改动前三列各自是
  * 一堆彩色 a-tag，读的人要自己把它们串起来。加两个箭头把顺序说出来。

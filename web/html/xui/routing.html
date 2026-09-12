@@ -26,7 +26,7 @@
         width: 10px;
         height: 16px;
         cursor: grab;
-        color: #bfbfbf;
+        color: var(--aui-text-3);
         background-image: radial-gradient(currentColor 1.2px, transparent 1.3px);
         background-size: 5px 5px;
         background-position: 0 2px;
@@ -35,7 +35,7 @@
     }
 
     .rule-drag-handle:hover {
-        color: #1890ff;
+        color: var(--aui-primary);
     }
 
     .rule-drag-handle:active {
@@ -227,7 +227,7 @@
                                                     <a-icon type="edit"></a-icon>编辑
                                                 </a-menu-item>
                                                 <a-menu-item key="delete">
-                                                    <span style="color: #B91C1C">
+                                                    <span style="color: var(--aui-danger)">
                                                         <a-icon type="delete"></a-icon>删除
                                                     </span>
                                                 </a-menu-item>
@@ -303,7 +303,7 @@
                                                     <a-icon type="copy"></a-icon>复制 tag
                                                 </a-menu-item>
                                                 <a-menu-item key="delete">
-                                                    <span style="color: #B91C1C">
+                                                    <span style="color: var(--aui-danger)">
                                                         <a-icon type="delete"></a-icon>删除
                                                     </span>
                                                 </a-menu-item>
@@ -377,7 +377,7 @@
             <a-form-item label="手工域名（一行一条）">
                 <a-input type="textarea" :rows="8" v-model="groupModal.domains"
                          placeholder="domain:openai.com&#10;full:chat.openai.com&#10;keyword:openai&#10;geosite:openai&#10;可留空，只用订阅内容"></a-input>
-                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                <div style="color: var(--aui-text-3); font-size: 12px; margin-top: 4px;">
                     可用前缀：domain:（含子域名）/ full:（精确）/ keyword:（子串）/ regexp: / dotless: / geosite: / ext:（别名 ext-domain: 与 ext-site:）。
                     不带前缀且不含点的会按 keyword: 处理；含点的必须写前缀。
                 </div>
@@ -385,7 +385,7 @@
             <a-form-item label="IP 段（一行一条）">
                 <a-input type="textarea" :rows="4" v-model="groupModal.cidrs"
                          placeholder="1.2.3.0/24&#10;8.8.8.8&#10;2001:db8::/32&#10;geoip:cn&#10;可留空"></a-input>
-                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                <div style="color: var(--aui-text-3); font-size: 12px; margin-top: 4px;">
                     IP 段与域名各自生成一条独立的分流规则，互不影响。
                     默认只对客户端直接连 IP 的连接生效；要让它也匹配域名目标，
                     到「面板设置」打开「让 IP 规则也匹配域名目标」。
@@ -417,13 +417,13 @@
                             [[ relativeTime(subscribeStateOf(u).lastUpdatedAt) ]] ·
                             域名 [[ subscribeStateOf(u).domainCount ]] 条 / IP 段 [[ subscribeStateOf(u).cidrCount ]] 条
                         </span>
-                        <span v-else style="color: #faad14;">等待首次拉取</span>
+                        <span v-else style="color: var(--aui-warning);">等待首次拉取</span>
                     </div>
                 </div>
                 <a-button type="dashed" size="small" icon="plus"
                           :disabled="groupModal.subscribeUrls.length >= 10"
                           @click="addSubscribeUrl">添加订阅地址</a-button>
-                <div style="color: #888; font-size: 12px; margin-top: 4px;">
+                <div style="color: var(--aui-text-3); font-size: 12px; margin-top: 4px;">
                     支持 Surge/Clash 规则集、纯域名列表与纯 IP 列表。
                     IP-CIDR / IP-CIDR6 / GEOIP 会进 IP 段；IP-ASN、SRC-IP-CIDR 等无法忠实翻译的规则会被忽略。
                     保存后由定时任务拉取，或在列表里点「立即更新」。
@@ -441,11 +441,11 @@
                      待在下面那个 subscribedCount 块里：纯 IP 订阅的域名是 0 条，
                      那个块整个不渲染，这句话会跟着一起消失。 -->
                 <div v-if="groupModal.lastUpdatedAt && !groupModal.lastError"
-                     style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                     style="color: var(--aui-text-3); font-size: 12px; margin-bottom: 4px;">
                     本次已忽略 [[ groupModal.lastSkipped ]] 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）。
                 </div>
                 <div v-if="groupModal.subscribedCount">
-                    <div style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                    <div style="color: var(--aui-text-3); font-size: 12px; margin-bottom: 4px;">
                         共 [[ groupModal.subscribedCount ]] 条。
                         <span v-if="groupModal.subscribedCount > groupModal.subscribedPreview.length">
                             此处只显示前 [[ groupModal.subscribedPreview.length ]] 条。
@@ -462,7 +462,7 @@
                  subscribedCidrCount 为 0 时整块不渲染，纯域名订阅的弹窗
                  因此和改动前完全一样，不会多出一个空标题。 -->
             <a-form-item v-if="groupModal.subscribedCidrCount" label="订阅到的 IP 段">
-                <div style="color: #888; font-size: 12px; margin-bottom: 4px;">
+                <div style="color: var(--aui-text-3); font-size: 12px; margin-bottom: 4px;">
                     共 [[ groupModal.subscribedCidrCount ]] 条。
                     <span v-if="groupModal.subscribedCidrCount > groupModal.subscribedCidrPreview.length">
                         此处只显示前 [[ groupModal.subscribedCidrPreview.length ]] 条。
@@ -512,7 +512,7 @@
                     所有用户（含以后新建的入站）
                 </a-checkbox>
                 <div v-if="allUsersDisabledReason"
-                     style="color: #faad14; font-size: 12px; margin: 4px 0 0 24px;">
+                     style="color: var(--aui-warning); font-size: 12px; margin: 4px 0 0 24px;">
                     [[ allUsersDisabledReason ]]
                 </div>
                 <div style="margin-top: 6px;">
@@ -532,7 +532,7 @@
                     </a-checkbox>
                 </div>
                 <a-divider style="margin: 8px 0;"></a-divider>
-                <div v-if="!inbounds.length" style="color: #999;">还没有任何入站</div>
+                <div v-if="!inbounds.length" style="color: var(--aui-text-3);">还没有任何入站</div>
                 <template v-else>
                     <div style="display: flex; align-items: center; margin-bottom: 8px;">
                         <!-- 入站少的时候搜索框纯属噪音，超过 5 个才出现 -->
@@ -541,7 +541,7 @@
                                  :disabled="ruleModal.allUsers" style="width: 160px;">
                             <a-icon slot="prefix" type="search"></a-icon>
                         </a-input>
-                        <span style="margin-left: auto; font-size: 12px; color: #999;">
+                        <span style="margin-left: auto; font-size: 12px; color: var(--aui-text-3);">
                             已选 [[ ruleModal.rule.inboundIds.length ]] 人
                             <template v-if="!ruleModal.allUsers">
                                 <a @click="selectAllVisible" style="margin-left: 8px;">[[ selectAllLabel ]]</a>
@@ -559,11 +559,11 @@
                                 [[ i.remark || i.tag ]]
                             </a-checkbox>
                             <span v-if="inboundOccupiedBy(i.id)"
-                                  style="color: #999; font-size: 12px; margin-left: 8px;">
+                                  style="color: var(--aui-text-3); font-size: 12px; margin-left: 8px;">
                                 已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖
                             </span>
                         </div>
-                        <div v-if="!visibleInbounds.length" style="color: #999; font-size: 12px;">
+                        <div v-if="!visibleInbounds.length" style="color: var(--aui-text-3); font-size: 12px;">
                             没有匹配的用户
                         </div>
                     </div>
@@ -577,7 +577,7 @@
                              style="width: 160px;">
                         <a-icon slot="prefix" type="search"></a-icon>
                     </a-input>
-                    <span style="margin-left: auto; font-size: 12px; color: #999;">
+                    <span style="margin-left: auto; font-size: 12px; color: var(--aui-text-3);">
                         已选 [[ ruleModal.rule.domainGroupIds.length ]] 组
                         <a @click="selectAllVisibleGroups" style="margin-left: 8px;">[[ selectAllGroupsLabel ]]</a>
                         <a @click="clearGroupSelection" style="margin-left: 8px;">清空</a>
@@ -594,7 +594,7 @@
                             [[ g.remark ]]
                         </a-checkbox>
                     </div>
-                    <div v-if="!visibleGroups.length" style="color: #999; font-size: 12px;">
+                    <div v-if="!visibleGroups.length" style="color: var(--aui-text-3); font-size: 12px;">
                         没有匹配的域名组
                     </div>
                 </div>
@@ -650,7 +650,7 @@
         <div v-if="importReport.messages && importReport.messages.length" class="import-messages">
             <div v-for="(m, i) in importReport.messages" :key="i">[[ m ]]</div>
         </div>
-        <div v-else style="color:#8c8c8c">全部导入成功，没有需要说明的项。</div>
+        <div v-else style="color:var(--aui-text-3)">全部导入成功，没有需要说明的项。</div>
     </a-modal>
 </a-layout>
 
@@ -1487,7 +1487,7 @@
                     content: h => h('div', [
                         h('p', '导出文件包含出站节点的 UUID / 密码等凭据，任何拿到该文件的人都可以直接使用这些节点。'),
                         h('p', '请妥善保管，不要发到公开渠道。'),
-                        extra ? h('p', { style: 'color:#8c8c8c' }, extra) : null,
+                        extra ? h('p', { style: 'color:var(--aui-text-3)' }, extra) : null,
                     ]),
                     okText: '导出',
                     cancelText: '取消',
