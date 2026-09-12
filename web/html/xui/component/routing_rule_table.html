@@ -10,16 +10,22 @@
         </a-tooltip>
     </template>
     <template slot="inbound" slot-scope="text, rule">
-        <a-tag v-if="rule.broken" color="red">数据损坏</a-tag>
-        <a-tag v-else-if="!rule.inboundIds.length">所有用户</a-tag>
+        <span v-if="rule.broken" class="status-badge status-danger">
+            <a-icon type="close-circle"/>数据损坏
+        </span>
+        <span v-else-if="!rule.inboundIds.length" class="chip">所有用户</span>
         <template v-else>
-            <a-tag v-for="id in rule.inboundIds.slice(0, 3)" :key="id"
-                   :color="inboundMissing(id) ? 'red' : ''">
-                [[ inboundName(id) ]]
-            </a-tag>
+            <!-- 引用到一个不存在的入站是**真状态**（这条规则的这一部分不会
+                 生效），所以它是红徽标；正常的用户名只是分类，用无色 chip。 -->
+            <template v-for="id in rule.inboundIds.slice(0, 3)">
+                <span v-if="inboundMissing(id)" :key="id" class="status-badge status-danger">
+                    <a-icon type="close-circle"/>[[ inboundName(id) ]]
+                </span>
+                <span v-else :key="id" class="chip">[[ inboundName(id) ]]</span>
+            </template>
             <a-tooltip v-if="rule.inboundIds.length > 3"
                        :title="rule.inboundIds.map(inboundName).join('、')">
-                <a-tag>等 [[ rule.inboundIds.length ]] 人</a-tag>
+                <span class="chip">等 [[ rule.inboundIds.length ]] 人</span>
             </a-tooltip>
         </template>
         <!-- 数据损坏的规则不该同时挂「+新用户」，那会让一条根本不生效的规则
@@ -30,32 +36,46 @@
              才不会因为这一列的历史取值不同而在列表里显得不一样。 -->
         <a-tooltip v-if="!rule.broken && (rule.applyToNewInbounds || !rule.inboundIds.length)"
                    title="以后新建的入站会自动加入这条规则">
-            <a-tag color="blue">+新用户</a-tag>
+            <span class="chip">+新用户</span>
         </a-tooltip>
     </template>
     <template slot="group" slot-scope="text, rule">
-        <template v-if="rule.groupsBroken">
-            <a-tag color="red">域名组数据损坏</a-tag>
-        </template>
+        <span v-if="rule.groupsBroken" class="status-badge status-danger">
+            <a-icon type="close-circle"/>域名组数据损坏
+        </span>
         <template v-else>
-            <a-tag v-for="gid in rule.domainGroupIds" :key="gid"
-                   :color="groupMissing(gid) ? 'red' : ''">
-                [[ groupName(gid) ]]
-            </a-tag>
+            <template v-for="gid in rule.domainGroupIds">
+                <span v-if="groupMissing(gid)" :key="gid" class="status-badge status-danger">
+                    <a-icon type="close-circle"/>[[ groupName(gid) ]]
+                </span>
+                <span v-else :key="gid" class="chip">[[ groupName(gid) ]]</span>
+            </template>
         </template>
     </template>
     <template slot="target" slot-scope="text, rule">
-        <a-tag v-if="rule.action === 'block'" color="red">阻断</a-tag>
-        <a-tag v-else-if="rule.action === 'direct'" color="green">直连</a-tag>
-        <a-tag v-else :color="nodeMissing(rule.outboundId) ? 'red' : 'blue'">
-            [[ nodeName(rule.outboundId) ]]
-        </a-tag>
+        <!-- 「阻断」保留红色：它是唯一一个「这些流量会被掐断」的动作，
+             与旁边两个「送到某处」不是同一类事。「直连」改中性——它只是
+             「从本机出网」，不是健康信号，改动前那个绿色与全站「绿＝成功」
+             的约定对不上。 -->
+        <span v-if="rule.action === 'block'" class="status-badge status-danger">
+            <a-icon type="stop"/>阻断
+        </span>
+        <span v-else-if="rule.action === 'direct'" class="chip">直连</span>
+        <span v-else-if="nodeMissing(rule.outboundId)" class="status-badge status-danger">
+            <a-icon type="close-circle"/>[[ nodeName(rule.outboundId) ]]
+        </span>
+        <span v-else class="chip">[[ nodeName(rule.outboundId) ]]</span>
     </template>
     <template slot="warn" slot-scope="text, rule">
+        <!-- #faad14 在白底上只有 2.0:1、#52c41a 只有 2.3:1，两个图标都接近
+             看不见。换成语义 token（5.02 / 5.02:1）。图标形状本身也承担含义，
+             不是只靠颜色。 -->
         <a-tooltip v-if="ruleIssue(rule)" :title="ruleIssue(rule)">
-            <a-icon type="warning" style="color: #faad14;"></a-icon>
+            <a-icon type="warning" style="color: var(--aui-warning)"
+                    :aria-label="ruleIssue(rule)"></a-icon>
         </a-tooltip>
-        <a-icon v-else type="check-circle" style="color: #52c41a;"></a-icon>
+        <a-icon v-else type="check-circle" style="color: var(--aui-success)"
+                aria-label="这条规则会生效"></a-icon>
     </template>
     <template slot="action" slot-scope="text, rule">
         <a-dropdown :trigger="['click']">
@@ -65,7 +85,7 @@
                     <a-icon type="edit"></a-icon>编辑
                 </a-menu-item>
                 <a-menu-item key="delete">
-                    <span style="color: #FF4D4F">
+                    <span style="color: #B91C1C">
                         <a-icon type="delete"></a-icon>删除
                     </span>
                 </a-menu-item>

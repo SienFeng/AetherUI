@@ -863,6 +863,35 @@ button.status-badge:hover {
     color: var(--aui-text-3);
 }
 
+/* ── 分流规则：把一行读成一条链路 ────────────────────────────────────
+ * 一条规则表达的是「哪些用户 → 访问哪批域名 → 去哪」。改动前三列各自是
+ * 一堆彩色 a-tag，读的人要自己把它们串起来。加两个箭头把顺序说出来。
+ *
+ * 箭头用 ::after 画在单元格右缘，不占一列——多一列会让本来就窄的三列
+ * 再各缩一截。aria-hidden 由 CSS 生成内容天然满足（生成内容不进无障碍树）。 */
+.rule-flow-cell {
+    position: relative;
+}
+
+.rule-flow-cell::after {
+    content: '→';
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--aui-line-strong);
+    font-size: 13px;
+    line-height: 1;
+    pointer-events: none;
+}
+
+/* 窄屏下表格已经在横滚，箭头压在滚动边界上反而添乱 */
+@media (max-width: 768px) {
+    .rule-flow-cell::after {
+        display: none;
+    }
+}
+
 /* ── 系统状态页：资源条与指标格 ──────────────────────────────────────
  * 改动前 CPU / 内存 / swap / 硬盘是四个 a-progress type="dashboard" 的大圆环，
  * 占掉整个首屏。它们回答的是「这台机器累不累」，而管理员打开面板最先要知道

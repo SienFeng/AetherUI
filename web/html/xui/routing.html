@@ -93,6 +93,10 @@
                     <h1 class="page-title">分流管理</h1>
                     <p class="page-description">按用户与域名把流量分配到不同的出站节点</p>
                 </div>
+                <div class="page-actions">
+                    <a-button icon="download" @click="confirmExport('all')">导出全部</a-button>
+                    <a-button icon="upload" @click="pickImportFile()">导入全部</a-button>
+                </div>
             </div>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
                 <transition name="list" appear>
@@ -149,16 +153,14 @@
 
                 <transition name="list" appear>
                     <a-tabs id="routing-tabs" default-active-key="1">
-                        <!-- 放进标签栏右端而不是单独占一行：这两个按钮作用于整页，
-                             与标签是同级操作，挤在指标卡上方只会白占一行。 -->
-                        <template slot="tabBarExtraContent">
-                            <a-button icon="download" @click="confirmExport('all')">导出全部</a-button>
-                            <a-button icon="upload" style="margin-left:8px" @click="pickImportFile()">导入全部</a-button>
-                        </template>
-
-                        <a-tab-pane key="1" tab="域名组">
+                        <a-tab-pane key="1">
+                            <!-- 数量放进标签本身：切过去才知道有几条，等于每次都要
+                                 先点一遍。 -->
+                            <span slot="tab">域名组
+                                <span class="cell-muted">[[ groups.length ]]</span>
+                            </span>
                             <a-card>
-                                <div slot="title">
+                                <div slot="title" class="toolbar" style="margin-bottom: 0">
                                     <a-button type="primary" icon="plus" @click="openGroup()">添加域名组</a-button>
                                     <a-button icon="download" style="margin-left:8px"
                                               @click="confirmExport('domainGroups')">导出</a-button>
@@ -169,19 +171,19 @@
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
                                          style="margin-top: 20px">
                                     <template slot="domains" slot-scope="text, group">
-                                        <span v-if="group.broken" style="color: #f5222d;">
+                                        <span v-if="group.broken" style="color: var(--aui-danger)">
                                             数据损坏，这条组的规则不会写进配置
                                         </span>
                                         <template v-else>
-                                            <a-tag v-for="d in group.preview" :key="d">[[ d ]]</a-tag>
-                                            <span v-if="group.effectiveCount > group.preview.length" style="color: #888;">
+                                            <span v-for="d in group.preview" :key="d" class="chip">[[ d ]]</span>
+                                            <span v-if="group.effectiveCount > group.preview.length" class="cell-muted">
                                                 +[[ group.effectiveCount - group.preview.length ]]
                                             </span>
                                             <!-- 纯 IP 组不是「空」：buildRule 的跳过条件是
                                                  域名和 IP 段都为空，纯 IP 组照样会生成一条 ip 规则。
                                                  这一列只说域名，红字留给真正两侧都空的组。 -->
-                                            <span v-if="group.effectiveCount === 0 && group.cidrCount" style="color: #bbb;">—</span>
-                                            <span v-else-if="group.effectiveCount === 0" style="color: #f5222d;">
+                                            <span v-if="group.effectiveCount === 0 && group.cidrCount" class="cell-muted">—</span>
+                                            <span v-else-if="group.effectiveCount === 0" style="color: var(--aui-danger)">
                                                 空（引用它的规则不会写进配置）
                                             </span>
                                         </template>
@@ -191,25 +193,26 @@
                                              后端已把 cidrCount 强制归零。不单独渲染的话，
                                              只有 IP 段损坏的组在这一列显示「—」，与「本来就没填」
                                              完全分不开，而它引用的规则其实整条都不会写进配置。 -->
-                                        <span v-if="group.broken" style="color: #f5222d;">数据损坏</span>
-                                        <span v-else-if="!group.cidrCount" style="color: #bbb;">—</span>
+                                        <span v-if="group.broken" style="color: var(--aui-danger)">数据损坏</span>
+                                        <span v-else-if="!group.cidrCount" class="cell-muted">—</span>
                                         <span v-else>[[ group.cidrCount ]] 条</span>
                                     </template>
                                     <template slot="subscribe" slot-scope="text, group">
-                                        <span v-if="group.subscribeState === 'none'" style="color: #bbb;">—</span>
+                                        <span v-if="group.subscribeState === 'none'" class="cell-muted">—</span>
                                         <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
-                                            <a-tag color="red">拉取失败</a-tag>
+                                            <span class="status-badge status-danger"><a-icon type="close-circle"/>拉取失败</span>
                                         </a-tooltip>
-                                        <a-tag v-else-if="group.subscribeState === 'pending'" color="orange">等待首次拉取</a-tag>
+                                        <span v-else-if="group.subscribeState === 'pending'"
+                                              class="status-badge status-warn"><a-icon type="clock-circle"/>等待首次拉取</span>
                                         <!-- 订阅现在也收 IP-CIDR/IP-CIDR6/GEOIP，两类都要报数：
                                              只报域名的话，一个纯 IP 订阅会显示「共 0 条」而实际拉到了几千条。
                                              lastSkipped 也不再是「非域名规则」——IP 段已经收下了，
                                              跳过的是 IP-ASN、SRC-IP-CIDR、进程/UA 这些没法忠实翻译的。 -->
                                         <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
-                                            <a-tag color="green">[[ relativeTime(group.lastUpdatedAt) ]]</a-tag>
+                                            <span class="status-badge status-ok"><a-icon type="check-circle"/>[[ relativeTime(group.lastUpdatedAt) ]]</span>
                                             <!-- 多地址时报个数：合并后只剩一个时间戳，不说明来源有几个的话，
                                                  管理员无从知道这条绿标签背后其实有好几个地址在拉。 -->
-                                            <span v-if="group.subscribeUrls.length > 1" style="color: #888;">
+                                            <span v-if="group.subscribeUrls.length > 1" class="cell-muted">
                                                 · [[ group.subscribeUrls.length ]] 个地址
                                             </span>
                                         </a-tooltip>
@@ -224,7 +227,7 @@
                                                     <a-icon type="edit"></a-icon>编辑
                                                 </a-menu-item>
                                                 <a-menu-item key="delete">
-                                                    <span style="color: #FF4D4F">
+                                                    <span style="color: #B91C1C">
                                                         <a-icon type="delete"></a-icon>删除
                                                     </span>
                                                 </a-menu-item>
@@ -235,9 +238,14 @@
                             </a-card>
                         </a-tab-pane>
 
-                        <a-tab-pane key="2" tab="出站节点">
+                        <a-tab-pane key="2">
+                            <!-- 数量放进标签本身：切过去才知道有几条，等于每次都要
+                                 先点一遍。 -->
+                            <span slot="tab">出站节点
+                                <span class="cell-muted">[[ nodes.length ]]</span>
+                            </span>
                             <a-card>
-                                <div slot="title">
+                                <div slot="title" class="toolbar" style="margin-bottom: 0">
                                     <a-button type="primary" icon="plus" @click="openNode()">添加出站节点</a-button>
                                     <a-button icon="thunderbolt" style="margin-left:8px"
                                               :loading="probingAll" :disabled="nodes.length === 0"
@@ -251,10 +259,10 @@
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
                                          style="margin-top: 20px">
                                     <template slot="tag" slot-scope="text, node">
-                                        <a-tag>[[ node.tag ]]</a-tag>
+                                        <span class="chip cell-num">[[ node.tag ]]</span>
                                     </template>
                                     <template slot="protocol" slot-scope="text, node">
-                                        <a-tag color="blue">[[ node.protocol ]]</a-tag>
+                                        <span>[[ node.protocol ]]</span>
                                     </template>
                                     <!-- 连通性测试只说明「面板这台机器能不能经这个节点出网」，
                                          不代表任何一条分流规则真的会把流量送到这里——规则是否
@@ -262,16 +270,20 @@
                                          自己的警告图标负责。措辞不要越过这条边界。 -->
                                     <template slot="probe" slot-scope="text, node">
                                         <a-spin v-if="node.probing" size="small"></a-spin>
-                                        <a-tag v-else-if="!node.probe">未测试</a-tag>
+                                        <span v-else-if="!node.probe" class="status-badge status-neutral">未测试</span>
                                         <a-tooltip v-else-if="node.probe.status === 'ok'"
                                                    :title="'测试于 ' + probeTime(node.probe)">
-                                            <a-tag color="green">[[ node.probe.latencyMs ]] ms</a-tag>
+                                            <span class="status-badge status-ok">
+                                                <a-icon type="check-circle"/>[[ node.probe.latencyMs ]] ms
+                                            </span>
                                         </a-tooltip>
                                         <a-tooltip v-else
                                                    :title="node.probe.error + '（' + probeTime(node.probe) + '）'">
-                                            <a-tag :color="node.probe.status === 'fail' ? 'red' : 'orange'">
+                                            <span class="status-badge"
+                                                  :class="node.probe.status === 'fail' ? 'status-danger' : 'status-warn'">
+                                                <a-icon :type="node.probe.status === 'fail' ? 'close-circle' : 'question-circle'"/>
                                                 [[ node.probe.status === 'fail' ? '不通' : '无法测试' ]]
-                                            </a-tag>
+                                            </span>
                                         </a-tooltip>
                                         <a v-if="!node.probing" style="margin-left: 4px"
                                            @click="probeNode(node)">测试</a>
@@ -291,7 +303,7 @@
                                                     <a-icon type="copy"></a-icon>复制 tag
                                                 </a-menu-item>
                                                 <a-menu-item key="delete">
-                                                    <span style="color: #FF4D4F">
+                                                    <span style="color: #B91C1C">
                                                         <a-icon type="delete"></a-icon>删除
                                                     </span>
                                                 </a-menu-item>
@@ -302,9 +314,14 @@
                             </a-card>
                         </a-tab-pane>
 
-                        <a-tab-pane key="3" tab="分流规则">
+                        <a-tab-pane key="3">
+                            <!-- 数量放进标签本身：切过去才知道有几条，等于每次都要
+                                 先点一遍。 -->
+                            <span slot="tab">分流规则
+                                <span class="cell-muted">[[ rules.length ]]</span>
+                            </span>
                             <a-card>
-                                <div slot="title">
+                                <div slot="title" class="toolbar" style="margin-bottom: 0">
                                     <a-button type="primary" icon="plus" @click="openRule()">添加分流规则</a-button>
                                     <a-button icon="download" style="margin-left:8px"
                                               @click="confirmExport('rules')">导出</a-button>
@@ -389,14 +406,14 @@
                          必须把「正在用什么时候拉到的内容」写出来，否则管理员只
                          看到一个红字，不知道现在生效的到底是什么。 -->
                     <div v-if="subscribeStateOf(u)" style="font-size: 12px; margin-top: 2px;">
-                        <span v-if="subscribeStateOf(u).lastError" style="color: #f5222d;">
+                        <span v-if="subscribeStateOf(u).lastError" style="color: var(--aui-danger)">
                             拉取失败：[[ subscribeStateOf(u).lastError ]]
-                            <span v-if="subscribeStateOf(u).lastUpdatedAt" style="color: #888;">
+                            <span v-if="subscribeStateOf(u).lastUpdatedAt" class="cell-muted">
                                 —— 仍在使用 [[ relativeTime(subscribeStateOf(u).lastUpdatedAt) ]]拉到的
                                 域名 [[ subscribeStateOf(u).domainCount ]] 条 / IP 段 [[ subscribeStateOf(u).cidrCount ]] 条
                             </span>
                         </span>
-                        <span v-else-if="subscribeStateOf(u).lastUpdatedAt" style="color: #888;">
+                        <span v-else-if="subscribeStateOf(u).lastUpdatedAt" class="cell-muted">
                             [[ relativeTime(subscribeStateOf(u).lastUpdatedAt) ]] ·
                             域名 [[ subscribeStateOf(u).domainCount ]] 条 / IP 段 [[ subscribeStateOf(u).cidrCount ]] 条
                         </span>
@@ -435,7 +452,7 @@
                         </span>
                     </div>
                     <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
-                        <a-tag v-for="d in groupModal.subscribedPreview" :key="d">[[ d ]]</a-tag>
+                        <span v-for="d in groupModal.subscribedPreview" :key="d" class="chip">[[ d ]]</span>
                     </div>
                 </div>
             </a-form-item>
@@ -452,7 +469,7 @@
                     </span>
                 </div>
                 <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
-                    <a-tag v-for="c in groupModal.subscribedCidrPreview" :key="c">[[ c ]]</a-tag>
+                    <span v-for="c in groupModal.subscribedCidrPreview" :key="c" class="chip">[[ c ]]</span>
                 </div>
             </a-form-item>
         </a-form>
@@ -609,25 +626,25 @@
     <a-modal v-model="importReportVisible" title="导入结果" :footer="null" :width="720">
         <a-row style="margin-bottom:12px">
             <a-col :span="8">
-                域名组：<a-tag color="green">新增 [[ importReport.domainGroups.created ]]</a-tag>
-                <a-tag>跳过 [[ importReport.domainGroups.skipped ]]</a-tag>
-                <a-tag v-if="importReport.domainGroups.failed" color="red">
+                域名组：<span class="chip">新增 [[ importReport.domainGroups.created ]]</span>
+                <span class="chip">跳过 [[ importReport.domainGroups.skipped ]]</span>
+                <span v-if="importReport.domainGroups.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
                     失败 [[ importReport.domainGroups.failed ]]
-                </a-tag>
+                </span>
             </a-col>
             <a-col :span="8">
-                出站节点：<a-tag color="green">新增 [[ importReport.outbounds.created ]]</a-tag>
-                <a-tag>跳过 [[ importReport.outbounds.skipped ]]</a-tag>
-                <a-tag v-if="importReport.outbounds.failed" color="red">
+                出站节点：<span class="chip">新增 [[ importReport.outbounds.created ]]</span>
+                <span class="chip">跳过 [[ importReport.outbounds.skipped ]]</span>
+                <span v-if="importReport.outbounds.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
                     失败 [[ importReport.outbounds.failed ]]
-                </a-tag>
+                </span>
             </a-col>
             <a-col :span="8">
-                分流规则：<a-tag color="green">新增 [[ importReport.rules.created ]]</a-tag>
-                <a-tag>跳过 [[ importReport.rules.skipped ]]</a-tag>
-                <a-tag v-if="importReport.rules.failed" color="red">
+                分流规则：<span class="chip">新增 [[ importReport.rules.created ]]</span>
+                <span class="chip">跳过 [[ importReport.rules.skipped ]]</span>
+                <span v-if="importReport.rules.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
                     失败 [[ importReport.rules.failed ]]
-                </a-tag>
+                </span>
             </a-col>
         </a-row>
         <div v-if="importReport.messages && importReport.messages.length" class="import-messages">
@@ -672,8 +689,13 @@
                 // 优先级不再是一个可编辑的数字：它由行的先后决定，拖手柄改。
                 { title: '', width: 40, scopedSlots: { customRender: 'drag' } },
                 { title: '备注', dataIndex: 'remark', width: 140 },
-                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140 },
-                { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140 },
+                // rule-flow-cell 在单元格右缘用 ::after 画一个 →，把「哪些用户
+                // → 访问哪批域名 → 去哪」这条链路说出来。不单开一列：三列本来
+                // 就窄，再挤两列箭头会让每列各缩一截。
+                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140,
+                  className: 'rule-flow-cell' },
+                { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140,
+                  className: 'rule-flow-cell' },
                 { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
                 { title: '状态', width: 60, scopedSlots: { customRender: 'warn' } },
                 { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
