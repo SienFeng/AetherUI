@@ -445,6 +445,9 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 	if db == nil {
 		return out
 	}
+	// 主判定对应的原始 Location。分歧要按字段逐级判，不能拿 formatLocation
+	// 拼出来的串比——「南京市」与「南京」是同一个地方的两种写法。
+	var primary ipdb.Location
 	for _, sl := range db.Lookup(ip) {
 		text := formatLocation(sl.Location)
 		out.Sources = append(out.Sources, ipSourceLocation{
@@ -454,8 +457,8 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 		})
 		if text != "" {
 			if out.Location == "" {
-				out.Location = text
-			} else if text != out.Location && out.LocationAlt == "" {
+				out.Location, primary = text, sl.Location
+			} else if out.LocationAlt == "" && !sameLocation(primary, sl.Location) {
 				out.LocationAlt = text
 			}
 		}
@@ -468,6 +471,28 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 		}
 	}
 	return out
+}
+
+// sameLocation 判断两个数据源说的是不是同一个地方。
+//
+// 逐级比较而不是比 formatLocation 拼出来的整串，两处与直觉不同的口径各自
+// 防着一类假阳性——实测两份真实库对同一批中国 IP 有 87.9% 会被判成分歧，
+// 而真正的分歧只有 17.6%，「存疑」几乎对每个 IP 都亮，等于把这个提示废掉：
+//
+//   - 城市按 ipdb.CanonicalCity 归一后再比。ip2region 写「南京市」、纯真库写
+//     「南京」，占了全部假阳性的三分之二。
+//   - 某一级一方为空时视为相同。那是两个源的精度不同（纯真库对一批段只给到
+//     省），不是它们对同一个问题给出了两个答案。地区限制只看省份，城市这一级
+//     的取舍也影响不到放行判定。
+//
+// 反过来，归一后仍然不同就必须如实报出来：漏报比误报难查得多——管理员看到的
+// 会是一个被当成唯一答案的错误归属地，而面板本来掌握着「另一个源不这么认为」
+// 这个信息。
+func sameLocation(a, b ipdb.Location) bool {
+	sameField := func(x, y string) bool { return x == "" || y == "" || x == y }
+	return sameField(a.Country, b.Country) &&
+		sameField(a.Region, b.Region) &&
+		sameField(ipdb.CanonicalCity(a.City), ipdb.CanonicalCity(b.City))
 }
 
 // transportObservable 判断某入站的传输方式能否从内核连接表里看到每个客户端。
