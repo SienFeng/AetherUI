@@ -84,10 +84,6 @@ html, body {
     border-radius: 30px;
 }
 
-.ant-card-hoverable {
-    cursor: auto;
-}
-
 .ant-card+.ant-card {
     margin-top: 20px;
 }
