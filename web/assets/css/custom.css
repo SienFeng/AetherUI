@@ -1,3 +1,68 @@
+/* ════════════════════════════════════════════════════════════════════
+ * AetherUI Design Token
+ *
+ * 全部取自登录页那套已经核算过 WCAG 的色板（login.html 的 .login-page），
+ * 把它从「只有登录页用」提升为全站基准。注释里的比值是白底（或注明的底色）
+ * 上的实测对比度，改任何一个值都要重新核算，不要凭感觉调。
+ *
+ * 命名统一带 --aui- 前缀，与登录页自己那套 --txt/--accent 局部变量隔离：
+ * 那套是 .login-page 作用域内的，两边同名会在将来某次改动里互相覆盖。
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+    /* ── Surface ───────────────────────────────────────────────── */
+    --aui-bg:            #F1F5F9;   /* 页面底。取代 antd 的 #f0f2f5，与登录页同族 */
+    --aui-surface:       #FFFFFF;
+    --aui-surface-soft:  #F8FAFC;   /* 表头、只读区、代码块底 */
+
+    /* ── Text ──────────────────────────────────────────────────── */
+    --aui-text:          #0F172A;   /* 17.8:1  正文 */
+    --aui-text-2:        #475569;   /*  7.6:1  次要正文 */
+    --aui-text-3:        #64748B;   /*  4.8:1  占位符、辅助说明，仍过 AA
+                                     * 不要退到常见的 slate-400 #94A3B8，那只有 2.6:1 */
+
+    /* ── Line ──────────────────────────────────────────────────── */
+    --aui-line:          #E2E8F0;
+    --aui-line-strong:   #CBD5E1;
+
+    /* ── Semantic ──────────────────────────────────────────────────
+     * 每个色只有一个含义，页面之间不得再各自解释：
+     *   蓝 = 主操作 / 选中 / 链接      绿 = 成功 / 健康 / 已生效
+     *   橙 = 警告 / 等待 / 降级 / 存疑  红 = 故障 / 超额 / 过期 / 高风险 / 删除
+     *   灰 = 未知 / 关闭 / 未配置 / 离线 / 无限制
+     * 特别注意「无限制 / 无限期 / 不限速」是中性事实，用 muted 不用 success。 */
+    --aui-primary:       #1266D6;   /* 白字 5.39:1（antd 原本的 #1890FF 只有 3.24:1） */
+    --aui-primary-hover: #0F58BC;   /* 白字 6.30:1 */
+    --aui-primary-active:#0B4694;   /* 白字 9.06:1 */
+    --aui-primary-soft:  #EFF6FF;   /* 选中行底、轻量 chip 底 */
+    --aui-primary-line:  #BFDBFE;
+    --aui-ring:          rgba(18, 102, 214, .14);
+
+    --aui-success:       #15803D;   /* 白底 5.4:1 */
+    --aui-warning:       #B45309;   /* 白底 5.3:1 */
+    --aui-danger:        #B91C1C;   /* 白底 7.0:1 */
+    --aui-muted:         #64748B;   /* 白底 4.8:1 */
+
+    /* ── Radius ────────────────────────────────────────────────────
+     * 改动前全站有七种取值（30/20/13/10/8/6/4），收敛成四档。
+     * 30px 这个默认值本身就不成立——本文件下方 .stat-card 的原注释已经
+     * 论证过「110px 高的卡用 30px 会圆到像药丸」，而同样的推理对
+     * index.html 里那些 60px 高的卡片只会更成立。 */
+    --aui-r-sm:   6px;    /* chip、tag、小按钮 */
+    --aui-r-md:  10px;    /* 输入框、按钮、图标块 */
+    --aui-r-lg:  12px;    /* 卡片、弹窗 */
+    --aui-r-pill: 999px;  /* 仅状态 badge */
+
+    /* ── Shadow ────────────────────────────────────────────────────
+     * 极轻，只用来表达层级，不作为主要视觉效果。 */
+    --aui-sh-1: 0 1px 2px rgba(15, 23, 42, .04);
+    --aui-sh-2: 0 2px 8px rgba(15, 23, 42, .06);
+    --aui-sh-3: 0 8px 24px -8px rgba(15, 23, 42, .16);
+
+    /* ── Motion ────────────────────────────────────────────────── */
+    --aui-dur:  180ms;
+    --aui-ease: cubic-bezier(.22, .61, .36, 1);
+}
+
 #app {
     height: 100%;
 }
@@ -15,7 +80,13 @@
  * 不去画侧栏那条深色区域——侧栏宽度会随折叠状态变化，画死了反而会在折叠后
  * 露出一条对不齐的深色带。灰底已经比白底柔和得多。 */
 html, body {
-    background-color: #f0f2f5;
+    background-color: var(--aui-bg);
+}
+
+/* antd 把页面底色画在 .ant-layout 上（antd.min.css: .ant-layout{...background:#f0f2f5}），
+ * 只改 html/body 会被它整块盖住，一个像素都看不出来。 */
+.ant-layout {
+    background: var(--aui-bg);
 }
 
 /* 第二段：挂载后整体淡入，内容区再多一点点位移，让它读起来是「浮现」
@@ -72,6 +143,33 @@ html, body {
     }
 }
 
+/* ── 全站键盘焦点环 ────────────────────────────────────────────────
+ * :focus-visible 只在键盘导航时命中，鼠标点击不触发，所以对鼠标用户
+ * 零视觉噪声。antd 1.7.2 对焦点基本只改边框色，在图标按钮、表格内的
+ * 链接、开关上几乎看不出来，键盘用户会完全跟丢自己在哪。
+ *
+ * 不支持 :focus-visible 的浏览器会把整条规则丢弃（选择器列表里有一个
+ * 不认识就整条作废），退回 antd 原样，没有回归。所以侧栏那条必须单独
+ * 成一条规则，不能并进来——并进来的话它会连累整条。 */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible,
+.ant-btn:focus-visible,
+.ant-input:focus-visible,
+.ant-switch:focus-visible,
+.ant-tabs-tab:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+}
+
+/* 侧栏是 #001529 的深底，主色蓝在上面对比度不够，单独给一个亮环。 */
+#sider .ant-menu-item:focus-visible,
+#sider .ant-menu-submenu-title:focus-visible,
+#sider .sider-version-tag:focus-visible {
+    outline: 2px solid #FFFFFF;
+    outline-offset: -2px;
+}
+
 .ant-space {
     width: 100%;
 }
@@ -81,7 +179,7 @@ html, body {
 }
 
 .ant-card {
-    border-radius: 30px;
+    border-radius: var(--aui-r-lg);
 }
 
 .ant-card+.ant-card {
@@ -404,31 +502,32 @@ html, body {
     margin-bottom: 20px;
 }
 
-/* 圆角跟随面板既有语言：本文件上方的 .ant-card 是 30px，整套界面都是大圆角，
- * 指标卡用小圆角会在一堆圆卡里显得突兀。这里取 20px 而不是照抄 30px——
- * 大表格卡有八百多像素高，30px 只占它一小截；指标卡才 110px 高，同样的
- * 30px 占到高度的四分之一以上，会圆到像药丸。 */
+/* 圆角与卡片同档。改动前这里是 20px、.ant-card 是 30px，理由是「大卡八百多
+ * 像素高，30px 只占一小截；指标卡才 110px 高，30px 会圆到像药丸」——那段推理
+ * 本身是对的，它证明的是 30px 这个默认值不成立，而不是指标卡该有自己的一档。
+ * 现在 .ant-card 已经收敛到 12px，两者用同一个 token，不再需要例外。 */
 .stat-card {
     display: flex;
     align-items: center;
     gap: 14px;
     padding: 16px 20px;
     background: #fff;
-    border: 1px solid #f0f0f0;
-    border-radius: 20px;
-    transition: border-color .2s, box-shadow .2s;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-lg);
+    transition: border-color var(--aui-dur) var(--aui-ease),
+                box-shadow var(--aui-dur) var(--aui-ease);
 }
 
 .stat-card:hover {
-    border-color: #d9d9d9;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, .06);
+    border-color: var(--aui-line-strong);
+    box-shadow: var(--aui-sh-2);
 }
 
 .stat-icon {
     flex: none;
     width: 44px;
     height: 44px;
-    border-radius: 13px;
+    border-radius: var(--aui-r-md);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -444,7 +543,7 @@ html, body {
 .stat-label {
     font-size: 12px;
     line-height: 18px;
-    color: rgba(0, 0, 0, .65);
+    color: var(--aui-text-2);
     white-space: nowrap;
 }
 
@@ -453,7 +552,7 @@ html, body {
     font-size: 24px;
     line-height: 32px;
     font-weight: 600;
-    color: #1f1f1f;
+    color: var(--aui-text);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -461,33 +560,33 @@ html, body {
 .stat-value .unit {
     font-size: 13px;
     font-weight: 400;
-    color: rgba(0, 0, 0, .65);
+    color: var(--aui-text-2);
     margin-left: 5px;
 }
 
-.stat-card.tone-blue .stat-icon   { color: #1890ff; background: #e6f7ff; }
+.stat-card.tone-blue .stat-icon   { color: var(--aui-primary); background: var(--aui-primary-soft); }
 .stat-card.tone-cyan .stat-icon   { color: #13c2c2; background: #e6fffb; }
 .stat-card.tone-purple .stat-icon { color: #722ed1; background: #f9f0ff; }
 .stat-card.tone-geek .stat-icon   { color: #2f54eb; background: #f0f5ff; }
-.stat-card.tone-ok .stat-icon     { color: #52c41a; background: #f6ffed; }
+.stat-card.tone-ok .stat-icon     { color: var(--aui-success); background: #F0FDF4; }
 
-/* #cf1322 在白底上是 5.57:1，过 AA。 */
+/* --aui-danger #B91C1C 在白底上是 7.0:1，比改动前的 #cf1322（5.57:1）更稳。 */
 .stat-card.tone-alert {
-    border-color: #ffccc7;
-    background: #fff2f0;
+    border-color: #FECACA;
+    background: #FEF2F2;
 }
 
-.stat-card.tone-alert .stat-icon  { color: #cf1322; background: #fff1f0; }
-.stat-card.tone-alert .stat-value { color: #cf1322; }
+.stat-card.tone-alert .stat-icon  { color: var(--aui-danger); background: #FEE2E2; }
+.stat-card.tone-alert .stat-value { color: var(--aui-danger); }
 
 /* tooltip 挂在普通元素上，不加 tabindex 键盘用户永远看不到「哪几条规则
  * 没生效」。有了 tabindex 就必须给回一个可见的焦点环。 */
 .stat-card[tabindex] { cursor: default; }
 
 .stat-card[tabindex]:focus-visible {
-    outline: 2px solid #1890ff;
+    outline: 2px solid var(--aui-primary);
     outline-offset: 2px;
-    border-radius: 20px;
+    border-radius: var(--aui-r-lg);
 }
 
 /* 归属地两个数据源判定不一致时的标记。
@@ -497,12 +596,15 @@ html, body {
  * 3:1 门槛；同时补一个图标，不让「有分歧」只靠颜色表达。
  *
  * 用橙色而不是红色：分歧是「哪个源可信不确定」，不是错误。实测过一次
- * ip2region 判错、纯真判对，红色会让管理员以为是故障。 */
+ * ip2region 判错、纯真判对，红色会让管理员以为是故障。
+ *
+ * 现在取 --aui-warning（5.3:1），比改动前的 #d46b08（3.56:1）更稳，
+ * 同时让「存疑」与全站其他警告态用同一个橙。 */
 .ip-divergent {
-    border-bottom: 1px dashed #d46b08;
+    border-bottom: 1px dashed var(--aui-warning);
 }
 
 .ip-divergent .anticon {
     margin-left: 4px;
-    color: #d46b08;
+    color: var(--aui-warning);
 }
