@@ -863,6 +863,86 @@ button.status-badge:hover {
     color: var(--aui-text-3);
 }
 
+/* ── 设置页：左侧二级导航 ────────────────────────────────────────────
+ * 改动前是 9 个横向 tab，已经排满一行；再加 2FA / 备份 / 告警 / API 这类
+ * 分类一定撑不住。antd 1.7.2 的 a-tabs 自带 tab-position="left"，
+ * 9 个 a-tab-pane 一个都不用动，DOM 结构与 Vue 作用域零变化。 */
+#setting-tabs > .ant-tabs-bar {
+    min-width: 132px;
+    border-right: 1px solid var(--aui-line);
+}
+
+#setting-tabs .ant-tabs-tab {
+    margin: 0 0 2px 0 !important;
+    padding: 8px 16px !important;
+    border-radius: var(--aui-r-sm) 0 0 var(--aui-r-sm);
+    text-align: left;
+}
+
+#setting-tabs .ant-tabs-content {
+    padding-left: 20px;
+}
+
+/* 窄屏退回横向：132px 的侧导航在手机上会把右侧内容挤到没法填表。
+ * antd 的左置 tab 靠 float 布局，回退时要把这些一并解除。 */
+@media (max-width: 768px) {
+    #setting-tabs > .ant-tabs-bar {
+        min-width: 0;
+        width: 100%;
+        float: none;
+        border-right: 0;
+        border-bottom: 1px solid var(--aui-line);
+    }
+
+    #setting-tabs .ant-tabs-tab {
+        border-radius: var(--aui-r-sm) var(--aui-r-sm) 0 0;
+    }
+
+    #setting-tabs .ant-tabs-content {
+        padding-left: 0;
+    }
+}
+
+/* ── 未保存提示条 ────────────────────────────────────────────────────
+ * 改动前「保存配置」在页面最顶部，而 xray 配置模板那个 textarea 能撑到
+ * 几屏高——改完往下滚的人要滚回顶部才能保存。
+ *
+ * 没有改动时整条不渲染（v-if），所以「不突出」不是靠淡化，是压根不存在。
+ *
+ * 贴**顶**而不是贴底。sticky 的粘滞区间是元素在其包含块内剩余的空间——
+ * 放在容器最后一个位置再写 bottom: 0，区间恰好是零，滚动时它不会浮起来，
+ * 看起来就跟没加一样。放在表单之前配 top: 0，下面有整屏内容可滚，才真的
+ * 会跟着视口走。 */
+.save-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border: 1px solid var(--aui-warning);
+    border-radius: var(--aui-r-lg);
+    /* 不透明底：它浮在内容之上，半透明会让底下的表单文字透上来 */
+    background: #FFFBEB;
+    box-shadow: var(--aui-sh-3);
+}
+
+.save-bar-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--aui-warning);
+}
+
+@media (max-width: 768px) {
+    .save-bar-text {
+        flex: 1 1 100%;
+    }
+}
+
 /* 归属地两个数据源判定不一致时的标记。
  *
  * 改动前只有一条 rgba(0,0,0,.25) 的虚线，在白底上对比度 1.84:1，等于看不见，
