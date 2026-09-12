@@ -678,6 +678,191 @@ button:focus-visible,
     border-radius: var(--aui-r-lg);
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * 表格单元格与工具栏
+ *
+ * 改动前入站表有 15 列、scroll.x=1360，1600px 以下的屏幕一律横向滚动；
+ * 一行里能出现 8~10 个彩色 a-tag，真正需要被看见的（超流量、已过期、
+ * 高风险）全被淹掉。
+ *
+ * 这里的规则就是 custom.css 上方 .stat-row 注释里那条，只是此前只在指标卡
+ * 上执行过：**分类信息是装饰，状态才是信息**。所以协议、传输、端口、额度、
+ * 日期一律降成文本或无色 chip，彩色只留给「出事了」。
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 一个单元格里的两行：主行 + 次行。次行统一 12px/muted，不再各自写
+ * 内联 style——改动前那些 color: rgba(0,0,0,.45) 只有 3.36:1，不达 AA。 */
+.cell-main {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--aui-text);
+}
+
+.cell-sub {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--aui-text-3);
+}
+
+/* 每秒刷新的数值必须等宽，否则整行会左右跳动 */
+.cell-num {
+    font-variant-numeric: tabular-nums;
+}
+
+.cell-muted {
+    color: var(--aui-text-3);
+}
+
+/* 轻量 chip：用来承载「设了限制」这类分类信息。无底色、无彩色，
+ * 只靠一圈描边把它和正文分开。 */
+.chip {
+    display: inline-block;
+    padding: 0 6px;
+    margin: 1px 4px 1px 0;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-sm);
+    background: var(--aui-surface-soft);
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--aui-text-2);
+    white-space: nowrap;
+}
+
+/* ── 状态徽标 ────────────────────────────────────────────────────────
+ * 只有**状态**才配用它。每一档都带文字，绝不只靠颜色——色觉障碍用户
+ * 看到的必须和其他人一样多。 */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border-radius: var(--aui-r-pill);
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+}
+
+.status-badge .anticon {
+    font-size: 11px;
+}
+
+.status-neutral { background: #F1F5F9; color: var(--aui-text-2); }
+
+/* 只染文字、不加底色的两档。用在单元格主行上——「剩 3 天」「已过期」
+ * 本身就是一句话，再套一个药丸底会让整列变成色块墙。
+ * 两者都必须配一个能独立读出含义的文字，绝不只靠颜色。 */
+.status-text-warn   { color: var(--aui-warning); }
+.status-text-danger { color: var(--aui-danger); font-weight: 500; }
+.status-ok      { background: #F0FDF4; color: var(--aui-success); }
+.status-warn    { background: #FFFBEB; color: var(--aui-warning); }
+.status-danger  { background: #FEF2F2; color: var(--aui-danger); }
+
+/* 可点开明细的徽标（风险那一列）。必须能被键盘拿到：它是这个入站
+ * 唯一的风险弹窗入口。 */
+button.status-badge {
+    cursor: pointer;
+    border: 0;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+button.status-badge:hover {
+    filter: brightness(.96);
+}
+
+/* ── 流量进度条 ──────────────────────────────────────────────────────
+ * 改动前额度是三个并排的彩色 a-tag（用量 / 额度 / 无限制），要读数字
+ * 才知道用了多少。一条 3px 的条一眼就能扫完整列。 */
+.usage-bar {
+    height: 3px;
+    margin-top: 4px;
+    border-radius: 2px;
+    background: var(--aui-line);
+    overflow: hidden;
+}
+
+.usage-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--aui-primary);
+    transition: width var(--aui-dur) var(--aui-ease);
+}
+
+.usage-bar-fill.is-warn   { background: var(--aui-warning); }
+.usage-bar-fill.is-danger { background: var(--aui-danger); }
+
+@media (prefers-reduced-motion: reduce) {
+    .usage-bar-fill { transition: none; }
+}
+
+/* ── 列表工具栏 ──────────────────────────────────────────────────────
+ * 改动前入站页没有搜索也没有过滤——模板里那行 <a-input v-model="searchKey">
+ * 是注释掉的，而它对应的 searchInbounds() 引用了一个从来不在 data 里的
+ * this.searchedInbounds，即半成品死代码。 */
+.toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.toolbar-search {
+    display: inline-block;
+    width: 220px;
+    max-width: 100%;
+}
+
+.toolbar-spacer {
+    flex: 1 1 auto;
+}
+
+/* 结果计数。过滤之后必须说清「看到的是全部还是一部分」，
+ * 否则管理员会把过滤后的空表读成「入站被删光了」。 */
+.toolbar-count {
+    font-size: 12px;
+    color: var(--aui-text-3);
+    white-space: nowrap;
+}
+
+/* 窄屏下搜索框独占一行，四个过滤器再换行排 */
+@media (max-width: 768px) {
+    .toolbar-search {
+        width: 100%;
+    }
+
+    .toolbar-spacer {
+        display: none;
+    }
+}
+
+/* ── 展开行分区 ──────────────────────────────────────────────────────
+ * 展开区里原本四块内容（时间窗控件 / 来源明细 / 其余来源合计 / 用量图）
+ * 一路平铺，没有任何分隔，读起来是一长条。
+ *
+ * 刻意不用 a-tabs：图表所在的面板未激活时 canvas 不在 DOM 里，而
+ * loadTrafficChart 是在 $nextTick 里 getElementById 取它的，取不到就
+ * 整段静默跳过——图永远不画，且不报错。视觉分区能解决可读性，
+ * 不动 canvas 的挂载时机。 */
+.row-section + .row-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.row-section-title {
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+.row-section-title .anticon {
+    margin-right: 6px;
+    color: var(--aui-text-3);
+}
+
 /* 归属地两个数据源判定不一致时的标记。
  *
  * 改动前只有一条 rgba(0,0,0,.25) 的虚线，在白底上对比度 1.84:1，等于看不见，
