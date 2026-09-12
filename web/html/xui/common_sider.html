@@ -191,9 +191,13 @@
 <a-drawer id="sider-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"
           :visible="siderDrawer.visible" :wrap-style="{ padding: 0 }">
-    <div class="drawer-handle" @click="siderDrawer.change()" slot="handle">
+    <!-- 改成 <button>：这是小屏上打开导航的唯一入口（侧栏在 md 断点下
+         collapsed-width="0" 会整个消失），而 div + @click 键盘完全拿不到。 -->
+    <button type="button" class="drawer-handle" @click="siderDrawer.change()" slot="handle"
+            :aria-label="siderDrawer.visible ? '关闭导航菜单' : '打开导航菜单'"
+            :aria-expanded="siderDrawer.visible ? 'true' : 'false'">
         <a-icon :type="siderDrawer.visible ? 'close' : 'menu-fold'"></a-icon>
-    </div>
+    </button>
     <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
         @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}

@@ -169,6 +169,7 @@
                                 </div>
                                 <a-table :columns="groupColumns" :data-source="groups"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
+                                         :locale="{ emptyText: '还没有域名组。域名组是一批域名或 IP 段的集合，分流规则引用它来决定哪些流量走哪个出站。' }"
                                          style="margin-top: 20px">
                                     <template slot="domains" slot-scope="text, group">
                                         <span v-if="group.broken" style="color: var(--aui-danger)">
@@ -257,6 +258,7 @@
                                 </div>
                                 <a-table :columns="nodeColumns" :data-source="nodes"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
+                                         :locale="{ emptyText: '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }"
                                          style="margin-top: 20px">
                                     <template slot="tag" slot-scope="text, node">
                                         <span class="chip cell-num">[[ node.tag ]]</span>
@@ -351,6 +353,7 @@
                                     <span class="rule-section-hint">越靠上越先匹配，拖动左侧手柄调整顺序</span>
                                 </div>
                                 <a-table :columns="ruleColumns" :data-source="routeRules"
+                                         :locale="{ emptyText: '还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。' }"
                                          :custom-row="ruleRow"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false">
 {{template "routingRuleTableSlots" .}}

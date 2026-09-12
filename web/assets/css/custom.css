@@ -127,10 +127,32 @@ html, body {
 
 /* 系统设置里开了「减少动态效果」就不要动。这类偏好通常是前庭功能需求，
  * 不是审美选择。 */
+/* 全站动效降级集中在这一处。分散成好几个 @media 块的话，新增一条动效时
+ * 很容易忘了它还有第二个地方要改。
+ *
+ * 收的是**位移与缩放**这类会引发前庭不适的动效，以及入场动画；颜色与阴影
+ * 的过渡保留——它们不产生运动，去掉反而让 hover 反馈变成生硬的跳变。 */
 @media (prefers-reduced-motion: reduce) {
     #app,
     #content-layout {
         animation: none;
+    }
+
+    /* <transition name="list"> 的入场带 translateY(-30px)，七个地方在用 */
+    .list-enter-active,
+    .list-leave-active {
+        transition: none;
+    }
+
+    .list-enter,
+    .list-leave-active {
+        transform: none;
+    }
+
+    /* 进度条与资源条的宽度变化是位移的一种 */
+    .usage-bar-fill,
+    .res-bar-fill {
+        transition: none;
     }
 
     #sider .ant-menu-item,
@@ -186,113 +208,40 @@ button:focus-visible,
     margin-top: 20px;
 }
 
+/* 手机上打开侧栏的唯一入口——侧栏在 breakpoint="md" 下 collapsed-width="0"
+ * 会整个消失，全靠这个把手。改动前是 41×40，低于 44×44 的触控下限，而它
+ * 恰恰是小屏上最需要点得准的一个东西。 */
 .drawer-handle {
+    /* <button> 自带的 UA 样式要清掉，否则会多一圈默认边框 */
+    border: 0;
+    padding: 0;
+    font-family: inherit;
     position: absolute;
     top: 72px;
-    width: 41px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     z-index: 0;
-    text-align: center;
-    line-height: 40px;
     font-size: 16px;
     display: flex;
     justify-content: center;
     align-items: center;
-    background: #fff;
-    right: -40px;
-    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
-    border-radius: 0 4px 4px 0;
+    background: var(--aui-surface);
+    color: var(--aui-text-2);
+    right: -44px;
+    box-shadow: var(--aui-sh-3);
+    border-radius: 0 var(--aui-r-md) var(--aui-r-md) 0;
+}
+
+.drawer-handle:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
 }
 
 @media (min-width: 769px) {
     .drawer-handle {
         display: none;
     }
-}
-
-.fade-in-enter, .fade-in-leave-active, .fade-in-linear-enter, .fade-in-linear-leave, .fade-in-linear-leave-active, .fade-in-linear-enter, .fade-in-linear-leave, .fade-in-linear-leave-active {
-    opacity: 0
-}
-
-.fade-in-linear-enter-active, .fade-in-linear-leave-active {
-    -webkit-transition: opacity .2s linear;
-    transition: opacity .2s linear
-}
-
-.fade-in-linear-enter-active, .fade-in-linear-leave-active {
-    -webkit-transition: opacity .2s linear;
-    transition: opacity .2s linear
-}
-
-.fade-in-enter-active, .fade-in-leave-active {
-    -webkit-transition: all .3s cubic-bezier(.55, 0, .1, 1);
-    transition: all .3s cubic-bezier(.55, 0, .1, 1)
-}
-
-.zoom-in-center-enter-active, .zoom-in-center-leave-active {
-    -webkit-transition: all .3s cubic-bezier(.55, 0, .1, 1);
-    transition: all .3s cubic-bezier(.55, 0, .1, 1)
-}
-
-.zoom-in-center-enter, .zoom-in-center-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleX(0);
-    transform: scaleX(0)
-}
-
-.zoom-in-top-enter-active, .zoom-in-top-leave-active {
-    opacity: 1;
-    -webkit-transform: scaleY(1);
-    transform: scaleY(1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: center top;
-    transform-origin: center top
-}
-
-.zoom-in-top-enter, .zoom-in-top-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleY(0);
-    transform: scaleY(0)
-}
-
-.zoom-in-bottom-enter-active, .zoom-in-bottom-leave-active {
-    opacity: 1;
-    -webkit-transform: scaleY(1);
-    transform: scaleY(1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: center bottom;
-    transform-origin: center bottom
-}
-
-.zoom-in-bottom-enter, .zoom-in-bottom-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleY(0);
-    transform: scaleY(0)
-}
-
-.zoom-in-left-enter-active, .zoom-in-left-leave-active {
-    opacity: 1;
-    -webkit-transform: scale(1, 1);
-    transform: scale(1, 1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: top left;
-    transform-origin: top left
-}
-
-.zoom-in-left-enter, .zoom-in-left-leave-active {
-    opacity: 0;
-    -webkit-transform: scale(.45, .45);
-    transform: scale(.45, .45)
 }
 
 .list-enter-active, .list-leave-active {
@@ -792,10 +741,6 @@ button.status-badge:hover {
 .usage-bar-fill.is-warn   { background: var(--aui-warning); }
 .usage-bar-fill.is-danger { background: var(--aui-danger); }
 
-@media (prefers-reduced-motion: reduce) {
-    .usage-bar-fill { transition: none; }
-}
-
 /* ── 列表工具栏 ──────────────────────────────────────────────────────
  * 改动前入站页没有搜索也没有过滤——模板里那行 <a-input v-model="searchKey">
  * 是注释掉的，而它对应的 searchInbounds() 引用了一个从来不在 data 里的
@@ -861,6 +806,71 @@ button.status-badge:hover {
 .row-section-title .anticon {
     margin-right: 6px;
     color: var(--aui-text-3);
+}
+
+/* ── 窄屏收尾 ────────────────────────────────────────────────────────
+ * 目标不是把复杂表格拆成纵向堆叠——那会让一个入站占掉一屏，扫读彻底没了。
+ * 表格该横滚就横滚；这里处理的是表格**之外**那些本来就该换行的部分。 */
+@media (max-width: 768px) {
+    /* 内容区左右留白：antd 只在 ≥769px 给 .ant-layout-content 加 margin，
+     * 窄屏下内容会直接贴到视口边缘。 */
+    .ant-layout-content {
+        padding: 16px 12px;
+        box-sizing: border-box;
+    }
+
+    /* 标题与主操作上下排，主操作撑满一行便于点击 */
+    .page-header {
+        gap: 12px;
+    }
+
+    .page-actions {
+        width: 100%;
+    }
+
+    .page-actions .ant-btn {
+        flex: 1 1 auto;
+    }
+
+    /* 指标卡单列。改动前 minmax(210px, 1fr) 在 390px 屏上仍是一列，
+     * 但 padding 与图标尺寸偏大，压缩一档。 */
+    .stat-card {
+        padding: 12px 14px;
+        gap: 12px;
+    }
+
+    .stat-icon {
+        width: 38px;
+        height: 38px;
+        font-size: 17px;
+    }
+
+    .stat-value {
+        font-size: 20px;
+        line-height: 28px;
+    }
+
+    /* 弹窗在窄屏上接近满宽：antd 1.7.2 的 a-modal 用固定 px 宽度
+     * （入站弹窗 900、共享风险 900、访问日志 1000），小屏上会溢出视口。 */
+    .ant-modal {
+        max-width: calc(100vw - 16px);
+        margin: 8px auto;
+    }
+
+    /* 风险分数区在窄屏换行后，数字与文字之间的 20px 间距过大 */
+    .risk-hero {
+        gap: 12px;
+        padding: 14px 16px;
+    }
+
+    .risk-score-num {
+        font-size: 34px;
+    }
+
+    /* 键值明细的标签列在窄屏收窄，给值留出宽度 */
+    .kv-row dt {
+        flex: 0 0 78px;
+    }
 }
 
 /* ── 弹窗内的表单分段 ────────────────────────────────────────────────
@@ -1126,10 +1136,6 @@ button.chip.is-active {
  * 且百分比数字就在正上方——颜色不是唯一的信息来源。 */
 .res-bar-fill.is-warn   { background: var(--aui-warning); }
 .res-bar-fill.is-danger { background: var(--aui-danger); }
-
-@media (prefers-reduced-motion: reduce) {
-    .res-bar-fill { transition: none; }
-}
 
 /* 没有百分比的那些量（负载、连接数、网速、累计流量） */
 .metric-grid {
