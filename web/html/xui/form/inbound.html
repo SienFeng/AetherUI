@@ -12,7 +12,8 @@
 </a-alert>
 
 <!-- 基本信息 -->
-<a-card size="small" title="基本信息" style="margin-bottom: 8px;" :body-style="{ padding: '12px 16px' }">
+<div class="form-section">
+    <div class="form-section-title">基本信息</div>
     <a-form layout="horizontal">
         <a-row :gutter="16">
             <a-col :span="12">
@@ -103,10 +104,11 @@
             </a-col>
         </a-row>
     </a-form>
-</a-card>
+</div>
 
 <!-- 限制与配额 -->
-<a-card size="small" title="限制与配额" style="margin-bottom: 8px;" :body-style="{ padding: '12px 16px' }">
+<div class="form-section">
+    <div class="form-section-title">限制与配额</div>
     <a-form layout="horizontal">
         <a-row :gutter="16">
             <a-col :span="8">
@@ -197,10 +199,11 @@
             </a-col>
         </a-row>
     </a-form>
-</a-card>
+</div>
 
 <!-- 协议参数 -->
-<a-card size="small" title="协议参数" style="margin-bottom: 8px;" :body-style="{ padding: '12px 16px' }">
+<div class="form-section">
+    <div class="form-section-title">协议参数</div>
     <!-- vmess settings -->
     <template v-if="inbound.protocol === Protocols.VMESS">
         {{template "form/vmess"}}
@@ -235,7 +238,7 @@
     <template v-if="inbound.protocol === Protocols.HTTP">
         {{template "form/http"}}
     </template>
-</a-card>
+</div>
 
 <!-- 传输与安全：原「传输」「安全层」「探测」三张卡片合并为一张，避免三套卡片头
      + 边框 + 内边距各自只装一两个控件。合并前三张卡片各自的可见性门槛
@@ -243,8 +246,9 @@
      REALITY 设置原来嵌套在「安全层」卡片（canEnableTls）内部、自身又带
      canEnableStream 条件，这里用同样的嵌套（外层 canEnableTls 的 template
      包住安全层单选 + tlsSettings + realitySettings）保持复合条件不变。 -->
-<a-card v-if="inbound.canEnableStream() || inbound.canEnableTls() || inbound.canSniffing()"
-        size="small" title="传输与安全" :body-style="{ padding: '12px 16px' }">
+<div class="form-section"
+     v-if="inbound.canEnableStream() || inbound.canEnableTls() || inbound.canSniffing()">
+    <div class="form-section-title">传输与安全</div>
     <!-- 传输 -->
     <template v-if="inbound.canEnableStream()">
         {{template "form/streamSettings"}}
@@ -292,5 +296,5 @@
     <template v-if="inbound.canSniffing()">
         {{template "form/sniffing"}}
     </template>
-</a-card>
+</div>
 {{end}}

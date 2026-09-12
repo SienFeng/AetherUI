@@ -41,6 +41,20 @@
      腾出来的宽度留给入站列表——那张表的列已经排到十四列。布局是 flex，
      内容区会自动变宽，没有任何一处硬编码过侧栏宽度。 -->
 <a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0" :width="160">
+    <!-- 品牌头。改动前侧栏顶部直接就是第一个菜单项，整个面板没有一处写着
+         自己叫什么。标识与登录页 .panel-brand 用同一个内联 SVG。
+         aria-hidden：紧挨着就是「AetherUI」这几个字，读屏软件念两遍是噪音。 -->
+    <div class="sider-brand">
+        <span class="sider-brand-mark" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
+                <path d="M8.3 14.2h7.4"/>
+            </svg>
+        </span>
+        <span class="sider-brand-name">AetherUI</span>
+    </div>
     <a-menu theme="dark" mode="inline" :selected-keys="['{{ .request_uri }}']"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
@@ -59,7 +73,7 @@
                         <div class="version-current">
                             [[ panelVersion.current ]]
                             <a-icon v-if="panelVersion.knownCurrent && !panelVersion.hasUpdate"
-                                    type="check-circle" theme="filled" style="color:#52c41a"></a-icon>
+                                    type="check-circle" theme="filled" style="color:var(--aui-success)"></a-icon>
                         </div>
                         <div class="version-state">[[ versionStateText() ]]</div>
                         <div v-if="panelVersion.lastError" class="version-error">
@@ -121,24 +135,24 @@
         <template v-if="upgradeState === 'starting'">
             <a-spin size="large"></a-spin>
             <p style="margin-top:16px">正在更新到 [[ upgradeTarget ]]…</p>
-            <p style="color:#8c8c8c;font-size:12px">
+            <p style="color:var(--aui-text-3);font-size:12px">
                 更新在后台独立进程中执行，请不要关闭此页面
             </p>
         </template>
         <template v-else-if="upgradeState === 'restarting'">
             <a-spin size="large"></a-spin>
             <p style="margin-top:16px">面板重启中…</p>
-            <p style="color:#8c8c8c;font-size:12px">这是更新过程中的正常现象</p>
+            <p style="color:var(--aui-text-3);font-size:12px">这是更新过程中的正常现象</p>
         </template>
         <template v-else-if="upgradeState === 'done'">
             <a-icon type="check-circle" theme="filled"
-                    style="font-size:48px;color:#52c41a"></a-icon>
+                    style="font-size:48px;color:var(--aui-success)"></a-icon>
             <!-- 版本号读不到时绝不能沿用「当前版本 X」那句：那个位置显示的是
                  panelVersion.current，此路径下它还是更新前的旧值，照原样显示
                  等于报一个假版本号。 -->
             <template v-if="upgradeVersionUnverified">
                 <p style="margin-top:16px">[[ upgradeTarget ]] 已安装完成，面板已重启</p>
-                <p style="color:#8c8c8c;font-size:12px">
+                <p style="color:var(--aui-text-3);font-size:12px">
                     该版本不提供版本查询接口，无法在这里核对版本号，
                     侧栏底部的版本入口也会随之消失。
                     此后如需再切换版本，请在服务器上执行 <b>a-ui update</b>。
@@ -149,13 +163,13 @@
         </template>
         <template v-else-if="upgradeState === 'timeout'">
             <a-icon type="exclamation-circle" theme="filled"
-                    style="font-size:48px;color:#faad14"></a-icon>
+                    style="font-size:48px;color:var(--aui-warning)"></a-icon>
             <p style="margin-top:16px">3 分钟内版本号仍未变化</p>
-            <p style="color:#8c8c8c;font-size:12px">
+            <p style="color:var(--aui-text-3);font-size:12px">
                 更新可能仍在进行中（慢速网络下载发版包可能超过 3 分钟），也可能已经失败。
                 <b>请不要重复点击更新</b>，先查看日志确认。
             </p>
-            <p style="color:#8c8c8c;font-size:12px">
+            <p style="color:var(--aui-text-3);font-size:12px">
                 若是登录态已失效导致查询中断，刷新页面重新登录即可确认当前版本。
             </p>
             <a-button style="margin-right:8px" @click="openUpgradeLog()">查看日志</a-button>
@@ -165,21 +179,25 @@
 </a-modal>
 
 <a-modal v-model="upgradeLogVisible" title="更新日志" :footer="null" :width="800">
-    <p style="color:#8c8c8c;font-size:12px">
+    <p style="color:var(--aui-text-3);font-size:12px">
         服务器上的 /var/log/a-ui-update.log，只显示最后 200 行
     </p>
     <pre class="upgrade-log"><template v-for="line in upgradeLogLines">[[ line ]]
 </template></pre>
-    <div v-if="!upgradeLogLines.length" style="color:#8c8c8c">
+    <div v-if="!upgradeLogLines.length" style="color:var(--aui-text-3)">
         日志为空，说明还没有执行过更新
     </div>
 </a-modal>
 <a-drawer id="sider-drawer" placement="left" :closable="false"
           @close="siderDrawer.close()"
           :visible="siderDrawer.visible" :wrap-style="{ padding: 0 }">
-    <div class="drawer-handle" @click="siderDrawer.change()" slot="handle">
+    <!-- 改成 <button>：这是小屏上打开导航的唯一入口（侧栏在 md 断点下
+         collapsed-width="0" 会整个消失），而 div + @click 键盘完全拿不到。 -->
+    <button type="button" class="drawer-handle" @click="siderDrawer.change()" slot="handle"
+            :aria-label="siderDrawer.visible ? '关闭导航菜单' : '打开导航菜单'"
+            :aria-expanded="siderDrawer.visible ? 'true' : 'false'">
         <a-icon :type="siderDrawer.visible ? 'close' : 'menu-fold'"></a-icon>
-    </div>
+    </button>
     <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
         @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}

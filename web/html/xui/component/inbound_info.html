@@ -1,74 +1,149 @@
+<!-- 入站详情。改动前每个值都套一个绿色 a-tag（协议、端口、uuid、密码、
+     path、加密方式……），整个弹窗是一面绿标签墙。绿色在全站表示「成功 /
+     健康」，而这些只是**值**——一个 uuid 没有健康与否可言；全绿的另一个
+     后果是里面真正需要注意的项（比如 TLS 未启用）一点都不显眼。
+     现在是键值列表，机器可读的值用等宽字体，方便逐字符核对。 -->
 {{define "inboundInfoStream"}}
-<p>传输: <a-tag color="green">[[ inbound.network ]]</a-tag></p>
+<div class="kv-row">
+    <dt>传输</dt>
+    <dd>[[ inbound.network ]]</dd>
+</div>
 
 <template v-if="inbound.isTcp || inbound.isWs || inbound.isH2">
-    <p v-if="inbound.host">host: <a-tag color="green">[[ inbound.host ]]</a-tag></p>
-    <p v-else>host: <a-tag color="orange">无</a-tag></p>
-
-    <p v-if="inbound.path">path: <a-tag color="green">[[ inbound.path ]]</a-tag></p>
-    <p v-else>path: <a-tag color="orange">无</a-tag></p>
+    <div class="kv-row">
+        <dt>host</dt>
+        <dd v-if="inbound.host" class="kv-mono">[[ inbound.host ]]</dd>
+        <dd v-else class="cell-muted">未设置</dd>
+    </div>
+    <div class="kv-row">
+        <dt>path</dt>
+        <dd v-if="inbound.path" class="kv-mono">[[ inbound.path ]]</dd>
+        <dd v-else class="cell-muted">未设置</dd>
+    </div>
 </template>
 
 <template v-if="inbound.isKcp">
-    <p>kcp 加密: <a-tag color="green">[[ inbound.kcpType ]]</a-tag></p>
-    <p>kcp 密码: <a-tag color="green">[[ inbound.kcpSeed ]]</a-tag></p>
+    <div class="kv-row">
+        <dt>kcp 加密</dt>
+        <dd>[[ inbound.kcpType ]]</dd>
+    </div>
+    <div class="kv-row">
+        <dt>kcp 密码</dt>
+        <dd class="kv-mono">[[ inbound.kcpSeed ]]</dd>
+    </div>
 </template>
 
 <template v-if="inbound.isGrpc">
-    <p>grpc serviceName: <a-tag color="green">[[ inbound.serviceName ]]</a-tag></p>
+    <div class="kv-row">
+        <dt>serviceName</dt>
+        <dd class="kv-mono">[[ inbound.serviceName ]]</dd>
+    </div>
 </template>
 
-<template v-if="inbound.tls">
-    <p>tls: <a-tag color="green">开启</a-tag></p>
-</template>
-<template v-else>
-    <p>tls: <a-tag color="red">关闭</a-tag></p>
-</template>
-<p v-if="inbound.tls">
-    tls域名: <a-tag :color="inbound.serverName ? 'green' : 'orange'">[[ inbound.serverName ? inbound.serverName : "无" ]]</a-tag>
-</p>
+<div class="kv-row">
+    <dt>TLS</dt>
+    <!-- 「未启用」用中性而不是改动前的红色：ws 入站藏在 Caddy 后面由反代
+         终结 TLS、以及 REALITY 入站，都是合法且常见的配置，红色会让管理员
+         以为自己配错了。 -->
+    <dd>
+        <span v-if="inbound.tls" class="status-badge status-ok">
+            <a-icon type="lock"/>已启用
+        </span>
+        <span v-else class="chip">未启用</span>
+    </dd>
+</div>
+<div class="kv-row" v-if="inbound.tls">
+    <dt>TLS 域名</dt>
+    <dd v-if="inbound.serverName" class="kv-mono">[[ inbound.serverName ]]</dd>
+    <!-- 开了 TLS 却没有域名确实值得提醒：证书与 SNI 对不上时客户端会连不上 -->
+    <dd v-else>
+        <span class="status-badge status-warn"><a-icon type="exclamation-circle"/>未设置</span>
+    </dd>
+</div>
 {{end}}
 
 
 {{define "component/inboundInfoComponent"}}
-<div>
-    <p>协议: <a-tag color="green">[[ dbInbound.protocol ]]</a-tag></p>
-    <p>地址: <a-tag color="blue">[[ dbInbound.address ]]</a-tag></p>
-    <p>端口: <a-tag color="green">[[ dbInbound.port ]]</a-tag></p>
+<dl class="kv">
+    <div class="kv-row">
+        <dt>协议</dt>
+        <dd>[[ dbInbound.protocol ]]</dd>
+    </div>
+    <div class="kv-row">
+        <dt>地址</dt>
+        <dd class="kv-mono">[[ dbInbound.address ]]</dd>
+    </div>
+    <div class="kv-row">
+        <dt>端口</dt>
+        <dd class="kv-mono">[[ dbInbound.port ]]</dd>
+    </div>
 
     <template v-if="dbInbound.isVMess">
-        <p>uuid: <a-tag color="green">[[ inbound.uuid ]]</a-tag></p>
-        <p>alterId: <a-tag color="green">[[ inbound.alterId ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>uuid</dt>
+            <dd class="kv-mono">[[ inbound.uuid ]]</dd>
+        </div>
+        <div class="kv-row">
+            <dt>alterId</dt>
+            <dd class="kv-mono">[[ inbound.alterId ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isVLess">
-        <p>uuid: <a-tag color="green">[[ inbound.uuid ]]</a-tag></p>
-        <p v-if="inbound.visionEnabled">flow: <a-tag color="green">[[ inbound.flow ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>uuid</dt>
+            <dd class="kv-mono">[[ inbound.uuid ]]</dd>
+        </div>
+        <div class="kv-row" v-if="inbound.visionEnabled">
+            <dt>flow</dt>
+            <dd class="kv-mono">[[ inbound.flow ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isTrojan">
-        <p>密码: <a-tag color="green">[[ inbound.password ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>密码</dt>
+            <dd class="kv-mono">[[ inbound.password ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isSS">
-        <p>加密: <a-tag color="green">[[ inbound.method ]]</a-tag></p>
-        <p>密码: <a-tag color="green">[[ inbound.password ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>加密</dt>
+            <dd>[[ inbound.method ]]</dd>
+        </div>
+        <div class="kv-row">
+            <dt>密码</dt>
+            <dd class="kv-mono">[[ inbound.password ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isSocks">
-        <p>用户名: <a-tag color="green">[[ inbound.username ]]</a-tag></p>
-        <p>密码: <a-tag color="green">[[ inbound.password ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>用户名</dt>
+            <dd class="kv-mono">[[ inbound.username ]]</dd>
+        </div>
+        <div class="kv-row">
+            <dt>密码</dt>
+            <dd class="kv-mono">[[ inbound.password ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isHTTP">
-        <p>用户名: <a-tag color="green">[[ inbound.username ]]</a-tag></p>
-        <p>密码: <a-tag color="green">[[ inbound.password ]]</a-tag></p>
+        <div class="kv-row">
+            <dt>用户名</dt>
+            <dd class="kv-mono">[[ inbound.username ]]</dd>
+        </div>
+        <div class="kv-row">
+            <dt>密码</dt>
+            <dd class="kv-mono">[[ inbound.password ]]</dd>
+        </div>
     </template>
 
     <template v-if="dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS">
         {{template "inboundInfoStream"}}
     </template>
-</div>
+</dl>
 {{end}}
 
 {{define "component/inboundInfo"}}

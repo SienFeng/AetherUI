@@ -12,16 +12,8 @@
         margin-top: 10px;
     }
 
-    .ant-tabs-bar {
-        margin: 0;
-    }
-
     .ant-list-item {
         display: block;
-    }
-
-    .ant-tabs-top-bar {
-        background: white;
     }
 </style>
 <style>
@@ -43,26 +35,48 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
+            <div class="page-header">
+                <div class="page-heading">
+                    <h1 class="page-title">面板设置</h1>
+                    <p class="page-description">面板自身、Xray、网络与日志的配置</p>
+                </div>
+                <div class="page-actions">
+                    <!-- 「重启面板」从「保存配置」旁边挪到这里。改动前两个按钮
+                         外观等重、紧挨着，而它们的 disabled 条件恰好**互为反向**
+                         （没有未保存改动时保存灰、重启亮）——这个反向联动没有
+                         任何文字说明，「保存完想再确认一下」的手停在原位点下去
+                         就是重启，而重启会中断所有管理会话。 -->
+                    <a-tooltip :title="dirty ? '有未保存的修改，请先保存或放弃' : null">
+                        <a-button :disabled="dirty" @click="restartPanel">重启面板</a-button>
+                    </a-tooltip>
+                </div>
+            </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
                 <a-space direction="vertical">
-                    <a-space direction="horizontal">
-                        <a-button type="primary" :disabled="saveBtnDisable" @click="updateAllSetting">保存配置</a-button>
-                        <a-button type="danger" :disabled="!saveBtnDisable" @click="restartPanel">重启面板</a-button>
-                    </a-space>
-                    <a-tabs default-active-key="1">
-                        <a-tab-pane key="1" tab="面板配置">
+                    <!-- 未保存提示条。没有改动时整条不渲染——「不突出」不是靠
+                         淡化，是压根不存在。放在表单**之前**并配 sticky top，
+                         xray 配置模板那个能撑几屏的 textarea 改到一半时它仍然
+                         挂在视口顶部，不必滚回来找保存按钮。 -->
+                    <div v-if="dirty" class="save-bar" role="status">
+                        <a-icon type="exclamation-circle" theme="filled"
+                                style="color: var(--aui-warning)"></a-icon>
+                        <span class="save-bar-text">有未保存的修改</span>
+                        <a-button size="small" @click="discardChanges">放弃修改</a-button>
+                        <a-button type="primary" size="small" @click="updateAllSetting">保存配置</a-button>
+                    </div>
+                    <!-- 9 个分类改成左侧二级导航。只加 tab-position 一个属性，
+                         9 个 a-tab-pane 与它们内部的表单一律不动。 -->
+                    <a-tabs id="setting-tabs" default-active-key="1" tab-position="left">
+                        <a-tab-pane key="1" tab="面板与访问">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="text" title="面板监听 IP" desc="默认留空监听所有 IP，重启面板生效" v-model="allSetting.webListen"></setting-list-item>
                                 <setting-list-item type="number" title="面板监听端口" desc="重启面板生效" v-model.number="allSetting.webPort"></setting-list-item>
                                 <setting-list-item type="text" title="面板证书公钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webCertFile"></setting-list-item>
                                 <setting-list-item type="text" title="面板证书密钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webKeyFile"></setting-list-item>
                                 <setting-list-item type="text" title="面板 url 根路径" desc="必须以 '/' 开头，以 '/' 结尾，重启面板生效" v-model="allSetting.webBasePath"></setting-list-item>
-                                <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
-                                <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
-                                <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
-                        <a-tab-pane key="2" tab="用户设置">
+                        <a-tab-pane key="2" tab="账号与密码">
                             <a-form style="background: white; padding: 20px">
                                 <a-form-item label="原用户名">
                                     <a-input v-model="user.oldUsername" style="max-width: 300px"></a-input>
@@ -83,18 +97,37 @@
                                 </a-form-item>
                             </a-form>
                         </a-tab-pane>
-                        <a-tab-pane key="3" tab="xray 相关设置">
+                        <a-tab-pane key="3" tab="Xray 配置">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
+                        <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
+                             都会进入 xray 配置、都由 routing/dns 注入器消费，
+                             和时区、订阅更新时刻不是一类东西。 -->
+                        <a-tab-pane key="11" tab="网络与 DNS">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
+                                                   desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
+                                                   v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
+                                <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
+                                                   desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
+                                                   v-model="allSetting.dnsServers"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                         <a-tab-pane key="4" tab="IP 归属地库">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-action-item v-for="src in ipdb.sources" :key="src.key"
                                                      :title="src.name" :desc="ipdbSourceDesc(src)">
-                                    <a-tag v-if="!src.enabled">未启用</a-tag>
-                                    <a-tag v-else-if="src.loaded" color="green">已加载</a-tag>
-                                    <a-tag v-else color="red">未下载</a-tag>
+                                    <span v-if="!src.enabled" class="chip">未启用</span>
+                                    <span v-else-if="src.loaded" class="status-badge status-ok">
+                                        <a-icon type="check-circle"/>已加载
+                                    </span>
+                                    <!-- 「未下载」用橙而不是红：源地址填了但还没拉过，
+                                         是新装机器的正常状态，不是故障。 -->
+                                    <span v-else class="status-badge status-warn">
+                                        <a-icon type="exclamation-circle"/>未下载
+                                    </span>
                                     <a-button type="primary" size="small" style="margin-left: 8px"
                                               :disabled="!src.enabled"
                                               :loading="ipdbUpdating === src.key"
@@ -125,7 +158,7 @@
                                                    v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
-                        <a-tab-pane key="9" tab="用量图表">
+                        <a-tab-pane key="9" tab="流量统计">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="number" title="小时数据保留天数"
                                                    desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
@@ -145,10 +178,16 @@
                         <a-tab-pane key="6" tab="端口限速">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-action-item title="限速状态" :desc="shapingDesc()">
-                                    <a-tag v-if="!shaping.supported" color="red">不支持</a-tag>
-                                    <a-tag v-else-if="shaping.rolledBack" color="red">已自动撤销</a-tag>
-                                    <a-tag v-else-if="shaping.active" color="green">已生效</a-tag>
-                                    <a-tag v-else>未启用</a-tag>
+                                    <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
+                                         用中性；「已自动撤销」才是真出了事，保留红。 -->
+                                    <span v-if="!shaping.supported" class="chip">不支持</span>
+                                    <span v-else-if="shaping.rolledBack" class="status-badge status-danger">
+                                        <a-icon type="close-circle"/>已自动撤销
+                                    </span>
+                                    <span v-else-if="shaping.active" class="status-badge status-ok">
+                                        <a-icon type="check-circle"/>已生效
+                                    </span>
+                                    <span v-else class="chip">未启用</span>
                                 </setting-action-item>
                                 <setting-action-item title="清除全部限速"
                                                      desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
@@ -161,18 +200,23 @@
                                                    v-model.trim="allSetting.tcInterface"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
-                        <a-tab-pane key="7" tab="其他设置">
+                        <a-tab-pane key="7" tab="常规">
                             <a-list item-layout="horizontal" style="background: white">
                                 <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
                                 <setting-list-item type="text" title="订阅更新时间"
                                                    desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，最多 10 分钟内生效，无需重启面板"
                                                    v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
-                                <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
-                                                   desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
-                                                   v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
-                                <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
-                                                   desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
-                                                   v-model="allSetting.dnsServers"></setting-list-item>
+                            </a-list>
+                        </a-tab-pane>
+                        <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
+                             「设置系统」一节），只是新建入站表单的预填值。混在
+                             「面板与访问」里会被读成面板自身的证书设置——而面板
+                             自己的证书是上面那两项，填错地方的后果完全不同。 -->
+                        <a-tab-pane key="10" tab="入站默认值">
+                            <a-list item-layout="horizontal" style="background: white">
+                                <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
+                                <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
                             </a-list>
                         </a-tab-pane>
                     </a-tabs>
@@ -194,7 +238,11 @@
             spinning: false,
             oldAllSetting: new AllSetting(),
             allSetting: new AllSetting(),
-            saveBtnDisable: true,
+            // 改动前这里是 saveBtnDisable，由 mounted 里一个每秒跑一次的
+            // while(true) 轮询 oldAllSetting.equals(allSetting) 得出——意味着
+            // 改完一个字段后按钮最多 1 秒才亮起，这期间点击完全无效且没有
+            // 任何提示。改成深度 watch，改动即时反映。
+            dirty: false,
             user: {},
             ipdb: { sources: [], updateTime: '' },
             ipdbUpdating: null,
@@ -212,8 +260,21 @@
                 if (msg.success) {
                     this.oldAllSetting = new AllSetting(msg.obj);
                     this.allSetting = new AllSetting(msg.obj);
-                    this.saveBtnDisable = true;
+                    // 显式置回：深度 watch 的回调走的是 nextTick，不显式置的话
+                    // 保存成功到下一个 tick 之间提示条还挂着。
+                    this.dirty = false;
                 }
+            },
+            discardChanges() {
+                this.$confirm({
+                    title: '放弃修改',
+                    content: '将丢弃当前页面上所有未保存的改动，恢复成服务端的当前配置。',
+                    okText: '放弃',
+                    cancelText: '取消',
+                    // 重新拉一次而不是从 oldAllSetting 复制：这期间别的会话
+                    // 可能已经改过设置，用本地那份旧快照会把它们覆盖回去。
+                    onOk: () => this.getAllSetting(),
+                });
             },
             async updateAllSetting() {
                 this.loading(true);
@@ -330,10 +391,17 @@
             // 必须在下面那个死循环之前调用
             await this.getIPDBStatus();
             await this.getShapingStatus();
-            while (true) {
-                await PromiseUtil.sleep(1000);
-                this.saveBtnDisable = this.oldAllSetting.equals(this.allSetting);
-            }
+        },
+        watch: {
+            // deep 是必须的：allSetting 是个对象，改的永远是它的字段而不是
+            // 它本身。ObjectUtil.equals 只按 oldAllSetting 已有的 key 比较，
+            // 与改动前那个轮询用的是同一个判据。
+            allSetting: {
+                deep: true,
+                handler() {
+                    this.dirty = !this.oldAllSetting.equals(this.allSetting);
+                },
+            },
         },
     });
 

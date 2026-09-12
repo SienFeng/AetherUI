@@ -31,12 +31,16 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
+            <div class="page-header">
+                <div class="page-heading">
+                    <h1 class="page-title">入站列表</h1>
+                    <p class="page-description">管理用户、流量额度、在线来源与共享风险</p>
+                </div>
+                <div class="page-actions">
+                    <a-button type="primary" icon="plus" @click="openAddInbound">添加入站</a-button>
+                </div>
+            </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
-                <transition name="list" appear>
-                    <a-tag v-if="false" color="red" style="margin-bottom: 10px">
-                        Please go to the panel settings as soon as possible to modify the username and password, otherwise there may be a risk of leaking account information
-                    </a-tag>
-                </transition>
                 <transition name="list" appear>
                     <div class="stat-row">
                         <div class="stat-card tone-blue">
@@ -70,24 +74,84 @@
                     </div>
                 </transition>
                 <transition name="list" appear>
-                    <a-card hoverable>
-                        <div slot="title">
-                            <a-button type="primary" icon="plus" @click="openAddInbound"></a-button>
+                    <a-card>
+                        <!-- 工具栏。改动前这一页既没有搜索也没有过滤：模板里那行
+                             <a-input v-model="searchKey"> 是注释掉的，而它对应的
+                             searchInbounds() 引用了一个从来不在 data 里的
+                             this.searchedInbounds——即半成品死代码。 -->
+                        <div class="toolbar">
+                            <!-- 用 a-input 而不是 a-input-search：筛选是边打边生效的，
+                                 而 a-input-search 会渲染一个搜索按钮，暗示「要按一下才算数」。 -->
+                            <!-- 宽度挂在外层 span 上而不是 a-input 自己：带 prefix 的
+                                 a-input 会多包一层 .ant-input-affix-wrapper，class 落在
+                                 哪一层取决于组件内部实现，挂在外面才一定生效。 -->
+                            <span class="toolbar-search">
+                                <a-input v-model="filters.key" allow-clear
+                                         placeholder="搜索备注 / 端口 / UUID"
+                                         aria-label="搜索入站">
+                                    <a-icon slot="prefix" type="search"/>
+                                </a-input>
+                            </span>
+                            <a-select v-model="filters.protocol" style="width: 108px"
+                                      aria-label="按协议过滤">
+                                <a-select-option value="">全部协议</a-select-option>
+                                <a-select-option v-for="p in protocolOptions" :key="p" :value="p">
+                                    [[ p ]]
+                                </a-select-option>
+                            </a-select>
+                            <a-select v-model="filters.enable" style="width: 100px"
+                                      aria-label="按启用状态过滤">
+                                <a-select-option value="">启用与否</a-select-option>
+                                <a-select-option value="on">已启用</a-select-option>
+                                <a-select-option value="off">已停用</a-select-option>
+                            </a-select>
+                            <a-select v-model="filters.online" style="width: 100px"
+                                      aria-label="按在线状态过滤">
+                                <a-select-option value="">在线状态</a-select-option>
+                                <a-select-option value="on">有人在线</a-select-option>
+                                <a-select-option value="off">无人在线</a-select-option>
+                            </a-select>
+                            <a-select v-model="filters.risk" style="width: 108px"
+                                      aria-label="按风险过滤">
+                                <a-select-option value="">风险状态</a-select-option>
+                                <a-select-option value="alert">中风险以上</a-select-option>
+                                <a-select-option value="unrated">尚无结论</a-select-option>
+                            </a-select>
+                            <a-select v-model="filters.expiry" style="width: 108px"
+                                      aria-label="按到期过滤">
+                                <a-select-option value="">到期状态</a-select-option>
+                                <a-select-option value="soon">7 天内到期</a-select-option>
+                                <a-select-option value="expired">已过期</a-select-option>
+                            </a-select>
+                            <span class="toolbar-spacer"></span>
+                            <!-- 过滤之后必须说清「看到的是全部还是一部分」，否则
+                                 管理员会把过滤后的空表读成「入站被删光了」。 -->
+                            <span class="toolbar-count">
+                                <template v-if="filterActive">
+                                    筛出 [[ filteredInbounds.length ]] / [[ dbInbounds.length ]]
+                                </template>
+                                <template v-else>共 [[ dbInbounds.length ]] 个入站</template>
+                            </span>
+                            <a-button v-if="filterActive" type="link" size="small"
+                                      @click="resetFilters">清除筛选</a-button>
                         </div>
-<!--                        <a-input v-model="searchKey" placeholder="搜索" autofocus style="max-width: 300px"></a-input>-->
                         <a-table :columns="columns" :row-key="dbInbound => dbInbound.id"
-                                 :data-source="dbInbounds"
-                                 :loading="spinning" :scroll="{ x: 1360 }"
+                                 :data-source="filteredInbounds"
+                                 :loading="spinning" :scroll="{ x: tableScrollX }"
                                  :pagination="false"
+                                 :locale="{ emptyText: tableEmptyText }"
                                  :expanded-row-keys="expandedKeys"
                                  :expand-row-by-click="true"
                                  :expand-icon-as-cell="false"
                                  :expand-icon-column-index="-1"
                                  @expand="onExpand"
-                                 style="margin-top: 20px"
                                  @change="() => getDBInbounds()">
                             <template slot="expandedRowRender" slot-scope="dbInbound">
-                                <div style="margin-bottom: 12px">
+                                <!-- 展开区分三段：时间窗（控制区）／来源明细／用量趋势。
+                                     刻意不用 a-tabs：图表所在的面板未激活时 canvas 不在 DOM 里，
+                                     而 loadTrafficChart 是在 $nextTick 里 getElementById 取它的，
+                                     取不到就整段静默跳过——图永远不画且不报错。 -->
+                                <div class="row-section">
                                     <a-radio-group size="small" :value="trafficRangeOf(dbInbound.id)"
                                                    @change="e => changeTrafficRange(dbInbound.id, e.target.value)">
                                         <a-radio-button value="today">今日</a-radio-button>
@@ -99,16 +163,23 @@
                                     <a-range-picker size="small" style="margin-left: 8px; width: 240px"
                                                     :value="customRangeOf(dbInbound.id)"
                                                     @change="d => changeCustomRange(dbInbound.id, d)"></a-range-picker>
-                                    <span style="margin-left: 16px">
-                                        本段入站用量
-                                        <a-tag color="green">↑ [[ sizeFormat(totalOf(dbInbound.id).up) ]]</a-tag>
-                                        <a-tag color="blue">↓ [[ sizeFormat(totalOf(dbInbound.id).down) ]]</a-tag>
+                                    <span style="margin-left: 16px" class="cell-num">
+                                        <span class="cell-muted">本段入站用量</span>
+                                        ↑ [[ sizeFormat(totalOf(dbInbound.id).up) ]]
+                                        · ↓ [[ sizeFormat(totalOf(dbInbound.id).down) ]]
                                         <a-tooltip>
                                             <template slot="title">
                                                 来自 xray 的流量统计，是代理转发的应用层字节，与下方按来源 IP 的分项口径不同。
                                             </template>
                                             <a-icon type="info-circle"></a-icon>
                                         </a-tooltip>
+                                    </span>
+                                </div>
+                                <div class="row-section">
+                                <div class="row-section-title">
+                                    <a-icon type="global"/>来源明细
+                                    <span style="font-weight: 400; color: var(--aui-text-3)">
+                                        · 窗口内活跃过的来源，不只是当前在线
                                     </span>
                                 </div>
                                 <a-alert v-if="onlineOf(dbInbound.id).reason"
@@ -145,36 +216,48 @@
                                             <template slot="title">
                                                 超出并发额度，连接已被断开。最近一次：[[ DateUtil.formatMillis(online.rejectedAt) ]]
                                             </template>
-                                            <a-tag color="red">超额被拒</a-tag>
+                                            <span class="status-badge status-danger"><a-icon type="stop"/>超额被拒</span>
                                         </a-tooltip>
                                         <a-tooltip v-if="online.idle">
                                             <template slot="title">
                                                 连接还在，但已超过设定的闲置超时没有任何流量，当前不占用并发额度
                                             </template>
-                                            <a-tag color="orange">闲置</a-tag>
+                                            <span class="status-badge status-warn"><a-icon type="pause-circle"/>闲置</span>
                                         </a-tooltip>
                                         <a-tooltip v-if="online.banned">
                                             <template slot="title">[[ banDesc(online) ]]</template>
-                                            <a-tag color="red">已封禁</a-tag>
+                                            <span class="status-badge status-danger"><a-icon type="lock"/>已封禁</span>
                                         </a-tooltip>
                                     </template>
                                     <template slot="location" slot-scope="text, online">
-                                        <a-tag v-if="online.location" color="blue">[[ online.location ]]</a-tag>
-                                        <a-tag v-else>未知</a-tag>
+                                        <span v-if="online.location">[[ online.location ]]</span>
+                                        <span v-else class="cell-muted">未知</span>
                                         <a-tooltip v-if="online.locationAlt || online.ispAlt">
                                             <template slot="title">{{ template "ipDivergenceTip" "online" }}</template>
-                                            <a-tag color="orange">存疑</a-tag>
+                                            <span class="status-badge status-warn" style="margin-left: 4px">
+                                                <a-icon type="exclamation-circle"/>存疑
+                                            </span>
                                         </a-tooltip>
                                     </template>
+                                    <!-- 改动前机房来源靠一个紫色 a-tag 区分，而紫色本身
+                                         不说明任何事——读的人得先知道「紫＝机房」这条约定。
+                                         现在直接写「机房」两个字，颜色让位给文字。 -->
                                     <template slot="isp" slot-scope="text, online">
-                                        <a-tag v-if="online.isp" :color="ispColor(online.isp)">[[ online.isp ]]</a-tag>
-                                        <a-tag v-else>未知</a-tag>
+                                        <template v-if="online.isp">
+                                            <span>[[ online.isp ]]</span>
+                                            <span v-if="isHostingISP(online.isp)" class="chip"
+                                                  style="margin-left: 4px"
+                                                  title="来源不是基础运营商，多半是云厂商或机房——把账号挂在服务器上中转与家宽来源是两件事">机房</span>
+                                        </template>
+                                        <span v-else class="cell-muted">未知</span>
                                     </template>
                                     <template slot="speed" slot-scope="text, online">
                                         <template v-if="online.offline">—</template>
                                         <template v-else>
-                                            <a-tag color="green">↑ [[ sizeFormat(online.upSpeed) ]]/s</a-tag>
-                                            <a-tag color="blue">↓ [[ sizeFormat(online.downSpeed) ]]/s</a-tag>
+                                            <span class="cell-num">
+                                                ↑ [[ sizeFormat(online.upSpeed) ]]/s ·
+                                                ↓ [[ sizeFormat(online.downSpeed) ]]/s
+                                            </span>
                                         </template>
                                     </template>
                                     <template slot="conns" slot-scope="text, online">
@@ -200,7 +283,7 @@
                                         <template v-else-if="online.usageMissing">
                                             <a-tooltip>
                                                 <template slot="title">活跃满 1 分钟后开始计入</template>
-                                                <a-tag>统计中</a-tag>
+                                                <span class="chip">统计中</span>
                                             </a-tooltip>
                                         </template>
                                         <template v-else-if="!ipUsageOf(dbInbound.id).split">
@@ -218,7 +301,7 @@
                                     </template>
                                     <template slot="onlineAction" slot-scope="text, online">
                                         <a-button v-if="online.conns > 0" type="link" size="small"
-                                                  style="color: #FF4D4F"
+                                                  style="color: var(--aui-danger)"
                                                   @click="kickOnline(dbInbound, online)">踢下线</a-button>
                                         <a-button v-if="online.banned" type="link" size="small"
                                                   @click="unbanOnline(dbInbound, online)">解除封禁</a-button>
@@ -227,7 +310,7 @@
                                     </template>
                                 </a-table>
                                 <div v-if="ipUsageOf(dbInbound.id).otherCount > 0"
-                                     style="padding: 8px 16px; color: rgba(0,0,0,.45)">
+                                     class="cell-sub" style="padding: 8px 16px">
                                     其余 [[ ipUsageOf(dbInbound.id).otherCount ]] 个来源共
                                     <!-- 与用量列同一套降级：拆不出上下行时服务端把合计全部计进
                                          otherDown，照原样渲染会显示「↑ 0 B ↓ 20 GB」，而同一张
@@ -241,22 +324,145 @@
                                         [[ sizeFormat(ipUsageOf(dbInbound.id).otherUp + ipUsageOf(dbInbound.id).otherDown) ]]
                                     </template>
                                     （按用量排序后未列出的部分）
+                                    </div>
                                 </div>
-                                <div style="margin-top: 16px">
+                                <div class="row-section">
+                                    <div class="row-section-title">
+                                        <a-icon type="line-chart"/>用量趋势
+                                    </div>
                                     <a-alert v-if="trafficReasonOf(dbInbound.id)" type="info" show-icon
-                                             style="margin-top: 12px"
+                                             style="margin-bottom: 12px"
                                              :message="trafficReasonOf(dbInbound.id)"></a-alert>
-                                    <div style="position: relative; height: 220px; margin-top: 12px">
+                                    <div style="position: relative; height: 220px">
                                         <canvas :id="'traffic-chart-' + dbInbound.id"></canvas>
                                     </div>
                                 </div>
                             </template>
+                            <!-- ══ 一级表格的列渲染 ══
+                                 改动前这里每一列都套 a-tag：协议、传输、流量数值、到期日期、地区、
+                                 并发、限速，一行能出现 8~10 个彩色标签。规则现在统一成 custom.css
+                                 里 .stat-row 早就写明的那条——分类是装饰、状态才是信息——所以下面
+                                 只有「风险」「已过期」「超额」用得上颜色，其余一律文本或无色 chip。 -->
+
+                            <template slot="identity" slot-scope="text, dbInbound">
+                                <div class="cell-main">[[ dbInbound.remark || '未命名' ]]</div>
+                                <div class="cell-sub cell-num">#[[ dbInbound.id ]] · :[[ dbInbound.port ]]</div>
+                            </template>
+
+                            <template slot="conn" slot-scope="text, dbInbound">
+                                <div class="cell-main">[[ dbInbound.protocol ]]</div>
+                                <!-- 传输层按 id 取，**不能再用 inbounds[index]**：inbounds 与
+                                     dbInbounds 是两个下标对齐的平行数组，而表格现在吃的是过滤后的
+                                     列表，index 是过滤后的下标——照旧写法会把别人的传输方式显示到
+                                     这一行上，且不会报任何错。 -->
+                                <div class="cell-sub">[[ connSubOf(dbInbound) ]]</div>
+                            </template>
+
+                            <template slot="traffic" slot-scope="text, dbInbound">
+                                <div class="cell-main cell-num">
+                                    [[ sizeFormat(dbInbound.up + dbInbound.down) ]]
+                                    <template v-if="dbInbound.total > 0"> / [[ sizeFormat(dbInbound.total) ]]</template>
+                                    <span v-else class="cell-muted"> / 不限</span>
+                                </div>
+                                <!-- 进度条只在真的设了额度时出现。没有额度就没有「用了百分之多少」
+                                     这回事，画一条空槽会让人以为额度是 0。 -->
+                                <div v-if="dbInbound.total > 0" class="usage-bar">
+                                    <div class="usage-bar-fill" :class="usageToneOf(dbInbound)"
+                                         :style="{ width: usagePercentOf(dbInbound) + '%' }"></div>
+                                </div>
+                                <div class="cell-sub cell-num">
+                                    ↑ [[ sizeFormat(dbInbound.up) ]] · ↓ [[ sizeFormat(dbInbound.down) ]]
+                                </div>
+                            </template>
+
+                            <template slot="online" slot-scope="text, dbInbound">
+                                <template v-if="onlineCountOf(dbInbound.id).supported">
+                                    <div class="cell-main cell-num"
+                                         :class="onlineCountOf(dbInbound.id).count ? '' : 'cell-muted'">
+                                        [[ onlineCountOf(dbInbound.id).count ]] 台
+                                    </div>
+                                    <div v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0"
+                                         class="cell-sub cell-num">
+                                        ↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s ·
+                                        ↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
+                                    </div>
+                                    <!-- 都是 0 时收成一条短横：一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉
+                                         真正在跑的那几行。 -->
+                                    <div v-else class="cell-sub">—</div>
+                                </template>
+                                <!-- 数不出来必须显示「—」而不是 0：把「看不到」渲染成「没人在线」，
+                                     管理员就会对着一个假的 0 做判断。 -->
+                                <!-- 必须只有一个子节点：antd 的 Tooltip 把子节点当唯一
+                                     触发元素，并列两个会让它挂不上，而这条 tooltip 是
+                                     「为什么数不出在线设备」的唯一出口。 -->
+                                <a-tooltip v-else :title="onlineCountOf(dbInbound.id).reason">
+                                    <div style="cursor: help">
+                                        <div class="cell-main cell-muted">—</div>
+                                        <div class="cell-sub">读不到</div>
+                                    </div>
+                                </a-tooltip>
+                            </template>
+
+                            <!-- 风险徽标**每个入站都渲染**，包括「低」「学习中」「不可评估」。
+                                 它是这个入站唯一的弹窗入口，只给高风险的打标等于让其余状态永远
+                                 打不开；而「不可评估」恰恰最需要被看到——那表示这条路上永远不会
+                                 有数据，把它显示成「低风险」是一个确信的错误结论。
+
+                                 改用 <button> 而不是 <a-tag>：它可点击，此前是个 div，键盘完全
+                                 拿不到，读屏软件也念不出这是个可操作的东西。 -->
+                            <template slot="risk" slot-scope="text, dbInbound">
+                                <a-tooltip :title="riskTooltipOf(dbInbound.id)">
+                                    <button type="button" class="status-badge"
+                                            :class="riskToneOf(dbInbound.id)"
+                                            :aria-label="'共享风险：' + riskLabelOf(dbInbound.id) + '，点击查看依据'"
+                                            @click.stop="showSharing(dbInbound)">
+                                        <a-icon v-if="riskIconOf(dbInbound.id)" :type="riskIconOf(dbInbound.id)"/>
+                                        [[ riskLabelOf(dbInbound.id) ]]
+                                    </button>
+                                </a-tooltip>
+                            </template>
+
+                            <template slot="expiryTime" slot-scope="text, dbInbound">
+                                <template v-if="dbInbound.expiryTime > 0">
+                                    <div class="cell-main" :class="expiryToneOf(dbInbound)">
+                                        [[ expiryTextOf(dbInbound) ]]
+                                    </div>
+                                    <div class="cell-sub cell-num">[[ DateUtil.formatMillis(dbInbound.expiryTime) ]]</div>
+                                </template>
+                                <!-- 「无限期」是中性事实，不是健康信号。改动前它是绿色 a-tag，
+                                     与同一张表里表示上行速度的绿色撞了含义。 -->
+                                <div v-else class="cell-main cell-muted">不限</div>
+                            </template>
+
+                            <!-- 地区 / 并发 / 限速三项合一。三者都没设时是一条短横——那是绝大多数
+                                 入站的常态，让真正设了限制的那几行自己跳出来。 -->
+                            <template slot="limits" slot-scope="text, dbInbound">
+                                <template v-if="limitsOf(dbInbound).length">
+                                    <span v-for="l in limitsOf(dbInbound)" :key="l.key" class="chip"
+                                          :title="l.title">[[ l.text ]]</span>
+                                </template>
+                                <span v-else class="cell-muted">—</span>
+                            </template>
+
+                            <template slot="enable" slot-scope="text, dbInbound">
+                                <span @click.stop>
+                                    <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"
+                                              :aria-label="'启用 ' + (dbInbound.remark || ('入站 #' + dbInbound.id))"></a-switch>
+                                </span>
+                            </template>
+
                             <template slot="action" slot-scope="text, dbInbound">
                                 <a-dropdown :trigger="['click']">
-                                    <a @click="e => { e.preventDefault(); e.stopPropagation(); }">操作</a>
+                                    <a @click="e => { e.preventDefault(); e.stopPropagation(); }"
+                                       :aria-label="'操作：' + (dbInbound.remark || ('入站 #' + dbInbound.id))">操作</a>
                                     <a-menu slot="overlay" @click="a => clickAction(a, dbInbound)">
                                         <a-menu-item v-if="dbInbound.hasLink()" key="qrcode">
                                             <a-icon type="qrcode"></a-icon>二维码
+                                        </a-menu-item>
+                                        <!-- 原来这是一级表格里单独的「详情」列。整列拿掉换成这一项，
+                                             打开的还是同一个 inbound_info_modal。 -->
+                                        <a-menu-item key="info">
+                                            <a-icon type="profile"></a-icon>查看详情
                                         </a-menu-item>
                                         <a-menu-item key="edit">
                                             <a-icon type="edit"></a-icon>编辑
@@ -271,117 +477,12 @@
                                             <a-icon type="file-search"></a-icon>访问日志
                                         </a-menu-item>
                                         <a-menu-item key="delete">
-                                            <span style="color: #FF4D4F">
+                                            <span style="color: var(--aui-danger)">
                                                 <a-icon type="delete"></a-icon>删除
                                             </span>
                                         </a-menu-item>
                                     </a-menu>
                                 </a-dropdown>
-                            </template>
-                            <template slot="protocol" slot-scope="text, dbInbound">
-                                <a-tag color="blue">[[ dbInbound.protocol ]]</a-tag>
-                            </template>
-                            <template slot="traffic" slot-scope="text, dbInbound">
-                                <a-tag color="blue">[[ sizeFormat(dbInbound.up) ]] / [[ sizeFormat(dbInbound.down) ]]</a-tag>
-                                <template v-if="dbInbound.total > 0">
-                                    <a-tag v-if="dbInbound.up + dbInbound.down < dbInbound.total" color="cyan">[[ sizeFormat(dbInbound.total) ]]</a-tag>
-                                    <a-tag v-else color="red">[[ sizeFormat(dbInbound.total) ]]</a-tag>
-                                </template>
-                                <a-tag v-else color="green">无限制</a-tag>
-                            </template>
-                            <template slot="settings" slot-scope="text, dbInbound">
-                                <a-button type="link" @click.stop="showInfo(dbInbound)">查看</a-button>
-                            </template>
-                            <template slot="stream" slot-scope="text, dbInbound, index">
-                                <template v-if="dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS">
-                                    <a-tag color="green">[[ inbounds[index].stream.network ]]</a-tag>
-                                    <a-tag v-if="inbounds[index].stream.isTls" color="blue">tls</a-tag>
-                                </template>
-                                <template v-else>无</template>
-                            </template>
-                            <template slot="enable" slot-scope="text, dbInbound">
-                                <span @click.stop>
-                                    <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"></a-switch>
-                                </span>
-                            </template>
-                            <template slot="regions" slot-scope="text, dbInbound">
-                                <template v-if="dbInbound.regionList.length > 0">
-                                    <a-tag v-for="r in dbInbound.regionList" :key="r" color="purple">[[ r ]]</a-tag>
-                                </template>
-                                <a-tag v-else color="green">不限制</a-tag>
-                                <!-- 风险 chip **每个入站都渲染**，包括「低」「学习中」
-                                     「不可评估」。它是这个入站唯一的弹窗入口，只给高风险
-                                     的打标等于让其余状态永远打不开；而「不可评估」恰恰是
-                                     最需要被看到的一个——那表示这条路上永远不会有数据，
-                                     把它显示成「低风险」是一个确信的错误结论。
-
-                                     低风险那几个用中性色，但对比度必须够：v1.23.0 修过一次
-                                     rgba(0,0,0,.25) 的提示，对比度 1.84:1，等于看不见。 -->
-                                <a-tooltip>
-                                    <template slot="title">[[ riskTooltipOf(dbInbound.id) ]]</template>
-                                    <a-tag :color="riskColorOf(dbInbound.id)"
-                                           style="cursor: pointer"
-                                           @click.stop="showSharing(dbInbound)">
-                                        [[ riskLabelOf(dbInbound.id) ]]
-                                    </a-tag>
-                                </a-tooltip>
-                            </template>
-                            <template slot="online" slot-scope="text, dbInbound">
-                                <template v-if="onlineCountOf(dbInbound.id).supported">
-                                    <a-tag v-if="onlineCountOf(dbInbound.id).count > 0" color="green">
-                                        [[ onlineCountOf(dbInbound.id).count ]] 台
-                                    </a-tag>
-                                    <a-tag v-else>0</a-tag>
-                                </template>
-                                <a-tooltip v-else>
-                                    <!-- 数不出来必须显示「—」而不是 0：把「看不到」渲染成「没人在线」，
-                                         管理员就会对着一个假的 0 做判断。 -->
-                                    <template slot="title">[[ onlineCountOf(dbInbound.id).reason ]]</template>
-                                    <a-tag style="cursor: help">—</a-tag>
-                                </a-tooltip>
-                            </template>
-                            <template slot="speed" slot-scope="text, dbInbound">
-                                <template v-if="onlineCountOf(dbInbound.id).supported">
-                                    <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
-                                        <a-tag color="green">↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s</a-tag>
-                                        <a-tag color="blue">↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s</a-tag>
-                                    </template>
-                                    <!-- 都是 0 时收成一个朴素标签，与「在线」列同一套视觉逻辑：
-                                         一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉真正在跑的那几行。 -->
-                                    <a-tag v-else>0</a-tag>
-                                </template>
-                                <a-tooltip v-else>
-                                    <!-- 与「在线」列同一条铁律：读不到连接表时显示「—」，
-                                         绝不能把「看不到」渲染成「一点流量都没有」。 -->
-                                    <template slot="title">[[ onlineCountOf(dbInbound.id).reason ]]</template>
-                                    <a-tag style="cursor: help">—</a-tag>
-                                </a-tooltip>
-                            </template>
-                            <template slot="concurrency" slot-scope="text, dbInbound">
-                                <a-tag v-if="dbInbound.concurrencyLimit > 0" color="orange">
-                                    [[ dbInbound.concurrencyLimit ]] IP
-                                </a-tag>
-                                <a-tag v-else color="green">无限制</a-tag>
-                            </template>
-                            <template slot="rate" slot-scope="text, dbInbound">
-                                <template v-if="dbInbound.upMbit > 0 || dbInbound.downMbit > 0">
-                                    <a-tag color="orange">
-                                        [[ dbInbound.upMbit > 0 ? dbInbound.upMbit + 'M' : '不限' ]] /
-                                        [[ dbInbound.downMbit > 0 ? dbInbound.downMbit + 'M' : '不限' ]]
-                                    </a-tag>
-                                </template>
-                                <a-tag v-else color="green">不限制</a-tag>
-                            </template>
-                            <template slot="expiryTime" slot-scope="text, dbInbound">
-                                <template v-if="dbInbound.expiryTime > 0">
-                                    <a-tag v-if="dbInbound.isExpiry" color="red">
-                                        [[ DateUtil.formatMillis(dbInbound.expiryTime) ]]
-                                    </a-tag>
-                                    <a-tag v-else color="blue">
-                                        [[ DateUtil.formatMillis(dbInbound.expiryTime) ]]
-                                    </a-tag>
-                                </template>
-                                <a-tag v-else color="green">无限期</a-tag>
                             </template>
                         </a-table>
                     </a-card>
@@ -405,91 +506,96 @@
     // 传 undefined 才落回原生中性样式：rgba(0,0,0,.65) on #fafafa，约 5.6:1。
     // v1.23.0 为了修 rgba(0,0,0,.25) 的 1.84:1 才换成 'default'，结果对比度反而更低。
     const RISK_LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
-    const RISK_LEVEL_COLOR = { low: undefined, watch: 'orange', medium: 'orange', high: 'red', severe: 'red' };
+    // 风险徽标用 custom.css 的 .status-badge 一套 class，不再走 a-tag。
+    // 与之配套的 RISK_LEVEL_COLOR（antd a-tag 的预设色名）已随全站 a-tag
+    // 退役一并删除；那条「'default' 不在预设色里、会被当成自定义颜色而渲染
+    // 成白底白字」的结论移进了 CLAUDE.md 的「已知偏差」，因为它约束的是
+    // 将来任何一处 a-tag :color 的写法，不只是风险等级这一处。
+    const RISK_LEVEL_TONE = {
+        low:    'status-ok',
+        watch:  'status-warn',
+        medium: 'status-warn',
+        high:   'status-danger',
+        severe: 'status-danger',
+    };
+    const RISK_LEVEL_ICON = {
+        low:    'check-circle',
+        watch:  'exclamation-circle',
+        medium: 'exclamation-circle',
+        high:   'warning',
+        severe: 'warning',
+    };
 
+    // 一级表格的列。
+    //
+    // 改动前是 15 列、scroll.x=1360，实际可用宽度是「视口 − 160 侧栏 −
+    // 32 margin − 48 卡片内边距」，所以 1600px 以下的屏幕一律横向滚动，
+    // 1024px 笔记本要横拖 576px。现在 9 列合计 980，1280px 起不再横滚。
+    //
+    // 减列不是藏信息，三条都保住了：
+    //   - id 与端口并进「入站」列的次行；
+    //   - 协议 / 传输 / 安全并进「连接」列；
+    //   - 原来那个「详情 → 查看」按钮整列拿掉，改挂进「操作」下拉，
+    //     inbound_info_modal 照常打得开。
+    // 地区 / 并发 / 限速合成「限制」一列：绝大多数入站三项都没设，这一列
+    // 平时是「—」，一旦有值才出现——比三列常驻的「不限制」绿标签更能让
+    // 真正设了限制的那几行跳出来。
     const columns = [{
-        title: "操作",
-        align: 'center',
-        width: 70,
-        scopedSlots: { customRender: 'action' },
+        title: "入站",
+        align: 'left',
+        width: 150,
+        scopedSlots: { customRender: 'identity' },
+    }, {
+        title: "连接",
+        align: 'left',
+        width: 120,
+        scopedSlots: { customRender: 'conn' },
+    }, {
+        title: "流量",
+        align: 'left',
+        width: 165,
+        scopedSlots: { customRender: 'traffic' },
+    }, {
+        title: "在线",
+        align: 'left',
+        width: 115,
+        scopedSlots: { customRender: 'online' },
+    }, {
+        title: "风险",
+        align: 'left',
+        width: 90,
+        scopedSlots: { customRender: 'risk' },
+    }, {
+        title: "到期",
+        align: 'left',
+        width: 105,
+        scopedSlots: { customRender: 'expiryTime' },
+    }, {
+        title: "限制",
+        align: 'left',
+        width: 115,
+        scopedSlots: { customRender: 'limits' },
     }, {
         title: "启用",
         align: 'center',
-        width: 80,
+        width: 60,
         scopedSlots: { customRender: 'enable' },
     }, {
-        title: "id",
+        title: "操作",
         align: 'center',
-        dataIndex: "id",
-        width: 50,
-    }, {
-        title: "备注",
-        align: 'center',
-        width: 100,
-        dataIndex: "remark",
-    }, {
-        title: "协议",
-        align: 'center',
-        width: 90,
-        scopedSlots: { customRender: 'protocol' },
-    }, {
-        title: "端口",
-        align: 'center',
-        dataIndex: "port",
-        width: 80,
-    }, {
-        title: "流量↑|↓",
-        align: 'center',
-        width: 150,
-        scopedSlots: { customRender: 'traffic' },
-    }, {
-        title: "详情",
-        align: 'center',
-        width: 70,
-        scopedSlots: { customRender: 'settings' },
-    }, {
-        title: "传输",
-        align: 'center',
-        width: 70,
-        scopedSlots: { customRender: 'stream' },
-    }, {
-        title: "到期",
-        align: 'center',
-        width: 100,
-        scopedSlots: { customRender: 'expiryTime' },
-    }, {
-        title: "地区",
-        align: 'center',
-        width: 110,
-        scopedSlots: { customRender: 'regions' },
-    }, {
-        title: "在线",
-        align: 'center',
-        width: 80,
-        scopedSlots: { customRender: 'online' },
-    }, {
-        // 紧挨「在线」：两列出自同一次连接表快照，放在一起管理员才能一眼
-        // 对上「几台设备」和「它们合计跑多快」。
-        title: "实时↑|↓",
-        align: 'center',
-        width: 120,
-        scopedSlots: { customRender: 'speed' },
-    }, {
-        title: "并发",
-        align: 'center',
-        width: 80,
-        scopedSlots: { customRender: 'concurrency' },
-    }, {
-        title: "限速↑|↓",
-        align: 'center',
-        width: 110,
-        scopedSlots: { customRender: 'rate' },
+        width: 60,
+        scopedSlots: { customRender: 'action' },
     }];
 
+    // 上面 9 列的 width 之和。写成算出来的而不是再抄一个字面量：
+    // 改动前 scroll.x 手写 1360，恰好等于当时 15 列之和——那是靠人肉维护的
+    // 巧合，加一列忘了改就会让最后一列被挤掉一截。
+    const TABLE_SCROLL_X = columns.reduce((n, c) => n + c.width, 0);
+
     // 服务端 CanonicalISP 归一出来的基础运营商名。不在这个表里的要么是云厂商，
-    // 要么是地方运营商，展开行按「机房色」显示——把账号挂在服务器上中转与
-    // 家宽来源是完全不同的两件事。表与 util/ipdb/isp_name.go 的 ispAliases
-    // 取值一致，那边新增基础运营商时这里要跟着加，否则它会被显示成机房色。
+    // 要么是地方运营商，展开行会在运营商后面补一个「机房」chip——把账号挂在
+    // 服务器上中转与家宽来源是完全不同的两件事。表与 util/ipdb/isp_name.go 的
+    // ispAliases 取值一致，那边新增基础运营商时这里要跟着加，否则它会被误标成机房。
     const ISP_CARRIER_NAMES = ['中国电信', '中国联通', '中国移动', '中国广电', '教育网', '科技网'];
 
     // 展开行：某个入站上每个来源 IP 的在线明细。
@@ -556,7 +662,18 @@
             spinning: false,
             inbounds: [],
             dbInbounds: [],
-            searchKey: '',
+            // 改动前这里是 searchKey，配一个 watch 调 searchInbounds()——
+            // 而那个方法写向 this.searchedInbounds，一个从来不在 data 里的
+            // 属性。输入框本身是注释掉的，所以这段死代码一直没人发现。
+            filters: {
+                key: '',
+                protocol: '',
+                enable: '',
+                online: '',
+                risk: '',
+                expiry: '',
+            },
+            tableScrollX: TABLE_SCROLL_X,
             onlineColumns,
             expandedKeys: [],
             trafficRanges: {},
@@ -611,13 +728,6 @@
                 if (r.state !== 'ready') return '学习中';
                 return '风险 ' + (RISK_LEVEL_TEXT[r.level] || r.level);
             },
-            riskColorOf(inboundId) {
-                const r = this.riskOf(inboundId);
-                // 非 ready 与未知等级都落到 undefined（不是 'default'，
-                // 理由见 RISK_LEVEL_COLOR 上方的注释）。
-                if (r.state !== 'ready') return undefined;
-                return RISK_LEVEL_COLOR[r.level];
-            },
             riskTooltipOf(inboundId) {
                 const r = this.riskOf(inboundId);
                 if (r.state === 'unobservable') {
@@ -662,22 +772,97 @@
                     this.dbInbounds.push(dbInbound);
                 }
             },
-            searchInbounds(key) {
-                if (ObjectUtil.isEmpty(key)) {
-                    this.searchedInbounds = this.dbInbounds.slice();
-                } else {
-                    this.searchedInbounds.splice(0, this.searchedInbounds.length);
-                    this.dbInbounds.forEach(inbound => {
-                        if (ObjectUtil.deepSearch(inbound, key)) {
-                            this.searchedInbounds.push(inbound);
-                        }
+            resetFilters() {
+                this.filters = { key: '', protocol: '', enable: '', online: '', risk: '', expiry: '' };
+            },
+            // ── 单元格派生值 ───────────────────────────────────────────
+            // 传输层必须按 id 取。inbounds 与 dbInbounds 是 setInbounds 里
+            // 下标对齐推进去的两个平行数组，而表格现在吃的是**过滤后**的
+            // 列表——继续用 inbounds[index] 会把别人的传输方式画到这一行，
+            // 而且不会报任何错。
+            connSubOf(dbInbound) {
+                if (!(dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS)) {
+                    return '无传输层';
+                }
+                const stream = this.streamById[dbInbound.id];
+                if (!stream) {
+                    return '—';
+                }
+                const sec = { tls: 'TLS', reality: 'Reality', xtls: 'XTLS' }[stream.security];
+                return sec ? `${stream.network} · ${sec}` : stream.network;
+            },
+            usagePercentOf(dbInbound) {
+                if (dbInbound.total <= 0) {
+                    return 0;
+                }
+                const pct = (dbInbound.up + dbInbound.down) / dbInbound.total * 100;
+                // 上限压到 100：超额时条已经满了，再长会溢出槽外。
+                return Math.min(100, Math.max(0, pct));
+            },
+            usageToneOf(dbInbound) {
+                const pct = this.usagePercentOf(dbInbound);
+                if (pct >= 100) return 'is-danger';
+                if (pct >= 80) return 'is-warn';
+                return '';
+            },
+            riskToneOf(inboundId) {
+                const r = this.riskOf(inboundId);
+                // 非 ready 一律中性：把「测不了」「还没测够」渲染成绿色或红色
+                // 都是在报一个没算过的结论。
+                if (r.state !== 'ready') return 'status-neutral';
+                return RISK_LEVEL_TONE[r.level] || 'status-neutral';
+            },
+            riskIconOf(inboundId) {
+                const r = this.riskOf(inboundId);
+                if (r.state !== 'ready') return 'question-circle';
+                return RISK_LEVEL_ICON[r.level] || '';
+            },
+            // 剩余天数按整天向上取整：剩 3 小时显示「1 天」而不是「0 天」，
+            // 后者读起来像已经过期了。
+            expiryTextOf(dbInbound) {
+                const ms = dbInbound.expiryTime - Date.now();
+                if (ms <= 0) return '已过期';
+                const days = Math.ceil(ms / 86400000);
+                return days > 365 ? Math.floor(days / 365) + ' 年+' : '剩 ' + days + ' 天';
+            },
+            expiryToneOf(dbInbound) {
+                if (dbInbound.isExpiry) return 'status-text-danger';
+                if (dbInbound.expiryTime - Date.now() <= 7 * 86400000) return 'status-text-warn';
+                return '';
+            },
+            // 地区 / 并发 / 限速三项合成一列。只输出**已经设了**的那几项，
+            // 三项都没设时返回空数组，单元格显示一条短横。
+            limitsOf(dbInbound) {
+                const out = [];
+                const regions = dbInbound.regionList;
+                if (regions.length > 0) {
+                    out.push({
+                        key: 'region',
+                        text: regions.length <= 2 ? regions.join(' · ') : `地区 ${regions.length} 个`,
+                        title: '仅允许这些地区连接：' + regions.join('、') + '（启用后该入站只监听 IPv4）',
                     });
                 }
+                if (dbInbound.concurrencyLimit > 0) {
+                    out.push({
+                        key: 'conc',
+                        text: `并发 ${dbInbound.concurrencyLimit}`,
+                        title: `最多同时 ${dbInbound.concurrencyLimit} 个来源 IP`,
+                    });
+                }
+                if (dbInbound.upMbit > 0 || dbInbound.downMbit > 0) {
+                    const up = dbInbound.upMbit > 0 ? dbInbound.upMbit + 'M' : '不限';
+                    const down = dbInbound.downMbit > 0 ? dbInbound.downMbit + 'M' : '不限';
+                    out.push({ key: 'rate', text: `限速 ${up}/${down}`, title: `上行 ${up}，下行 ${down}` });
+                }
+                return out;
             },
             clickAction(action, dbInbound) {
                 switch (action.key) {
                     case "qrcode":
                         this.showQrcode(dbInbound);
+                        break;
+                    case "info":
+                        this.showInfo(dbInbound);
                         break;
                     case "edit":
                         this.openEditInbound(dbInbound);
@@ -917,22 +1102,28 @@
                     this.loadOnlines(dbInbound.id);
                     this.reloadWindowed(dbInbound.id);
                 } else {
-                    this.expandedKeys = this.expandedKeys.filter(id => id !== dbInbound.id);
-                    this.$delete(this.onlines, dbInbound.id);
-                    this.$delete(this.ipUsages, dbInbound.id);
-                    this.$delete(this.trafficTotals, dbInbound.id);
-                    this.$delete(this.customRanges, dbInbound.id);
-                    // 日期被清掉了，'custom' 这个标记就不能留下——它不匹配任何
-                    // 一个档位按钮，而 windowParamsOf 在拿不到日期时回落「今日」：
-                    // 重新展开会出现「一个档位都不高亮、显示的却是今日」这种
-                    // 不一致。其余档位保持原样，与改动前一样跨展开折叠记住。
-                    if (this.trafficRangeOf(dbInbound.id) === 'custom') {
-                        this.$set(this.trafficRanges, dbInbound.id, 'today');
-                    }
-                    this.$delete(this.mergedOnlines, dbInbound.id);
-                    this.destroyTrafficChart(dbInbound.id);
+                    this.collapseRow(dbInbound.id);
                 }
                 this.syncOnlineTimer();
+            },
+            // 折叠一行并释放它占的东西。抽出来是因为除了用户点击折叠，
+            // 「这一行被筛掉了」也要走同一套清理——尤其是 destroyTrafficChart，
+            // 漏掉的话 Chart 实例会攥着一个已脱离文档的 canvas 不放。
+            collapseRow(id) {
+                this.expandedKeys = this.expandedKeys.filter(k => k !== id);
+                this.$delete(this.onlines, id);
+                this.$delete(this.ipUsages, id);
+                this.$delete(this.trafficTotals, id);
+                this.$delete(this.customRanges, id);
+                // 日期被清掉了，'custom' 这个标记就不能留下——它不匹配任何
+                // 一个档位按钮，而 windowParamsOf 在拿不到日期时回落「今日」：
+                // 重新展开会出现「一个档位都不高亮、显示的却是今日」这种
+                // 不一致。其余档位保持原样，与改动前一样跨展开折叠记住。
+                if (this.trafficRangeOf(id) === 'custom') {
+                    this.$set(this.trafficRanges, id, 'today');
+                }
+                this.$delete(this.mergedOnlines, id);
+                this.destroyTrafficChart(id);
             },
             async loadOnlines(id) {
                 // 这里刻意不用 HttpUtil：它会把每次失败都弹成 message，
@@ -1057,15 +1248,15 @@
                                 {
                                     label: '上传',
                                     data: data.points.map(p => p.up),
-                                    borderColor: '#52c41a',
-                                    backgroundColor: 'rgba(82, 196, 26, 0.1)',
+                                    borderColor: '#15803D',
+                                    backgroundColor: 'rgba(21, 128, 61, 0.1)',
                                     borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
                                 },
                                 {
                                     label: '下载',
                                     data: data.points.map(p => p.down),
-                                    borderColor: '#1890ff',
-                                    backgroundColor: 'rgba(24, 144, 255, 0.1)',
+                                    borderColor: '#1266D6',
+                                    backgroundColor: 'rgba(18, 102, 214, 0.1)',
                                     borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
                                 },
                             ],
@@ -1148,8 +1339,8 @@
             // 已经把认得出的运营商归一成了固定的几个字符串，剩下的要么是云厂商，
             // 要么是地方运营商（「鹏博士宽带」这类），后者按机房色显示只是偏
             // 保守，不会误导。
-            ispColor(isp) {
-                return ISP_CARRIER_NAMES.includes(isp) ? 'blue' : 'purple';
+            isHostingISP(isp) {
+                return !ISP_CARRIER_NAMES.includes(isp);
             },
             async submit(url, data, modal) {
                 const msg = await HttpUtil.postWithModal(url, data, modal);
@@ -1159,9 +1350,15 @@
             },
         },
         watch: {
-            searchKey(value) {
-                this.searchInbounds(value);
-            }
+            // 一行被筛掉时，它的展开区会被 antd 从 DOM 里摘掉，但 expandedKeys
+            // 里还留着它的 id——于是那个 2 秒的轮询继续为一个看不见的行请求
+            // 在线明细，而 trafficCharts 里那个 Chart 实例还攥着一个已经脱离
+            // 文档的 canvas。两者都不报错，只是白耗。
+            filteredInbounds(list) {
+                const visible = new Set(list.map(i => i.id));
+                this.expandedKeys.filter(id => !visible.has(id)).forEach(id => this.collapseRow(id));
+                this.syncOnlineTimer();
+            },
         },
         mounted() {
             this.getDBInbounds();
@@ -1193,6 +1390,82 @@
             }
         },
         computed: {
+            // id → StreamSettings。setInbounds 把 inbounds 与 dbInbounds
+            // 按同一顺序推进去，所以这里的下标配对在**未过滤**的原始数组上
+            // 才成立——建好映射之后，渲染侧一律按 id 取。
+            streamById() {
+                const m = {};
+                this.dbInbounds.forEach((db, i) => {
+                    const ib = this.inbounds[i];
+                    if (ib) {
+                        m[db.id] = ib.stream;
+                    }
+                });
+                return m;
+            },
+            protocolOptions() {
+                return Array.from(new Set(this.dbInbounds.map(i => i.protocol).filter(Boolean))).sort();
+            },
+            filterActive() {
+                const f = this.filters;
+                return !!(f.key || f.protocol || f.enable || f.online || f.risk || f.expiry);
+            },
+            filteredInbounds() {
+                const f = this.filters;
+                const key = (f.key || '').trim().toLowerCase();
+                const now = Date.now();
+                return this.dbInbounds.filter(db => {
+                    if (f.protocol && db.protocol !== f.protocol) return false;
+                    if (f.enable === 'on' && !db.enable) return false;
+                    if (f.enable === 'off' && db.enable) return false;
+
+                    if (f.online) {
+                        const c = this.onlineCountOf(db.id);
+                        // 数不出来的行在两个方向上都不参与筛选：把「看不到」
+                        // 判成「无人在线」会让它出现在一个它本不该出现的
+                        // 结果集里，而管理员看不出这一行其实没有结论。
+                        if (!c.supported) return false;
+                        if (f.online === 'on' && c.count <= 0) return false;
+                        if (f.online === 'off' && c.count > 0) return false;
+                    }
+
+                    if (f.risk) {
+                        const r = this.riskOf(db.id);
+                        const rated = r.state === 'ready';
+                        if (f.risk === 'unrated' && rated) return false;
+                        if (f.risk === 'alert' &&
+                            !(rated && ['watch', 'medium', 'high', 'severe'].includes(r.level))) {
+                            return false;
+                        }
+                    }
+
+                    if (f.expiry === 'expired' && !(db.expiryTime > 0 && db.expiryTime <= now)) return false;
+                    if (f.expiry === 'soon' &&
+                        !(db.expiryTime > now && db.expiryTime - now <= 7 * 86400000)) {
+                        return false;
+                    }
+
+                    if (key) {
+                        // 大小写不敏感，且要能搜到 UUID——它藏在 settings 那段
+                        // JSON 字符串里，所以整段一起拼进草堆。
+                        const hay = [
+                            db.remark, '#' + db.id, ':' + db.port, db.protocol,
+                            db.settings, db.streamSettings,
+                        ].join(' ').toLowerCase();
+                        if (hay.indexOf(key) < 0) return false;
+                    }
+                    return true;
+                });
+            },
+            // 「一个入站都没有」与「筛选没筛出东西」是两回事。前者要引导去
+            // 创建，后者要提示清筛选——混成一句「暂无数据」会让刚过滤完的
+            // 管理员以为入站被删光了。
+            tableEmptyText() {
+                if (this.dbInbounds.length === 0) {
+                    return '还没有任何入站。点右上角「添加入站」创建第一个。';
+                }
+                return '没有符合当前筛选条件的入站。点工具栏右侧「清除筛选」看全部。';
+            },
             total() {
                 let down = 0, up = 0;
                 for (let i = 0; i < this.dbInbounds.length; ++i) {

@@ -17,182 +17,186 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
-            <a-spin :spinning="spinning" :delay="200" :tip="loadingTip"/>
-            <transition name="list" appear>
-                <a-row>
-                    <a-card hoverable>
-                        <a-row>
-                            <a-col :sm="24" :md="12">
-                                <a-row>
-                                    <a-col :span="12" style="text-align: center">
-                                        <a-progress type="dashboard" status="normal"
-                                                    :stroke-color="status.cpu.color"
-                                                    :percent="status.cpu.percent"></a-progress>
-                                        <div>CPU</div>
-                                    </a-col>
-                                    <a-col :span="12" style="text-align: center">
-                                        <a-progress type="dashboard" status="normal"
-                                                    :stroke-color="status.mem.color"
-                                                    :percent="status.mem.percent"></a-progress>
-                                        <div>
-                                            内存: [[ sizeFormat(status.mem.current) ]] / [[ sizeFormat(status.mem.total) ]]
-                                        </div>
-                                    </a-col>
-                                </a-row>
-                            </a-col>
-                            <a-col :sm="24" :md="12">
-                                <a-row>
-                                    <a-col :span="12" style="text-align: center">
-                                        <a-progress type="dashboard" status="normal"
-                                                    :stroke-color="status.swap.color"
-                                                    :percent="status.swap.percent"></a-progress>
-                                        <div>
-                                            swap: [[ sizeFormat(status.swap.current) ]] / [[ sizeFormat(status.swap.total) ]]
-                                        </div>
-                                    </a-col>
-                                    <a-col :span="12" style="text-align: center">
-                                        <a-progress type="dashboard" status="normal"
-                                                    :stroke-color="status.disk.color"
-                                                    :percent="status.disk.percent"></a-progress>
-                                        <div>
-                                            硬盘: [[ sizeFormat(status.disk.current) ]] / [[ sizeFormat(status.disk.total) ]]
-                                        </div>
-                                    </a-col>
-                                </a-row>
-                            </a-col>
-                        </a-row>
+            <div class="page-header">
+                <div class="page-heading">
+                    <h1 class="page-title">系统状态</h1>
+                    <p class="page-description">面板、Xray 与服务器资源的实时运行情况</p>
+                </div>
+                <div class="page-actions">
+                    <!-- 改动前「切换版本」是一个带 @click 的蓝色 a-tag。那不是按钮：
+                         键盘拿不到、没有焦点环、读屏软件念出来是一段普通文本。 -->
+                    <a-button icon="swap" @click="openSelectV2rayVersion">切换 Xray 版本</a-button>
+                </div>
+            </div>
+            <a-spin :spinning="spinning" :delay="200" :tip="loadingTip">
+                <!-- 第一屏回答的是「系统健康吗、有没有人异常」，不是「CPU 多少」。
+                     四张卡全部来自已有接口，没有为了排版虚构任何指标：
+                     /server/status、/aui/inbound/list、/aui/inbound/onlineCounts、
+                     /aui/inbound/sharing/risk/summary。 -->
+                <transition name="list" appear>
+                    <div class="stat-row">
+                        <div class="stat-card" :class="xrayTone">
+                            <span class="stat-icon">
+                                <a-icon :type="xrayIcon" theme="filled"/>
+                            </span>
+                            <div class="stat-text">
+                                <span class="stat-label">Xray</span>
+                                <div class="stat-value" style="font-size: 18px">
+                                    [[ xrayStateText ]]
+                                    <a-tooltip v-if="status.xray.state === State.Error">
+                                        <template slot="title">
+                                            <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
+                                        </template>
+                                        <a-icon type="question-circle" theme="filled"></a-icon>
+                                    </a-tooltip>
+                                    <span class="unit">[[ status.xray.version || '—' ]]</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-geek">
+                            <span class="stat-icon"><a-icon type="team"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">入站</span>
+                                <div class="stat-value">
+                                    [[ enabledInboundCount ]]<span class="unit">/ [[ dbInbounds.length ]] 已启用</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="stat-card tone-cyan">
+                            <span class="stat-icon"><a-icon type="wifi"/></span>
+                            <div class="stat-text">
+                                <span class="stat-label">在线设备</span>
+                                <!-- 读不到连接表时显示「—」而不是 0：把「看不到」渲染成
+                                     「没人在线」，管理员就会对着一个假的 0 做判断。
+                                     与入站列表那两列同一条口径。 -->
+                                <div class="stat-value">[[ onlineDeviceText ]]</div>
+                            </div>
+                        </div>
+                        <a-tooltip :title="attentionSummary">
+                            <div class="stat-card" tabindex="0"
+                                 :class="attentionCount ? 'tone-alert' : 'tone-ok'"
+                                 :aria-label="attentionCount ? attentionSummary : '没有需要关注的入站'">
+                                <span class="stat-icon">
+                                    <a-icon :type="attentionCount ? 'exclamation-circle' : 'check-circle'"
+                                            theme="filled"/>
+                                </span>
+                                <div class="stat-text">
+                                    <span class="stat-label">需要关注</span>
+                                    <div class="stat-value">[[ attentionCount ]]</div>
+                                </div>
+                            </div>
+                        </a-tooltip>
+                    </div>
+                </transition>
+
+                <transition name="list" appear>
+                    <a-card>
+                        <div slot="title">最近使用 (Top [[ overviewSeriesCount ]])</div>
+                        <a-radio-group size="small" :value="overviewRange" @change="changeOverviewRange">
+                            <a-radio-button value="24h">24 小时</a-radio-button>
+                            <a-radio-button value="7d">7 天</a-radio-button>
+                            <a-radio-button value="30d">30 天</a-radio-button>
+                            <a-radio-button value="1y">1 年</a-radio-button>
+                        </a-radio-group>
+                        <a-alert v-if="overviewReason" type="info" show-icon style="margin-top: 12px"
+                                 :message="overviewReason"></a-alert>
+                        <div style="position: relative; height: 320px; margin-top: 12px">
+                            <canvas id="overview-chart"></canvas>
+                        </div>
                     </a-card>
-                </a-row>
-            </transition>
-            <transition name="list" appear>
-                <a-row>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            xray 状态:
-                            <a-tag :color="status.xray.color">[[ status.xray.state ]]</a-tag>
-                            <a-tooltip v-if="status.xray.state === State.Error">
-                                <template slot="title">
-                                    <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
-                                </template>
-                                <a-icon type="question-circle" theme="filled"></a-icon>
-                            </a-tooltip>
-                            <a-tag color="green" @click="openSelectV2rayVersion">[[ status.xray.version ]]</a-tag>
-                            <a-tag color="blue" @click="openSelectV2rayVersion">切换版本</a-tag>
-                        </a-card>
-                    </a-col>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            运行时间:
-                            <a-tag color="#87d068">[[ formatSecond(status.uptime) ]]</a-tag>
-                            <a-tooltip>
-                                <template slot="title">
-                                    系统自启动以来的运行时间
-                                </template>
-                                <a-icon type="question-circle" theme="filled"></a-icon>
-                            </a-tooltip>
-                        </a-card>
-                    </a-col>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            系统负载: [[ status.loads[0] ]] | [[ status.loads[1] ]] | [[ status.loads[2] ]]
-                        </a-card>
-                    </a-col>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            tcp / udp 连接数: [[ status.tcpCount ]] / [[ status.udpCount ]]
-                            <a-tooltip>
-                                <template slot="title">
-                                    所有网卡的总连接数
-                                </template>
-                                <a-icon type="question-circle" theme="filled"></a-icon>
-                            </a-tooltip>
-                        </a-card>
-                    </a-col>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            <a-row>
-                                <a-col :span="12">
-                                    <a-icon type="arrow-up"></a-icon>
-                                    [[ sizeFormat(status.netIO.up) ]] / S
-                                    <a-tooltip>
-                                        <template slot="title">
-                                            所有网卡的总上传速度
-                                        </template>
-                                        <a-icon type="question-circle" theme="filled"></a-icon>
-                                    </a-tooltip>
-                                </a-col>
-                                <a-col :span="12">
-                                    <a-icon type="arrow-down"></a-icon>
-                                    [[ sizeFormat(status.netIO.down) ]] / S
-                                    <a-tooltip>
-                                        <template slot="title">
-                                            所有网卡的总下载速度
-                                        </template>
-                                        <a-icon type="question-circle" theme="filled"></a-icon>
-                                    </a-tooltip>
-                                </a-col>
-                            </a-row>
-                        </a-card>
-                    </a-col>
-                    <a-col :sm="24" :md="12">
-                        <a-card hoverable>
-                            <a-row>
-                                <a-col :span="12">
-                                    <a-icon type="cloud-upload"></a-icon>
-                                    [[ sizeFormat(status.netTraffic.sent) ]]
-                                    <a-tooltip>
-                                        <template slot="title">
-                                            系统启动以来所有网卡的总上传流量
-                                        </template>
-                                        <a-icon type="question-circle" theme="filled"></a-icon>
-                                    </a-tooltip>
-                                </a-col>
-                                <a-col :span="12">
-                                    <a-icon type="cloud-download"></a-icon>
-                                    [[ sizeFormat(status.netTraffic.recv) ]]
-                                    <a-tooltip>
-                                        <template slot="title">
-                                            系统启动以来所有网卡的总下载流量
-                                        </template>
-                                        <a-icon type="question-circle" theme="filled"></a-icon>
-                                    </a-tooltip>
-                                </a-col>
-                            </a-row>
-                        </a-card>
-                    </a-col>
-                </a-row>
-            </transition>
-            <a-row style="margin-top: 10px">
-                <a-card hoverable>
-                    <div slot="title">
-                        最近使用 (Top [[ overviewSeriesCount ]])
-                    </div>
-                    <a-radio-group size="small" :value="overviewRange" @change="changeOverviewRange">
-                        <a-radio-button value="24h">24 小时</a-radio-button>
-                        <a-radio-button value="7d">7 天</a-radio-button>
-                        <a-radio-button value="30d">30 天</a-radio-button>
-                        <a-radio-button value="1y">1 年</a-radio-button>
-                    </a-radio-group>
-                    <a-alert v-if="overviewReason" type="info" show-icon style="margin-top: 12px"
-                             :message="overviewReason"></a-alert>
-                    <div style="position: relative; height: 320px; margin-top: 12px">
-                        <canvas id="overview-chart"></canvas>
-                    </div>
-                </a-card>
-            </a-row>
+                </transition>
+
+                <!-- 系统资源降到最后一段：它回答的是「这台机器累不累」，是背景
+                     信息，不是打开面板要先看的东西。四个 dashboard 大圆环换成
+                     细条，百分比数字就在条的正上方——颜色不是唯一信息来源。 -->
+                <transition name="list" appear>
+                    <a-card>
+                        <div slot="title">服务器资源</div>
+                        <div class="card-section">
+                            <div class="res-grid">
+                                <div v-for="r in resourceBars" :key="r.name">
+                                    <div class="res-head">
+                                        <span class="res-name">[[ r.name ]]</span>
+                                        <span class="res-value">[[ r.text ]]</span>
+                                    </div>
+                                    <div class="res-bar">
+                                        <div class="res-bar-fill" :class="r.tone"
+                                             :style="{ width: r.percent + '%' }"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-section">
+                            <div class="metric-grid">
+                                <div>
+                                    <div class="metric-name">系统负载</div>
+                                    <div class="metric-value">
+                                        [[ status.loads[0] ]] · [[ status.loads[1] ]] · [[ status.loads[2] ]]
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="metric-name">
+                                        TCP / UDP 连接
+                                        <a-tooltip title="所有网卡的总连接数">
+                                            <a-icon type="question-circle"></a-icon>
+                                        </a-tooltip>
+                                    </div>
+                                    <div class="metric-value">[[ status.tcpCount ]] / [[ status.udpCount ]]</div>
+                                </div>
+                                <div>
+                                    <div class="metric-name">
+                                        实时网速
+                                        <a-tooltip title="所有网卡的总上传 / 下载速度">
+                                            <a-icon type="question-circle"></a-icon>
+                                        </a-tooltip>
+                                    </div>
+                                    <div class="metric-value">
+                                        ↑ [[ sizeFormat(status.netIO.up) ]]/s · ↓ [[ sizeFormat(status.netIO.down) ]]/s
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="metric-name">
+                                        累计流量
+                                        <a-tooltip title="系统启动以来所有网卡的总上传 / 下载流量">
+                                            <a-icon type="question-circle"></a-icon>
+                                        </a-tooltip>
+                                    </div>
+                                    <div class="metric-value">
+                                        ↑ [[ sizeFormat(status.netTraffic.sent) ]] · ↓ [[ sizeFormat(status.netTraffic.recv) ]]
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="metric-name">
+                                        运行时间
+                                        <a-tooltip title="系统自启动以来的运行时间">
+                                            <a-icon type="question-circle"></a-icon>
+                                        </a-tooltip>
+                                    </div>
+                                    <div class="metric-value">[[ formatSecond(status.uptime) ]]</div>
+                                </div>
+                            </div>
+                        </div>
+                    </a-card>
+                </transition>
+            </a-spin>
         </a-layout-content>
     </a-layout>
     <a-modal id="version-modal" v-model="versionModal.visible" title="切换版本"
              :closable="true" @ok="() => versionModal.visible = false"
              ok-text="确定" cancel-text="取消">
-        <h2>点击你想切换的版本</h2>
-        <h2>请谨慎选择，旧版本可能配置不兼容</h2>
-        <template v-for="version, index in versionModal.versions">
-            <a-tag :color="index % 2 == 0 ? 'blue' : 'green'"
-                   style="margin: 10px" @click="switchV2rayVersion(version)">
+        <p style="margin-bottom: 4px">点击要切换到的版本。</p>
+        <p style="color: var(--aui-text-2); font-size: 13px">
+            旧版本可能与当前配置不兼容，切换后请确认 Xray 是否正常运行。
+        </p>
+        <!-- 改动前这里是一排带 @click 的 a-tag，颜色按 index % 2 蓝绿交替——
+             颜色在这里不携带任何信息，纯装饰噪声；而且 a-tag 不是按钮，
+             键盘拿不到、没有焦点环、读屏软件念出来是普通文本。 -->
+        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px">
+            <a-button v-for="version in versionModal.versions" :key="version"
+                      size="small" @click="switchV2rayVersion(version)">
                 [[ version ]]
-            </a-tag>
-        </template>
+            </a-button>
+        </div>
     </a-modal>
 </a-layout>
 {{template "js" .}}
@@ -221,15 +225,17 @@
             return toFixed(this.current / this.total * 100, 2);
         }
 
-        get color() {
+        // 改动前返回的是 #67C23A / #E6A23C / #F56C6C——element-ui 的调色板，
+        // 而 element-ui 本身早已不在这个项目里。现在返回语义档位的 class，
+        // 实际颜色由 custom.css 的 --aui-success/warning/danger 决定。
+        get tone() {
             const percent = this.percent;
             if (percent < 80) {
-                return '#67C23A';
+                return '';
             } else if (percent < 90) {
-                return '#E6A23C';
-            } else {
-                return '#F56C6C';
+                return 'is-warn';
             }
+            return 'is-danger';
         }
     }
 
@@ -245,7 +251,7 @@
             this.tcpCount = 0;
             this.udpCount = 0;
             this.uptime = 0;
-            this.xray = {state: State.Stop, errorMsg: "", version: "", color: ""};
+            this.xray = {state: State.Stop, errorMsg: "", version: ""};
 
             if (data == null) {
                 return;
@@ -260,20 +266,10 @@
             this.tcpCount = data.tcpCount;
             this.udpCount = data.udpCount;
             this.uptime = data.uptime;
+            // 不再在这里塞 color：改动前它把 stop 映射成 orange，而橙色在全站
+            // 表示「警告 / 降级」——管理员手动停掉 xray 是正常状态，不是警告。
+            // 现在由下面的 xrayTone 决定，stop 走中性档。
             this.xray = data.xray;
-            switch (this.xray.state) {
-                case State.Running:
-                    this.xray.color = "green";
-                    break;
-                case State.Stop:
-                    this.xray.color = "orange";
-                    break;
-                case State.Error:
-                    this.xray.color = "red";
-                    break;
-                default:
-                    this.xray.color = "gray";
-            }
         }
     }
 
@@ -282,7 +278,7 @@
     // 12 个区分度足够的颜色，按系列顺序取，超过 12 个入站时循环
     // （Top N 默认就是 12，正常取不到循环）。
     const OVERVIEW_COLORS = [
-        '#1890ff', '#52c41a', '#faad14', '#f5222d', '#722ed1', '#eb2f96',
+        '#1266D6', '#15803D', '#B45309', '#B91C1C', '#722ed1', '#eb2f96',
         '#13c2c2', '#fa8c16', '#2f54eb', '#a0d911', '#08979c', '#c41d7f',
     ];
 
@@ -311,11 +307,60 @@
             overviewRange: '24h',
             overviewReason: '',
             overviewSeriesCount: 0,
+            // 这三份数据来自入站页已有的接口，本页只读不写，也不新增任何
+            // 后端接口。刷新频率远低于 /server/status 的 2 秒——它们一小时
+            // 量级才有意义的变化，跟着 CPU 一起每 2 秒拉一次纯属浪费。
+            dbInbounds: [],
+            onlineCounts: {},
+            onlineCountError: '',
+            riskMap: {},
+            businessTimer: null,
         },
         methods: {
             loading(spinning, tip = '加载中') {
                 this.spinning = spinning;
                 this.loadingTip = tip;
+            },
+            async loadBusiness() {
+                await Promise.all([this.loadInbounds(), this.loadOnlineCounts(), this.loadRisk()]);
+            },
+            async loadInbounds() {
+                // 不用 HttpUtil：它会把每次失败弹成 message，而这是个定时刷新
+                // 的只读查询，失败时首屏那几张卡停在上一轮的数据上即可。
+                try {
+                    const resp = await axios.post('/aui/inbound/list');
+                    if (resp.data && resp.data.success) {
+                        this.dbInbounds = (resp.data.obj || []).map(i => new DBInbound(i));
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            },
+            async loadOnlineCounts() {
+                try {
+                    const resp = await axios.post('/aui/inbound/onlineCounts');
+                    const data = resp.data;
+                    if (!data || !data.success) {
+                        this.onlineCountError = (data && data.msg) || '读取在线设备数失败';
+                        return;
+                    }
+                    const counts = {};
+                    (data.obj || []).forEach(c => { counts[c.inboundId] = c; });
+                    this.onlineCounts = counts;
+                    this.onlineCountError = '';
+                } catch (e) {
+                    this.onlineCountError = e.toString();
+                }
+            },
+            async loadRisk() {
+                try {
+                    const resp = await axios.post('/aui/inbound/sharing/risk/summary');
+                    if (resp.data && resp.data.success) {
+                        this.riskMap = resp.data.obj || {};
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
             },
             async getStatus() {
                 const msg = await HttpUtil.post('/server/status');
@@ -390,8 +435,108 @@
                 });
             },
         },
+        computed: {
+            xrayStateText() {
+                return { running: '运行中', stop: '已停止', error: '启动失败' }[this.status.xray.state]
+                    || this.status.xray.state || '未知';
+            },
+            // stop 走中性而不是橙：管理员手动停掉 xray 是正常状态。
+            // 橙色在全站只表示「警告 / 等待 / 降级」。
+            xrayTone() {
+                switch (this.status.xray.state) {
+                    case State.Running: return 'tone-ok';
+                    case State.Error:   return 'tone-alert';
+                    default:            return '';
+                }
+            },
+            xrayIcon() {
+                switch (this.status.xray.state) {
+                    case State.Running: return 'check-circle';
+                    case State.Error:   return 'close-circle';
+                    default:            return 'pause-circle';
+                }
+            },
+            enabledInboundCount() {
+                return this.dbInbounds.filter(i => i.enable).length;
+            },
+            // 读不到连接表时是「—」而不是 0，与入站列表那两列同一条口径：
+            // 把「看不到」渲染成「没人在线」，管理员就会对着一个假的 0 做判断。
+            onlineDeviceText() {
+                if (this.onlineCountError) {
+                    return '—';
+                }
+                const list = Object.values(this.onlineCounts);
+                if (list.length === 0) {
+                    return '—';
+                }
+                const usable = list.filter(c => c.supported);
+                if (usable.length === 0) {
+                    return '—';
+                }
+                return String(usable.reduce((n, c) => n + (c.count || 0), 0));
+            },
+            // 「需要关注」的四类，逐项都能点名，不是一个说不清来源的数字。
+            // 未评估出结论的风险（learning / unobservable / degraded）**不计入**：
+            // 把「测不出来」算成「有风险」是在报一个没算过的结论。
+            attentionItems() {
+                const now = Date.now();
+                const highRisk = [], expired = [], expiring = [], disabled = [];
+                this.dbInbounds.forEach(i => {
+                    const r = this.riskMap[i.id];
+                    if (r && r.state === 'ready' && (r.level === 'high' || r.level === 'severe')) {
+                        highRisk.push(i);
+                    }
+                    if (i.expiryTime > 0 && i.expiryTime <= now) {
+                        expired.push(i);
+                    } else if (i.expiryTime > now && i.expiryTime - now <= 7 * 86400000) {
+                        expiring.push(i);
+                    }
+                    if (!i.enable) {
+                        disabled.push(i);
+                    }
+                });
+                return { highRisk, expired, expiring, disabled };
+            },
+            attentionCount() {
+                const a = this.attentionItems;
+                return a.highRisk.length + a.expired.length + a.expiring.length + a.disabled.length;
+            },
+            attentionSummary() {
+                const a = this.attentionItems;
+                const parts = [];
+                if (a.highRisk.length) parts.push(`高风险 ${a.highRisk.length}`);
+                if (a.expired.length)  parts.push(`已过期 ${a.expired.length}`);
+                if (a.expiring.length) parts.push(`7 天内到期 ${a.expiring.length}`);
+                if (a.disabled.length) parts.push(`已停用 ${a.disabled.length}`);
+                return parts.length ? parts.join(' · ') : '没有需要关注的入站';
+            },
+            resourceBars() {
+                const s = this.status;
+                return [
+                    { name: 'CPU', percent: s.cpu.percent, tone: s.cpu.tone,
+                      text: s.cpu.percent + '%' },
+                    { name: '内存', percent: s.mem.percent, tone: s.mem.tone,
+                      text: `${sizeFormat(s.mem.current)} / ${sizeFormat(s.mem.total)}` },
+                    { name: 'Swap', percent: s.swap.percent, tone: s.swap.tone,
+                      text: `${sizeFormat(s.swap.current)} / ${sizeFormat(s.swap.total)}` },
+                    { name: '硬盘', percent: s.disk.percent, tone: s.disk.tone,
+                      text: `${sizeFormat(s.disk.current)} / ${sizeFormat(s.disk.total)}` },
+                ];
+            },
+        },
+        beforeDestroy() {
+            if (this.businessTimer != null) {
+                clearInterval(this.businessTimer);
+                this.businessTimer = null;
+            }
+        },
         async mounted() {
             this.loadOverviewChart();
+            this.loadBusiness();
+            // 30 秒一次。入站数量、到期、风险结论都是小时量级才变的东西，
+            // 跟着下面那个 2 秒的状态轮询一起拉纯属浪费——风险汇总还要扫
+            // 共享检测的快照表。
+            this.businessTimer = setInterval(() => this.loadBusiness(), 30000);
             while (true) {
                 try {
                     await this.getStatus();

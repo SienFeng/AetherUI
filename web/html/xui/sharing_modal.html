@@ -24,35 +24,50 @@
              :description="'能解析出归属地的记录只占 ' + sharingModal.risk.geoCoverage + '%（归属地库只收录 IPv4）。当前只能按网络段粗判，这个口径的误报率高得多——同一个人的手机与宽带就是两个网络。'">
     </a-alert>
 
-    <a-descriptions v-else size="small" bordered :column="2" style="margin-bottom: 12px">
-        <a-descriptions-item label="共享风险">
-            <a-tag :color="sharingModal.riskColor()">
-                [[ sharingModal.risk.score ]] / 100 · [[ sharingModal.riskText() ]]
-            </a-tag>
-        </a-descriptions-item>
-        <a-descriptions-item label="置信度">[[ sharingModal.risk.confidence ]] / 100</a-descriptions-item>
-    </a-descriptions>
+    <!-- 分数是这个弹窗的主角。改动前它被塞在一个 a-tag 里、和「置信度」
+         等重地并排在 descriptions 的两格中，读的人得先找到它。 -->
+    <div v-else class="risk-hero" :class="sharingModal.heroTone()">
+        <div class="risk-score">
+            <span class="risk-score-num">[[ sharingModal.risk.score ]]</span>
+            <span class="risk-score-max">/ 100</span>
+        </div>
+        <div class="risk-hero-meta">
+            <div class="risk-hero-level">[[ sharingModal.riskText() ]]风险</div>
+            <div class="risk-hero-sub">
+                置信度 [[ sharingModal.risk.confidence ]] / 100 ·
+                统计窗口最近 [[ sharingModal.windowDays ]] 天
+                <template v-if="sharingModal.cappedByNoCoexist()">
+                    · 无异地同时使用的证据，分数上限 69
+                </template>
+            </div>
+        </div>
+    </div>
 
-    <!-- 依据。0 分的是上下文证据，单独标注「不计分」——它们会对几乎每个
-         双设备用户命中，混在计分项里会让管理员以为自己在看证据。
-         中性标签传 undefined 而不是 'default'：后者不在 antd 的预设色里，会被
-         当成自定义颜色而渲染成白底白字（详见 inbounds.html 的 RISK_LEVEL_COLOR
-         注释），标签完全隐形且不报错。下面那个小时表里的中性标签同理。 -->
+    <!-- 依据。0 分的是上下文证据，用灰字标注「不计分」——它们会对几乎每个
+         双设备用户命中，做成和计分项一样的样式会让管理员以为自己在看证据。 -->
     <a-card v-if="sharingModal.risk.evidence.length > 0" size="small" title="风险依据"
             style="margin-bottom: 12px">
-        <div v-for="e in sharingModal.risk.evidence" :key="e.code" style="margin-bottom: 8px">
-            <a-tag :color="e.points > 0 ? 'red' : undefined">
+        <div v-for="e in sharingModal.risk.evidence" :key="e.code" class="evidence-item">
+            <div class="evidence-body">
+                <div class="evidence-title">[[ e.title ]]</div>
+                <div class="evidence-detail">[[ e.detail ]]</div>
+            </div>
+            <!-- 分值靠右对齐成一列，扫读时能直接比大小。0 分那些是上下文
+                 证据，用灰字而不是另一个标签——它们会对几乎每个双设备用户
+                 命中，做成标签会让管理员以为自己在看证据。 -->
+            <div class="evidence-points" :class="e.points > 0 ? '' : 'is-context'">
                 <template v-if="e.points > 0">+[[ e.points ]]</template>
                 <template v-else>不计分</template>
-            </a-tag>
-            <b>[[ e.title ]]</b>
-            <div style="color: rgba(0,0,0,.65); margin-left: 4px">[[ e.detail ]]</div>
+            </div>
         </div>
-        <div v-if="sharingModal.risk.state === 'ready'" style="border-top: 1px solid #f0f0f0; padding-top: 8px">
-            合计 <b>[[ sharingModal.risk.score ]]</b> / 100
-            <span v-if="sharingModal.cappedByNoCoexist()" style="color: rgba(0,0,0,.65)">
-                （没有异地同时使用的证据，上限 69——错峰与「同一个人在两地规律往返」在网络层分不开）
-            </span>
+        <div v-if="sharingModal.risk.state === 'ready'" class="evidence-item">
+            <div class="evidence-body">
+                <div class="evidence-title">合计</div>
+                <div v-if="sharingModal.cappedByNoCoexist()" class="evidence-detail">
+                    没有异地同时使用的证据，上限 69——错峰与「同一个人在两地规律往返」在网络层分不开
+                </div>
+            </div>
+            <div class="evidence-points">[[ sharingModal.risk.score ]]</div>
         </div>
     </a-card>
 
@@ -63,7 +78,9 @@
                  :row-key="p => p.key" :pagination="false" size="small">
             <template slot="who" slot-scope="text, p">
                 [[ sharingModal.profileName(p) ]]
-                <a-tag v-if="p.hosting" color="purple">机房</a-tag>
+                <!-- 与入站页展开行同一条：紫色本身不说明任何事，直接写字。 -->
+                <span v-if="p.hosting" class="chip"
+                      title="来源不是基础运营商，多半是云厂商或机房">机房</span>
             </template>
             <template slot="active" slot-scope="text, p">
                 [[ p.activeDays ]] 天 / [[ p.activeHours ]] 小时
@@ -77,13 +94,16 @@
 
     <a-descriptions size="small" bordered :column="2" style="margin-bottom: 12px">
         <a-descriptions-item label="并存时长">
-            <a-tag color="orange">[[ sharingModal.stat.hours ]] 小时</a-tag>
-            <span style="color: rgba(0,0,0,.45)">最近 [[ sharingModal.windowDays ]] 天</span>
+            <span class="cell-num">[[ sharingModal.stat.hours ]] 小时</span>
+            <span class="cell-muted">（最近 [[ sharingModal.windowDays ]] 天）</span>
         </a-descriptions-item>
         <a-descriptions-item :label="sharingModal.stat.byIp ? '涉及来源' : '涉及地区'">
             <template v-if="sharingModal.stat.byIp">[[ sharingModal.stat.ips ]] 个来源网络</template>
             <template v-else>
-                <a-tag v-for="p in sharingModal.stat.provinces" :key="p" color="red">[[ p ]]</a-tag>
+                <!-- 这些地区**本身**就是并存记录里出现过的，红色在这里不增加
+                     任何信息（整行都是并存数据）；下面「地区限制建议」里的红色
+                     才有含义——那里红标出的是「建议采纳的地区中哪些有并存嫌疑」。 -->
+                <span v-for="p in sharingModal.stat.provinces" :key="p" class="chip">[[ p ]]</span>
             </template>
         </a-descriptions-item>
     </a-descriptions>
@@ -95,8 +115,16 @@
         </template>
         <p style="margin-bottom: 8px">
             按最近 [[ sharingModal.windowDays ]] 天的活跃时长，覆盖 95% 的地区是：
-            <a-tag v-for="p in sharingModal.suggestion.suggested" :key="p"
-                   :color="sharingModal.isCoexisting(p) ? 'red' : 'purple'">[[ p ]]</a-tag>
+            <!-- 红色在这里**有**含义：标红的是「建议采纳的地区里，哪些出现在
+                 并存记录中」，直接采纳等于把共享合法化。其余地区只是候选值，
+                 改动前那个紫色不携带任何信息。 -->
+            <template v-for="p in sharingModal.suggestion.suggested">
+                <span v-if="sharingModal.isCoexisting(p)" :key="p"
+                      class="status-badge status-danger">
+                    <a-icon type="exclamation-circle"/>[[ p ]]
+                </span>
+                <span v-else :key="p" class="chip">[[ p ]]</span>
+            </template>
         </p>
         <a-alert v-if="sharingModal.suggestion.coexisting.length > 0" type="error" show-icon
                  style="margin-bottom: 8px"
@@ -117,9 +145,9 @@
              :row-key="h => h.t" :pagination="{ pageSize: 10 }" size="small">
         <template slot="label" slot-scope="text, h">[[ h.label ]]</template>
         <template slot="entries" slot-scope="text, h">
-            <a-tag v-for="e in h.entries" :key="e.ip" :color="e.province ? 'red' : undefined">
+            <span v-for="e in h.entries" :key="e.ip" class="chip cell-num">
                 [[ e.province || '归属地未知' ]] · [[ e.ip ]] · [[ sharingModal.minutes(e.activeSeconds) ]] · [[ sizeFormat(e.activeBytes) ]]
-            </a-tag>
+            </span>
         </template>
     </a-table>
     <p style="margin-top: 8px; color: rgba(0,0,0,.45)">
@@ -150,7 +178,7 @@
 </a-modal>
 <script>
 
-    // RISK_LEVEL_TEXT / RISK_LEVEL_COLOR 定义在 inbounds.html 的脚本里。
+    // RISK_LEVEL_TEXT 定义在 inbounds.html 的脚本里。
     // 那个 <script> 在 inbounds.html 包含本模板的那一行之前执行，所以
     // 这里引用得到。（注意：注释里也不能写出模板调用的字面写法，Go 的
     // html/template 不认 JS 注释，会把它当成真的模板调用，自我递归。）两处共用一份是刻意的——分开定义迟早分叉，而分叉
@@ -184,10 +212,12 @@
         riskText() {
             return RISK_LEVEL_TEXT[this.risk.level] || this.risk.level;
         },
-        riskColor() {
-            // 未知等级落到 undefined 而不是 'default'，理由见 inbounds.html
-            // 里 RISK_LEVEL_COLOR 上方的注释。
-            return RISK_LEVEL_COLOR[this.risk.level];
+        // 分数区的底色档，对应 custom.css 的 .risk-hero 修饰类。
+        heroTone() {
+            if (this.risk.state !== 'ready') return '';
+            if (this.risk.level === 'high' || this.risk.level === 'severe') return 'is-danger';
+            if (this.risk.level === 'watch' || this.risk.level === 'medium') return 'is-warn';
+            return '';
         },
         // 画像键是给程序看的（CN|江苏省|中国电信），这里翻成人话。
         profileName(p) {

@@ -1,3 +1,68 @@
+/* ════════════════════════════════════════════════════════════════════
+ * AetherUI Design Token
+ *
+ * 全部取自登录页那套已经核算过 WCAG 的色板（login.html 的 .login-page），
+ * 把它从「只有登录页用」提升为全站基准。注释里的比值是白底（或注明的底色）
+ * 上的实测对比度，改任何一个值都要重新核算，不要凭感觉调。
+ *
+ * 命名统一带 --aui- 前缀，与登录页自己那套 --txt/--accent 局部变量隔离：
+ * 那套是 .login-page 作用域内的，两边同名会在将来某次改动里互相覆盖。
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+    /* ── Surface ───────────────────────────────────────────────── */
+    --aui-bg:            #F1F5F9;   /* 页面底。取代 antd 的 #f0f2f5，与登录页同族 */
+    --aui-surface:       #FFFFFF;
+    --aui-surface-soft:  #F8FAFC;   /* 表头、只读区、代码块底 */
+
+    /* ── Text ──────────────────────────────────────────────────── */
+    --aui-text:          #0F172A;   /* 17.8:1  正文 */
+    --aui-text-2:        #475569;   /*  7.6:1  次要正文 */
+    --aui-text-3:        #64748B;   /*  4.8:1  占位符、辅助说明，仍过 AA
+                                     * 不要退到常见的 slate-400 #94A3B8，那只有 2.6:1 */
+
+    /* ── Line ──────────────────────────────────────────────────── */
+    --aui-line:          #E2E8F0;
+    --aui-line-strong:   #CBD5E1;
+
+    /* ── Semantic ──────────────────────────────────────────────────
+     * 每个色只有一个含义，页面之间不得再各自解释：
+     *   蓝 = 主操作 / 选中 / 链接      绿 = 成功 / 健康 / 已生效
+     *   橙 = 警告 / 等待 / 降级 / 存疑  红 = 故障 / 超额 / 过期 / 高风险 / 删除
+     *   灰 = 未知 / 关闭 / 未配置 / 离线 / 无限制
+     * 特别注意「无限制 / 无限期 / 不限速」是中性事实，用 muted 不用 success。 */
+    --aui-primary:       #1266D6;   /* 白字 5.39:1（antd 原本的 #1890FF 只有 3.24:1） */
+    --aui-primary-hover: #0F58BC;   /* 白字 6.68:1 */
+    --aui-primary-active:#0B4694;   /* 白字 9.06:1 */
+    --aui-primary-soft:  #EFF6FF;   /* 选中行底、轻量 chip 底 */
+    --aui-primary-line:  #BFDBFE;
+    --aui-ring:          rgba(18, 102, 214, .14);
+
+    --aui-success:       #15803D;   /* 白底 5.02:1 */
+    --aui-warning:       #B45309;   /* 白底 5.02:1 */
+    --aui-danger:        #B91C1C;   /* 白底 6.47:1 */
+    --aui-muted:         #64748B;   /* 白底 4.8:1 */
+
+    /* ── Radius ────────────────────────────────────────────────────
+     * 改动前全站有七种取值（30/20/13/10/8/6/4），收敛成四档。
+     * 30px 这个默认值本身就不成立——本文件下方 .stat-card 的原注释已经
+     * 论证过「110px 高的卡用 30px 会圆到像药丸」，而同样的推理对
+     * index.html 里那些 60px 高的卡片只会更成立。 */
+    --aui-r-sm:   6px;    /* chip、tag、小按钮 */
+    --aui-r-md:  10px;    /* 输入框、按钮、图标块 */
+    --aui-r-lg:  12px;    /* 卡片、弹窗 */
+    --aui-r-pill: 999px;  /* 仅状态 badge */
+
+    /* ── Shadow ────────────────────────────────────────────────────
+     * 极轻，只用来表达层级，不作为主要视觉效果。 */
+    --aui-sh-1: 0 1px 2px rgba(15, 23, 42, .04);
+    --aui-sh-2: 0 2px 8px rgba(15, 23, 42, .06);
+    --aui-sh-3: 0 8px 24px -8px rgba(15, 23, 42, .16);
+
+    /* ── Motion ────────────────────────────────────────────────── */
+    --aui-dur:  180ms;
+    --aui-ease: cubic-bezier(.22, .61, .36, 1);
+}
+
 #app {
     height: 100%;
 }
@@ -15,7 +80,13 @@
  * 不去画侧栏那条深色区域——侧栏宽度会随折叠状态变化，画死了反而会在折叠后
  * 露出一条对不齐的深色带。灰底已经比白底柔和得多。 */
 html, body {
-    background-color: #f0f2f5;
+    background-color: var(--aui-bg);
+}
+
+/* antd 把页面底色画在 .ant-layout 上（antd.min.css: .ant-layout{...background:#f0f2f5}），
+ * 只改 html/body 会被它整块盖住，一个像素都看不出来。 */
+.ant-layout {
+    background: var(--aui-bg);
 }
 
 /* 第二段：挂载后整体淡入，内容区再多一点点位移，让它读起来是「浮现」
@@ -56,10 +127,32 @@ html, body {
 
 /* 系统设置里开了「减少动态效果」就不要动。这类偏好通常是前庭功能需求，
  * 不是审美选择。 */
+/* 全站动效降级集中在这一处。分散成好几个 @media 块的话，新增一条动效时
+ * 很容易忘了它还有第二个地方要改。
+ *
+ * 收的是**位移与缩放**这类会引发前庭不适的动效，以及入场动画；颜色与阴影
+ * 的过渡保留——它们不产生运动，去掉反而让 hover 反馈变成生硬的跳变。 */
 @media (prefers-reduced-motion: reduce) {
     #app,
     #content-layout {
         animation: none;
+    }
+
+    /* <transition name="list"> 的入场带 translateY(-30px)，七个地方在用 */
+    .list-enter-active,
+    .list-leave-active {
+        transition: none;
+    }
+
+    .list-enter,
+    .list-leave-active {
+        transform: none;
+    }
+
+    /* 进度条与资源条的宽度变化是位移的一种 */
+    .usage-bar-fill,
+    .res-bar-fill {
+        transition: none;
     }
 
     #sider .ant-menu-item,
@@ -72,6 +165,33 @@ html, body {
     }
 }
 
+/* ── 全站键盘焦点环 ────────────────────────────────────────────────
+ * :focus-visible 只在键盘导航时命中，鼠标点击不触发，所以对鼠标用户
+ * 零视觉噪声。antd 1.7.2 对焦点基本只改边框色，在图标按钮、表格内的
+ * 链接、开关上几乎看不出来，键盘用户会完全跟丢自己在哪。
+ *
+ * 不支持 :focus-visible 的浏览器会把整条规则丢弃（选择器列表里有一个
+ * 不认识就整条作废），退回 antd 原样，没有回归。所以侧栏那条必须单独
+ * 成一条规则，不能并进来——并进来的话它会连累整条。 */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible,
+.ant-btn:focus-visible,
+.ant-input:focus-visible,
+.ant-switch:focus-visible,
+.ant-tabs-tab:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+}
+
+/* 侧栏是 #001529 的深底，主色蓝在上面对比度不够，单独给一个亮环。 */
+#sider .ant-menu-item:focus-visible,
+#sider .ant-menu-submenu-title:focus-visible,
+#sider .sider-version-tag:focus-visible {
+    outline: 2px solid #FFFFFF;
+    outline-offset: -2px;
+}
+
 .ant-space {
     width: 100%;
 }
@@ -81,124 +201,47 @@ html, body {
 }
 
 .ant-card {
-    border-radius: 30px;
-}
-
-.ant-card-hoverable {
-    cursor: auto;
+    border-radius: var(--aui-r-lg);
 }
 
 .ant-card+.ant-card {
     margin-top: 20px;
 }
 
+/* 手机上打开侧栏的唯一入口——侧栏在 breakpoint="md" 下 collapsed-width="0"
+ * 会整个消失，全靠这个把手。改动前是 41×40，低于 44×44 的触控下限，而它
+ * 恰恰是小屏上最需要点得准的一个东西。 */
 .drawer-handle {
+    /* <button> 自带的 UA 样式要清掉，否则会多一圈默认边框 */
+    border: 0;
+    padding: 0;
+    font-family: inherit;
     position: absolute;
     top: 72px;
-    width: 41px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     z-index: 0;
-    text-align: center;
-    line-height: 40px;
     font-size: 16px;
     display: flex;
     justify-content: center;
     align-items: center;
-    background: #fff;
-    right: -40px;
-    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.15);
-    border-radius: 0 4px 4px 0;
+    background: var(--aui-surface);
+    color: var(--aui-text-2);
+    right: -44px;
+    box-shadow: var(--aui-sh-3);
+    border-radius: 0 var(--aui-r-md) var(--aui-r-md) 0;
+}
+
+.drawer-handle:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
 }
 
 @media (min-width: 769px) {
     .drawer-handle {
         display: none;
     }
-}
-
-.fade-in-enter, .fade-in-leave-active, .fade-in-linear-enter, .fade-in-linear-leave, .fade-in-linear-leave-active, .fade-in-linear-enter, .fade-in-linear-leave, .fade-in-linear-leave-active {
-    opacity: 0
-}
-
-.fade-in-linear-enter-active, .fade-in-linear-leave-active {
-    -webkit-transition: opacity .2s linear;
-    transition: opacity .2s linear
-}
-
-.fade-in-linear-enter-active, .fade-in-linear-leave-active {
-    -webkit-transition: opacity .2s linear;
-    transition: opacity .2s linear
-}
-
-.fade-in-enter-active, .fade-in-leave-active {
-    -webkit-transition: all .3s cubic-bezier(.55, 0, .1, 1);
-    transition: all .3s cubic-bezier(.55, 0, .1, 1)
-}
-
-.zoom-in-center-enter-active, .zoom-in-center-leave-active {
-    -webkit-transition: all .3s cubic-bezier(.55, 0, .1, 1);
-    transition: all .3s cubic-bezier(.55, 0, .1, 1)
-}
-
-.zoom-in-center-enter, .zoom-in-center-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleX(0);
-    transform: scaleX(0)
-}
-
-.zoom-in-top-enter-active, .zoom-in-top-leave-active {
-    opacity: 1;
-    -webkit-transform: scaleY(1);
-    transform: scaleY(1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: center top;
-    transform-origin: center top
-}
-
-.zoom-in-top-enter, .zoom-in-top-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleY(0);
-    transform: scaleY(0)
-}
-
-.zoom-in-bottom-enter-active, .zoom-in-bottom-leave-active {
-    opacity: 1;
-    -webkit-transform: scaleY(1);
-    transform: scaleY(1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: center bottom;
-    transform-origin: center bottom
-}
-
-.zoom-in-bottom-enter, .zoom-in-bottom-leave-active {
-    opacity: 0;
-    -webkit-transform: scaleY(0);
-    transform: scaleY(0)
-}
-
-.zoom-in-left-enter-active, .zoom-in-left-leave-active {
-    opacity: 1;
-    -webkit-transform: scale(1, 1);
-    transform: scale(1, 1);
-    -webkit-transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1);
-    transition: transform .3s cubic-bezier(.23, 1, .32, 1), opacity .3s cubic-bezier(.23, 1, .32, 1), -webkit-transform .3s cubic-bezier(.23, 1, .32, 1);
-    -webkit-transform-origin: top left;
-    transform-origin: top left
-}
-
-.zoom-in-left-enter, .zoom-in-left-leave-active {
-    opacity: 0;
-    -webkit-transform: scale(.45, .45);
-    transform: scale(.45, .45)
 }
 
 .list-enter-active, .list-leave-active {
@@ -273,6 +316,95 @@ html, body {
 
 #sider .ant-layout-sider-children > .ant-menu {
     flex: 1 1 auto;
+}
+
+/* ── 侧栏品牌头 ────────────────────────────────────────────────────
+ * 改动前侧栏顶部直接就是第一个菜单项，整个面板没有任何一处写着自己叫什么。
+ * 标识与登录页用同一个内联 SVG（一个字母 A），不引图标字体也不用 emoji。
+ *
+ * 高度 56px 与 antd 菜单项（40px）+ 上下留白对齐，不额外占视觉重量。
+ * 侧栏是 #001529 深底，这里的浅色都要按深底重新核算，不能照搬内页那套。 */
+.sider-brand {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 56px;
+    padding: 0 16px;
+    box-sizing: border-box;
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+
+.sider-brand-mark {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--aui-r-sm);
+    /* 深底上用主色的高亮档，#1266D6 本身在 #001529 上偏暗 */
+    color: #7FB0F0;
+    background: rgba(18, 102, 214, .22);
+    border: 1px solid rgba(127, 176, 240, .28);
+}
+
+/* rgba(255,255,255,.85) 在 #001529 上约 14:1 */
+.sider-brand-name {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -.005em;
+    color: rgba(255, 255, 255, .85);
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* ── 统一页面标题区 ────────────────────────────────────────────────
+ * 改动前四个内页打开后第一个元素直接是内容，全站没有任何一处页面标题。
+ * 侧栏选中态是唯一的「我在哪」线索，而侧栏在 breakpoint="md" 下
+ * collapsed-width="0" 会整个消失——手机上打开面板，屏幕上没有任何一个字
+ * 说明这是哪一页。
+ *
+ * 刻意压扁：标题 20px 而不是 h1 常见的 32px，整块连描述一起约 52px。
+ * 这是管理后台，垂直空间要留给表格。 */
+.page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.page-heading {
+    min-width: 0;
+}
+
+/* 三个属性都必须显式写：antd 的 base reset 里有
+ * h1,h2,...,h6 { margin-bottom:.5em; color:rgba(0,0,0,.85); font-weight:500 }，
+ * 不盖掉的话标题会比正文还灰、还细，底下还多出半个字高的空隙。
+ * 登录页的 .login-title 注释里记过同一个坑。 */
+.page-title {
+    margin: 0;
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+.page-description {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--aui-text-2);
+}
+
+.page-actions {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .sider-version {
@@ -408,31 +540,32 @@ html, body {
     margin-bottom: 20px;
 }
 
-/* 圆角跟随面板既有语言：本文件上方的 .ant-card 是 30px，整套界面都是大圆角，
- * 指标卡用小圆角会在一堆圆卡里显得突兀。这里取 20px 而不是照抄 30px——
- * 大表格卡有八百多像素高，30px 只占它一小截；指标卡才 110px 高，同样的
- * 30px 占到高度的四分之一以上，会圆到像药丸。 */
+/* 圆角与卡片同档。改动前这里是 20px、.ant-card 是 30px，理由是「大卡八百多
+ * 像素高，30px 只占一小截；指标卡才 110px 高，30px 会圆到像药丸」——那段推理
+ * 本身是对的，它证明的是 30px 这个默认值不成立，而不是指标卡该有自己的一档。
+ * 现在 .ant-card 已经收敛到 12px，两者用同一个 token，不再需要例外。 */
 .stat-card {
     display: flex;
     align-items: center;
     gap: 14px;
     padding: 16px 20px;
     background: #fff;
-    border: 1px solid #f0f0f0;
-    border-radius: 20px;
-    transition: border-color .2s, box-shadow .2s;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-lg);
+    transition: border-color var(--aui-dur) var(--aui-ease),
+                box-shadow var(--aui-dur) var(--aui-ease);
 }
 
 .stat-card:hover {
-    border-color: #d9d9d9;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, .06);
+    border-color: var(--aui-line-strong);
+    box-shadow: var(--aui-sh-2);
 }
 
 .stat-icon {
     flex: none;
     width: 44px;
     height: 44px;
-    border-radius: 13px;
+    border-radius: var(--aui-r-md);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -448,7 +581,7 @@ html, body {
 .stat-label {
     font-size: 12px;
     line-height: 18px;
-    color: rgba(0, 0, 0, .65);
+    color: var(--aui-text-2);
     white-space: nowrap;
 }
 
@@ -457,7 +590,7 @@ html, body {
     font-size: 24px;
     line-height: 32px;
     font-weight: 600;
-    color: #1f1f1f;
+    color: var(--aui-text);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
@@ -465,33 +598,657 @@ html, body {
 .stat-value .unit {
     font-size: 13px;
     font-weight: 400;
-    color: rgba(0, 0, 0, .65);
+    color: var(--aui-text-2);
     margin-left: 5px;
 }
 
-.stat-card.tone-blue .stat-icon   { color: #1890ff; background: #e6f7ff; }
+.stat-card.tone-blue .stat-icon   { color: var(--aui-primary); background: var(--aui-primary-soft); }
 .stat-card.tone-cyan .stat-icon   { color: #13c2c2; background: #e6fffb; }
 .stat-card.tone-purple .stat-icon { color: #722ed1; background: #f9f0ff; }
 .stat-card.tone-geek .stat-icon   { color: #2f54eb; background: #f0f5ff; }
-.stat-card.tone-ok .stat-icon     { color: #52c41a; background: #f6ffed; }
+.stat-card.tone-ok .stat-icon     { color: var(--aui-success); background: #F0FDF4; }
 
-/* #cf1322 在白底上是 5.57:1，过 AA。 */
+/* --aui-danger #B91C1C 在白底上是 6.47:1，比改动前的 #cf1322（5.57:1）更稳。 */
 .stat-card.tone-alert {
-    border-color: #ffccc7;
-    background: #fff2f0;
+    border-color: #FECACA;
+    background: #FEF2F2;
 }
 
-.stat-card.tone-alert .stat-icon  { color: #cf1322; background: #fff1f0; }
-.stat-card.tone-alert .stat-value { color: #cf1322; }
+.stat-card.tone-alert .stat-icon  { color: var(--aui-danger); background: #FEE2E2; }
+.stat-card.tone-alert .stat-value { color: var(--aui-danger); }
 
 /* tooltip 挂在普通元素上，不加 tabindex 键盘用户永远看不到「哪几条规则
  * 没生效」。有了 tabindex 就必须给回一个可见的焦点环。 */
 .stat-card[tabindex] { cursor: default; }
 
 .stat-card[tabindex]:focus-visible {
-    outline: 2px solid #1890ff;
+    outline: 2px solid var(--aui-primary);
     outline-offset: 2px;
-    border-radius: 20px;
+    border-radius: var(--aui-r-lg);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * 表格单元格与工具栏
+ *
+ * 改动前入站表有 15 列、scroll.x=1360，1600px 以下的屏幕一律横向滚动；
+ * 一行里能出现 8~10 个彩色 a-tag，真正需要被看见的（超流量、已过期、
+ * 高风险）全被淹掉。
+ *
+ * 这里的规则就是 custom.css 上方 .stat-row 注释里那条，只是此前只在指标卡
+ * 上执行过：**分类信息是装饰，状态才是信息**。所以协议、传输、端口、额度、
+ * 日期一律降成文本或无色 chip，彩色只留给「出事了」。
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 一个单元格里的两行：主行 + 次行。次行统一 12px/muted，不再各自写
+ * 内联 style——改动前那些 color: rgba(0,0,0,.45) 只有 3.36:1，不达 AA。 */
+.cell-main {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--aui-text);
+}
+
+.cell-sub {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--aui-text-3);
+}
+
+/* 每秒刷新的数值必须等宽，否则整行会左右跳动 */
+.cell-num {
+    font-variant-numeric: tabular-nums;
+}
+
+.cell-muted {
+    color: var(--aui-text-3);
+}
+
+/* 轻量 chip：用来承载「设了限制」这类分类信息。无底色、无彩色，
+ * 只靠一圈描边把它和正文分开。 */
+.chip {
+    display: inline-block;
+    padding: 0 6px;
+    margin: 1px 4px 1px 0;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-sm);
+    background: var(--aui-surface-soft);
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--aui-text-2);
+    white-space: nowrap;
+}
+
+/* ── 状态徽标 ────────────────────────────────────────────────────────
+ * 只有**状态**才配用它。每一档都带文字，绝不只靠颜色——色觉障碍用户
+ * 看到的必须和其他人一样多。 */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border-radius: var(--aui-r-pill);
+    font-size: 12px;
+    line-height: 20px;
+    white-space: nowrap;
+}
+
+.status-badge .anticon {
+    font-size: 11px;
+}
+
+.status-neutral { background: #F1F5F9; color: var(--aui-text-2); }
+
+/* 只染文字、不加底色的两档。用在单元格主行上——「剩 3 天」「已过期」
+ * 本身就是一句话，再套一个药丸底会让整列变成色块墙。
+ * 两者都必须配一个能独立读出含义的文字，绝不只靠颜色。 */
+.status-text-warn   { color: var(--aui-warning); }
+.status-text-danger { color: var(--aui-danger); font-weight: 500; }
+.status-ok      { background: #F0FDF4; color: var(--aui-success); }
+.status-warn    { background: #FFFBEB; color: var(--aui-warning); }
+.status-danger  { background: #FEF2F2; color: var(--aui-danger); }
+
+/* 可点开明细的徽标（风险那一列）。必须能被键盘拿到：它是这个入站
+ * 唯一的风险弹窗入口。 */
+button.status-badge {
+    cursor: pointer;
+    border: 0;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+button.status-badge:hover {
+    filter: brightness(.96);
+}
+
+/* ── 流量进度条 ──────────────────────────────────────────────────────
+ * 改动前额度是三个并排的彩色 a-tag（用量 / 额度 / 无限制），要读数字
+ * 才知道用了多少。一条 3px 的条一眼就能扫完整列。 */
+.usage-bar {
+    height: 3px;
+    margin-top: 4px;
+    border-radius: 2px;
+    background: var(--aui-line);
+    overflow: hidden;
+}
+
+.usage-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--aui-primary);
+    transition: width var(--aui-dur) var(--aui-ease);
+}
+
+.usage-bar-fill.is-warn   { background: var(--aui-warning); }
+.usage-bar-fill.is-danger { background: var(--aui-danger); }
+
+/* ── 列表工具栏 ──────────────────────────────────────────────────────
+ * 改动前入站页没有搜索也没有过滤——模板里那行 <a-input v-model="searchKey">
+ * 是注释掉的，而它对应的 searchInbounds() 引用了一个从来不在 data 里的
+ * this.searchedInbounds，即半成品死代码。 */
+.toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.toolbar-search {
+    display: inline-block;
+    width: 220px;
+    max-width: 100%;
+}
+
+.toolbar-spacer {
+    flex: 1 1 auto;
+}
+
+/* 结果计数。过滤之后必须说清「看到的是全部还是一部分」，
+ * 否则管理员会把过滤后的空表读成「入站被删光了」。 */
+.toolbar-count {
+    font-size: 12px;
+    color: var(--aui-text-3);
+    white-space: nowrap;
+}
+
+/* 窄屏下搜索框独占一行，四个过滤器再换行排 */
+@media (max-width: 768px) {
+    .toolbar-search {
+        width: 100%;
+    }
+
+    .toolbar-spacer {
+        display: none;
+    }
+}
+
+/* ── 展开行分区 ──────────────────────────────────────────────────────
+ * 展开区里原本四块内容（时间窗控件 / 来源明细 / 其余来源合计 / 用量图）
+ * 一路平铺，没有任何分隔，读起来是一长条。
+ *
+ * 刻意不用 a-tabs：图表所在的面板未激活时 canvas 不在 DOM 里，而
+ * loadTrafficChart 是在 $nextTick 里 getElementById 取它的，取不到就
+ * 整段静默跳过——图永远不画，且不报错。视觉分区能解决可读性，
+ * 不动 canvas 的挂载时机。 */
+.row-section + .row-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.row-section-title {
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+.row-section-title .anticon {
+    margin-right: 6px;
+    color: var(--aui-text-3);
+}
+
+/* ── 窄屏收尾 ────────────────────────────────────────────────────────
+ * 目标不是把复杂表格拆成纵向堆叠——那会让一个入站占掉一屏，扫读彻底没了。
+ * 表格该横滚就横滚；这里处理的是表格**之外**那些本来就该换行的部分。 */
+@media (max-width: 768px) {
+    /* 内容区左右留白：antd 只在 ≥769px 给 .ant-layout-content 加 margin，
+     * 窄屏下内容会直接贴到视口边缘。 */
+    .ant-layout-content {
+        padding: 16px 12px;
+        box-sizing: border-box;
+    }
+
+    /* 标题与主操作上下排，主操作撑满一行便于点击 */
+    .page-header {
+        gap: 12px;
+    }
+
+    .page-actions {
+        width: 100%;
+    }
+
+    .page-actions .ant-btn {
+        flex: 1 1 auto;
+    }
+
+    /* 指标卡单列。改动前 minmax(210px, 1fr) 在 390px 屏上仍是一列，
+     * 但 padding 与图标尺寸偏大，压缩一档。 */
+    .stat-card {
+        padding: 12px 14px;
+        gap: 12px;
+    }
+
+    .stat-icon {
+        width: 38px;
+        height: 38px;
+        font-size: 17px;
+    }
+
+    .stat-value {
+        font-size: 20px;
+        line-height: 28px;
+    }
+
+    /* 弹窗在窄屏上接近满宽：antd 1.7.2 的 a-modal 用固定 px 宽度
+     * （入站弹窗 900、共享风险 900、访问日志 1000），小屏上会溢出视口。 */
+    .ant-modal {
+        max-width: calc(100vw - 16px);
+        margin: 8px auto;
+    }
+
+    /* 风险分数区在窄屏换行后，数字与文字之间的 20px 间距过大 */
+    .risk-hero {
+        gap: 12px;
+        padding: 14px 16px;
+    }
+
+    .risk-score-num {
+        font-size: 34px;
+    }
+
+    /* 键值明细的标签列在窄屏收窄，给值留出宽度 */
+    .kv-row dt {
+        flex: 0 0 78px;
+    }
+}
+
+/* ── 弹窗内的表单分段 ────────────────────────────────────────────────
+ * 入站弹窗改动前是四张嵌套的 a-card（基本信息 / 限制与配额 / 协议参数 /
+ * 传输与安全）。卡片套卡片是本次重构明确要去掉的一种噪声：弹窗本身已经
+ * 是一个浮起的面，里面再画四个带边框和圆角的面，层级读起来是平的，
+ * 却多出四圈描边和四份内边距。改成扁平分段——一条细线加一个小标题。 */
+.form-section + .form-section {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.form-section-title {
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+/* 可点击的 chip（访问日志里按来源 IP 过滤那一排）。选中态用主色填充，
+ * 未选中是普通 chip——改动前靠 a-tag 的 color 在 'blue' 与 '' 之间切换。 */
+button.chip {
+    cursor: pointer;
+    font-family: inherit;
+}
+
+button.chip:hover {
+    border-color: var(--aui-line-strong);
+}
+
+button.chip.is-active {
+    border-color: var(--aui-primary);
+    background: var(--aui-primary-soft);
+    color: var(--aui-primary-hover);
+}
+
+/* ── 键值明细 ───────────────────────────────────────────────────────
+ * 入站详情弹窗改动前是一面绿标签墙：协议、端口、uuid、密码、path、
+ * 加密方式……每一个值都套一个绿色 a-tag。绿色在全站表示「成功 / 健康」，
+ * 而这些只是**值**，一个 uuid 没有健康与否可言。全绿的另一个后果是
+ * 里面真正需要注意的项（比如 TLS 未启用）一点都不显眼。 */
+.kv {
+    margin: 0;
+}
+
+.kv-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--aui-line);
+}
+
+.kv-row:last-child {
+    border-bottom: 0;
+}
+
+.kv-row dt {
+    flex: 0 0 96px;
+    font-size: 13px;
+    color: var(--aui-text-2);
+}
+
+.kv-row dd {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 13px;
+    color: var(--aui-text);
+    /* uuid、密码、路径都可能很长且不含空格，不给断点会撑破弹窗 */
+    word-break: break-all;
+}
+
+/* 机器可读的值（uuid / 密码 / 路径 / 端口）用等宽，肉眼逐字符核对时
+ * 才分得清 0 和 O、1 和 l。 */
+.kv-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 12.5px;
+}
+
+/* ── 共享风险弹窗：让分数成为焦点 ────────────────────────────────────
+ * 改动前 900px 宽的弹窗里 alert → descriptions → card → card → descriptions
+ * → card → table 一路平铺，全部同一层级同样间距；而最重要的那个数字（风险
+ * 分数）被塞进一个 a-tag 里，和旁边的「置信度」等重。 */
+.risk-hero {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-lg);
+    background: var(--aui-surface-soft);
+}
+
+.risk-hero.is-warn   { border-color: #FDE68A; background: #FFFBEB; }
+.risk-hero.is-danger { border-color: #FECACA; background: #FEF2F2; }
+
+.risk-score {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+.risk-score-num {
+    font-size: 40px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.risk-hero.is-warn   .risk-score-num { color: var(--aui-warning); }
+.risk-hero.is-danger .risk-score-num { color: var(--aui-danger); }
+
+.risk-score-max {
+    font-size: 15px;
+    color: var(--aui-text-3);
+}
+
+.risk-hero-meta {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+.risk-hero-level {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.risk-hero-sub {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+/* 证据行：分值靠右对齐成一列，扫读时能直接比大小，
+ * 不必在一堆左对齐的红标签里找数字。 */
+.evidence-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0;
+}
+
+.evidence-item + .evidence-item {
+    border-top: 1px solid var(--aui-line);
+}
+
+.evidence-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.evidence-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.evidence-detail {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--aui-text-2);
+}
+
+.evidence-points {
+    flex: 0 0 auto;
+    min-width: 52px;
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-danger);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 0 分的是上下文证据，不计分。它们会对几乎每个双设备用户命中，
+ * 混在计分项里会让管理员以为自己在看证据。 */
+.evidence-points.is-context {
+    font-weight: 400;
+    color: var(--aui-text-3);
+}
+
+/* ── 分流规则：把一行读成一条链路 ────────────────────────────────────
+ * 一条规则表达的是「哪些用户 → 访问哪批域名 → 去哪」。改动前三列各自是
+ * 一堆彩色 a-tag，读的人要自己把它们串起来。加两个箭头把顺序说出来。
+ *
+ * 箭头用 ::after 画在单元格右缘，不占一列——多一列会让本来就窄的三列
+ * 再各缩一截。aria-hidden 由 CSS 生成内容天然满足（生成内容不进无障碍树）。 */
+.rule-flow-cell {
+    position: relative;
+}
+
+.rule-flow-cell::after {
+    content: '→';
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--aui-line-strong);
+    font-size: 13px;
+    line-height: 1;
+    pointer-events: none;
+}
+
+/* 窄屏下表格已经在横滚，箭头压在滚动边界上反而添乱 */
+@media (max-width: 768px) {
+    .rule-flow-cell::after {
+        display: none;
+    }
+}
+
+/* ── 系统状态页：资源条与指标格 ──────────────────────────────────────
+ * 改动前 CPU / 内存 / swap / 硬盘是四个 a-progress type="dashboard" 的大圆环，
+ * 占掉整个首屏。它们回答的是「这台机器累不累」，而管理员打开面板最先要知道
+ * 的是「Xray 还在跑吗、有没有人异常」——CPU 不该是第一视觉焦点。
+ * 现在降级成一行细条，圆环省下来的位置让给业务指标。 */
+.res-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 16px 24px;
+}
+
+.res-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.res-name {
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.res-value {
+    font-size: 13px;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.res-bar {
+    height: 6px;
+    margin-top: 6px;
+    border-radius: 3px;
+    background: var(--aui-line);
+    overflow: hidden;
+}
+
+.res-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--aui-primary);
+    transition: width var(--aui-dur) var(--aui-ease);
+}
+
+/* 三档都按「填充色 vs 槽色 #E2E8F0」过 SC 1.4.11 的 3:1，
+ * 且百分比数字就在正上方——颜色不是唯一的信息来源。 */
+.res-bar-fill.is-warn   { background: var(--aui-warning); }
+.res-bar-fill.is-danger { background: var(--aui-danger); }
+
+/* 没有百分比的那些量（负载、连接数、网速、累计流量） */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 16px 24px;
+}
+
+.metric-name {
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.metric-value {
+    margin-top: 2px;
+    font-size: 15px;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* 卡片分段标题，与展开行的 .row-section-title 同一档视觉重量 */
+.card-section + .card-section {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--aui-line);
+}
+
+.card-section-title {
+    margin-bottom: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+/* ── 设置页：左侧二级导航 ────────────────────────────────────────────
+ * 改动前是 9 个横向 tab，已经排满一行；再加 2FA / 备份 / 告警 / API 这类
+ * 分类一定撑不住。antd 1.7.2 的 a-tabs 自带 tab-position="left"，
+ * 9 个 a-tab-pane 一个都不用动，DOM 结构与 Vue 作用域零变化。 */
+#setting-tabs > .ant-tabs-bar {
+    min-width: 132px;
+    border-right: 1px solid var(--aui-line);
+}
+
+#setting-tabs .ant-tabs-tab {
+    margin: 0 0 2px 0 !important;
+    padding: 8px 16px !important;
+    border-radius: var(--aui-r-sm) 0 0 var(--aui-r-sm);
+    text-align: left;
+}
+
+#setting-tabs .ant-tabs-content {
+    padding-left: 20px;
+}
+
+/* 窄屏退回横向：132px 的侧导航在手机上会把右侧内容挤到没法填表。
+ * antd 的左置 tab 靠 float 布局，回退时要把这些一并解除。 */
+@media (max-width: 768px) {
+    #setting-tabs > .ant-tabs-bar {
+        min-width: 0;
+        width: 100%;
+        float: none;
+        border-right: 0;
+        border-bottom: 1px solid var(--aui-line);
+    }
+
+    #setting-tabs .ant-tabs-tab {
+        border-radius: var(--aui-r-sm) var(--aui-r-sm) 0 0;
+    }
+
+    #setting-tabs .ant-tabs-content {
+        padding-left: 0;
+    }
+}
+
+/* ── 未保存提示条 ────────────────────────────────────────────────────
+ * 改动前「保存配置」在页面最顶部，而 xray 配置模板那个 textarea 能撑到
+ * 几屏高——改完往下滚的人要滚回顶部才能保存。
+ *
+ * 没有改动时整条不渲染（v-if），所以「不突出」不是靠淡化，是压根不存在。
+ *
+ * 贴**顶**而不是贴底。sticky 的粘滞区间是元素在其包含块内剩余的空间——
+ * 放在容器最后一个位置再写 bottom: 0，区间恰好是零，滚动时它不会浮起来，
+ * 看起来就跟没加一样。放在表单之前配 top: 0，下面有整屏内容可滚，才真的
+ * 会跟着视口走。 */
+.save-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border: 1px solid var(--aui-warning);
+    border-radius: var(--aui-r-lg);
+    /* 不透明底：它浮在内容之上，半透明会让底下的表单文字透上来 */
+    background: #FFFBEB;
+    box-shadow: var(--aui-sh-3);
+}
+
+.save-bar-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--aui-warning);
+}
+
+@media (max-width: 768px) {
+    .save-bar-text {
+        flex: 1 1 100%;
+    }
 }
 
 /* 归属地两个数据源判定不一致时的标记。
@@ -501,12 +1258,15 @@ html, body {
  * 3:1 门槛；同时补一个图标，不让「有分歧」只靠颜色表达。
  *
  * 用橙色而不是红色：分歧是「哪个源可信不确定」，不是错误。实测过一次
- * ip2region 判错、纯真判对，红色会让管理员以为是故障。 */
+ * ip2region 判错、纯真判对，红色会让管理员以为是故障。
+ *
+ * 现在取 --aui-warning（5.02:1），比改动前的 #d46b08（3.56:1）更稳，
+ * 同时让「存疑」与全站其他警告态用同一个橙。 */
 .ip-divergent {
-    border-bottom: 1px dashed #d46b08;
+    border-bottom: 1px dashed var(--aui-warning);
 }
 
 .ip-divergent .anticon {
     margin-left: 4px;
-    color: #d46b08;
+    color: var(--aui-warning);
 }
