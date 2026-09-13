@@ -102,21 +102,21 @@
                 <transition name="list" appear>
                     <div class="stat-row">
                         <div class="stat-card tone-blue">
-                            <span class="stat-icon"><a-icon type="folder"/></span>
+                            <span class="stat-icon"><a-icon type="folder"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">域名组</span>
                                 <div class="stat-value">[[ groups.length ]]</div>
                             </div>
                         </div>
                         <div class="stat-card tone-cyan">
-                            <span class="stat-icon"><a-icon type="cloud-server"/></span>
+                            <span class="stat-icon"><a-icon type="cloud-server"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">出站节点</span>
                                 <div class="stat-value">[[ enabledNodeCount ]]<span class="unit">/ [[ nodes.length ]] 已启用</span></div>
                             </div>
                         </div>
                         <div class="stat-card tone-purple">
-                            <span class="stat-icon"><a-icon type="branches"/></span>
+                            <span class="stat-icon"><a-icon type="branches"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">分流规则</span>
                                 <div class="stat-value">[[ rules.length ]]</div>
@@ -130,7 +130,7 @@
                                  :class="brokenRules.length ? 'tone-alert' : 'tone-ok'"
                                  :aria-label="brokenRules.length ? brokenRules.length + ' 条规则未生效' : null">
                                 <span class="stat-icon">
-                                    <a-icon :type="brokenRules.length ? 'exclamation-circle' : 'check-circle'" theme="filled"/>
+                                    <a-icon :type="brokenRules.length ? 'exclamation-circle' : 'check-circle'" theme="filled"></a-icon>
                                 </span>
                                 <div class="stat-text">
                                     <span class="stat-label">未生效规则</span>
@@ -141,7 +141,7 @@
                         <div class="stat-card" :class="subscriptionErrorCount ? 'tone-alert' : 'tone-ok'"
                              :aria-label="subscriptionErrorCount ? subscriptionErrorCount + ' 个订阅异常' : null">
                             <span class="stat-icon">
-                                <a-icon :type="subscriptionErrorCount ? 'exclamation-circle' : 'check-circle'" theme="filled"/>
+                                <a-icon :type="subscriptionErrorCount ? 'exclamation-circle' : 'check-circle'" theme="filled"></a-icon>
                             </span>
                             <div class="stat-text">
                                 <span class="stat-label">订阅异常</span>
@@ -201,16 +201,16 @@
                                     <template slot="subscribe" slot-scope="text, group">
                                         <span v-if="group.subscribeState === 'none'" class="cell-muted">—</span>
                                         <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
-                                            <span class="status-badge status-danger"><a-icon type="close-circle"/>拉取失败</span>
+                                            <span class="status-badge status-danger"><a-icon type="close-circle"></a-icon>拉取失败</span>
                                         </a-tooltip>
                                         <span v-else-if="group.subscribeState === 'pending'"
-                                              class="status-badge status-warn"><a-icon type="clock-circle"/>等待首次拉取</span>
+                                              class="status-badge status-warn"><a-icon type="clock-circle"></a-icon>等待首次拉取</span>
                                         <!-- 订阅现在也收 IP-CIDR/IP-CIDR6/GEOIP，两类都要报数：
                                              只报域名的话，一个纯 IP 订阅会显示「共 0 条」而实际拉到了几千条。
                                              lastSkipped 也不再是「非域名规则」——IP 段已经收下了，
                                              跳过的是 IP-ASN、SRC-IP-CIDR、进程/UA 这些没法忠实翻译的。 -->
                                         <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
-                                            <span class="status-badge status-ok"><a-icon type="check-circle"/>[[ relativeTime(group.lastUpdatedAt) ]]</span>
+                                            <span class="status-badge status-ok"><a-icon type="check-circle"></a-icon>[[ relativeTime(group.lastUpdatedAt) ]]</span>
                                             <!-- 多地址时报个数：合并后只剩一个时间戳，不说明来源有几个的话，
                                                  管理员无从知道这条绿标签背后其实有好几个地址在拉。 -->
                                             <span v-if="group.subscribeUrls.length > 1" class="cell-muted">
@@ -276,14 +276,14 @@
                                         <a-tooltip v-else-if="node.probe.status === 'ok'"
                                                    :title="'测试于 ' + probeTime(node.probe)">
                                             <span class="status-badge status-ok">
-                                                <a-icon type="check-circle"/>[[ node.probe.latencyMs ]] ms
+                                                <a-icon type="check-circle"></a-icon>[[ node.probe.latencyMs ]] ms
                                             </span>
                                         </a-tooltip>
                                         <a-tooltip v-else
                                                    :title="node.probe.error + '（' + probeTime(node.probe) + '）'">
                                             <span class="status-badge"
                                                   :class="node.probe.status === 'fail' ? 'status-danger' : 'status-warn'">
-                                                <a-icon :type="node.probe.status === 'fail' ? 'close-circle' : 'question-circle'"/>
+                                                <a-icon :type="node.probe.status === 'fail' ? 'close-circle' : 'question-circle'"></a-icon>
                                                 [[ node.probe.status === 'fail' ? '不通' : '无法测试' ]]
                                             </span>
                                         </a-tooltip>
@@ -631,21 +631,21 @@
             <a-col :span="8">
                 域名组：<span class="chip">新增 [[ importReport.domainGroups.created ]]</span>
                 <span class="chip">跳过 [[ importReport.domainGroups.skipped ]]</span>
-                <span v-if="importReport.domainGroups.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
+                <span v-if="importReport.domainGroups.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
                     失败 [[ importReport.domainGroups.failed ]]
                 </span>
             </a-col>
             <a-col :span="8">
                 出站节点：<span class="chip">新增 [[ importReport.outbounds.created ]]</span>
                 <span class="chip">跳过 [[ importReport.outbounds.skipped ]]</span>
-                <span v-if="importReport.outbounds.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
+                <span v-if="importReport.outbounds.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
                     失败 [[ importReport.outbounds.failed ]]
                 </span>
             </a-col>
             <a-col :span="8">
                 分流规则：<span class="chip">新增 [[ importReport.rules.created ]]</span>
                 <span class="chip">跳过 [[ importReport.rules.skipped ]]</span>
-                <span v-if="importReport.rules.failed" class="status-badge status-danger"><a-icon type="close-circle"/>
+                <span v-if="importReport.rules.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
                     失败 [[ importReport.rules.failed ]]
                 </span>
             </a-col>

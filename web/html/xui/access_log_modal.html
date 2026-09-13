@@ -81,7 +81,7 @@
                          存疑的答案显示得像唯一答案。 -->
                     <a-tooltip v-if="row.locationAlt || row.ispAlt">
                         <template slot="title">{{ template "ipDivergenceTip" "row" }}</template>
-                        <span class="ip-divergent">[[ row.location ]]<a-icon type="question-circle"/></span>
+                        <span class="ip-divergent">[[ row.location ]]<a-icon type="question-circle"></a-icon></span>
                     </a-tooltip>
                     <span v-else-if="row.location">[[ row.location ]]</span>
                     <span v-else class="cell-muted">-</span>
@@ -98,7 +98,7 @@
                              是流量被掐断，后者是不常见的拓扑；「直连」与「走了
                              某个出站节点」都只是分类，蓝绿之分不携带信息。 -->
                         <span class="status-badge" :class="routeTone(row.route)">
-                            <a-icon v-if="routeIcon(row.route)" :type="routeIcon(row.route)"/>
+                            <a-icon v-if="routeIcon(row.route)" :type="routeIcon(row.route)"></a-icon>
                             [[ routeLabel(row.route) ]]
                         </span>
                     </a-tooltip>

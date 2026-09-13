@@ -11,7 +11,7 @@
     </template>
     <template slot="inbound" slot-scope="text, rule">
         <span v-if="rule.broken" class="status-badge status-danger">
-            <a-icon type="close-circle"/>数据损坏
+            <a-icon type="close-circle"></a-icon>数据损坏
         </span>
         <span v-else-if="!rule.inboundIds.length" class="chip">所有用户</span>
         <template v-else>
@@ -19,7 +19,7 @@
                  生效），所以它是红徽标；正常的用户名只是分类，用无色 chip。 -->
             <template v-for="id in rule.inboundIds.slice(0, 3)">
                 <span v-if="inboundMissing(id)" :key="id" class="status-badge status-danger">
-                    <a-icon type="close-circle"/>[[ inboundName(id) ]]
+                    <a-icon type="close-circle"></a-icon>[[ inboundName(id) ]]
                 </span>
                 <span v-else :key="id" class="chip">[[ inboundName(id) ]]</span>
             </template>
@@ -41,12 +41,12 @@
     </template>
     <template slot="group" slot-scope="text, rule">
         <span v-if="rule.groupsBroken" class="status-badge status-danger">
-            <a-icon type="close-circle"/>域名组数据损坏
+            <a-icon type="close-circle"></a-icon>域名组数据损坏
         </span>
         <template v-else>
             <template v-for="gid in rule.domainGroupIds">
                 <span v-if="groupMissing(gid)" :key="gid" class="status-badge status-danger">
-                    <a-icon type="close-circle"/>[[ groupName(gid) ]]
+                    <a-icon type="close-circle"></a-icon>[[ groupName(gid) ]]
                 </span>
                 <span v-else :key="gid" class="chip">[[ groupName(gid) ]]</span>
             </template>
@@ -58,11 +58,11 @@
              「从本机出网」，不是健康信号，改动前那个绿色与全站「绿＝成功」
              的约定对不上。 -->
         <span v-if="rule.action === 'block'" class="status-badge status-danger">
-            <a-icon type="stop"/>阻断
+            <a-icon type="stop"></a-icon>阻断
         </span>
         <span v-else-if="rule.action === 'direct'" class="chip">直连</span>
         <span v-else-if="nodeMissing(rule.outboundId)" class="status-badge status-danger">
-            <a-icon type="close-circle"/>[[ nodeName(rule.outboundId) ]]
+            <a-icon type="close-circle"></a-icon>[[ nodeName(rule.outboundId) ]]
         </span>
         <span v-else class="chip">[[ nodeName(rule.outboundId) ]]</span>
     </template>

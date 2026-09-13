@@ -152,6 +152,48 @@ func TestVueDirectivesLiveInsideAVueRoot(t *testing.T) {
 	}
 }
 
+// selfClosingComponentPattern 抓 <a-xxx ... /> 这种自闭合写法。
+// 属性里可能含 > 与引号（如 :type="a > b ? 'x' : 'y'"），所以逐段跳过带引号的部分。
+var selfClosingComponentPattern = regexp.MustCompile(`<(a-[a-z0-9-]+)((?:[^<>"']|"[^"]*"|'[^']*')*?)\s*/>`)
+
+// TestNoSelfClosingAntdComponents 守住「不许自闭合 antd 组件」。
+//
+// 这几个页面是 **in-DOM 模板**：服务端吐出 HTML，浏览器先按 HTML 规则解析成
+// DOM，Vue 再拿 el 指向的那棵子树去编译。而 HTML **不支持**非 void 元素的
+// 自闭合写法——<a-icon type="stop"/> 会被解析成一个**开标签**，紧跟其后的
+// 内容于是全部变成它的子节点。
+//
+// 后果特别隐蔽：a-icon 这类组件不渲染默认插槽，被吞掉的文字就此人间蒸发，
+// 而图标、背景、tooltip、点击统统正常。v1.29.0 的风险列就是这么坏的——
+//
+//	<a-icon v-if="..." :type="..."/>
+//	[[ riskLabelOf(dbInbound.id) ]]
+//
+// 页面上是一排只有底色没有字的小药丸，hover 还能弹出正确的 tooltip，
+// 没有任何一层报错。
+//
+// 注意这条规则**只对 in-DOM 模板成立**：Vue 自己的 parseHTML 认自闭合，
+// 所以写在 JS 字符串模板里的组件自闭合是合法的。但本仓库两种模板混着用
+// （component/inbound_info.html 是字符串模板，其余是 in-DOM），而它们最终
+// 都会被这里的 renderPage 渲进同一份 HTML —— 与其让每个人先判断自己改的
+// 是哪一种，不如一律写显式闭合：那在两种解析器下都成立。
+func TestNoSelfClosingAntdComponents(t *testing.T) {
+	tmpl := parseAllTemplates(t)
+	for _, page := range topLevelPages {
+		page := page
+		t.Run(page, func(t *testing.T) {
+			rendered := renderPage(t, tmpl, page)
+			for _, m := range selfClosingComponentPattern.FindAllStringSubmatch(rendered, -1) {
+				t.Errorf("%s 里有自闭合的 <%s%s/>。\n"+
+					"HTML 不支持非 void 元素自闭合，浏览器会把它当成开标签，"+
+					"紧随其后的内容会变成它的子节点——而 antd 组件多半不渲染"+
+					"默认插槽，那段内容就此消失且不报错。\n"+
+					"改成 <%s%s></%s>。", page, m[1], m[2], m[1], m[2], m[1])
+			}
+		})
+	}
+}
+
 // TestRoutingRulesRenderAsTwoSections 守住「封禁规则与分流规则必须分两段渲染」。
 //
 // 生成期 block 规则整体排在所有分流规则之前（routing_inject.go 的 buildRules

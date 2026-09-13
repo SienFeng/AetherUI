@@ -121,7 +121,7 @@
             <template v-for="p in sharingModal.suggestion.suggested">
                 <span v-if="sharingModal.isCoexisting(p)" :key="p"
                       class="status-badge status-danger">
-                    <a-icon type="exclamation-circle"/>[[ p ]]
+                    <a-icon type="exclamation-circle"></a-icon>[[ p ]]
                 </span>
                 <span v-else :key="p" class="chip">[[ p ]]</span>
             </template>

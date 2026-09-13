@@ -37,7 +37,7 @@
                     <div class="stat-row">
                         <div class="stat-card" :class="xrayTone">
                             <span class="stat-icon">
-                                <a-icon :type="xrayIcon" theme="filled"/>
+                                <a-icon :type="xrayIcon" theme="filled"></a-icon>
                             </span>
                             <div class="stat-text">
                                 <span class="stat-label">Xray</span>
@@ -54,7 +54,7 @@
                             </div>
                         </div>
                         <div class="stat-card tone-geek">
-                            <span class="stat-icon"><a-icon type="team"/></span>
+                            <span class="stat-icon"><a-icon type="team"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">入站</span>
                                 <div class="stat-value">
@@ -63,7 +63,7 @@
                             </div>
                         </div>
                         <div class="stat-card tone-cyan">
-                            <span class="stat-icon"><a-icon type="wifi"/></span>
+                            <span class="stat-icon"><a-icon type="wifi"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">在线设备</span>
                                 <!-- 读不到连接表时显示「—」而不是 0：把「看不到」渲染成
@@ -78,7 +78,7 @@
                                  :aria-label="attentionCount ? attentionSummary : '没有需要关注的入站'">
                                 <span class="stat-icon">
                                     <a-icon :type="attentionCount ? 'exclamation-circle' : 'check-circle'"
-                                            theme="filled"/>
+                                            theme="filled"></a-icon>
                                 </span>
                                 <div class="stat-text">
                                     <span class="stat-label">需要关注</span>

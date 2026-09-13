@@ -121,12 +121,12 @@
                                                      :title="src.name" :desc="ipdbSourceDesc(src)">
                                     <span v-if="!src.enabled" class="chip">未启用</span>
                                     <span v-else-if="src.loaded" class="status-badge status-ok">
-                                        <a-icon type="check-circle"/>已加载
+                                        <a-icon type="check-circle"></a-icon>已加载
                                     </span>
                                     <!-- 「未下载」用橙而不是红：源地址填了但还没拉过，
                                          是新装机器的正常状态，不是故障。 -->
                                     <span v-else class="status-badge status-warn">
-                                        <a-icon type="exclamation-circle"/>未下载
+                                        <a-icon type="exclamation-circle"></a-icon>未下载
                                     </span>
                                     <a-button type="primary" size="small" style="margin-left: 8px"
                                               :disabled="!src.enabled"
@@ -182,10 +182,10 @@
                                          用中性；「已自动撤销」才是真出了事，保留红。 -->
                                     <span v-if="!shaping.supported" class="chip">不支持</span>
                                     <span v-else-if="shaping.rolledBack" class="status-badge status-danger">
-                                        <a-icon type="close-circle"/>已自动撤销
+                                        <a-icon type="close-circle"></a-icon>已自动撤销
                                     </span>
                                     <span v-else-if="shaping.active" class="status-badge status-ok">
-                                        <a-icon type="check-circle"/>已生效
+                                        <a-icon type="check-circle"></a-icon>已生效
                                     </span>
                                     <span v-else class="chip">未启用</span>
                                 </setting-action-item>

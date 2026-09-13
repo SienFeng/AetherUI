@@ -47,7 +47,7 @@
          以为自己配错了。 -->
     <dd>
         <span v-if="inbound.tls" class="status-badge status-ok">
-            <a-icon type="lock"/>已启用
+            <a-icon type="lock"></a-icon>已启用
         </span>
         <span v-else class="chip">未启用</span>
     </dd>
@@ -57,7 +57,7 @@
     <dd v-if="inbound.serverName" class="kv-mono">[[ inbound.serverName ]]</dd>
     <!-- 开了 TLS 却没有域名确实值得提醒：证书与 SNI 对不上时客户端会连不上 -->
     <dd v-else>
-        <span class="status-badge status-warn"><a-icon type="exclamation-circle"/>未设置</span>
+        <span class="status-badge status-warn"><a-icon type="exclamation-circle"></a-icon>未设置</span>
     </dd>
 </div>
 {{end}}
