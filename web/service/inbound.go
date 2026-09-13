@@ -149,10 +149,15 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 }
 
 func (s *InboundService) DelInbound(id int) error {
-	// 分流规则存的是入站 id 外键，而 SQLite 会复用被删除的自增 id：
-	// 不拦住这里，孤儿规则会在下一个入站建出来时静默绑到新用户身上。
+	// 分流规则存的是入站 id 外键，而 SQLite 会复用被删除的自增 id：删完不把
+	// 引用清干净，孤儿规则会在下一个入站建出来时静默绑到新用户身上。清理由
+	// 下面那个事务里的 DetachInbound 完成。
+	//
+	// 这里先算一次只为快速失败：规则数据损坏时无从判断引用关系，必须赶在下面
+	// 那一串清理动手之前退出，否则会留下「访问日志、用量历史、封禁都已经删了，
+	// 入站却还在」这种谁都没要求过的状态。真正生效的判定是事务里的那一次。
 	ruleService := RoutingRuleService{}
-	if err := ruleService.CheckInboundRefs(id); err != nil {
+	if _, err := ruleService.PlanInboundDetach(id); err != nil {
 		return err
 	}
 	// 访问日志按入站 id 存，同样会被 id 复用坑到：不清掉的话，
@@ -203,7 +208,14 @@ func (s *InboundService) DelInbound(id int) error {
 		return err
 	}
 	db := database.GetDB()
-	return db.Delete(model.Inbound{}, id).Error
+	// 清理规则引用与删除入站必须原子：只成一半的两种残留——规则没了入站还在、
+	// 入站没了规则还指着它——都不会有任何一层报错。
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := ruleService.DetachInbound(tx, id); err != nil {
+			return err
+		}
+		return tx.Delete(model.Inbound{}, id).Error
+	})
 }
 
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {

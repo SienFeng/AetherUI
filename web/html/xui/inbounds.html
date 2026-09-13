@@ -976,14 +976,47 @@
                     },
                 });
             },
-            delInbound(dbInbound) {
+            async delInbound(dbInbound) {
+                let plan = null;
+                try {
+                    // 走裸 axios 而不是 HttpUtil：预检只决定确认框的措辞，
+                    // 失败时退回原来那句通用提示即可，不该额外弹一条错误，
+                    // 更不该因为多了一次请求就把删除入口整个卡住。
+                    const resp = await axios.post('/aui/inbound/delPreview/' + dbInbound.id);
+                    if (resp.data.success) {
+                        plan = resp.data.obj;
+                    }
+                } catch (e) {
+                    plan = null;
+                }
                 this.$confirm({
                     title: '删除入站',
-                    content: '确定要删除入站吗?',
+                    content: this.delInboundContent(plan),
                     okText: '删除',
                     cancelText: '取消',
                     onOk: () => this.submit('/aui/inbound/del/' + dbInbound.id),
                 });
+            },
+            // 删除确认框的正文。删除入站会顺带清理指向它的分流规则，静默做掉
+            // 事后极难查，所以这里把两类去向分开点名。拿不到预检结果时逐字
+            // 保持原来那句，不编造一个可能是错的说明。
+            delInboundContent(plan) {
+                const removed = (plan && plan.removed) || [];
+                const detached = (plan && plan.detached) || [];
+                if (removed.length === 0 && detached.length === 0) {
+                    return '确定要删除入站吗?';
+                }
+                const names = rules => rules.map(r => '「' + r.label + '」').join('、');
+                const lines = ['确定要删除入站吗?'];
+                if (removed.length > 0) {
+                    lines.push('将同时删除 ' + removed.length + ' 条分流规则：' + names(removed)
+                        + '。它们只覆盖这一个用户，删掉后不再有作用对象。');
+                }
+                if (detached.length > 0) {
+                    lines.push('将从 ' + detached.length + ' 条分流规则中移除该用户：' + names(detached)
+                        + '。规则本身保留，其余用户不受影响。');
+                }
+                return (h) => h('div', lines.map(line => h('p', { style: { marginBottom: '8px' } }, line)));
             },
             showQrcode(dbInbound) {
                 const link = dbInbound.genLink();
