@@ -71,13 +71,17 @@ type OnlineIP struct {
 	ISPAlt string `json:"ispAlt"`
 	// Sources 是各数据源各自的结论，界面用它说明「是谁说的」——只说
 	// 「另一个源认为是 X」，管理员没法判断该信哪一个。
-	Sources   []ipSourceLocation `json:"sources"`
-	Conns     int                `json:"conns"`
-	FirstSeen int64              `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
-	UpSpeed   int64              `json:"upSpeed"`   // B/s
-	DownSpeed int64              `json:"downSpeed"`
-	Up        int64              `json:"up"` // 本次在线期间的累计字节
-	Down      int64              `json:"down"`
+	Sources []ipSourceLocation `json:"sources"`
+	// Evidence 回答「这个判定有多少源同意」。Sources 列出了每个源怎么说，
+	// 但源多起来之后管理员没法一眼数清支持与反对各几个，尤其是「主判定只有
+	// 一个源支持、另外三个源一致认为是别的省」这种最该被看见的情形。
+	Evidence  provinceEvidence `json:"evidence"`
+	Conns     int              `json:"conns"`
+	FirstSeen int64            `json:"firstSeen"` // 毫秒；面板首次观测到该 IP 的时间
+	UpSpeed   int64            `json:"upSpeed"`   // B/s
+	DownSpeed int64            `json:"downSpeed"`
+	Up        int64            `json:"up"` // 本次在线期间的累计字节
+	Down      int64            `json:"down"`
 
 	// Idle 为 true 表示该 IP 的连接还在，但已经连续 idleAfter 没有任何字节
 	// 往来。闲置来源不占用并发额度：TCP 连接不会因为没有流量就消失，客户端
@@ -312,6 +316,7 @@ func (t *onlineTracker) snapshotAt(port int, locate func(net.IP) ipLocation, idl
 			ISP:         loc.ISP,
 			ISPAlt:      loc.ISPAlt,
 			Sources:     loc.Sources,
+			Evidence:    loc.Evidence,
 			Conns:       e.conns,
 			FirstSeen:   e.firstSeen.UnixMilli(),
 			UpSpeed:     e.upSpeed,
@@ -417,6 +422,9 @@ type ipLocation struct {
 	// 并集也正确放行。管理员只能自己去查第三方才搞清楚，而面板本来就掌握着
 	// 「两个源分别怎么说」这个信息。
 	Sources []ipSourceLocation
+
+	// Evidence 是省级判定的多源证据，只用于展示，不参与仲裁。
+	Evidence provinceEvidence
 }
 
 // ipSourceLocation 是单个数据源对一个 IP 的结论。
@@ -424,6 +432,54 @@ type ipSourceLocation struct {
 	Source   string `json:"source"`
 	Location string `json:"location"`
 	ISP      string `json:"isp"`
+}
+
+// provinceEvidence 是省级判定的多源证据，**只用于展示，不参与仲裁**。
+//
+// 主判定仍由 ipdbSourceList 的顺序决定（顺序的依据是各源的兜底率，见该处注释），
+// 这里回答的是另一个问题：这个判定有多少源同意。两者分开是刻意的——实测四个
+// 源里有两个会把大批判不准的段兜底到广东省，朴素多数票会让那批兜底值顶掉前面
+// 源的正确判定，而界面上完全看不出来。
+//
+// **三个计数必须分开，绝不能把 Silent 并进 Support。** 「两个源支持江苏，两个
+// 源没有数据」与「四个源都支持江苏」在界面上必须是两句话：前者的可信度明显更
+// 低，而合并之后一个只有单源覆盖的判定会显示成「4/4 一致」，把最不该被信任的
+// 那类判定包装成最可信的。
+type provinceEvidence struct {
+	// Province 是得票最多的省份。与主判定不一定相同——不同的时候恰恰最该看。
+	Province string `json:"province"`
+	// Support 是给出这个省份的源数，Conflict 是给出**别的**省份的源数，
+	// Silent 是没有省级结论的源数（没收录该 IP，或收录了但没有省份，比如境外段）。
+	Support  int `json:"support"`
+	Conflict int `json:"conflict"`
+	Silent   int `json:"silent"`
+	// Total 是当前加载成功的源数。前端要显示 "3/4" 这种分母，而它不等于
+	// Support+Conflict+Silent 之外的任何一个常数——管理员可能只启用了两个源。
+	Total int `json:"total"`
+}
+
+// evidenceOf 按各源的省级结论统计证据。locs 只含**收录了该 IP** 的源，
+// 所以 Silent 要用总源数减出来，不能靠遍历 locs 数。
+func evidenceOf(locs []ipdb.SourceLocation, total int) provinceEvidence {
+	votes := map[string]int{}
+	withRegion := 0
+	for _, sl := range locs {
+		if sl.Location.Region == "" {
+			continue
+		}
+		withRegion++
+		votes[sl.Location.Region]++
+	}
+	ev := provinceEvidence{Total: total, Silent: total - withRegion}
+	// 平票时取字节序最小的那个，只为让同一份库对同一个 IP 永远给出同一个
+	// 展示结果——这里不承担仲裁职责，取谁都不影响主判定。
+	for province, n := range votes {
+		if n > ev.Support || (n == ev.Support && province < ev.Province) {
+			ev.Province, ev.Support = province, n
+		}
+	}
+	ev.Conflict = withRegion - ev.Support
+	return ev
 }
 
 // locate 返回主判定与「另一个源给出的不同结论」。
@@ -448,7 +504,9 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 	// 主判定对应的原始 Location。分歧要按字段逐级判，不能拿 formatLocation
 	// 拼出来的串比——「南京市」与「南京」是同一个地方的两种写法。
 	var primary ipdb.Location
-	for _, sl := range db.Lookup(ip) {
+	found := db.Lookup(ip)
+	out.Evidence = evidenceOf(found, db.Len())
+	for _, sl := range found {
 		text := formatLocation(sl.Location)
 		out.Sources = append(out.Sources, ipSourceLocation{
 			Source:   ipdbSourceName(sl.Source),

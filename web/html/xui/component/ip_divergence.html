@@ -20,6 +20,12 @@
 <div v-for="s in {{ . }}.sources" :key="s.source">
     [[ s.source ]]：[[ s.location || '未收录该 IP' ]]<template v-if="s.isp"> · [[ s.isp ]]</template>
 </div>
+<div v-if="{{ . }}.evidence && {{ . }}.evidence.province" style="margin-top: 6px">
+    省级证据：<b>[[ {{ . }}.evidence.province ]]</b>
+    [[ {{ . }}.evidence.support ]]/[[ {{ . }}.evidence.total ]] 源支持<template
+        v-if="{{ . }}.evidence.conflict">，[[ {{ . }}.evidence.conflict ]] 源给出别的省</template><template
+        v-if="{{ . }}.evidence.silent">，[[ {{ . }}.evidence.silent ]] 源没有数据</template>
+</div>
 <div style="margin-top: 6px; opacity: .75">
     数据源判定不一致。地区限制按<b>并集</b>放行——任一个源认为它属于所选省份即放行。
 </div>

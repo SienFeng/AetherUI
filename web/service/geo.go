@@ -13,8 +13,10 @@ import (
 	"sync"
 
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/util/common"
 	"a-ui/util/geodat"
+	"a-ui/util/ipdb"
 )
 
 // geoDatPath 与 bin/config.json 一样是相对路径。
@@ -99,9 +101,51 @@ func regionTag(provinces []string) string {
 	return "ALLOW" + strings.ToUpper(hex.EncodeToString(sum[:4]))
 }
 
+// 地区限制的两种合并口径。
+const (
+	// RegionMatchUnion 是并集：任一源认为该段属于所选省份就放行。**默认值。**
+	//
+	// 保持默认是因为实测差距没有想象中大——三源并集只比最大的单源宽 1%~18%
+	//（按覆盖的 IP 地址数），而这条路径生成的是允许集，收紧的代价是正常用户
+	// 连不上，那是即时可见的投诉；放宽的代价是地区限制被稀释，慢性且可察觉。
+	// util/ipdb/multi.go 那句「本该能连却连不上比本不该连却连上了严重」在这个
+	// 量级下依然成立。
+	RegionMatchUnion = 0
+	// RegionMatchMajority 是多数判据：支持数必须严格大于反对数，沉默不计入。
+	// 判据细节见 ipdb.Multi.MajorityCIDRsOfProvinces。
+	RegionMatchMajority = 1
+)
+
 // provinceCIDRSource 是 buildGeoPlan 需要的全部能力，方便测试替换。
 type provinceCIDRSource interface {
 	CIDRsOfProvinces(provinces []string) []string
+}
+
+// majorityCIDRSource 把 Multi 的多数判据包装成 provinceCIDRSource。
+//
+// 做成适配器而不是给 buildGeoPlan 加一个模式参数：那样每个调用点和每条测试
+// 都要跟着改，而它们关心的只是「给我这些省份的 IP 段」，口径由上层选定。
+type majorityCIDRSource struct{ m *ipdb.Multi }
+
+func (s majorityCIDRSource) CIDRsOfProvinces(provinces []string) []string {
+	return s.m.MajorityCIDRsOfProvinces(provinces)
+}
+
+// regionCIDRSource 按面板设置选出地区限制的合并口径。
+//
+// 取不到设置、或设置是默认值时一律退回并集：这条路径生成的是**允许集**，
+// 而空的或过窄的允许集配上 ! 取反就是把人挡在门外。读设置失败是个与地区
+// 限制无关的故障（库锁、磁盘满），不该由它决定谁能连上。
+func regionCIDRSource(db *ipdb.Multi, settingService *SettingService) provinceCIDRSource {
+	mode, err := settingService.GetRegionMatchMode()
+	if err != nil {
+		logger.Warning("读取地区匹配模式失败，本轮按并集口径生成:", err)
+		return db
+	}
+	if mode == RegionMatchMajority {
+		return majorityCIDRSource{db}
+	}
+	return db
 }
 
 // geoPlan 是一轮生成的结果：dat 里要写哪几组数据，以及每个入站用哪个 tag。

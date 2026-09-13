@@ -14,13 +14,17 @@ import (
 	"a-ui/config"
 	"a-ui/logger"
 	"a-ui/util/common"
+	"a-ui/util/dbip"
+	"a-ui/util/ip2location"
 	"a-ui/util/ipdb"
 	"a-ui/util/qqwry"
 )
 
 const (
-	ip2regionKey = "ip2region"
-	qqwryKey     = "qqwry"
+	ip2regionKey   = "ip2region"
+	qqwryKey       = "qqwry"
+	ip2locationKey = "ip2location"
+	dbipKey        = "dbip"
 
 	// 旧的落盘位置。运行期数据现在放在 /etc/<name>/ 下（见 config.GetIPDBPath），
 	// 这两个常量只用于一次性迁移。bin/ipdb.dat 同时还是发版包带的种子：
@@ -33,6 +37,11 @@ const (
 	ip2regionCheckedAtKey = "ipdbCheckedAt"
 	qqwryEtagKey          = "qqwryEtag"
 	qqwryCheckedAtKey     = "qqwryCheckedAt"
+
+	ip2locationEtagKey      = "ip2locationEtag"
+	ip2locationCheckedAtKey = "ip2locationCheckedAt"
+	dbipEtagKey             = "dbipEtag"
+	dbipCheckedAtKey        = "dbipCheckedAt"
 
 	// 下载被中途截断时，生成出来的库是「合法但残缺」的：Parse 能通过，段数却少了一截，
 	// 于是省份 CIDR 集合悄悄变小，地区限制开始误拒合法用户。用段数下限挡住它。
@@ -91,7 +100,47 @@ var ipdbSourceList = func() []ipdbSource {
 			URL:          func(s *SettingService) (string, error) { return s.GetQQWrySourceUrl() },
 			Build:        buildQQWry,
 		},
+		// 后两个是拉丁字母源，**顺序必须排在前两个之后**。Multi.Lookup 按这个
+		// 顺序返回，而 selectNetworkMeta 取第一个给出非空省份的源作为画像快照。
+		// 实测四个源把中国段判为「广东省」的比例分别是 9.7% / 11.8% / 18.0% /
+		// 27.2%——后两个在把判不准的段大批兜底到广东，排到前面会让那批兜底值
+		// 顶掉前两个源的判定，而界面上完全看不出来。它们的价值是旁证与兜底：
+		// 前两个源都没有数据时（实测约占中国段样本的 9.6%）才成为主判定。
+		{
+			Key: ip2locationKey, Name: "IP2Location LITE", Path: config.GetIP2LocationPath(),
+			EtagKey:      ip2locationEtagKey,
+			CheckedAtKey: ip2locationCheckedAtKey,
+			MinSegments:  minValidSegments,
+			URL:          func(s *SettingService) (string, error) { return s.GetIP2LocationSourceUrl() },
+			Build:        buildIP2Location,
+		},
+		{
+			Key: dbipKey, Name: "DB-IP City Lite", Path: config.GetDBIPPath(),
+			EtagKey:      dbipEtagKey,
+			CheckedAtKey: dbipCheckedAtKey,
+			MinSegments:  minValidSegments,
+			URL:          func(s *SettingService) (string, error) { return s.GetDBIPSourceUrl() },
+			Build:        buildDBIP,
+		},
 	}
+}
+
+// buildIP2Location 把 IP2Location LITE DB3 的 CSV 发行包转成本项目的紧凑格式。
+func buildIP2Location(r io.Reader, w io.Writer, builtAt time.Time) error {
+	records, err := ip2location.Parse(r)
+	if err != nil {
+		return err
+	}
+	return ipdb.BuildRecords(records, w, builtAt)
+}
+
+// buildDBIP 把 DB-IP City Lite 的 csv.gz 转成本项目的紧凑格式。
+func buildDBIP(r io.Reader, w io.Writer, builtAt time.Time) error {
+	records, err := dbip.Parse(r)
+	if err != nil {
+		return err
+	}
+	return ipdb.BuildRecords(records, w, builtAt)
 }
 
 // ipdbSourceName 把数据源的内部 key 换成界面上的显示名。

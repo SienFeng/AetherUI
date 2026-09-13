@@ -201,7 +201,10 @@ class AllSetting {
 
         this.ipdbSourceUrl = "";
         this.qqwrySourceUrl = "";
+        this.ip2locationSourceUrl = "";
+        this.dbipSourceUrl = "";
         this.ipdbUpdateTime = "";
+        this.regionMatchMode = 0;
         this.accessLogEnable = 0;
         this.accessLogRetentionDays = 7;
         this.trafficHourRetentionDays = 30;

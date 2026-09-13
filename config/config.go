@@ -74,3 +74,14 @@ func GetIPDBPath() string {
 func GetQQWryPath() string {
 	return fmt.Sprintf("/etc/%s/ipdb-qqwry.dat", GetName())
 }
+
+// GetIP2LocationPath 与 GetDBIPPath 是后加的两个拉丁字母源的落盘路径，
+// 目录与理由同上。两者都没有发版包种子：IP2Location 的许可禁止再分发，
+// DB-IP 则没有必要——它们都是可选的旁证源，缺失时面板照常工作。
+func GetIP2LocationPath() string {
+	return fmt.Sprintf("/etc/%s/ipdb-ip2location.dat", GetName())
+}
+
+func GetDBIPPath() string {
+	return fmt.Sprintf("/etc/%s/ipdb-dbip.dat", GetName())
+}

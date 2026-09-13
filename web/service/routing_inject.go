@@ -661,7 +661,7 @@ func (s *RoutingInjector) buildGeoRules() ([]any, error) {
 		return nil, common.NewError("已配置地区限制，但 IP 归属地库未加载；" +
 			"请到「面板设置 → IP 归属地库」更新，或清空入站的地区限制")
 	}
-	plan, err := buildGeoPlan(inbounds, db)
+	plan, err := buildGeoPlan(inbounds, regionCIDRSource(db, &s.settingService))
 	if err != nil {
 		return nil, err
 	}
