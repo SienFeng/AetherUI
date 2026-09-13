@@ -513,20 +513,32 @@ func (s *IPDBService) RunScheduledUpdate(now time.Time) (int, error) {
 		if url == "" {
 			continue
 		}
-		// 库不在时无条件立刻补，既不看到点判断也不发条件请求。这条路径正是
-		// 「安装目录被清空」之后的自愈路径，必须比日程优先。
+		// 判据是「这个源最近一次有结果是什么时候」，取库的生成时间与上次向
+		// 上游确认时间的较晚者，两者都没有（值为 0）才无条件立刻补。
+		//
+		// 库不在时立刻补，是「安装目录被清空」之后的自愈路径，必须比日程优先。
+		// 但它不能无视 lastCheckedAt——否则一个**建不成库**的源会被这个每 10
+		// 分钟跑一次的任务一天重试 144 次。IP2Location 每 24 小时只放行 5 次
+		// 下载，撞上配额后库始终不存在，于是永远建不成、日志每 10 分钟刷一条，
+		// 还正好撞上官方 FAQ 写明会封号的「大量下载」。
+		//
+		// 网络故障不受这条影响：refresh 对那类失败不写 lastCheckedAt，所以
+		// 库不在 + 拉取失败仍然每轮重试，网络一恢复就能补上。只有被上游**明确
+		// 拒绝**时才会记一笔，退到每天一次。
+		//
+		// 库的时间戳在未来说明机器时钟异常。当成 0 会让它每轮都重下，这里
+		// 保持原样交给 ShouldUpdateNow 判断（它会认为今天已经跑过）。
+		var lastUpdatedAt int64
 		if cur := s.dbOf(src.Key); cur != nil {
-			// 库的时间戳在未来说明机器时钟异常。当成 0 会让它每轮都重下，
-			// 这里保持原样交给 ShouldUpdateNow 判断（它会认为今天已经跑过）。
-			lastUpdatedAt := cur.BuiltAt().UnixMilli()
-			// 304 不产生新库，生成时间原地不动，所以还要看上次确认时间，
-			// 否则今天余下的每一轮都会再问一遍上游。
-			if checked := s.lastCheckedAt(src); checked > lastUpdatedAt {
-				lastUpdatedAt = checked
-			}
-			if !ShouldUpdateNow(now, lastUpdatedAt, at.Hour(), at.Minute()) {
-				continue
-			}
+			lastUpdatedAt = cur.BuiltAt().UnixMilli()
+		}
+		// 304 不产生新库，生成时间原地不动，所以还要看上次确认时间，
+		// 否则今天余下的每一轮都会再问一遍上游。
+		if checked := s.lastCheckedAt(src); checked > lastUpdatedAt {
+			lastUpdatedAt = checked
+		}
+		if lastUpdatedAt > 0 && !ShouldUpdateNow(now, lastUpdatedAt, at.Hour(), at.Minute()) {
+			continue
 		}
 		if s.refresh(src, url, now, "定时更新") {
 			updated++
@@ -549,6 +561,13 @@ func (s *IPDBService) refresh(src ipdbSource, url string, now time.Time, what st
 		return false
 	}
 	if err != nil {
+		// 被上游明确拒绝（配额用尽、凭证失效）与网络故障要分开善后：前者短期内
+		// 重试必然同样失败，记下「这一刻问过了」让它退到每天一次；后者什么都不
+		// 记，网络一恢复下一轮就补上。不区分的话，一个建不成库的源会被这个每
+		// 10 分钟跑一次的任务一天重试 144 次，而 IP2Location 每 24 小时只放行 5 次。
+		if errors.Is(err, ip2location.ErrUpstreamRejected) {
+			s.markChecked(src, now)
+		}
 		logger.Warning(what+"IP 库失败, 源:", src.Name, "err:", err)
 		return false
 	}

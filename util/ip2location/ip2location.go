@@ -20,6 +20,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/csv"
+	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -46,7 +48,7 @@ func Parse(r io.Reader) ([]ipdb.Record, error) {
 		return nil, common.NewErrorf("IP2Location 源数据超过 %d 字节上限，疑似地址有误", maxSourceBytes)
 	}
 	if msg, ok := upstreamMessage(data); ok {
-		return nil, common.NewError("IP2Location 上游拒绝了这次下载：" + msg)
+		return nil, fmt.Errorf("%w：%s", ErrUpstreamRejected, msg)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -111,6 +113,15 @@ func parseCSV(r io.Reader) ([]ipdb.Record, error) {
 	}
 	return records, nil
 }
+
+// ErrUpstreamRejected 表示上游明确拒绝了这次下载（配额用尽、token 失效、
+// 文件代码不存在），而不是网络故障。
+//
+// 两者的善后完全不同，调用方必须分开处理：网络故障值得很快重试（一恢复就能
+// 拿到数据），而被明确拒绝时短期内重试必然同样失败——IP2Location 每 24 小时
+// 只放行 5 次下载，而那个自检任务每 10 分钟跑一次，不区分的话一天会撞 144 次，
+// 既永远建不成库，又正好撞上官方 FAQ 写明会封号的「大量下载」。
+var ErrUpstreamRejected = errors.New("上游拒绝下载")
 
 // maxUpstreamMessageBytes 是「把上游原话回显给管理员」的长度上限。
 // 真正的 DB3 包有几十 MB，而上游的错误提示是一行字；超出这个长度的东西
