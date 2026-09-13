@@ -52,189 +52,201 @@
                 </div>
             </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
-                <a-space direction="vertical">
-                    <!-- 未保存提示条。没有改动时整条不渲染——「不突出」不是靠
-                         淡化，是压根不存在。放在表单**之前**并配 sticky top，
-                         xray 配置模板那个能撑几屏的 textarea 改到一半时它仍然
-                         挂在视口顶部，不必滚回来找保存按钮。 -->
-                    <div v-if="dirty" class="save-bar" role="status">
-                        <a-icon type="exclamation-circle" theme="filled"
-                                style="color: var(--aui-warning)"></a-icon>
-                        <span class="save-bar-text">有未保存的修改</span>
-                        <a-button size="small" @click="discardChanges">放弃修改</a-button>
-                        <a-button type="primary" size="small" @click="updateAllSetting">保存配置</a-button>
-                    </div>
-                    <!-- 9 个分类改成左侧二级导航。只加 tab-position 一个属性，
-                         9 个 a-tab-pane 与它们内部的表单一律不动。 -->
-                    <a-tabs id="setting-tabs" default-active-key="1" tab-position="left">
-                        <a-tab-pane key="1" tab="面板与访问">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="text" title="面板监听 IP" desc="默认留空监听所有 IP，重启面板生效" v-model="allSetting.webListen"></setting-list-item>
-                                <setting-list-item type="number" title="面板监听端口" desc="重启面板生效" v-model.number="allSetting.webPort"></setting-list-item>
-                                <setting-list-item type="text" title="面板证书公钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webCertFile"></setting-list-item>
-                                <setting-list-item type="text" title="面板证书密钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webKeyFile"></setting-list-item>
-                                <setting-list-item type="text" title="面板 url 根路径" desc="必须以 '/' 开头，以 '/' 结尾，重启面板生效" v-model="allSetting.webBasePath"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="2" tab="账号与密码">
-                            <a-form style="background: white; padding: 20px">
-                                <a-form-item label="原用户名">
-                                    <a-input v-model="user.oldUsername" style="max-width: 300px"></a-input>
-                                </a-form-item>
-                                <a-form-item label="原密码">
-                                    <a-input type="password" v-model="user.oldPassword"
-                                             style="max-width: 300px"></a-input>
-                                </a-form-item>
-                                <a-form-item label="新用户名">
-                                    <a-input v-model="user.newUsername" style="max-width: 300px"></a-input>
-                                </a-form-item>
-                                <a-form-item label="新密码">
-                                    <a-input type="password" v-model="user.newPassword"
-                                             style="max-width: 300px"></a-input>
-                                </a-form-item>
-                                <a-form-item>
-                                    <a-button type="primary" @click="updateUser">修改</a-button>
-                                </a-form-item>
-                            </a-form>
-                        </a-tab-pane>
-                        <a-tab-pane key="3" tab="Xray 配置">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
-                             都会进入 xray 配置、都由 routing/dns 注入器消费，
-                             和时区、订阅更新时刻不是一类东西。 -->
-                        <a-tab-pane key="11" tab="网络与 DNS">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
-                                                   desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
-                                                   v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
-                                <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
-                                                   desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
-                                                   v-model="allSetting.dnsServers"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="4" tab="IP 归属地库">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-action-item v-for="src in ipdb.sources" :key="src.key"
-                                                     :title="src.name" :desc="ipdbSourceDesc(src)">
-                                    <span v-if="!src.enabled" class="chip">未启用</span>
-                                    <span v-else-if="src.loaded" class="status-badge status-ok">
-                                        <a-icon type="check-circle"></a-icon>已加载
-                                    </span>
-                                    <!-- 「未下载」用橙而不是红：源地址填了但还没拉过，
-                                         是新装机器的正常状态，不是故障。 -->
-                                    <span v-else class="status-badge status-warn">
-                                        <a-icon type="exclamation-circle"></a-icon>未下载
-                                    </span>
-                                    <a-button type="primary" size="small" style="margin-left: 8px"
-                                              :disabled="!src.enabled"
-                                              :loading="ipdbUpdating === src.key"
-                                              @click="updateIPDB(src.key)">更新</a-button>
-                                </setting-action-item>
-                                <setting-action-item title="更新全部数据源" desc="">
-                                    <a-button type="primary" :loading="ipdbUpdating === 'all'"
-                                              @click="updateIPDB('')">立即更新全部</a-button>
-                                </setting-action-item>
-                                <setting-list-item type="text" title="ip2region 源地址"
-                                                   desc="源数据约 35 MB，留空表示不启用"
-                                                   v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
-                                <setting-list-item type="text" title="纯真库源地址"
-                                                   desc="源数据约 25 MB，留空表示不启用。四个源不能都留空"
-                                                   v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
-                                <setting-list-item type="text" title="IP2Location LITE 源地址"
-                                                   desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。注意上游限制每 24 小时最多下载 5 次，超出后会返回一行提示文本而不是数据（面板会把上游原话显示在错误里），等满 24 小时即可恢复。数据使用需署名 IP2Location LITE"
-                                                   v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
-                                <setting-list-item type="text" title="DB-IP City Lite 源地址"
-                                                   desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"
-                                                   v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
-                                <setting-list-item type="switch" title="地区限制要求多数数据源认同"
-                                                   desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）"
-                                                   v-model="allSetting.regionMatchMode"></setting-list-item>
-                                <a-list-item>
-                                    <a-alert type="info" show-icon
-                                             message="后两个源是「旁证」，不是「更准」"
-                                             description="实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）。"></a-alert>
-                                </a-list-item>
-                                <setting-list-item type="text" title="每日更新时刻"
-                                                   desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
-                                                   v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="5" tab="访问日志">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="switch" title="记录访问日志"
-                                                   desc="记录用户在什么时间访问了什么目标、走的哪条路由。开关变化约 10 秒后生效"
-                                                   v-model="allSetting.accessLogEnable"></setting-list-item>
-                                <setting-list-item type="number" title="日志保留天数"
-                                                   desc="超过该天数的记录每小时自动清除"
-                                                   v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="9" tab="流量统计">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="number" title="小时数据保留天数"
-                                                   desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
-                                                   v-model.number="allSetting.trafficHourRetentionDays"></setting-list-item>
-                                <setting-list-item type="number" title="每日数据保留天数"
-                                                   desc="用量图「1 年」这一档用的数据，一个入站一年只占 365 行。可填 1 ~ 3650，默认 365"
-                                                   v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="8" tab="并发限制">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="number" title="闲置超时（秒）"
-                                                   desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
-                                                   v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="6" tab="端口限速">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-action-item title="限速状态" :desc="shapingDesc()">
-                                    <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
-                                         用中性；「已自动撤销」才是真出了事，保留红。 -->
-                                    <span v-if="!shaping.supported" class="chip">不支持</span>
-                                    <span v-else-if="shaping.rolledBack" class="status-badge status-danger">
-                                        <a-icon type="close-circle"></a-icon>已自动撤销
-                                    </span>
-                                    <span v-else-if="shaping.active" class="status-badge status-ok">
-                                        <a-icon type="check-circle"></a-icon>已生效
-                                    </span>
-                                    <span v-else class="chip">未启用</span>
-                                </setting-action-item>
-                                <setting-action-item title="清除全部限速"
-                                                     desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
-                                    <a-button type="danger" :loading="shapingClearing" @click="clearShaping">
-                                        清除全部限速
-                                    </a-button>
-                                </setting-action-item>
-                                <setting-list-item type="text" title="限速网卡"
-                                                   desc="留空则按默认路由自动探测。多网卡机器可手动指定"
-                                                   v-model.trim="allSetting.tcInterface"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <a-tab-pane key="7" tab="常规">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
-                                <setting-list-item type="text" title="订阅更新时间"
-                                                   desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，最多 10 分钟内生效，无需重启面板"
-                                                   v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                        <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
-                             「设置系统」一节），只是新建入站表单的预填值。混在
-                             「面板与访问」里会被读成面板自身的证书设置——而面板
-                             自己的证书是上面那两项，填错地方的后果完全不同。 -->
-                        <a-tab-pane key="10" tab="入站默认值">
-                            <a-list item-layout="horizontal" style="background: white">
-                                <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
-                                <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
-                                <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
-                            </a-list>
-                        </a-tab-pane>
-                    </a-tabs>
-                </a-space>
+                <!-- 提示条与 a-tabs 必须是**直接同级**，中间不能再套 <a-space>
+                     这类按索引给子项分配 key 的容器。ASpace 给每个子项包一层
+                     key 为 `ant-space-item-<索引>` 的 div：提示条一出现就占走
+                     索引 0、把 a-tabs 顶到索引 1，于是 Vue 认为前后两个
+                     `ant-space-item-0` 是同一个节点，就地把里面的 a-tabs 换成
+                     提示条，再为索引 1 新建一个 a-tabs——**整棵 a-tabs 被销毁重建**。
+                     而它是 default-active-key（非受控），activeKey 只活在实例里，
+                     新实例回落到 "1"。表征是：dirty 每翻转一次（改一项、保存、
+                     放弃修改都算）就跳回「面板与访问」，正在输入的框当场失焦，
+                     控制台不报任何错。直接同级时 a-tabs 是组件 vnode、tag 与 div
+                     不同，sameVnode 判否，两者不会再被错配。给它们各加 key 挡不住
+                     （错配发生在 ant-space-item 那一层，外层 key 够不着），把提示条
+                     移到 a-space 之前也挡不住——实测都照跳。间距由 .save-bar 自己的
+                     margin-bottom 提供，本来就不需要这个容器。 -->
+                <!-- 未保存提示条。没有改动时整条不渲染——「不突出」不是靠
+                     淡化，是压根不存在。放在表单**之前**并配 sticky top，
+                     xray 配置模板那个能撑几屏的 textarea 改到一半时它仍然
+                     挂在视口顶部，不必滚回来找保存按钮。 -->
+                <div v-if="dirty" class="save-bar" role="status">
+                    <a-icon type="exclamation-circle" theme="filled"
+                            style="color: var(--aui-warning)"></a-icon>
+                    <span class="save-bar-text">有未保存的修改</span>
+                    <a-button size="small" @click="discardChanges">放弃修改</a-button>
+                    <a-button type="primary" size="small" @click="updateAllSetting">保存配置</a-button>
+                </div>
+                <!-- 9 个分类改成左侧二级导航。只加 tab-position 一个属性，
+                     9 个 a-tab-pane 与它们内部的表单一律不动。 -->
+                <a-tabs id="setting-tabs" default-active-key="1" tab-position="left">
+                    <a-tab-pane key="1" tab="面板与访问">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="text" title="面板监听 IP" desc="默认留空监听所有 IP，重启面板生效" v-model="allSetting.webListen"></setting-list-item>
+                            <setting-list-item type="number" title="面板监听端口" desc="重启面板生效" v-model.number="allSetting.webPort"></setting-list-item>
+                            <setting-list-item type="text" title="面板证书公钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webCertFile"></setting-list-item>
+                            <setting-list-item type="text" title="面板证书密钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webKeyFile"></setting-list-item>
+                            <setting-list-item type="text" title="面板 url 根路径" desc="必须以 '/' 开头，以 '/' 结尾，重启面板生效" v-model="allSetting.webBasePath"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="2" tab="账号与密码">
+                        <a-form style="background: white; padding: 20px">
+                            <a-form-item label="原用户名">
+                                <a-input v-model="user.oldUsername" style="max-width: 300px"></a-input>
+                            </a-form-item>
+                            <a-form-item label="原密码">
+                                <a-input type="password" v-model="user.oldPassword"
+                                         style="max-width: 300px"></a-input>
+                            </a-form-item>
+                            <a-form-item label="新用户名">
+                                <a-input v-model="user.newUsername" style="max-width: 300px"></a-input>
+                            </a-form-item>
+                            <a-form-item label="新密码">
+                                <a-input type="password" v-model="user.newPassword"
+                                         style="max-width: 300px"></a-input>
+                            </a-form-item>
+                            <a-form-item>
+                                <a-button type="primary" @click="updateUser">修改</a-button>
+                            </a-form-item>
+                        </a-form>
+                    </a-tab-pane>
+                    <a-tab-pane key="3" tab="Xray 配置">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
+                         都会进入 xray 配置、都由 routing/dns 注入器消费，
+                         和时区、订阅更新时刻不是一类东西。 -->
+                    <a-tab-pane key="11" tab="网络与 DNS">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
+                                               desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
+                                               v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
+                            <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
+                                               desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
+                                               v-model="allSetting.dnsServers"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="4" tab="IP 归属地库">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-action-item v-for="src in ipdb.sources" :key="src.key"
+                                                 :title="src.name" :desc="ipdbSourceDesc(src)">
+                                <span v-if="!src.enabled" class="chip">未启用</span>
+                                <span v-else-if="src.loaded" class="status-badge status-ok">
+                                    <a-icon type="check-circle"></a-icon>已加载
+                                </span>
+                                <!-- 「未下载」用橙而不是红：源地址填了但还没拉过，
+                                     是新装机器的正常状态，不是故障。 -->
+                                <span v-else class="status-badge status-warn">
+                                    <a-icon type="exclamation-circle"></a-icon>未下载
+                                </span>
+                                <a-button type="primary" size="small" style="margin-left: 8px"
+                                          :disabled="!src.enabled"
+                                          :loading="ipdbUpdating === src.key"
+                                          @click="updateIPDB(src.key)">更新</a-button>
+                            </setting-action-item>
+                            <setting-action-item title="更新全部数据源" desc="">
+                                <a-button type="primary" :loading="ipdbUpdating === 'all'"
+                                          @click="updateIPDB('')">立即更新全部</a-button>
+                            </setting-action-item>
+                            <setting-list-item type="text" title="ip2region 源地址"
+                                               desc="源数据约 35 MB，留空表示不启用"
+                                               v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
+                            <setting-list-item type="text" title="纯真库源地址"
+                                               desc="源数据约 25 MB，留空表示不启用。四个源不能都留空"
+                                               v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
+                            <setting-list-item type="text" title="IP2Location LITE 源地址"
+                                               desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。注意上游限制每 24 小时最多下载 5 次，超出后会返回一行提示文本而不是数据（面板会把上游原话显示在错误里），等满 24 小时即可恢复。数据使用需署名 IP2Location LITE"
+                                               v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
+                            <setting-list-item type="text" title="DB-IP City Lite 源地址"
+                                               desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"
+                                               v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
+                            <setting-list-item type="switch" title="地区限制要求多数数据源认同"
+                                               desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）"
+                                               v-model="allSetting.regionMatchMode"></setting-list-item>
+                            <a-list-item>
+                                <a-alert type="info" show-icon
+                                         message="后两个源是「旁证」，不是「更准」"
+                                         description="实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）。"></a-alert>
+                            </a-list-item>
+                            <setting-list-item type="text" title="每日更新时刻"
+                                               desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
+                                               v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="5" tab="访问日志">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="switch" title="记录访问日志"
+                                               desc="记录用户在什么时间访问了什么目标、走的哪条路由。开关变化约 10 秒后生效"
+                                               v-model="allSetting.accessLogEnable"></setting-list-item>
+                            <setting-list-item type="number" title="日志保留天数"
+                                               desc="超过该天数的记录每小时自动清除"
+                                               v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="9" tab="流量统计">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="number" title="小时数据保留天数"
+                                               desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
+                                               v-model.number="allSetting.trafficHourRetentionDays"></setting-list-item>
+                            <setting-list-item type="number" title="每日数据保留天数"
+                                               desc="用量图「1 年」这一档用的数据，一个入站一年只占 365 行。可填 1 ~ 3650，默认 365"
+                                               v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="8" tab="并发限制">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="number" title="闲置超时（秒）"
+                                               desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
+                                               v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="6" tab="端口限速">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-action-item title="限速状态" :desc="shapingDesc()">
+                                <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
+                                     用中性；「已自动撤销」才是真出了事，保留红。 -->
+                                <span v-if="!shaping.supported" class="chip">不支持</span>
+                                <span v-else-if="shaping.rolledBack" class="status-badge status-danger">
+                                    <a-icon type="close-circle"></a-icon>已自动撤销
+                                </span>
+                                <span v-else-if="shaping.active" class="status-badge status-ok">
+                                    <a-icon type="check-circle"></a-icon>已生效
+                                </span>
+                                <span v-else class="chip">未启用</span>
+                            </setting-action-item>
+                            <setting-action-item title="清除全部限速"
+                                                 desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
+                                <a-button type="danger" :loading="shapingClearing" @click="clearShaping">
+                                    清除全部限速
+                                </a-button>
+                            </setting-action-item>
+                            <setting-list-item type="text" title="限速网卡"
+                                               desc="留空则按默认路由自动探测。多网卡机器可手动指定"
+                                               v-model.trim="allSetting.tcInterface"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <a-tab-pane key="7" tab="常规">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
+                            <setting-list-item type="text" title="订阅更新时间"
+                                               desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，最多 10 分钟内生效，无需重启面板"
+                                               v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                    <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
+                         「设置系统」一节），只是新建入站表单的预填值。混在
+                         「面板与访问」里会被读成面板自身的证书设置——而面板
+                         自己的证书是上面那两项，填错地方的后果完全不同。 -->
+                    <a-tab-pane key="10" tab="入站默认值">
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
+                            <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
+                            <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
+                        </a-list>
+                    </a-tab-pane>
+                </a-tabs>
             </a-spin>
         </a-layout-content>
     </a-layout>
