@@ -144,7 +144,7 @@
                                                    desc="源数据约 25 MB，留空表示不启用。四个源不能都留空"
                                                    v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
                                 <setting-list-item type="text" title="IP2Location LITE 源地址"
-                                                   desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。数据使用需署名 IP2Location LITE"
+                                                   desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。注意上游限制每 24 小时最多下载 5 次，超出后会返回一行提示文本而不是数据（面板会把上游原话显示在错误里），等满 24 小时即可恢复。数据使用需署名 IP2Location LITE"
                                                    v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
                                 <setting-list-item type="text" title="DB-IP City Lite 源地址"
                                                    desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"

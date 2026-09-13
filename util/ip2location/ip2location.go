@@ -23,6 +23,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"a-ui/util/common"
 	"a-ui/util/ipdb"
@@ -43,6 +44,9 @@ func Parse(r io.Reader) ([]ipdb.Record, error) {
 	}
 	if len(data) > maxSourceBytes {
 		return nil, common.NewErrorf("IP2Location 源数据超过 %d 字节上限，疑似地址有误", maxSourceBytes)
+	}
+	if msg, ok := upstreamMessage(data); ok {
+		return nil, common.NewError("IP2Location 上游拒绝了这次下载：" + msg)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -106,6 +110,39 @@ func parseCSV(r io.Reader) ([]ipdb.Record, error) {
 		return nil, common.NewError("IP2Location: 没有解析出任何数据段")
 	}
 	return records, nil
+}
+
+// maxUpstreamMessageBytes 是「把上游原话回显给管理员」的长度上限。
+// 真正的 DB3 包有几十 MB，而上游的错误提示是一行字；超出这个长度的东西
+// 既不是提示也不是数据，原样贴进错误信息只会刷屏。
+const maxUpstreamMessageBytes = 512
+
+// upstreamMessage 判断这份响应是不是上游的一句错误提示，是则返回原文。
+//
+// **IP2Location 用 HTTP 200 + 一行纯文本传达错误**，不是 4xx：
+//
+//	THIS FILE CAN ONLY BE DOWNLOADED 5 TIMES WITHIN 24 HOURS
+//
+// 于是 fetchAndBuild 认为下载成功，把这 56 个字节交给解析器，管理员看到的是
+// 「不是有效的 ZIP」——那句话会把他指向一个其实完全正确的地址去反复检查。
+// 每 24 小时 5 次这个限额官方下载页没有写明，撞上它是常态而不是边缘情况
+// （手动点一次「更新」、定时任务跑一次、首次更新补一次，很容易就用掉几次）。
+//
+// 判据是「没有 ZIP 魔数 + 短 + 是合法 UTF-8」三条同时成立。只判魔数不够：
+// 一份被截断的真 ZIP 同样没有魔数，但它不该被当成提示语贴给管理员。
+func upstreamMessage(data []byte) (string, bool) {
+	// ZIP 的魔数：正常档案 PK\x03\x04，空档案 PK\x05\x06。
+	if bytes.HasPrefix(data, []byte("PK")) {
+		return "", false
+	}
+	if len(data) == 0 || len(data) > maxUpstreamMessageBytes || !utf8.Valid(data) {
+		return "", false
+	}
+	msg := strings.TrimSpace(string(data))
+	if msg == "" {
+		return "", false
+	}
+	return msg, true
 }
 
 // dash 把上游表示「无此字段」的 "-" 换成空串。
