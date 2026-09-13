@@ -139,3 +139,43 @@ func TestParseRejectsMalformed(t *testing.T) {
 		t.Errorf("空 CSV 应当报错，实际 err=%v", err)
 	}
 }
+
+// 上游用 HTTP 200 + 一行纯文本传达错误，不是 4xx。于是下载被判定成功，那几十个
+// 字节交给解析器后报出「不是有效的 ZIP」——那句话会把管理员指向一个其实完全
+// 正确的地址去反复检查。真实遇到过的是配额那一条。
+func TestParseSurfacesUpstreamTextMessage(t *testing.T) {
+	cases := []string{
+		"THIS FILE CAN ONLY BE DOWNLOADED 5 TIMES WITHIN 24 HOURS", // 实测原文
+		"NO PERMISSION",
+		"INVALID TOKEN",
+	}
+	for _, body := range cases {
+		_, err := Parse(bytes.NewReader([]byte(body)))
+		if err == nil {
+			t.Fatalf("%q：应当报错", body)
+		}
+		if !strings.Contains(err.Error(), body) {
+			t.Errorf("err = %v；必须把上游原话带出来，否则管理员看到的是一个指向错误方向的提示", err)
+		}
+	}
+}
+
+// 判据是「没有 ZIP 魔数 + 短 + 合法 UTF-8」三条同时成立。一份被截断的真 ZIP
+// 同样没有魔数，但它不该被当成提示语贴给管理员——那会把一次网络中断说成
+// 上游拒绝。
+func TestUpstreamMessageRejectsNonText(t *testing.T) {
+	long := bytes.Repeat([]byte("x"), maxUpstreamMessageBytes+1)
+	for name, data := range map[string][]byte{
+		"空响应":      {},
+		"超长文本":     long,
+		"非法 UTF-8": {0xff, 0xfe, 0xfd},
+		"真 ZIP 前缀": []byte("PK\x03\x04something"),
+	} {
+		if msg, ok := upstreamMessage(data); ok {
+			t.Errorf("%s：被误判成上游提示语 %q", name, msg)
+		}
+	}
+	if msg, ok := upstreamMessage([]byte("  NO PERMISSION  ")); !ok || msg != "NO PERMISSION" {
+		t.Errorf("= %q, %v；应当去掉首尾空白后返回", msg, ok)
+	}
+}
