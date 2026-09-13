@@ -962,3 +962,79 @@ func legacyV1Bytes(t *testing.T) []byte {
 	}
 	return buf
 }
+
+// 被上游**明确拒绝**（配额用尽、凭证失效）与网络故障必须分开善后。
+//
+// 这条测试盯的是一个真实事故：IP2Location 每 24 小时只放行 5 次下载，超出后用
+// HTTP 200 + 一行纯文本回应，于是库始终建不成；而这个自检任务每 10 分钟跑一次，
+// 「库不在就无条件补」那条自愈路径会让它一天重试 144 次——既永远建不成库，
+// 又正好撞上官方 FAQ 写明会封号的「大量下载」。
+func TestScheduledUpdateBacksOffAfterUpstreamRejection(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "04:00")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "il.dat")
+	// IP2Location 超配额时的真实响应，逐字照抄。
+	url, hits := countingSource(t, "THIS FILE CAN ONLY BE DOWNLOADED 5 TIMES WITHIN 24 HOURS")
+	src := urlSource("il", path, url)
+	src.Build = buildIP2Location
+	src.CheckedAtKey = "ilCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	s := IPDBService{}
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+
+	// 库从未建成，第一次应当尝试。
+	if _, err := s.RunScheduledUpdate(now); err != nil {
+		t.Fatalf("RunScheduledUpdate: %v", err)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("首轮发起了 %d 次请求，应为 1", n)
+	}
+
+	// 10 分钟后的下一轮：上游已经明确拒绝过，不该再撞一次。
+	if _, err := s.RunScheduledUpdate(now.Add(10 * time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Errorf("被明确拒绝后 10 分钟又重试了（共 %d 次）——照这个节奏一天会撞 144 次，"+
+			"而上游每 24 小时只放行 5 次", n)
+	}
+
+	// 次日到点后应当恢复尝试：配额是按 24 小时滚动的，退避不能变成永久放弃。
+	if _, err := s.RunScheduledUpdate(now.Add(24 * time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt32(hits); n != 2 {
+		t.Errorf("次日发起了 %d 次请求，应为 2——退避只到下一个更新时刻，不是永久放弃", n)
+	}
+}
+
+// 网络故障不受上面那条退避影响：库不在 + 拉取失败仍然每轮重试，
+// 网络一恢复下一轮就能补上。
+func TestScheduledUpdateKeepsRetryingAfterNetworkFailure(t *testing.T) {
+	setupDB(t)
+	setUpdateTime(t, "04:00")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.dat")
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	src := urlSource("a", path, srv.URL)
+	src.CheckedAtKey = "aCheckedAt"
+	useTestSources(t, []ipdbSource{src})
+
+	s := IPDBService{}
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		if _, err := s.RunScheduledUpdate(now.Add(time.Duration(i) * 10 * time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := atomic.LoadInt32(&hits); n != 3 {
+		t.Errorf("发起了 %d 次请求，应为 3——网络故障是暂时的，不该退避", n)
+	}
+}
