@@ -141,8 +141,22 @@
                                                    desc="源数据约 35 MB，留空表示不启用"
                                                    v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
                                 <setting-list-item type="text" title="纯真库源地址"
-                                                   desc="源数据约 25 MB，留空表示不启用。两个源不能都留空"
+                                                   desc="源数据约 25 MB，留空表示不启用。四个源不能都留空"
                                                    v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
+                                <setting-list-item type="text" title="IP2Location LITE 源地址"
+                                                   desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。数据使用需署名 IP2Location LITE"
+                                                   v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
+                                <setting-list-item type="text" title="DB-IP City Lite 源地址"
+                                                   desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"
+                                                   v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
+                                <setting-list-item type="switch" title="地区限制要求多数数据源认同"
+                                                   desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）"
+                                                   v-model="allSetting.regionMatchMode"></setting-list-item>
+                                <a-list-item>
+                                    <a-alert type="info" show-icon
+                                             message="后两个源是「旁证」，不是「更准」"
+                                             description="实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）。"></a-alert>
+                                </a-list-item>
                                 <setting-list-item type="text" title="每日更新时刻"
                                                    desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
                                                    v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>

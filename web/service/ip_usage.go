@@ -23,7 +23,7 @@ const ipUsageMaxEntries = 200
 // 必须有这句话：返回一张看起来正常的空表，管理员会以为这段时间没人用过。
 //
 // 文案说的是「更早的时段」而不是「更长的区间」——判据按起点而不是跨度
-//（见 Query），一个跨度只有 10 天但整体落在 3 个月前的自定义区间同样会
+// （见 Query），一个跨度只有 10 天但整体落在 3 个月前的自定义区间同样会
 // 降级，说成「更长的区间」会让管理员以为缩短区间就能看到，而那没有用。
 const ipUsageBeyondRetention = "按来源 IP 的明细只保留 30 天，更早的时段只有入站合计用量"
 
@@ -47,6 +47,8 @@ type IPUsageEntry struct {
 	ISP         string             `json:"isp"`
 	ISPAlt      string             `json:"ispAlt"`
 	Sources     []ipSourceLocation `json:"sources"`
+	// Evidence 见 ipLocation.Evidence：这个判定有多少源同意。
+	Evidence provinceEvidence `json:"evidence"`
 
 	// LastSeen 是窗口内最后一个有记录的小时（毫秒）。界面用它给离线行
 	// 填「上线时间」那一列——对已经断开的来源，「最后活跃」比一个空值有用。
@@ -102,7 +104,7 @@ func hasUnsplitBytes(rows []model.InboundIPHour) bool {
 // Query 返回某入站在窗口内各来源 IP 的用量，按用量降序。
 //
 // 窗口超出保留期时整块降级（BeyondRetention），而不是返回一张空表：
-//「看不到」和「没有」必须能区分开。
+// 「看不到」和「没有」必须能区分开。
 func (s *IPUsageService) Query(inboundId int, w TrafficWindow, now time.Time) (*IPUsageResult, error) {
 	result := &IPUsageResult{Entries: []IPUsageEntry{}}
 
@@ -171,7 +173,7 @@ func (s *IPUsageService) Query(inboundId int, w TrafficWindow, now time.Time) (*
 			loc := locateWithIPDB(s.ipdbService, parsed)
 			e.Location, e.LocationAlt = loc.Location, loc.LocationAlt
 			e.ISP, e.ISPAlt = loc.ISP, loc.ISPAlt
-			e.Sources = loc.Sources
+			e.Sources, e.Evidence = loc.Sources, loc.Evidence
 		}
 		entries = append(entries, e)
 	}

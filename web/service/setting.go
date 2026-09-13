@@ -35,6 +35,14 @@ var defaultValueMap = map[string]string{
 	"ipdbSourceUrl":            "https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ipv4_source.txt",
 	"ipdbUpdateTime":           "",
 	"qqwrySourceUrl":           "https://raw.githubusercontent.com/FW27623/qqwry/main/qqwry.dat",
+	// 后两个源默认留空即不启用，升级后行为零变化：它们各自要多下载几十 MB、
+	// 多占 3~4 MB 磁盘，还会让 Multi.Lookup 多返回两个判定（界面上的「存疑」
+	// 标记会更常出现）。这些都该由管理员自己决定，不能靠一次升级替他打开。
+	// IP2Location 还有硬性理由：下载要管理员自己的 token，没有默认值可给。
+	"ip2locationSourceUrl": "",
+	"dbipSourceUrl":        "",
+	// 地区限制的合并口径，默认 0（并集）＝ 升级后行为零变化。
+	"regionMatchMode": "0",
 	"accessLogEnable":          "0",
 	"accessLogRetentionDays":   "7",
 	"trafficHourRetentionDays": "30",
@@ -442,6 +450,55 @@ func (s *SettingService) GetIPDBSourceUrl() (string, error) {
 // 纯真库是第二个离线数据源：中文原生、每天有镜像更新，与 ip2region 交叉校验。
 func (s *SettingService) GetQQWrySourceUrl() (string, error) {
 	return s.getString("qqwrySourceUrl")
+}
+
+// GetIP2LocationSourceUrl 返回 IP2Location LITE DB3 的下载地址。**默认留空**。
+//
+// 它与前两个源不同，下载需要每个管理员自己在 ip2location.com 注册后拿到的
+// token，地址形如 https://www.ip2location.com/download?token=<TOKEN>&file=DB3LITE。
+// 不给默认值有两个原因：token 是个人凭证，内置一个共用的会被上游判定为
+// account sharing 并封号；而 LITE 的许可也明确禁止再分发数据本身。
+func (s *SettingService) GetIP2LocationSourceUrl() (string, error) {
+	return s.getString("ip2locationSourceUrl")
+}
+
+// GetDBIPSourceUrl 返回 DB-IP City Lite 的下载地址，其中的 {YYYY-MM} 会被展开。
+//
+// DB-IP 每月 1 日发布新一版，文件名里带年月，所以地址不是固定串。展开逻辑见
+// expandMonthPlaceholder。
+func (s *SettingService) GetDBIPSourceUrl() (string, error) {
+	raw, err := s.getString("dbipSourceUrl")
+	if err != nil {
+		return "", err
+	}
+	return expandMonthPlaceholder(raw, time.Now()), nil
+}
+
+// monthPlaceholder 是 DB-IP 下载地址里的年月占位符。
+const monthPlaceholder = "{YYYY-MM}"
+
+// expandMonthPlaceholder 把地址里的 {YYYY-MM} 展开成具体年月。
+//
+// **每月前两天取上一个月**：上游在 1 日发布，但发布完成有时差，而未发布的月份
+// 返回的是 404。实测 2026-10 的地址在 9 月是 404，而 2026-08 的地址到 9 月仍然
+// 可用——旧月份不会下线，所以往回退一个月永远是安全的，而往前踩空会让每月初
+// 连着几天更新失败、界面上只显示「更新失败」，看不出是在等上游发布。
+//
+// 代价是每月 1~2 日用的是上个月那份数据。IP 归属地按月变化的量极小，而这两天
+// 之后的定时更新会自动追平。
+func expandMonthPlaceholder(raw string, now time.Time) string {
+	if !strings.Contains(raw, monthPlaceholder) {
+		return raw
+	}
+	if now.Day() < 3 {
+		now = now.AddDate(0, 0, -now.Day())
+	}
+	return strings.ReplaceAll(raw, monthPlaceholder, now.Format("2006-01"))
+}
+
+// GetRegionMatchMode 返回地区限制的合并口径，取值见 RegionMatchUnion / RegionMatchMajority。
+func (s *SettingService) GetRegionMatchMode() (int, error) {
+	return s.getInt("regionMatchMode")
 }
 
 // GetIPDBUpdateTime 返回 IP 库的每日更新时刻，格式 HH:MM，留空表示关闭自动更新。

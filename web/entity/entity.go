@@ -40,9 +40,12 @@ type AllSetting struct {
 
 	SubscriptionUpdateTime string `json:"subscriptionUpdateTime" form:"subscriptionUpdateTime"`
 
-	IPDBSourceUrl  string `json:"ipdbSourceUrl" form:"ipdbSourceUrl"`
-	QQWrySourceUrl string `json:"qqwrySourceUrl" form:"qqwrySourceUrl"`
-	IPDBUpdateTime string `json:"ipdbUpdateTime" form:"ipdbUpdateTime"`
+	IPDBSourceUrl        string `json:"ipdbSourceUrl" form:"ipdbSourceUrl"`
+	QQWrySourceUrl       string `json:"qqwrySourceUrl" form:"qqwrySourceUrl"`
+	IP2LocationSourceUrl string `json:"ip2locationSourceUrl" form:"ip2locationSourceUrl"`
+	DBIPSourceUrl        string `json:"dbipSourceUrl" form:"dbipSourceUrl"`
+	IPDBUpdateTime       string `json:"ipdbUpdateTime" form:"ipdbUpdateTime"`
+	RegionMatchMode      int    `json:"regionMatchMode" form:"regionMatchMode"`
 
 	AccessLogEnable          int `json:"accessLogEnable" form:"accessLogEnable"`
 	AccessLogRetentionDays   int `json:"accessLogRetentionDays" form:"accessLogRetentionDays"`
@@ -254,8 +257,21 @@ func (s *AllSetting) CheckValid() error {
 	if err := checkIPDBSourceUrl("纯真库源地址", s.QQWrySourceUrl); err != nil {
 		return err
 	}
-	if s.IPDBSourceUrl == "" && s.QQWrySourceUrl == "" {
+	if err := checkIPDBSourceUrl("IP2Location 源地址", s.IP2LocationSourceUrl); err != nil {
+		return err
+	}
+	if err := checkIPDBSourceUrl("DB-IP 源地址", s.DBIPSourceUrl); err != nil {
+		return err
+	}
+	// 四个源全空才拒绝。判据是「一个都不剩」而不是「前两个都空」：后两个源
+	// 同样能撑起归属地与地区限制，只把前两个算数会把一个已经配好 IP2Location
+	// 的管理员挡在保存按钮外面。
+	if s.IPDBSourceUrl == "" && s.QQWrySourceUrl == "" &&
+		s.IP2LocationSourceUrl == "" && s.DBIPSourceUrl == "" {
 		return common.NewError("至少要保留一个 IP 归属地库的源地址，否则归属地与地区限制都会失效")
+	}
+	if s.RegionMatchMode != 0 && s.RegionMatchMode != 1 {
+		return common.NewError("地区匹配模式只能是 0（宽松）或 1（平衡）:", s.RegionMatchMode)
 	}
 
 	// 留空表示关闭自动更新。
