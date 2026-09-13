@@ -381,11 +381,18 @@
                                          :class="onlineCountOf(dbInbound.id).count ? '' : 'cell-muted'">
                                         [[ onlineCountOf(dbInbound.id).count ]] 台
                                     </div>
-                                    <div v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0"
-                                         class="cell-sub cell-num">
-                                        ↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s ·
-                                        ↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
-                                    </div>
+                                    <!-- 上下行分两行：挤在一行时这个列宽下必然折行，而断点
+                                         落在数字与单位之间（「64.38 / KB/s」），读起来像两个
+                                         残缺的数。拆成带文字标签的两行，顺带去掉箭头那层
+                                         要先认约定的编码。 -->
+                                    <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
+                                        <div class="cell-sub cell-num">
+                                            上传: [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s
+                                        </div>
+                                        <div class="cell-sub cell-num">
+                                            下载: [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
+                                        </div>
+                                    </template>
                                     <!-- 都是 0 时收成一条短横：一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉
                                          真正在跑的那几行。 -->
                                     <div v-else class="cell-sub">—</div>
