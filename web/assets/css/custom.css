@@ -659,6 +659,26 @@ button:focus-visible,
     font-variant-numeric: tabular-nums;
 }
 
+/* 实时网速这一格每 2 秒重绘一次，内容在「两行速度」与「一行短横」之间来回
+ * 切换。不按两行留位的话，一个用户开始跑流量整行就长高一行、停下来又缩回去
+ * ——在一张每 2 秒刷新的表上这是肉眼可见的上下弹跳，而且弹的是整行（行高由
+ * 最高的那个单元格决定）。所以这里按两行钉死高度，没速度时那条短横自己垫满。
+ * 34px = 16px 行高 × 2 + 两行之间的 2px。 */
+.cell-speed {
+    margin-top: 2px;
+    min-height: 34px;
+}
+
+/* 上边距交给 .cell-speed 自己出，否则它与内部第一行的 margin 会折叠，
+ * min-height 留的位就与实际渲染高度差 2px。 */
+.cell-speed > .cell-sub {
+    margin-top: 0;
+}
+
+.cell-speed > .cell-sub + .cell-sub {
+    margin-top: 2px;
+}
+
 .cell-muted {
     color: var(--aui-text-3);
 }
