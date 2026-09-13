@@ -381,21 +381,29 @@
                                          :class="onlineCountOf(dbInbound.id).count ? '' : 'cell-muted'">
                                         [[ onlineCountOf(dbInbound.id).count ]] 台
                                     </div>
-                                    <!-- 上下行分两行：挤在一行时这个列宽下必然折行，而断点
-                                         落在数字与单位之间（「64.38 / KB/s」），读起来像两个
-                                         残缺的数。拆成带文字标签的两行，顺带去掉箭头那层
-                                         要先认约定的编码。 -->
-                                    <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
-                                        <div class="cell-sub cell-num">
-                                            上传: [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s
-                                        </div>
-                                        <div class="cell-sub cell-num">
-                                            下载: [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
-                                        </div>
-                                    </template>
-                                    <!-- 都是 0 时收成一条短横：一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉
-                                         真正在跑的那几行。 -->
-                                    <div v-else class="cell-sub">—</div>
+                                    <!-- 上下行分两行：挤在一行时「↑ … · ↓ …」在这个列宽下会
+                                         折行，而断点落在数字与单位之间（「64.38 / KB/s」），
+                                         两个数各被劈成两半。
+                                         .cell-speed 负责把这一格的高度钉死——内容在「两行
+                                         速度」与「一行短横」之间每 2 秒切换一次，不留位的话
+                                         整行会跟着上下弹跳，见 custom.css 里的注释。 -->
+                                    <div class="cell-speed">
+                                        <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
+                                            <div class="cell-sub cell-num"
+                                                 :class="speedToneOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed)"
+                                                 :title="speedHintOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed, '上行')">
+                                                ↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s
+                                            </div>
+                                            <div class="cell-sub cell-num"
+                                                 :class="speedToneOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed)"
+                                                 :title="speedHintOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed, '下行')">
+                                                ↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
+                                            </div>
+                                        </template>
+                                        <!-- 都是 0 时收成一条短横：一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉
+                                             真正在跑的那几行。 -->
+                                        <div v-else class="cell-sub">—</div>
+                                    </div>
                                 </template>
                                 <!-- 数不出来必须显示「—」而不是 0：把「看不到」渲染成「没人在线」，
                                      管理员就会对着一个假的 0 做判断。 -->
@@ -862,6 +870,43 @@
                     out.push({ key: 'rate', text: `限速 ${up}/${down}`, title: `上行 ${up}，下行 ${down}` });
                 }
                 return out;
+            },
+            // 实时速率贴近 tc 设的限速时给那一行上色。两个方向各判各的——
+            // 只有下行打满就只有「↓」那行变红，管理员一眼知道该调哪个方向。
+            //
+            // **没设限速的方向一律不上色**（mbit 为 0）。否则这一列会常年
+            // 彩色，重蹈 custom.css 上方注释里记的「彩色标签泛滥」：彩色只
+            // 留给「出事了」。
+            //
+            // 这个对比能成立，前提是两边口径一致：upSpeed/downSpeed 来自内核
+            // 连接表（web/service/online.go），是含 TLS/WS 封装开销的**链路层**
+            // 字节，而 tc 也作用在链路层。若改用 xray 的应用层统计来比，分子会
+            // 系统性偏低 5~15%，红档几乎永远不会亮，而且没有任何一层会报错。
+            //
+            // 单位：upMbit/downMbit 是 Mbps（10^6 bit/s，与 tc 的 mbit 同义），
+            // 速率是 B/s，所以 1 Mbps = 125000 B/s。
+            speedRatioOf(mbit, speed) {
+                if (!(mbit > 0) || !(speed > 0)) return 0;
+                return speed / (mbit * 125000);
+            },
+            speedToneOf(mbit, speed) {
+                const ratio = this.speedRatioOf(mbit, speed);
+                // 红档取 95% 而不是 100%：tc 是令牌桶，实测速率通常压在标称值的
+                // 90~97%，再叠加采样间隔的平滑，正好打满 100% 的时刻极少——按
+                // 100% 判这一档几乎不会亮。红的含义是「已经贴在限速墙上了」。
+                if (ratio >= 0.95) return 'status-text-danger';
+                if (ratio >= 0.80) return 'status-text-warn';
+                return '';
+            },
+            // 只在上了色时才给 title：没上色的行挂一个 tooltip 只会让整列
+            // 到处弹提示。颜色本身不说明「为什么红」，这句话是它唯一的出口。
+            speedHintOf(mbit, speed, dir) {
+                const ratio = this.speedRatioOf(mbit, speed);
+                if (ratio < 0.80) return '';
+                // 向下取整而不是四舍五入：94.9% 判的是黄档，round 会把它写成
+                // 「95%」——读的人看到黄色却配着红档的数字，只会觉得哪里坏了。
+                // floor 保证这个百分比永远不越过它所在档位的边界。
+                return `${dir}已达限速 ${mbit}M 的 ${Math.floor(ratio * 100)}%`;
             },
             clickAction(action, dbInbound) {
                 switch (action.key) {
