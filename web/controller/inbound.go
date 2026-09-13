@@ -25,6 +25,7 @@ type InboundController struct {
 	sharingRiskService    service.SharingRiskService
 	ipUsageService        service.IPUsageService
 	settingService        service.SettingService
+	routingRuleService    service.RoutingRuleService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -40,6 +41,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/list", a.getInbounds)
 	g.POST("/add", a.addInbound)
 	g.POST("/del/:id", a.delInbound)
+	g.POST("/delPreview/:id", a.delPreviewInbound)
 	g.POST("/update/:id", a.updateInbound)
 	g.POST("/renew/:id", a.renewInbound)
 	g.POST("/onlines/:id", a.getOnlines)
@@ -98,6 +100,22 @@ func (a *InboundController) addInbound(c *gin.Context) {
 	if err == nil {
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// delPreviewInbound 告诉前端「删掉这个入站会顺带动到哪些分流规则」，供删除
+// 确认框如实点名。只读，不改任何东西；真正的判定仍以 DelInbound 那一次为准。
+func (a *InboundController) delPreviewInbound(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "删除预检", err)
+		return
+	}
+	plan, err := a.routingRuleService.PlanInboundDetach(id)
+	if err != nil {
+		jsonMsg(c, "删除预检", err)
+		return
+	}
+	jsonObj(c, plan, nil)
 }
 
 func (a *InboundController) delInbound(c *gin.Context) {

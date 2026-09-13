@@ -201,32 +201,6 @@ func TestDelOutboundNodeRejectsWhenReferenced(t *testing.T) {
 	}
 }
 
-// SQLite 的自增主键 id 会被复用（GORM 的 sqlite 驱动生成的是 rowid 别名而非
-// AUTOINCREMENT）。删掉用户甲的入站后，新建用户丙的入站可能拿到同一个 id，
-// 「甲的 ChatGPT 走 B 节点」这条孤儿规则会静默重绑到丙身上，规则列表还会渲染得
-// 很合理。生成期跳过那道防线拦不住 —— 引用不再悬空，只是指错了人。
-// 三条引用边必须对称：域名组、出站已有守卫，入站也要有。
-func TestDelInboundRejectedWhileReferencedByRule(t *testing.T) {
-	setupDB(t)
-	in := newTestInbound(t, 10001)
-	g := newTestGroup(t, "ChatGPT")
-	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
-		Remark: "甲的 ChatGPT", InboundIds: mustEncodeIds(t, []int{in.Id}), DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}),
-		Action: model.ActionBlock, Enable: true,
-	}); err != nil {
-		t.Fatalf("Add rule: %v", err)
-	}
-
-	if err := (&InboundService{}).DelInbound(in.Id); err == nil {
-		t.Fatal("DelInbound removed an inbound that a routing rule still references")
-	}
-
-	// 被拒之后入站必须还在，否则守卫只是「报错但照删」
-	if _, err := (&InboundService{}).GetInbound(in.Id); err != nil {
-		t.Errorf("inbound was deleted despite the rejection: %v", err)
-	}
-}
-
 // 空的 InboundIds（「所有用户」）不指向任何具体入站，不该阻塞任何入站的删除。
 func TestDelInboundAllowedWhenOnlyGlobalRuleExists(t *testing.T) {
 	setupDB(t)
@@ -287,46 +261,6 @@ func TestDecodeInboundIdsTreatsBlankAsAllUsers(t *testing.T) {
 func TestDecodeInboundIdsRejectsCorruptData(t *testing.T) {
 	if _, err := DecodeInboundIds("{not json"); err == nil {
 		t.Error("expected error for corrupt data")
-	}
-}
-
-// 引用守卫必须能看穿多入站规则：SQLite 会复用被删除的自增 id，
-// 一条覆盖 [甲, 乙] 的规则在甲被删掉后，会静默重绑到捡到甲旧 id 的新入站上。
-func TestCheckInboundRefsSeesIdInTheMiddleOfAMultiInboundRule(t *testing.T) {
-	setupDB(t)
-	g := newTestGroup(t, "ChatGPT")
-	a := newTestInbound(t, 10001)
-	b := newTestInbound(t, 10002)
-	c := newTestInbound(t, 10003)
-	s := RoutingRuleService{}
-	if err := s.Add(&model.RoutingRule{
-		InboundIds:    mustEncodeIds(t, []int{a.Id, b.Id}),
-		DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
-	}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	if err := s.CheckInboundRefs(b.Id); err == nil {
-		t.Error("expected error: inbound b is referenced by a multi-inbound rule")
-	}
-	if err := s.CheckInboundRefs(c.Id); err != nil {
-		t.Errorf("unreferenced inbound should be deletable, got %v", err)
-	}
-}
-
-// 「所有用户」规则不指向任何具体入站，不算引用——与旧语义 InboundId = 0 一致。
-// 否则一旦建了全局封禁规则，所有入站都删不掉了。
-func TestCheckInboundRefsIgnoresAllUsersRule(t *testing.T) {
-	setupDB(t)
-	g := newTestGroup(t, "违规域名")
-	in := newTestInbound(t, 10001)
-	s := RoutingRuleService{}
-	if err := s.Add(&model.RoutingRule{
-		InboundIds: "[]", DomainGroupId: g.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{g.Id}), Action: model.ActionBlock, Enable: true,
-	}); err != nil {
-		t.Fatalf("Add: %v", err)
-	}
-	if err := s.CheckInboundRefs(in.Id); err != nil {
-		t.Errorf("an all-users rule must not pin any specific inbound, got %v", err)
 	}
 }
 

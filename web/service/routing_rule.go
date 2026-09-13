@@ -168,7 +168,7 @@ func (s *RoutingRuleService) checkConflict(rule *model.RoutingRule) error {
 
 	// 域名组是 JSON 数组列，没法再用 WHERE domain_group_id = ? 交给 SQL 过滤，
 	// 只能读出全部规则逐条解码。规则是几十条量级，这点开销换掉一张关联表是
-	// 划算的——与 CheckInboundRefs 同一个取舍。
+	// 划算的——与 planInboundDetach 同一个取舍。
 	others, err := s.GetAll()
 	if err != nil {
 		return err
@@ -402,7 +402,7 @@ func (s *RoutingRuleService) Del(id int) error {
 // 那时引用不再悬空，生成期的跳过防线拦不住，规则列表还会渲染得完全正常。
 //
 // DomainGroupIds 是 JSON 数组列，没法交给 SQL 去数，只能读出来逐条解码，
-// 与 CheckInboundRefs 同形。
+// 与 planInboundDetach 同形。
 func (s *RoutingRuleService) CheckDomainGroupRefs(groupId int) error {
 	if groupId <= 0 {
 		return nil
@@ -429,48 +429,6 @@ func (s *RoutingRuleService) CheckDomainGroupRefs(groupId int) error {
 	}
 	if count > 0 {
 		return common.NewError("该域名组仍被", count, "条分流规则引用，请先删除这些规则")
-	}
-	return nil
-}
-
-// CheckInboundRefs 在删除入站前调用。
-//
-// SQLite 的自增主键 id 会被复用：GORM 的 sqlite 驱动对 primaryKey;autoIncrement
-// 生成的是 rowid 别名而非 AUTOINCREMENT，删掉最大 id 的行后，新插入的行会拿到
-// 同一个 id。删掉用户甲的入站再新建用户丙的入站，「甲的 ChatGPT 走 B 节点」这条
-// 孤儿规则会静默重绑到丙身上，而规则列表还会渲染得很合理。
-//
-// 生成期跳过那道防线拦不住这种情况——引用不再悬空，只是指错了人。
-//
-// InboundIds 为空数组是「所有用户」规则，不指向任何具体入站，不参与本检查。
-func (s *RoutingRuleService) CheckInboundRefs(inboundId int) error {
-	if inboundId <= 0 {
-		return nil
-	}
-	// InboundIds 是 JSON 数组列，没法交给 SQL 去数，只能读出来逐条解码。
-	// 规则是几十条量级，这点开销换掉一张关联表是划算的。
-	rules, err := s.GetAll()
-	if err != nil {
-		return err
-	}
-	count := 0
-	for _, rule := range rules {
-		ids, decodeErr := DecodeInboundIds(rule.InboundIds)
-		if decodeErr != nil {
-			// 数据损坏时无从判断这条规则引用了谁。宁可拦住删除：放行的话，
-			// SQLite 复用 id 后这条规则可能静默绑到新建的入站上。
-			return common.NewError("分流规则", rule.Id,
-				"的入站数据已损坏，无法确认引用关系，请先修复或删除该规则")
-		}
-		for _, id := range ids {
-			if id == inboundId {
-				count++
-				break
-			}
-		}
-	}
-	if count > 0 {
-		return common.NewError("该入站仍被", count, "条分流规则引用，请先删除这些规则")
 	}
 	return nil
 }
@@ -638,4 +596,123 @@ func intersectGroups(a, b []int) (bool, int) {
 		}
 	}
 	return false, 0
+}
+
+// AffectedRule 是删除某个入站时会被动到的一条分流规则。
+type AffectedRule struct {
+	Id    int    `json:"id"`
+	Label string `json:"label"`
+	// rest 是摘掉该入站之后剩下的入站 id。Removed 里的规则恒为空。
+	rest []int
+}
+
+// InboundDetachPlan 是「删除某个入站时，分流规则该怎么改」的完整判定结果。
+//
+// 删除前的预检接口与真正执行共用同一次判定（planInboundDetach）。分成两份
+// 实现迟早漂移，而漂移之后确认框告诉管理员的和实际做的不是一回事，没有任何
+// 一层会报错。
+type InboundDetachPlan struct {
+	// Removed 里的规则只覆盖这一个入站，必须整条删除。
+	Removed []AffectedRule `json:"removed"`
+	// Detached 里的规则还覆盖别的入站，只摘掉这一个。
+	Detached []AffectedRule `json:"detached"`
+}
+
+// planInboundDetach 算出删除 inboundId 时每条规则的去向，不碰数据库。
+//
+// 分流规则存的是入站 id 外键，而 SQLite 会复用被删除的自增 id：GORM 的 sqlite
+// 驱动对 primaryKey;autoIncrement 生成的是 rowid 别名而非 AUTOINCREMENT，删掉
+// 最大 id 的行后，新插入的行会拿到同一个 id。删掉用户甲的入站再新建用户丙的，
+// 「甲的 ChatGPT 走 B 节点」这条孤儿规则会静默重绑到丙身上，而规则列表还会渲染
+// 得很合理——引用不再悬空，生成期那道跳过防线也拦不住，只是指错了人。
+//
+// 所以删除入站时必须把指向它的引用一条不剩地清干净。
+func planInboundDetach(rules []*model.RoutingRule, inboundId int) (*InboundDetachPlan, error) {
+	plan := &InboundDetachPlan{}
+	if inboundId <= 0 {
+		return plan, nil
+	}
+	for _, rule := range rules {
+		ids, err := DecodeInboundIds(rule.InboundIds)
+		if err != nil {
+			// 数据损坏时无从判断这条规则引用了谁。宁可拦住删除：放行的话，
+			// id 一复用它就绑到下一个新建的入站上了。
+			return nil, common.NewError("分流规则", rule.Id,
+				"的入站数据已损坏，无法确认引用关系，请先修复或删除该规则")
+		}
+		// 空数组是「所有用户」规则，不指向任何具体入站，删谁都与它无关。
+		// 往里摘只会让它从「覆盖所有人」降级成「覆盖剩下这些人」，其余用户
+		// 当场失去它而没有任何一层报错。
+		if len(ids) == 0 {
+			continue
+		}
+		rest := make([]int, 0, len(ids))
+		hit := false
+		for _, id := range ids {
+			if id == inboundId {
+				hit = true
+				continue
+			}
+			rest = append(rest, id)
+		}
+		if !hit {
+			continue
+		}
+		affected := AffectedRule{Id: rule.Id, Label: ruleLabel(rule), rest: rest}
+		if len(rest) == 0 {
+			// 摘完就空了。绝不能把空数组写回去——它的语义是「对所有入站生效」，
+			// 一条本来只管这个人的规则会当场放大到全体，而 xray 返回
+			// Configuration OK、面板显示 running，没有任何一层会报错。
+			// 这条规则已经失去全部覆盖对象，整条删除是它唯一正确的去向。
+			plan.Removed = append(plan.Removed, affected)
+			continue
+		}
+		plan.Detached = append(plan.Detached, affected)
+	}
+	return plan, nil
+}
+
+// PlanInboundDetach 供删除入站前的预检使用：只读，不改任何东西。
+func (s *RoutingRuleService) PlanInboundDetach(inboundId int) (*InboundDetachPlan, error) {
+	rules, err := s.GetAll()
+	if err != nil {
+		return nil, err
+	}
+	return planInboundDetach(rules, inboundId)
+}
+
+// DetachInbound 在删除入站时清干净所有指向它的规则引用，对称于 AttachInbound。
+//
+// tx 由调用方传入：规则清理必须与删入站在同一个事务里。分成两次独立写入的话，
+// 中途失败会留下「规则已经删了但入站还在」或者反过来的孤儿引用，而这两种残留
+// 都不会有任何一层报错。
+func (s *RoutingRuleService) DetachInbound(tx *gorm.DB, inboundId int) error {
+	rules := make([]*model.RoutingRule, 0)
+	if err := tx.Model(model.RoutingRule{}).Find(&rules).Error; err != nil {
+		return err
+	}
+	plan, err := planInboundDetach(rules, inboundId)
+	if err != nil {
+		return err
+	}
+	for _, r := range plan.Removed {
+		if err := tx.Delete(model.RoutingRule{}, r.Id).Error; err != nil {
+			return err
+		}
+	}
+	for _, r := range plan.Detached {
+		// 用 Strict 而不是 EncodeInboundIds：上面已经保证 rest 非空，这里是
+		// 防止将来某次改动让空数组悄悄落回库里的第二道。
+		encoded, encodeErr := EncodeInboundIdsStrict(r.rest)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		// 只更这一列，不用 Save 写整行——理由同 DomainGroupService.Update：
+		// 整行写入会把读出来那一刻的其余字段一并写回。
+		if err := tx.Model(model.RoutingRule{}).Where("id = ?", r.Id).
+			Update("inbound_ids", encoded).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
