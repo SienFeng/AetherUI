@@ -434,12 +434,21 @@ type ipSourceLocation struct {
 	ISP      string `json:"isp"`
 }
 
-// provinceEvidence 是省级判定的多源证据，**只用于展示，不参与仲裁**。
+// provinceEvidence 是省级判定的多源证据，**同时驱动主判定与界面上的证据行**。
 //
-// 主判定仍由 ipdbSourceList 的顺序决定（顺序的依据是各源的兜底率，见该处注释），
-// 这里回答的是另一个问题：这个判定有多少源同意。两者分开是刻意的——实测四个
-// 源里有两个会把大批判不准的段兜底到广东省，朴素多数票会让那批兜底值顶掉前面
-// 源的正确判定，而界面上完全看不出来。
+// 改动前它只用于展示，主判定由 ipdbSourceList 的顺序独占决定。分工取消之后仍
+// 有两条缓解留着，缺了任何一条都会退回当初不敢用多数票的那个局面——实测四个
+// 源里有两个会把大批判不准的段兜底到省级的广东、市级的省会：
+//
+//   - **Silent 不计票**（没收录该 IP、或收录了却没给省份的源不站任何一边）。
+//     按支持数设阈值会让「1 源认定江苏 + 3 源没收录」和「1 源认定江苏 + 3 源
+//     认定浙江」得到同样的结论，而这两件事完全不同。
+//   - **平票一律回落顺序优先**，只有唯一最高票才改变显示。
+//
+// 香港生产库实测（50 万随机 IPv4、命中中国段 50812 个）：省份从「只有中国」
+// 变成有省份 5.09%，换成另一个省 1.75%，信息丢失 0%。城市那一级的代价要大得
+// 多——7.25% 会把 ip2region 给出的准确地级市换成两个拉丁源一致兜底的省会
+// （枣庄→济南、深圳→广州、阜新→沈阳），这是知情之后接受的取舍，不是疏漏。
 //
 // **三个计数必须分开，绝不能把 Silent 并进 Support。** 「两个源支持江苏，两个
 // 源没有数据」与「四个源都支持江苏」在界面上必须是两句话：前者的可信度明显更
@@ -460,7 +469,10 @@ type provinceEvidence struct {
 
 // evidenceOf 按各源的省级结论统计证据。locs 只含**收录了该 IP** 的源，
 // 所以 Silent 要用总源数减出来，不能靠遍历 locs 数。
-func evidenceOf(locs []ipdb.SourceLocation, total int) provinceEvidence {
+//
+// 第二个返回值是「最高票唯一」。调用方光看 Support 分不清 3:1 与 2:2——两者
+// 的 Support 都可能是 2，而前者该改变主判定、后者必须维持顺序优先。
+func evidenceOf(locs []ipdb.SourceLocation, total int) (provinceEvidence, bool) {
 	votes := map[string]int{}
 	withRegion := 0
 	for _, sl := range locs {
@@ -472,20 +484,117 @@ func evidenceOf(locs []ipdb.SourceLocation, total int) provinceEvidence {
 	}
 	ev := provinceEvidence{Total: total, Silent: total - withRegion}
 	// 平票时取字节序最小的那个，只为让同一份库对同一个 IP 永远给出同一个
-	// 展示结果——这里不承担仲裁职责，取谁都不影响主判定。
+	// 展示结果。平票不进入仲裁，取谁都不影响主判定。
 	for province, n := range votes {
 		if n > ev.Support || (n == ev.Support && province < ev.Province) {
 			ev.Province, ev.Support = province, n
 		}
 	}
 	ev.Conflict = withRegion - ev.Support
-	return ev
+	tied := 0
+	for _, n := range votes {
+		if n == ev.Support {
+			tied++
+		}
+	}
+	return ev, tied == 1
+}
+
+// resolvePrimary 定出要显示的那一份归属地。
+//
+// 省份有唯一最高票时，把给出该省的源收成一个子集，国家取子集里第一个源、城市
+// 在子集内再投一次票；没有唯一最高票（平票，或一个源都没给出省份）则整个退回
+// 「按源顺序取第一个有内容的」这条老路。
+//
+// **城市票只在同省子集里数，不在全集里数。** 在全集里投会拼出「江苏省 上海市」
+// 这种自洽性可疑的组合——省份来自一批源、城市来自另一批，而画像与地区限制都
+// 按省份走，界面上却写着另一个省的城市，没有任何一层会报错。
+func resolvePrimary(found []ipdb.SourceLocation, winner string, decisive bool) (ipdb.Location, bool) {
+	if !decisive || winner == "" {
+		return firstDisplayable(found)
+	}
+	var subset []ipdb.SourceLocation
+	for _, sl := range found {
+		if sl.Location.Region == winner {
+			subset = append(subset, sl)
+		}
+	}
+	if len(subset) == 0 {
+		return firstDisplayable(found)
+	}
+	return ipdb.Location{
+		Country: subset[0].Location.Country,
+		Region:  winner,
+		City:    majorityCity(subset),
+		ISP:     firstISP(subset),
+	}, true
+}
+
+// majorityCity 在同省的源之间投票选出城市。
+//
+// 先按 ipdb.CanonicalCity 归一再计票：ip2region 写「无锡市」、纯真写「无锡」，
+// 不归一的话同一个城市会被拆成两个候选，三票一致的局面会被数成 2:1:1 而落入
+// 平票分支。显示则用支持该归一名的第一个源的原文，不自己拼一个写法出来。
+//
+// 平票或一个源都没给城市时按源顺序取第一个非空——与省份平票的处置同构。
+func majorityCity(subset []ipdb.SourceLocation) string {
+	votes := map[string]int{}
+	for _, sl := range subset {
+		if c := ipdb.CanonicalCity(sl.Location.City); c != "" {
+			votes[c]++
+		}
+	}
+	best, top, tied := "", 0, 0
+	for c, n := range votes {
+		switch {
+		case n > top:
+			best, top, tied = c, n, 1
+		case n == top:
+			tied++
+		}
+	}
+	if tied == 1 {
+		for _, sl := range subset {
+			if ipdb.CanonicalCity(sl.Location.City) == best {
+				return sl.Location.City
+			}
+		}
+	}
+	for _, sl := range subset {
+		if sl.Location.City != "" {
+			return sl.Location.City
+		}
+	}
+	return ""
+}
+
+// firstDisplayable 是改动前的主判定规则：按源顺序取第一个能显示出内容的。
+func firstDisplayable(found []ipdb.SourceLocation) (ipdb.Location, bool) {
+	for _, sl := range found {
+		if formatLocation(sl.Location) != "" {
+			loc := sl.Location
+			loc.ISP = firstISP(found)
+			return loc, true
+		}
+	}
+	return ipdb.Location{}, false
+}
+
+// firstISP 按源顺序取第一个非空运营商。
+func firstISP(locs []ipdb.SourceLocation) string {
+	for _, sl := range locs {
+		if sl.Location.ISP != "" {
+			return sl.Location.ISP
+		}
+	}
+	return ""
 }
 
 // locate 返回主判定与「另一个源给出的不同结论」。
 //
-// 不做仲裁：实测两个离线库对同一批 IP 互有出入，谁也不是权威。把分歧原样
-// 显示给管理员，比替他挑一个更有用。
+// 仲裁只到省与市这两级、且只在票数分得出胜负时发生（见 provinceEvidence）。
+// 落选的那一方仍要原样显示成「存疑」：实测各源对同一批 IP 互有出入，谁也不是
+// 权威，藏起分歧比替管理员挑一个更糟。
 func (s *OnlineService) locate(ip net.IP) ipLocation {
 	return locateWithIPDB(s.ipdbService, ip)
 }
@@ -501,31 +610,37 @@ func locateWithIPDB(svc IPDBService, ip net.IP) ipLocation {
 	if db == nil {
 		return out
 	}
-	// 主判定对应的原始 Location。分歧要按字段逐级判，不能拿 formatLocation
-	// 拼出来的串比——「南京市」与「南京」是同一个地方的两种写法。
-	var primary ipdb.Location
 	found := db.Lookup(ip)
-	out.Evidence = evidenceOf(found, db.Len())
+	decisive := false
+	out.Evidence, decisive = evidenceOf(found, db.Len())
 	for _, sl := range found {
-		text := formatLocation(sl.Location)
 		out.Sources = append(out.Sources, ipSourceLocation{
 			Source:   ipdbSourceName(sl.Source),
-			Location: text,
+			Location: formatLocation(sl.Location),
 			ISP:      sl.Location.ISP,
 		})
-		if text != "" {
-			if out.Location == "" {
-				out.Location, primary = text, sl.Location
-			} else if out.LocationAlt == "" && !sameLocation(primary, sl.Location) {
-				out.LocationAlt = text
-			}
+	}
+
+	// 主判定对应的 Location。分歧要按字段逐级判，不能拿 formatLocation 拼出来
+	// 的串比——「南京市」与「南京」是同一个地方的两种写法。
+	primary, ok := resolvePrimary(found, out.Evidence.Province, decisive)
+	if ok {
+		out.Location = formatLocation(primary)
+	}
+	out.ISP = primary.ISP
+	if out.ISP == "" {
+		// 胜出那一批源全都不提供运营商时回落全集。实测三成多的中国段主判定
+		// 会落到两个拉丁源身上，而它们从不带 ISP——锁死在子集里等于让运营商
+		// 这一列凭空消失，而它与省份是各判各的，跨源不会拼出矛盾。
+		out.ISP = firstISP(found)
+	}
+	for _, sl := range found {
+		if text := formatLocation(sl.Location); text != "" && out.LocationAlt == "" &&
+			ok && !sameLocation(primary, sl.Location) {
+			out.LocationAlt = text
 		}
-		if isp := sl.Location.ISP; isp != "" {
-			if out.ISP == "" {
-				out.ISP = isp
-			} else if isp != out.ISP && out.ISPAlt == "" {
-				out.ISPAlt = isp
-			}
+		if isp := sl.Location.ISP; isp != "" && out.ISPAlt == "" && isp != out.ISP {
+			out.ISPAlt = isp
 		}
 	}
 	return out
