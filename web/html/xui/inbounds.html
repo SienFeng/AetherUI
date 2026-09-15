@@ -201,10 +201,20 @@
                                          :pagination="false" size="small"
                                          :locale="{ emptyText: '这段时间内没有来源连接过。若只是数据已过保留期，上方会有说明；更早的记录可从左侧「操作 → 访问日志」查看' }">
                                     <template slot="firstSeen" slot-scope="text, online">
-                                        <template v-if="online.offline">
+                                        <template v-if="online.offline && online.lastSeen">
                                             <a-tooltip>
                                                 <template slot="title">该来源在所选时段内有用量，但当前不在线。显示的是最后活跃时间。</template>
                                                 <span style="color: rgba(0,0,0,.45)">[[ DateUtil.formatMillis(online.lastSeen) ]]</span>
+                                            </a-tooltip>
+                                        </template>
+                                        <!-- 被封禁的来源由服务端追加进列表，它在所选窗口内不一定
+                                             有用量，那时一个时间都拿不到。照上面那支渲染的话，
+                                             formatMillis(0) 会显示 1970 年，tooltip 还写着「所选
+                                             时段内有用量」——两句都不成立。 -->
+                                        <template v-else-if="online.offline">
+                                            <a-tooltip>
+                                                <template slot="title">该来源当前不在线，且在所选时段内没有用量记录。换一个更长的时段，或从「访问日志」查看它的历史。</template>
+                                                <span class="cell-muted">—</span>
                                             </a-tooltip>
                                         </template>
                                         <template v-else-if="online.firstSeen">[[ DateUtil.formatMillis(online.firstSeen) ]]</template>
@@ -303,6 +313,12 @@
                                         <a-button v-if="online.conns > 0" type="link" size="small"
                                                   style="color: var(--aui-danger)"
                                                   @click="kickOnline(dbInbound, online)">踢下线</a-button>
+                                        <!-- 没有连接就没得踢，但封禁照样能下：管理员看到一段
+                                             异常用量时，那个来源多半已经断开了。少了这个入口，
+                                             他只能守在页面前等对方重新上线才点得到「踢下线」。 -->
+                                        <a-button v-else-if="!online.banned" type="link" size="small"
+                                                  style="color: var(--aui-danger)"
+                                                  @click="kickOnline(dbInbound, online, true)">禁止连接</a-button>
                                         <a-button v-if="online.banned" type="link" size="small"
                                                   @click="unbanOnline(dbInbound, online)">解除封禁</a-button>
                                         <a-button type="link" size="small"
@@ -1144,7 +1160,26 @@
                 const merged = onlineList.map(o => {
                     const u = byIP[o.ip];
                     delete byIP[o.ip];
-                    return Object.assign({}, o, {
+                    // 服务端把「被封禁但当前一条连接都没有」的来源也追加进了在线
+                    // 列表（markBanned），这类行除 IP 与封禁状态外全是零值，没有
+                    // firstSeen。按在线渲染的话，管理员刚封完就会看到这一行跳进
+                    // 在线区、连接数显示 0 而不是「—」，归属地与运营商整列变成
+                    //「未知」——功能是好的，但看起来像是刚把一个陌生来源放了进来。
+                    //
+                    // 判据必须带上 banned，不能只看「没有 firstSeen 且没有连接」：
+                    // 超额被拒的来源连接已被断开，服务端同样以这副零值形态追加进
+                    // 列表（online.go 的 rejectedAt 循环）。它是此刻正在被挡的活跃
+                    // 状态，归到离线区就等于把「谁在被挡」这件事从在线视图里抹掉。
+                    const bannedOffline = !!o.banned && !o.firstSeen && !o.conns;
+                    // 窗口用量里有同一个 IP 时，把展示用的几列补回去。补不上的
+                    // 情况也是正常的：封禁三天前活跃过的来源、窗口却只选了「今日」。
+                    const fromUsage = bannedOffline && u ? {
+                        location: u.location, locationAlt: u.locationAlt,
+                        isp: u.isp, ispAlt: u.ispAlt,
+                        sources: u.sources, evidence: u.evidence,
+                        lastSeen: u.lastSeen,
+                    } : {};
+                    return Object.assign({}, o, fromUsage, {
                         usageUp: u ? u.up : 0,
                         usageDown: u ? u.down : 0,
                         // 在线但库里还没有这一窗口的记录：显示「统计中」而
@@ -1157,8 +1192,11 @@
                         // 是他那段时间没用过、或者数据已过保留期，绝不是「才刚
                         // 上线还没满 1 分钟」。对历史区间显示 0 即可，真正的原因
                         // 由表格上方那条 a-alert 统一解释。
-                        usageMissing: !u && !usage.beyondRetention && !this.customRangeOf(id),
-                        offline: false,
+                        //
+                        // 被封禁的离线来源同样不适用：它根本没在连，「活跃满 1
+                        // 分钟后开始计入」是在解释一件不会发生的事。
+                        usageMissing: !bannedOffline && !u && !usage.beyondRetention && !this.customRangeOf(id),
+                        offline: bannedOffline,
                     });
                 });
 
@@ -1178,8 +1216,13 @@
                     }));
 
                 // 在线的在前，离线的在后，两者不混排：管理员一眼要能分出
-                //「现在有几个人在连」。
-                this.$set(this.mergedOnlines, id, merged.concat(offline));
+                //「现在有几个人在连」。merged 里那些被封禁的离线行来自在线接口，
+                // 但它们不在连，得跟着离线的一起往后排——刚封掉的来源留在在线区
+                // 顶上，等于当场否认这次操作生效了。它们排在离线区最前面：那是
+                // 管理员上一秒刚动过的行。
+                const live = merged.filter(o => !o.offline);
+                const bannedRows = merged.filter(o => o.offline);
+                this.$set(this.mergedOnlines, id, live.concat(bannedRows, offline));
             },
             onExpand(expanded, dbInbound) {
                 if (expanded) {
@@ -1361,37 +1404,66 @@
             showAccessLog(dbInbound, ip) {
                 accessLogModal.show({ dbInbound: dbInbound, ip: ip });
             },
-            kickOnline(dbInbound, online) {
+            // offline 为真表示这个来源当前没有连接。两种场景共用一个确认框而不是
+            // 各写一份：两份几乎相同的 content 迟早会分叉，而分叉之后不会有任何
+            // 东西提醒你其中一份漏改了。
+            kickOnline(dbInbound, online, offline) {
                 // 只断开的话客户端下一秒就能重连，并发额度判定每轮重算、额度够了照样放行。
                 // 所以这里让管理员选一个封禁时长，0 保留原来的「只断开」行为。
-                this.kickBanSeconds = 0;
+                //
+                // 离线来源去掉「仅断开」这一项：它对一个已经没有连接的来源是一次
+                // 空操作，而放在首位就成了默认值——点开确认框直接回车，什么都没发生。
+                // 默认落在永久封禁，因为管理员是先看到一段异常用量才来点这个按钮的。
+                const choices = offline
+                    ? [
+                        [-1, '永久封禁（需手动解除）'],
+                        [86400, '封禁 24 小时'],
+                        [3600, '封禁 1 小时'],
+                        [1800, '封禁 30 分钟'],
+                        [300, '封禁 5 分钟'],
+                    ]
+                    : [
+                        [0, '仅断开（客户端可立即重连）'],
+                        [300, '封禁 5 分钟'],
+                        [1800, '封禁 30 分钟'],
+                        [3600, '封禁 1 小时'],
+                        [86400, '封禁 24 小时'],
+                        [-1, '永久封禁（需手动解除）'],
+                    ];
+                this.kickBanSeconds = choices[0][0];
                 this.$confirm({
-                    title: `踢下线 - ${online.ip}`,
+                    title: `${offline ? '禁止连接' : '踢下线'} - ${online.ip}`,
                     okText: '确定',
                     cancelText: '取消',
                     content: (h) => h('div', [
-                        h('p', '选择封禁时长。封禁期内该来源每一轮都会被断开，且不占用并发额度。'),
+                        h('p', offline
+                            ? '该来源当前不在线。封禁期内它每次重连都会被立即断开，且不占用并发额度。'
+                            : '选择封禁时长。封禁期内该来源每一轮都会被断开，且不占用并发额度。'),
                         // 用非受控的 defaultValue：$confirm 的 content 只渲染一次，
                         // 传受控 value 的话点了选不上（组件拿不到更新后的值）。
                         h('a-radio-group', {
-                            props: { defaultValue: 0 },
+                            props: { defaultValue: choices[0][0] },
                             on: { change: (e) => { this.kickBanSeconds = e.target.value; } },
-                        }, [
-                            h('a-radio', { props: { value: 0 }, style: { display: 'block', lineHeight: '30px' } }, '仅断开（客户端可立即重连）'),
-                            h('a-radio', { props: { value: 300 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 5 分钟'),
-                            h('a-radio', { props: { value: 1800 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 30 分钟'),
-                            h('a-radio', { props: { value: 3600 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 1 小时'),
-                            h('a-radio', { props: { value: 86400 }, style: { display: 'block', lineHeight: '30px' } }, '封禁 24 小时'),
-                            h('a-radio', { props: { value: -1 }, style: { display: 'block', lineHeight: '30px' } }, '永久封禁（需手动解除）'),
-                        ]),
+                        }, choices.map(function (choice) {
+                            return h('a-radio', {
+                                props: { value: choice[0] },
+                                style: { display: 'block', lineHeight: '30px' },
+                            }, choice[1]);
+                        })),
                     ]),
                     onOk: async () => {
                         const banSeconds = this.kickBanSeconds;
                         const msg = await HttpUtil.post(`/aui/inbound/kick/${dbInbound.id}`,
                             { ip: online.ip, banSeconds: banSeconds });
                         if (msg.success) {
-                            const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
-                            this.$message.success(`已断开 ${msg.obj} 条连接${suffix}`);
+                            // 离线来源没有连接可断，复用在线那句会弹出「已断开 0 条连接」，
+                            // 读起来像是操作失败了，而封禁其实已经写进去了。
+                            if (offline) {
+                                this.$message.success(`已封禁 ${online.ip}，重连会被立即断开`);
+                            } else {
+                                const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
+                                this.$message.success(`已断开 ${msg.obj} 条连接${suffix}`);
+                            }
                             await this.loadOnlines(dbInbound.id);
                         }
                     },
