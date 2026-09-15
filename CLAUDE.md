@@ -103,6 +103,8 @@ go mod tidy && go vet ./...
 
 模板用 `[[ ]]` 作为 Vue 插值分隔符以避开 Go 模板的 `{{ }}`。`web/html/xui/form/` 下按协议 / 传输方式拆分为局部模板，新增协议需要同时改 `xray.js`（模型与分享链接生成）和对应 `form/protocol/*.html`。
 
+**给人看的时间一律按面板时区，走 `DateUtil`（`web/assets/js/util/date-util.js`）。** `moment(ms)` 按浏览器所在机器的时区格式化，而用量曲线刻度、「今日」这类窗口、定时任务都按面板时区（`timeLocation`）算——管理员电脑的时区与面板不同时，同一页上表格与曲线会差出整数个小时，哪边都不标时区。面板时区由 `html()` 注入（`web/controller/util.go` 的 `panelTimeZone`，经 `GetTimeLocation` 与服务端同口径回落），在 `common/js.html` 里先于 `date-util.js` 定义；浏览器不认的值（`Local` 能过 `time.LoadLocation`，过不了 `Intl`）回落浏览器本地时区。日期选择器要交给它 `DateUtil.toPanelMoment` 生成的 moment、取值走 `DateUtil.fromPanelMoment`，**不能直接 `valueOf()`**；还必须 `:show-today="false"`——「此刻」按钮给出的是浏览器本地的 `moment()`，会被当成面板时区的钟面时间，一点就差出时区差。`web/panel_time_zone_test.go` 守着这三条。唯一刻意保留浏览器本地时间的是分流导出的文件名（`routing.html`，那是管理员自己电脑上的下载时刻）。
+
 ### 调试模式与嵌入资源
 
 `config.IsDebug()` 为真时：gin 用 DebugMode，模板与静态资源**从磁盘的 `web/html`、`web/assets` 读取**（相对当前工作目录，所以必须在仓库根目录启动）；为假时全部走 `//go:embed`。因此改完模板要么开 `XUI_DEBUG=true`，要么重新编译。

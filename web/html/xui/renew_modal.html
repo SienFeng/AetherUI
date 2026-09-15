@@ -14,7 +14,10 @@
             </a-radio-group>
         </a-form-item>
         <a-form-item label="或直接指定到期时间（选择后以此为准）">
+            <!-- 选到的钟面时间按面板时区理解（DateUtil.fromPanelMoment）。去掉「此刻」按钮：
+                 它给的是浏览器本地的 moment()，会被当成面板时区的钟面时间，一点就差出时区差。 -->
             <a-date-picker :show-time="{ format: 'HH:mm' }" format="YYYY-MM-DD HH:mm"
+                           :show-today="false"
                            v-model="renewModal.customDate" style="width: 100%"
                            @change="renewModal.onCustomDateChange"></a-date-picker>
         </a-form-item>
@@ -39,6 +42,7 @@
         dbInbound: null,
         days: 30,
         // moment 对象或 null。非空时以它为准，忽略 days。
+        // 它的本地字段是面板时区的钟面时间，取毫秒必须走 DateUtil.fromPanelMoment。
         customDate: null,
         presets: [
             { days: 7, label: '7 天' },
@@ -72,7 +76,7 @@
         },
         ok() {
             const payload = renewModal.customDate
-                ? { days: 0, expiryTime: renewModal.customDate.valueOf() }
+                ? { days: 0, expiryTime: DateUtil.fromPanelMoment(renewModal.customDate) }
                 : { days: renewModal.days, expiryTime: 0 };
             renewModal.confirm(payload);
         },
@@ -95,7 +99,7 @@
             // 已过期或无限期从当前时刻起算。这里只用于预览，最终以后端写入的为准。
             newExpiryTime() {
                 if (this.renewModal.customDate) {
-                    return this.renewModal.customDate.valueOf();
+                    return DateUtil.fromPanelMoment(this.renewModal.customDate);
                 }
                 const now = new Date().getTime();
                 const base = this.currentExpiryTime > now ? this.currentExpiryTime : now;

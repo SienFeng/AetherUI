@@ -8,6 +8,7 @@ import (
 	"a-ui/config"
 	"a-ui/logger"
 	"a-ui/web/entity"
+	"a-ui/web/service"
 )
 
 func getUriId(c *gin.Context) int64 {
@@ -77,7 +78,24 @@ func html(c *gin.Context, name string, title string, data gin.H) {
 	data["title"] = title
 	data["request_uri"] = c.Request.RequestURI
 	data["base_path"] = c.GetString("base_path")
+	data["time_zone"] = panelTimeZone()
 	c.HTML(http.StatusOK, name, getContext(data))
+}
+
+// panelTimeZone 返回面板时区的 IANA 名，前端据此按面板时区显示时间
+// （web/assets/js/util/date-util.js）。
+//
+// 走 GetTimeLocation 而不是直接读设置项：它对非法值回落到默认时区，前端与
+// 服务端（曲线刻度、用量窗口、定时任务）因此始终是同一个口径。读库失败时
+// 返回空串，前端据此回落到浏览器本地时区——那是改动前的行为，页面照常可用。
+func panelTimeZone() string {
+	settingService := service.SettingService{}
+	loc, err := settingService.GetTimeLocation()
+	if err != nil {
+		logger.Warning("get time location failed:", err)
+		return ""
+	}
+	return loc.String()
 }
 
 func getContext(h gin.H) gin.H {
