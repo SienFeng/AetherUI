@@ -135,7 +135,104 @@ class DateUtil {
     }
 
     static formatMillis(millis) {
-        return moment(millis).format('YYYY-M-D H:m:s')
+        const p = DateUtil.panelParts(millis);
+        if (!p) {
+            return moment(millis).format('YYYY-M-D H:m:s');
+        }
+        return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+    }
+
+    // 只要日期的场合（侧栏的版本发布日期）。
+    static formatMillisDate(millis) {
+        const p = DateUtil.panelParts(millis);
+        if (!p) {
+            return moment(millis).format('YYYY/M/D');
+        }
+        return `${p.year}/${p.month}/${p.day}`;
+    }
+
+    // 给人看的时间一律按面板时区，不按浏览器所在机器的时区。
+    //
+    // 服务端的用量曲线刻度、「今日」这类窗口、定时任务都按面板时区算，而
+    // moment(ms) 用的是浏览器本地时区。管理员的电脑时区一旦与面板不同，同一
+    // 页上表格与曲线就会差出整数个小时，而且哪边都没有标明自己是哪个时区。
+    //
+    // panelTimeZone 由服务端注入（web/controller/util.go 的 panelTimeZone），
+    // 在 common/js.html 里先于本文件定义。浏览器不认识的值（设置里填 Local
+    // 能通过服务端的 time.LoadLocation，Intl 却会抛 RangeError）与读库失败时
+    // 注入的空串，都回落到浏览器本地时区——那是改动前的行为，时间只是换了个
+    // 时区显示，不至于整个出错。
+    static panelFormatter() {
+        if (DateUtil.cachedPanelFormatter !== undefined) {
+            return DateUtil.cachedPanelFormatter;
+        }
+        let formatter = null;
+        if (typeof panelTimeZone === 'string' && panelTimeZone !== '') {
+            try {
+                formatter = new Intl.DateTimeFormat('en-US', {
+                    timeZone: panelTimeZone,
+                    // 不用 hour12: false：部分 Chrome 版本在它下面把零点输出成 24。
+                    hourCycle: 'h23',
+                    year: 'numeric', month: 'numeric', day: 'numeric',
+                    hour: 'numeric', minute: 'numeric', second: 'numeric',
+                });
+            } catch (e) {
+                formatter = null;
+            }
+        }
+        DateUtil.cachedPanelFormatter = formatter;
+        return formatter;
+    }
+
+    // 面板时区下 millis 这一刻的钟面时间，各字段是数字、月份从 1 开始。
+    // 面板时区不可用时返回 null，由调用方回落到浏览器本地时区。
+    static panelParts(millis) {
+        const formatter = DateUtil.panelFormatter();
+        if (!formatter) {
+            return null;
+        }
+        const parts = {};
+        formatter.formatToParts(new Date(millis)).forEach(p => { parts[p.type] = p.value; });
+        return {
+            year: Number(parts.year),
+            month: Number(parts.month),
+            day: Number(parts.day),
+            hour: Number(parts.hour) % 24,
+            minute: Number(parts.minute),
+            second: Number(parts.second),
+        };
+    }
+
+    // antd 的日期选择器只会按浏览器本地时区显示 moment。交给它一个「本地字段
+    // 恰好等于面板时区钟面」的 moment，选择器上看到的就是面板时区的时间。
+    // 选完之后必须经 fromPanelMoment 换算回毫秒，不能直接 valueOf()。
+    static toPanelMoment(millis) {
+        const p = DateUtil.panelParts(millis);
+        if (!p) {
+            return moment(millis);
+        }
+        return moment([p.year, p.month - 1, p.day, p.hour, p.minute, p.second]);
+    }
+
+    // toPanelMoment 的逆：把选择器里的钟面时间当成面板时区的时间，换算回毫秒。
+    //
+    // 偏移要取「结果那一刻」的，而结果正是要算的东西：先用钟面本身估一次，
+    // 再用估出的时刻校正一次——跨夏令时切换时两次取到的偏移不同。面板时区里
+    // 不存在的钟面时间（夏令时拨快跳过的那一小时）会落到相邻的有效时刻，不报错。
+    static fromPanelMoment(m) {
+        if (!DateUtil.panelFormatter()) {
+            return m.valueOf();
+        }
+        const wall = Date.UTC(m.year(), m.month(), m.date(), m.hours(), m.minutes(), m.seconds(), m.milliseconds());
+        const guess = wall - DateUtil.panelOffset(wall);
+        return wall - DateUtil.panelOffset(guess);
+    }
+
+    // 面板时区在 millis 这一刻相对 UTC 的偏移（毫秒），东八区为 +8 小时。
+    static panelOffset(millis) {
+        const p = DateUtil.panelParts(millis);
+        const wall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+        return wall - Math.floor(millis / 1000) * 1000;
     }
 
     static firstDayOfMonth() {

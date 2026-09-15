@@ -77,7 +77,9 @@
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
                     </span>
+                    <!-- 按面板时区显示与选择（DBInbound._expiryTime）。不要「此刻」按钮，理由见 renew_modal.html。 -->
                     <a-date-picker :show-time="{ format: 'HH:mm' }" format="YYYY-MM-DD HH:mm"
+                                   :show-today="false"
                                    v-model="dbInbound._expiryTime" style="width: 100%;"></a-date-picker>
                 </a-form-item>
             </a-col>

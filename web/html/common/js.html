@@ -10,6 +10,10 @@
 <script src="{{ .base_path }}assets/uri/URI.min.js"></script>
 <script src="{{ .base_path }}assets/js/axios-init.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/util/common.js?{{ .cur_ver }}"></script>
+<script>
+    // 面板时区的 IANA 名，DateUtil 据此按面板时区显示时间。必须先于 date-util.js 定义。
+    const panelTimeZone = '{{ .time_zone }}';
+</script>
 <script src="{{ .base_path }}assets/js/util/date-util.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/util/utils.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/model/xray.js?{{ .cur_ver }}"></script>

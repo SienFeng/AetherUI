@@ -56,7 +56,7 @@ const panelVersionMixin = {
         },
         formatReleaseDate(ms) {
             if (!ms) return '';
-            return moment(ms).format('YYYY/M/D');
+            return DateUtil.formatMillisDate(ms);
         },
         // 版本区的状态文案。三种状态必须能区分开：
         // 「已是最新」「有新版」「当前版本不在发布列表里」。

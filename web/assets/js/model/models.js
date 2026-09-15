@@ -121,18 +121,19 @@ class DBInbound {
         return address;
     }
 
+    // 编辑表单里的到期时间按面板时区显示与选择，换算见 DateUtil.toPanelMoment。
     get _expiryTime() {
         if (this.expiryTime === 0) {
             return null;
         }
-        return moment(this.expiryTime);
+        return DateUtil.toPanelMoment(this.expiryTime);
     }
 
     set _expiryTime(t) {
         if (t == null) {
             this.expiryTime = 0;
         } else {
-            this.expiryTime = t.valueOf();
+            this.expiryTime = DateUtil.fromPanelMoment(t);
         }
     }
 
