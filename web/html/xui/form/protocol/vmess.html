@@ -3,7 +3,16 @@
     <a-row :gutter="16">
         <a-col :span="8">
             <a-form-item label="id">
-                <a-input v-model.trim="inbound.settings.vmesses[0].id"></a-input>
+                <a-input v-model.trim="inbound.settings.vmesses[0].id">
+                    <template slot="addonAfter">
+                        <a-tooltip title="重新生成 UUID">
+                            <a-button size="small" aria-label="重新生成 UUID"
+                                      @click="regenVmessId">
+                                <a-icon type="sync"></a-icon>
+                            </a-button>
+                        </a-tooltip>
+                    </template>
+                </a-input>
             </a-form-item>
         </a-col>
         <a-col :span="8">
