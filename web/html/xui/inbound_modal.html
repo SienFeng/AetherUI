@@ -197,6 +197,9 @@
                     this.realityLoading = false;
                 }
             },
+            regenVmessId() {
+                this.inbound.settings.vmesses[0].id = RandomUtil.randomUUID();
+            },
             genShortId() {
                 // 核心要求 shortId 是十六进制且不超过 16 位
                 // （transport_security.go:140-145 走 hex.Decode）。
