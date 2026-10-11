@@ -161,6 +161,16 @@
             <p v-else style="margin-top:16px">更新完成，当前版本 [[ panelVersion.current ]]</p>
             <a-button type="primary" @click="location.reload()">刷新页面</a-button>
         </template>
+        <template v-else-if="upgradeState === 'relogin'">
+            <a-icon type="check-circle" theme="filled"
+                    style="font-size:48px;color:var(--aui-success)"></a-icon>
+            <p style="margin-top:16px">面板已重启完成，需要重新登录</p>
+            <p style="color:var(--aui-text-3);font-size:12px">
+                目标版本 [[ upgradeTarget ]] 不再承认当前的登录状态，这在跨版本更新或回退时是正常的。
+                重新登录后可在侧栏确认当前版本。
+            </p>
+            <a-button type="primary" @click="location.reload()">重新登录</a-button>
+        </template>
         <template v-else-if="upgradeState === 'timeout'">
             <a-icon type="exclamation-circle" theme="filled"
                     style="font-size:48px;color:var(--aui-warning)"></a-icon>

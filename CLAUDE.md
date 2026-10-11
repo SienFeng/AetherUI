@@ -33,10 +33,11 @@ go mod tidy && go vet ./...
 ./a-ui run                               # 启动面板
 ./a-ui -v                                # 打印版本
 ./a-ui setting -port 54321               # 改面板端口
-./a-ui setting -username x -password y   # 改首个用户的账号密码
+./a-ui setting -username x -password y   # 改首个用户的账号密码（落库的是 bcrypt 哈希）
+./a-ui setting -disable2fa               # 关闭两步验证（验证器丢失、服务器时钟错乱时的救援入口）
 ./a-ui setting -listen 127.0.0.1         # 改面板监听地址（-listen "" 恢复监听所有 IP，救援用）
 ./a-ui setting -basepath /xxx/           # 改面板 url 根路径
-./a-ui setting -show                     # 只读打印当前端口/监听地址/根路径/账号密码，不写库
+./a-ui setting -show                     # 只读打印当前端口/监听地址/根路径/用户名/两步验证开关，不写库（密码是哈希，读不出也不打印）
 ./a-ui setting -reset                    # 清空 settings 表（回落到默认值）
 ./a-ui v2-ui -db /etc/v2-ui/v2-ui.db     # 从 v2-ui 迁移 inbound
 ./a-ui tc-clear                          # 清除本面板下发的全部 tc 限速规则（限速把网络掐断时的救援入口）
@@ -538,6 +539,35 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 这次改造收窄的是**面板**的暴露面（明文 HTTP、固定端口、默认根路径 `/`），**不是**已创建入站的暴露面。`:2886` 这类 vmess+ws+tls 入站改造前后一样直接监听在公网端口上，浏览器直连会得到 400 或断连，这个特征没有变化，443 上的伪装站也保护不到它们——伪装站只接管 Caddy 自己监听的 80/443。安装完成的提示文案必须如实告知这一点（`print_result` 末尾那段），不能让管理员误以为「配了域名 = 节点也变安全了」。真正把入站收编到 Caddy 之后（明文 ws 监听 127.0.0.1、按随机 path 由 Caddy 分流）是设计文档里明确写的下一期，不在本次范围。
 
+## 登录与会话安全
+
+设计文档在 `docs/superpowers/specs/2026-10-11-security-baseline-design.md`。这条链路上每一项的失败模式都是「看起来正常、其实没保护」，改动前先读它。
+
+**`users.password` 只能经 `crypto.HashPassword`（`util/crypto`）写入。** 写入口有三个：设置页改密码（`UserService.UpdateUser`）、`a-ui setting -username -password`（`UpdateFirstUser`）、空库建默认账号（`database.initUser`）。`crypto.CheckPassword` 对「不是 bcrypt 哈希」的值按明文比对——那条分支只为一种数据存在（升级前设置的、超过 72 字节而哈希不了的旧密码），但它意味着**任何一条新写入路径漏掉哈希，那一行都照常能登录、界面上看不出任何异常**。
+
+**明文行的迁移在 `runWebServer` 里做，不在 `database.InitDB` 里。** `InitDB` 也被 `a-ui setting -show` 这类只读子命令调用（`TestCurrentSettingsIsReadOnly` 守着「不写库」）。迁移是启动时一次性全量做，不是「下次登录时顺手升级」——后者会让一个长期不登录的账号永远以明文躺在库里。
+
+**会话里只有用户 id、用户名和一个指纹，绝不放 `model.User`。** 会话 cookie **只签名不加密**（`cookie.NewStore(secret)` 只给了一把签名密钥），放进去的东西在浏览器端和链路上都读得到；改动前整个 `User` 连同明文密码都在里面。指纹是 `sha256(用户名 + 库里的密码值)`，`session.GetLoginUser` **每个请求回库核对一次**：用户名或密码一变（含另一个进程经 `a-ui setting -password` 改的），此前签发的全部会话当场失效。会话存在客户端，服务端没有别的办法吊销它，所以这次查库不能为了省一次 SQLite 读而缓存掉。改密码的那个会话由 `updateUser` 重新签发，不然管理员改完就被踢出去。
+
+**限速与日志用的来源 IP 走 `getRemoteIp`（`web/controller/util.go`），不用 `c.ClientIP()`。** gin 1.7.1 默认信任任意来源的 `X-Forwarded-For`。`getRemoteIp` 只在 TCP 对端是本机回环（即请求由本机 Caddy 转发）时才读这个头，并且取**最后一段**——那一段是 Caddy 自己追加的，前面各段访客可以随便写。无域名安装的拓扑下面板直接暴露，这个头完全不可信。`session.isSecureRequest` 对 `X-Forwarded-Proto` 是同一个判据。
+
+**登录限速只按来源 IP 计，刻意不按用户名锁**（`web/controller/login_limiter.go`，10 分钟内 5 次失败锁 15 分钟）：只有一个管理员，按用户名锁等于让任何人都能把他锁在门外。IPv6 按 /64 计数。状态在包级变量里而不是 controller 实例上——面板「重启」是 SIGHUP 重建 `Server`，挂在实例上的话点一下重启就把锁定清掉了；真正清空它的是进程重启（`a-ui restart`），那也是管理员把自己锁住时的出路。表满时只回收已过期的记录，**绝不为了腾位置解除别人仍在生效的锁定**。
+
+**密码错与验证码错对外是同一句话，且登录是单次请求。** 是否开启两步验证随登录页模板下发（`two_factor`），页面据此显示验证码输入框。不做成「密码对了再问验证码」的两步流程：那会在第一步告诉攻击者密码已经猜对。验证码错误同样计入限速，否则 6 位数字可以直接穷举。
+
+**CSRF 防护靠「非只读请求必须带 `X-Requested-With: XMLHttpRequest`」**（`web/csrf.go`），没有 token。这个头由 `web/assets/js/axios-init.js` 全局加上；跨站表单加不上自定义头，跨站 fetch 想加就得先过 CORS 预检，而面板不响应预检。两条后果：**新增任何不经 axios 的非 GET 请求（原生表单、`fetch`、`sendBeacon`）都会被 403**（`TestNoStateChangingRequestBypassesAxios`）；动了 `axios-init.js` 那一行，面板上所有按钮一起 403，而 Go 侧别的测试一条都不会红（`TestAxiosSendsTheHeaderCSRFGuardRequires`）。`/logout` 仍是 GET，可被跨站触发，后果只是被登出。
+
+**两步验证的三个 key（`twoFactorSecret` / `twoFactorPending` / `twoFactorLastStep`）刻意不进 `defaultValueMap` 与 `entity.AllSetting`**，只经 `getOptionalString` 读写：进了 `AllSetting` 就会随 `/aui/setting/all` 下发给浏览器。`twoFactorSecret` 非空即表示已开启。四条不变量：
+
+- **先用一个有效验证码确认，才算开启**（`TwoFactorService.Enable`）。只生成密钥不算——扫码失败或验证器时间不对的话，开启后第一次登录就把管理员锁在门外。
+- **已开启时拒绝重新生成密钥**（`Begin`），否则任何拿到会话的人都能悄悄把验证器换成自己的。
+- **记住上一次接受的时间步，只接受更新的**。一个验证码在 ±1 步内最长有效 90 秒，不记的话可以被重放；开启时用掉的那个码也算在内。「读上次的步 → 校验 → 写回」由 `twoFactorMu` 串行化。
+- **读不出开关状态时拒绝登录**（`Enabled` 返回 error），不当成没开：否则一次库锁就能让第二个因素凭空消失。
+
+`a-ui setting -reset` 会清空 settings 表，因此**顺带关闭两步验证**；`a-ui.sh` 的 `reset_user`（菜单第 4 项）也会关闭它，并且把 `-disable2fa` 写成**独立的、允许失败的一条命令**——管理脚本永远来自 main 分支，而二进制可能是回退后的旧版本，不认识这个参数；并进同一条命令的话旧二进制会整条报错，连账号密码都重置不了。
+
+**回退到哈希上线之前的版本后登不上面板**：旧二进制拿明文去比哈希。救法是 `a-ui setting -username x -password y`（旧二进制会写回明文，再升级时启动迁移又把它换成哈希）。回退的二次确认框（`panel-version.js`）无条件提示这一条——前端判断不了目标版本在哪一边。
+
 ## 面板版本与一键更新
 
 侧栏底部常驻版本号（`config.GetVersion()`），有新版打红点，点开可更新或回退到最近 5 个版本。设计文档在 `docs/superpowers/specs/2026-09-05-panel-version-update-design.md`。
@@ -550,7 +580,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 **`Updatable` 前置检查挡住 Docker 与本地开发**（非 Linux / 找不到 `/usr/local/a-ui/a-ui` / 找不到 systemd 单元 / 没有 `systemd-run`）。在容器里跑 `install.sh` 是纯粹的破坏。`UnsupportedReason` 要具体到哪一条没过并原样显示给管理员。
 
-**回退只有一个后果需要写进二次确认框：数据库不回滚**，`AutoMigrate` 只加列不删列，数据不丢但新功能失效。xray 核心不再是回退的后果——`install.sh` 的 `restore_or_install_xray` 会在解压新版面板前把机器上现有的 `xray-linux-<arch>`/geo 数据备份好再原样恢复（见「运维脚本」一节），回退到 v1.2.8 之前的面板也不再会把核心一并拖回没有 `RoutingService` 符号的 Xray 1.4.x——这是本次改造顺带修掉的一个坑，`web/assets/js/util/panel-version.js` 的二次确认框文案已同步改写，不要把这条后果加回去。另有一条不写进 UI 但要记住的偏差：`install.sh` 无论装哪个版本，它自己和 `/usr/bin/a-ui` 都是从 **main 分支**拉的最新版，所以回退得到的是「旧二进制 + 新管理脚本」——改动 `a-ui bootstrap` / `a-ui setting` 的参数时要考虑这一点。
+**回退有两个后果需要写进二次确认框。一是数据库不回滚**，`AutoMigrate` 只加列不删列，数据不丢但新功能失效；二是回退到密码哈希上线之前的版本后无法用现有密码登录（见「登录与会话安全」）。xray 核心不再是回退的后果——`install.sh` 的 `restore_or_install_xray` 会在解压新版面板前把机器上现有的 `xray-linux-<arch>`/geo 数据备份好再原样恢复（见「运维脚本」一节），回退到 v1.2.8 之前的面板也不再会把核心一并拖回没有 `RoutingService` 符号的 Xray 1.4.x——这是本次改造顺带修掉的一个坑，`web/assets/js/util/panel-version.js` 的二次确认框文案已同步改写，不要把这条后果加回去。另有一条不写进 UI 但要记住的偏差：`install.sh` 无论装哪个版本，它自己和 `/usr/bin/a-ui` 都是从 **main 分支**拉的最新版，所以回退得到的是「旧二进制 + 新管理脚本」——改动 `a-ui bootstrap` / `a-ui setting` 的参数时要考虑这一点。
 
 **回退的目标版本很可能根本没有 `/server/panelVersion`——`pollUpgrade` 必须把 404 与「连不上」分开处理。** 版本管理本身是 v1.6.0 才加的接口，回退列表里更早的版本一条都没有，所以这不是边缘情况而是回退的常态。面板 stop 期间不会出现 404：装了 Caddy 的拓扑下 upstream 拒绝连接是 502，没装 Caddy 的 REALITY 拓扑下连接直接被拒、axios 连 `response` 都拿不到。因此 404 是一个可靠信号——有进程正在这个地址上服务，只是它没有这条路由，据此直接判定「面板已就绪」。把 404 并回「连不上 = 正在重启」那一支（改动前就是如此），界面会白转满 3 分钟再报一句「更新可能失败」，而回退其实早就成功了：实测 v1.6.0 → v1.5.0 从下发到新进程就绪只用 4 秒。此路径下版本号无从核对，`done` 的文案**不能**沿用「更新完成，当前版本 X」——那里显示的 `panelVersion.current` 仍是更新前的旧值，照原样显示等于报一个假版本号，改为报 `upgradeTarget` 并说明侧栏版本入口会随之消失、此后只能 `a-ui update`。
 
@@ -580,7 +610,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 ## 已知偏差与注意事项
 
 - **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
-- 用户密码在数据库中**明文存储**，登录失败日志还会打印明文用户名密码（`web/controller/index.go`）。这是既有行为，涉及认证的改动请提高审查标准。
+- 用户密码以 bcrypt 哈希存储，认证链路的全部约束见「登录与会话安全」一节，涉及认证的改动请提高审查标准。
 - `go.mod` 声明 `go 1.27.0`，CI（`.github/workflows/ci.yml`）用 `actions/setup-go` 的 `go-version-file: go.mod` 读同一个版本构建，不在工作流里另行硬编码。`xray-core` 锁定在 `v1.260327.1-0.20260728075948-5ca6f4b7d4dc`，与仓库里 `bin/xray-*` 那份种子核心的 26.7.28 同一个 commit。它不再只是 gRPC stats 客户端：`xray/api.go` 的控制面热应用还依赖它的 `infra/conf` 把面板发出的 JSON 编译成 typed message 再下发给 gRPC，用旧版本的解析器编译不出新协议/新字段的配置——但**这条耦合的另一端是用户机器上实际运行的核心，不再是 `bin/xray-*`**（`install.sh` 现在会保留机器上已有的核心，`bin/xray-*` 只是兜底种子），耦合方向与「仍然建议同版本」的确切含义见「运维脚本」一节。gin 仍是 1.7.1。代价是二进制体积从约 24 MB 增长到约 40 MB（darwin/arm64 本地实测约 39 MB）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
 - **`web.go` 的 `getHtmlTemplate` 吞掉 `ParseFS` 错误**（`// ignore`）。一个语法错误的模板会被静默跳过，直到渲染时才报 "template not found"。所以改完 `web/html/**` 光靠 `go build` 无法发现问题。`web/html_test.go` 的 `TestAllTemplatesParse` 走同样的遍历但不忽略错误，改完模板跑它即可。

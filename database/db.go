@@ -9,6 +9,7 @@ import (
 	"path"
 	"a-ui/config"
 	"a-ui/database/model"
+	"a-ui/util/crypto"
 )
 
 var db *gorm.DB
@@ -30,9 +31,14 @@ func initUser() error {
 		return err
 	}
 	if count == 0 {
+		// 默认账号也存哈希：这一列任何时候都不该出现明文，见 util/crypto。
+		hash, err := crypto.HashPassword("admin")
+		if err != nil {
+			return err
+		}
 		user := &model.User{
 			Username: "admin",
-			Password: "admin",
+			Password: hash,
 		}
 		return db.Create(user).Error
 	}

@@ -173,9 +173,9 @@ config_after_install() {
             echo -e "${green}user password:${passwordTemp}${plain}"
             echo -e "${red}web port:${portTemp}${plain}"
             echo -e "###############################################"
-            echo -e "${red}if you forgot your login info,you can type a-ui and then type 7 to check after installation${plain}"
+            echo -e "${red}write the password above down now: it is stored hashed and cannot be shown again. type a-ui then 7 for port/path/username, or 4 to reset a forgotten password${plain}"
         else
-            echo -e "${red} this is your upgrade,will keep old settings,if you forgot your login info,you can type a-ui and then type 7 to check${plain}"
+            echo -e "${red} this is your upgrade,will keep old settings. type a-ui then 7 for port/path/username; the password is stored hashed and cannot be shown,type 4 to reset it${plain}"
         fi
     fi
 }

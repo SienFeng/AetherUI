@@ -161,7 +161,7 @@ uninstall() {
 }
 
 reset_user() {
-    confirm "确定要将用户名和密码重置为 admin 吗" "n"
+    confirm "确定要将用户名和密码重置为 admin，并关闭两步验证吗" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
@@ -169,12 +169,17 @@ reset_user() {
         return 0
     fi
     /usr/local/a-ui/a-ui setting -username admin -password admin
-    echo -e "用户名和密码已重置为 ${green}admin${plain}，现在请重启面板"
+    # 单独一条命令，并且容忍失败：本脚本永远来自 main 分支，而二进制可能
+    # 是回退后的旧版本，不认识 -disable2fa。与上一条合并的话，旧二进制会
+    # 因一个未知参数整条报错，连账号密码都重置不了。
+    /usr/local/a-ui/a-ui setting -disable2fa >/dev/null 2>&1 || true
+    echo -e "用户名和密码已重置为 ${green}admin${plain}，两步验证已关闭，现在请重启面板"
+    echo -e "${yellow}admin/admin 是公开的默认口令，登录后请立即在「面板设置 → 账号与密码」里改掉${plain}"
     confirm_restart
 }
 
 reset_config() {
-    confirm "确定要重置所有面板设置吗，账号数据不会丢失，用户名和密码不会改变" "n"
+    confirm "确定要重置所有面板设置吗，账号数据不会丢失，用户名和密码不会改变，两步验证会被关闭" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
