@@ -150,6 +150,15 @@ func (s *Server) getHtmlTemplate(funcMap template.FuncMap) (*template.Template, 
 	return t, nil
 }
 
+// useSessionAndCSRF 挂上会话与跨站请求防护。拆成独立函数是为了让测试能在
+// 不启动整个面板（initRouter 还会注册定时任务、依赖全局 Server）的前提下，
+// 验证这两层确实挂在了引擎上——中间件写得再对，没挂上也等于没有。
+func useSessionAndCSRF(engine *gin.Engine, secret []byte) {
+	store := cookie.NewStore(secret)
+	engine.Use(sessions.Sessions("session", store))
+	engine.Use(csrfGuard())
+}
+
 func (s *Server) initRouter() (*gin.Engine, error) {
 	if config.IsDebug() {
 		gin.SetMode(gin.DebugMode)
@@ -172,8 +181,7 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 	assetsBasePath := basePath + "assets/"
 
-	store := cookie.NewStore(secret)
-	engine.Use(sessions.Sessions("session", store))
+	useSessionAndCSRF(engine, secret)
 	engine.Use(func(c *gin.Context) {
 		c.Set("base_path", basePath)
 	})

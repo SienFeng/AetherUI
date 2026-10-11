@@ -162,7 +162,7 @@ uninstall() {
 }
 
 reset_user() {
-    confirm "are you sure you want to reset the username and password to ${green}admin${plain} ?" "n"
+    confirm "are you sure you want to reset the username and password to ${green}admin${plain} and turn off two-factor authentication ?" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
@@ -170,12 +170,18 @@ reset_user() {
         return 0
     fi
     /usr/local/a-ui/a-ui setting -username admin -password admin
-    echo -e "your username and password are reset to ${green}admin${plain},restart a-ui to take effect"
+    # A separate command that is allowed to fail: this script always comes
+    # from the main branch while the binary may be an older, rolled-back
+    # version that does not know -disable2fa. Merged into the line above, an
+    # old binary would reject the whole command and reset nothing.
+    /usr/local/a-ui/a-ui setting -disable2fa >/dev/null 2>&1 || true
+    echo -e "your username and password are reset to ${green}admin${plain},two-factor authentication is off,restart a-ui to take effect"
+    echo -e "${yellow}admin/admin is a publicly known default,change it right after login (Panel Settings -> account)${plain}"
     confirm_restart
 }
 
 reset_config() {
-    confirm "are you sure you want to reset all settings,user data will not be lost" "n"
+    confirm "are you sure you want to reset all settings,user data will not be lost,two-factor authentication will be turned off" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu

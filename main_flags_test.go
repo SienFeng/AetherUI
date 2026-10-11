@@ -162,3 +162,55 @@ func TestParseXrayFlags(t *testing.T) {
 		}
 	})
 }
+
+// -show 不能再打印密码，哪怕是哈希：哈希离线可以被暴力破解，而这条命令的
+// 输出会进终端滚动记录、进截图、进工单。
+func TestCurrentSettingsNeverPrintsPassword(t *testing.T) {
+	if err := database.InitDB(t.TempDir() + "/test.db"); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	userService := service.UserService{}
+	if err := userService.UpdateFirstUser("admin", "Dist1nct-Passw0rd"); err != nil {
+		t.Fatal(err)
+	}
+	user, err := userService.GetFirstUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := currentSettings()
+	if err != nil {
+		t.Fatalf("currentSettings: %v", err)
+	}
+	if strings.Contains(out, "Dist1nct-Passw0rd") {
+		t.Error("输出里出现了明文密码")
+	}
+	if strings.Contains(out, user.Password) {
+		t.Error("输出里出现了密码哈希")
+	}
+	// a-ui.sh 的 restore_direct_panel 用 grep '^Port:' / '^BasePath:' 解析这两行。
+	for _, prefix := range []string{"Port: ", "BasePath: ", "Username: admin", "TwoFactor: off"} {
+		found := false
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, prefix) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("输出里没有以 %q 开头的行：\n%s", prefix, out)
+		}
+	}
+}
+
+func TestParseSettingFlagsDisable2FA(t *testing.T) {
+	f, err := parseSettingFlags([]string{"-disable2fa"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !f.Disable2FA {
+		t.Error("-disable2fa 未被识别")
+	}
+	f, err = parseSettingFlags([]string{"-port", "1234"})
+	if err != nil || f.Disable2FA {
+		t.Errorf("未传 -disable2fa 时 Disable2FA = %v, err = %v", f.Disable2FA, err)
+	}
+}

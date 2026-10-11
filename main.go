@@ -42,6 +42,15 @@ func runWebServer() {
 		log.Fatal(err)
 	}
 
+	// 把升级前留下的明文密码换成哈希。失败不阻止面板启动：没换成的行仍能
+	// 按明文登录（crypto.CheckPassword），而面板起不来比这严重得多。
+	userService := service.UserService{}
+	if n, err := userService.MigratePlaintextPasswords(); err != nil {
+		logger.Warning("migrate plaintext passwords failed:", err)
+	} else if n > 0 {
+		logger.Info("migrated", n, "plaintext password(s) to bcrypt")
+	}
+
 	var server *web.Server
 
 	server = web.NewServer()
@@ -102,6 +111,9 @@ func resetSetting() {
 type settingFlags struct {
 	Reset    bool
 	Show     bool
+	// 关闭两步验证：验证器丢失、或服务器时钟错乱导致验证码全部失效时的
+	// 救援入口。能执行这条命令的人已经是这台机器的 root，不需要再验证。
+	Disable2FA bool
 	Port     int
 	Username string
 	Password string
@@ -119,6 +131,7 @@ func parseSettingFlags(args []string) (settingFlags, error) {
 	// 不吃下一个 token，所以那个多出来的 "true" 会被 flag 包当成剩余的
 	// 位置参数，不解析、不报错——加这个 flag 不需要连带改 a-ui.sh。
 	cmd.BoolVar(&f.Show, "show", false, "show current settings (readonly)")
+	cmd.BoolVar(&f.Disable2FA, "disable2fa", false, "disable two-factor authentication")
 	cmd.IntVar(&f.Port, "port", 0, "set panel port")
 	cmd.StringVar(&f.Username, "username", "", "set login username")
 	cmd.StringVar(&f.Password, "password", "", "set login password")
@@ -182,6 +195,15 @@ func updateSetting(f settingFlags) {
 			fmt.Println("set username and password success")
 		}
 	}
+	if f.Disable2FA {
+		twoFactorService := service.TwoFactorService{}
+		err := twoFactorService.Disable()
+		if err != nil {
+			fmt.Println("disable two-factor authentication failed:", err)
+		} else {
+			fmt.Println("disable two-factor authentication success")
+		}
+	}
 }
 
 // currentSettings 把面板当前设置读出来拼成展示文本，不做任何写入。
@@ -191,9 +213,10 @@ func updateSetting(f settingFlags) {
 // 调这个函数，不用途经 os.Exit 就能拿到返回值——与 bootstrap.Run 假定
 // 调用方已 InitDB、自己不碰 os.Exit 是同一个道理。
 //
-// 输出密码是这个入口的既有契约（a-ui 菜单第 7 项、install.sh 里"忘记
-// 登录信息用菜单第 7 项查看"的提示都靠它），所以调用方需要在展示前
-// 提醒这会在终端打印明文密码。
+// 不再输出密码：库里存的是 bcrypt 哈希，面板自己也读不出原文。忘记密码
+// 的出路是重设（`a-ui setting -username x -password y`），输出里直接
+// 给出这条命令。Port / Listen / BasePath 三行的格式不能动——a-ui.sh 的
+// restore_direct_panel 用 grep '^Port:' 这类写法解析它们。
 func currentSettings() (string, error) {
 	settingService := service.SettingService{}
 	port, err := settingService.GetPort()
@@ -223,14 +246,24 @@ func currentSettings() (string, error) {
 		listenDisplay = "all interfaces"
 	}
 
+	twoFactorService := service.TwoFactorService{}
+	twoFactor, err := twoFactorService.Enabled()
+	if err != nil {
+		return "", fmt.Errorf("get two-factor state failed: %w", err)
+	}
+	twoFactorDisplay := "off"
+	if twoFactor {
+		twoFactorDisplay = "on (lost your authenticator? run: a-ui setting -disable2fa)"
+	}
+
 	return fmt.Sprintf(
-		"Warning: this will print your login password in plain text.\n"+
-			"Port: %v\n"+
+		"Port: %v\n"+
 			"Listen: %v\n"+
 			"BasePath: %v\n"+
 			"Username: %v\n"+
-			"Password: %v\n",
-		port, listenDisplay, basePath, user.Username, user.Password,
+			"Password: (stored hashed, cannot be shown; reset with: a-ui setting -username <name> -password <pass>)\n"+
+			"TwoFactor: %v\n",
+		port, listenDisplay, basePath, user.Username, twoFactorDisplay,
 	), nil
 }
 
@@ -274,7 +307,7 @@ func main() {
 		fmt.Println("Commands:")
 		fmt.Println("    run            run web panel")
 		fmt.Println("    v2-ui          migrate form v2-ui")
-		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-reset/-show）")
+		fmt.Println("    setting        set settings（-port/-username/-password/-listen/-basepath/-disable2fa/-reset/-show）")
 		fmt.Println("    tc-clear       清除本面板下发的全部 tc 限速规则（网络被限速规则掐断时的救援入口）")
 		fmt.Println("    bootstrap      安装脚本用：写入面板配置并按需创建入站")
 		fmt.Println("    xray           安装/更新 xray 核心（-update latest | -update <版本号>）")

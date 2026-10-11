@@ -25,7 +25,7 @@ const panelVersionMixin = {
             versionRefreshing: false,
             rollbackOpen: false,
             rollbackTag: '',
-            // idle | starting | restarting | done | timeout
+            // idle | starting | restarting | done | relogin | timeout
             upgradeState: 'idle',
             upgradeTarget: '',
             // 一旦观察到过一次「连不上 = 正在重启」，就不再退回 starting——
@@ -85,7 +85,14 @@ const panelVersionMixin = {
                     // 再也找不到切换版本的地方，只能 SSH 上去。前端无从判断
                     // 目标版本有没有这个功能，所以措辞留有余地。
                     + '注意：版本管理入口本身也是新版功能，回退到更早的版本后它会消失，'
-                    + '届时只能在服务器上执行 a-ui update 才能回到新版。')
+                    + '届时只能在服务器上执行 a-ui update 才能回到新版。\n\n'
+                    // 密码自某一版起以哈希存储，更早的版本拿明文去比，必然
+                    // 登不上——而回退是从面板点下去的，管理员下一眼看到的就是
+                    // 一个拒绝他的登录页。前端判断不了目标版本属于哪一边，
+                    // 所以无条件提示；多说一句无害，少说这句是一次锁门。
+                    + '另外：若回退到的版本早于「密码加密存储」上线，回退后将无法用现有密码登录，'
+                    + '需在服务器上执行 a-ui setting -username <用户名> -password <新密码> 重设；'
+                    + '两步验证在那些版本上也不生效。')
                 : ('确定要更新到 ' + tag + ' 吗？\n\n面板会在更新过程中短暂不可用。');
             this.$confirm({
                 title: goingBack ? '回退到旧版本' : '更新面板',
@@ -127,10 +134,13 @@ const panelVersionMixin = {
                 const resp = await axios.post('/server/panelVersion');
                 const body = resp && resp.data;
                 if (body && body.success === false) {
-                    // 会话过期：checkLogin 对 ajax 返回 200 + success:false，
-                    // axios 不会抛异常。不区分的话会一路轮询到超时，
-                    // 报一个「更新可能失败」——而更新其实可能已经成功了。
-                    this.upgradeState = 'timeout';
+                    // checkLogin 对 ajax 返回 200 + success:false，axios 不会抛
+                    // 异常。能拿到这个响应，本身就说明面板进程已经起来并在
+                    // 应答（与下面 404 分支是同一个道理），只是这个会话不再
+                    // 被承认——跨过「会话格式变更」的那次升级、以及任何一次
+                    // 回退到更早版本，都必然走到这里。它不是超时也不是失败，
+                    // 用独立的状态说清楚，不能复用 'timeout' 那句「可能已经失败」。
+                    this.upgradeState = 'relogin';
                     this.upgradeTarget = tag;
                     return;
                 }

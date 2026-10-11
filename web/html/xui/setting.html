@@ -109,6 +109,78 @@
                                 <a-button type="primary" @click="updateUser">修改</a-button>
                             </a-form-item>
                         </a-form>
+
+                        <!-- 两步验证。状态行沿用其他标签页的 setting-action-item，
+                             下面的表单沿用上面改密码那一块的写法。 -->
+                        <a-list item-layout="horizontal" style="background: white; margin-top: 16px">
+                            <setting-action-item title="两步验证" :desc="twoFactorDesc()">
+                                <span v-if="!twoFactor.loaded" class="chip">读取中</span>
+                                <span v-else-if="twoFactor.enabled" class="status-badge status-ok">
+                                    <a-icon type="check-circle"></a-icon>已开启
+                                </span>
+                                <span v-else class="chip">未开启</span>
+                            </setting-action-item>
+                        </a-list>
+
+                        <!-- 未开启 · 第一步：再输一次密码，换取密钥。 -->
+                        <a-form v-if="twoFactor.loaded && !twoFactor.enabled && !twoFactor.secret"
+                                style="background: white; padding: 0 20px 20px">
+                            <a-form-item label="当前密码">
+                                <a-input type="password" autocomplete="current-password"
+                                         v-model="twoFactor.password" style="max-width: 300px"
+                                         @keydown.enter.native="setupTwoFactor"></a-input>
+                            </a-form-item>
+                            <a-form-item>
+                                <a-button type="primary" :loading="twoFactor.busy"
+                                          :disabled="!twoFactor.password" @click="setupTwoFactor">开始设置</a-button>
+                            </a-form-item>
+                        </a-form>
+
+                        <!-- 未开启 · 第二步：扫码，再用一个验证码证明验证器配好了。
+                             只有这一步通过才真正开启，扫码失败不会把自己锁在门外。 -->
+                        <a-form v-if="twoFactor.loaded && !twoFactor.enabled && twoFactor.secret"
+                                style="background: white; padding: 0 20px 20px">
+                            <a-form-item label="用验证器扫描二维码">
+                                <canvas ref="twoFactorQr" role="img" aria-label="两步验证密钥二维码"
+                                        style="display: block; width: 200px; height: 200px"></canvas>
+                            </a-form-item>
+                            <a-form-item label="无法扫码时手动输入密钥">
+                                <code style="word-break: break-all; user-select: all">[[ twoFactor.secret ]]</code>
+                                <div style="color: var(--aui-text-2); line-height: 1.6">
+                                    密钥只显示这一次，离开本页后无法再次查看。
+                                </div>
+                            </a-form-item>
+                            <a-form-item label="验证器显示的 6 位验证码">
+                                <a-input v-model.trim="twoFactor.code" style="max-width: 300px"
+                                         inputmode="numeric" autocomplete="one-time-code" :max-length="7"
+                                         @keydown.enter.native="enableTwoFactor"></a-input>
+                            </a-form-item>
+                            <a-form-item>
+                                <a-button type="primary" :loading="twoFactor.busy"
+                                          :disabled="!twoFactor.code" @click="enableTwoFactor">确认开启</a-button>
+                                <a-button style="margin-left: 8px" :disabled="twoFactor.busy"
+                                          @click="resetTwoFactorForm">取消</a-button>
+                            </a-form-item>
+                        </a-form>
+
+                        <!-- 已开启：关闭要密码加一个当前有效的验证码。 -->
+                        <a-form v-if="twoFactor.loaded && twoFactor.enabled"
+                                style="background: white; padding: 0 20px 20px">
+                            <a-form-item label="当前密码">
+                                <a-input type="password" autocomplete="current-password"
+                                         v-model="twoFactor.password" style="max-width: 300px"></a-input>
+                            </a-form-item>
+                            <a-form-item label="验证器显示的 6 位验证码">
+                                <a-input v-model.trim="twoFactor.code" style="max-width: 300px"
+                                         inputmode="numeric" autocomplete="one-time-code" :max-length="7"
+                                         @keydown.enter.native="disableTwoFactor"></a-input>
+                            </a-form-item>
+                            <a-form-item>
+                                <a-button type="danger" :loading="twoFactor.busy"
+                                          :disabled="!twoFactor.password || !twoFactor.code"
+                                          @click="disableTwoFactor">关闭两步验证</a-button>
+                            </a-form-item>
+                        </a-form>
                     </a-tab-pane>
                     <a-tab-pane key="3" tab="Xray 配置">
                         <a-list item-layout="horizontal" style="background: white">
@@ -270,6 +342,9 @@
             // 任何提示。改成深度 watch，改动即时反映。
             dirty: false,
             user: {},
+            // loaded 为 false 时不渲染任何表单：状态没读回来之前，「开启」和
+            // 「关闭」两套表单显示哪一套都可能是错的。
+            twoFactor: { loaded: false, enabled: false, busy: false, password: '', code: '', secret: '' },
             ipdb: { sources: [], updateTime: '' },
             ipdbUpdating: null,
             shaping: { supported: false, active: false, interface: '', rolledBack: false, reason: '' },
@@ -392,6 +467,71 @@
                     this.user = {};
                 }
             },
+            twoFactorDesc() {
+                if (this.twoFactor.enabled) {
+                    return '登录时除密码外还需要验证器 App 上的 6 位验证码。丢失验证器时，在服务器上执行 <code>a-ui setting -disable2fa</code> 即可关闭';
+                }
+                return '开启后，登录时除密码外还需要验证器 App（Google Authenticator、1Password 等）上的 6 位验证码，密码泄露也无法登录';
+            },
+            resetTwoFactorForm() {
+                this.twoFactor.password = '';
+                this.twoFactor.code = '';
+                this.twoFactor.secret = '';
+            },
+            async getTwoFactorStatus() {
+                const msg = await HttpUtil.post("/aui/setting/twoFactor/status");
+                if (msg.success) {
+                    this.twoFactor.enabled = msg.obj.enabled;
+                    this.twoFactor.loaded = true;
+                }
+            },
+            async setupTwoFactor() {
+                if (!this.twoFactor.password || this.twoFactor.busy) return;
+                this.twoFactor.busy = true;
+                const msg = await HttpUtil.post("/aui/setting/twoFactor/setup", { password: this.twoFactor.password });
+                this.twoFactor.busy = false;
+                if (!msg.success) return;
+                this.twoFactor.password = '';
+                this.twoFactor.code = '';
+                this.twoFactor.secret = msg.obj.secret;
+                // canvas 在 v-if 的另一支里，要等这次渲染完才存在。
+                this.$nextTick(() => {
+                    new QRious({
+                        element: this.$refs.twoFactorQr,
+                        size: 400,
+                        level: 'M',
+                        value: msg.obj.uri,
+                    });
+                });
+            },
+            async enableTwoFactor() {
+                if (!this.twoFactor.code || this.twoFactor.busy) return;
+                this.twoFactor.busy = true;
+                const msg = await HttpUtil.post("/aui/setting/twoFactor/enable", { code: this.twoFactor.code });
+                this.twoFactor.busy = false;
+                if (!msg.success) {
+                    // 验证码用过即废，留着旧的只会让下一次必然再失败。
+                    this.twoFactor.code = '';
+                    return;
+                }
+                this.resetTwoFactorForm();
+                this.twoFactor.enabled = true;
+            },
+            async disableTwoFactor() {
+                if (!this.twoFactor.password || !this.twoFactor.code || this.twoFactor.busy) return;
+                this.twoFactor.busy = true;
+                const msg = await HttpUtil.post("/aui/setting/twoFactor/disable", {
+                    password: this.twoFactor.password,
+                    code: this.twoFactor.code,
+                });
+                this.twoFactor.busy = false;
+                if (!msg.success) {
+                    this.twoFactor.code = '';
+                    return;
+                }
+                this.resetTwoFactorForm();
+                this.twoFactor.enabled = false;
+            },
             async restartPanel() {
                 await new Promise(resolve => {
                     this.$confirm({
@@ -417,6 +557,7 @@
             // 必须在下面那个死循环之前调用
             await this.getIPDBStatus();
             await this.getShapingStatus();
+            await this.getTwoFactorStatus();
         },
         watch: {
             // deep 是必须的：allSetting 是个对象，改的永远是它的字段而不是

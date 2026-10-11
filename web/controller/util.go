@@ -20,16 +20,30 @@ func getUriId(c *gin.Context) int64 {
 	return s.Id
 }
 
+// getRemoteIp 返回请求的来源 IP，供登录限速与登录日志使用。
+//
+// 只在对端是本机回环（即请求由本机的 Caddy 转发而来）时才读
+// X-Forwarded-For，并且取最后一段：那一段是 Caddy 自己根据 TCP 对端
+// 追加的，前面的各段都是访客可以随便写的。面板直接暴露在公网时
+// （无域名安装的拓扑）这个头完全不可信，只认 TCP 对端。
+//
+// 不用 gin 的 c.ClientIP()：1.7.1 默认信任任意来源发来的这个头，换个
+// 请求头就能让限速按另一个地址计数。
 func getRemoteIp(c *gin.Context) string {
-	value := c.GetHeader("X-Forwarded-For")
-	if value != "" {
-		ips := strings.Split(value, ",")
-		return ips[0]
-	} else {
-		addr := c.Request.RemoteAddr
-		ip, _, _ := net.SplitHostPort(addr)
-		return ip
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
 	}
+	peer := net.ParseIP(host)
+	if peer == nil || !peer.IsLoopback() {
+		return host
+	}
+	parts := strings.Split(c.GetHeader("X-Forwarded-For"), ",")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if net.ParseIP(last) != nil {
+		return last
+	}
+	return host
 }
 
 func jsonMsg(c *gin.Context, msg string, err error) {
