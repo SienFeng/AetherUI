@@ -1080,6 +1080,10 @@ class Inbound extends XrayCommonClass {
             case Protocols.VLESS:
             case Protocols.TROJAN:
             case Protocols.SHADOWSOCKS:
+            // socks / http 代理在客户端把域名交给代理时本来就拿得到域名，但客户端
+            // 先自行解析成 IP 时，只有嗅探能把域名找回来，分流规则才会命中。
+            case Protocols.SOCKS:
+            case Protocols.HTTP:
                 return true;
             default:
                 return false;

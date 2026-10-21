@@ -1416,12 +1416,27 @@
                 // sniffing 只影响域名条件：xray 靠嗅探拿 SNI/Host。一条纯 IP 的
                 // 规则匹配的是连接目标 IP，与嗅探无关，对它报「永远不会命中」
                 // 是在说反话。
-                const off = this.ruleHasDomains(rule) ? this.sniffingOffNames(rule) : [];
+                // socks / http 代理入站不在此列：客户端把域名交给代理（socks5h、
+                // HTTP 代理的 CONNECT）时，xray 不嗅探也拿得到域名，规则照常命中。
+                // 对它们报「永远不会命中」是误报，还会被算进「未生效规则」，
+                // 管理员会去改一条本来就好好的规则。它们的前提条件走 ruleNote。
+                const off = this.ruleHasDomains(rule)
+                    ? this.sniffingOffIds(rule).filter(id => !this.isProxyInbound(id)) : [];
                 if (off.length) {
-                    return '入站 ' + off.join('、') +
+                    return '入站 ' + off.map(this.inboundName).join('、') +
                         ' 未开启 sniffing（http/tls），xray 在路由阶段拿不到域名，对这些用户本规则永远不会命中';
                 }
                 return this.ruleConflict(rule);
+            },
+            // ruleNote 是「规则会生效，但有前提」的说明，不算失效、不计入
+            // 「未生效规则」。目前只有一种：socks / http 代理入站没开 sniffing。
+            ruleNote(rule) {
+                if (!rule.enable || this.ruleIssue(rule) || !this.ruleHasDomains(rule)) return '';
+                const soft = this.sniffingOffIds(rule).filter(id => this.isProxyInbound(id));
+                if (!soft.length) return '';
+                return '入站 ' + soft.map(this.inboundName).join('、') +
+                    ' 是 socks / http 代理且未开启 sniffing：客户端把域名交给代理解析（socks5h、HTTP 代理）时本规则照常命中；' +
+                    '客户端先自行解析成 IP 再连代理时不会命中，可在入站设置里打开 sniffing 兜底';
             },
 
             clickGroupAction(a, group) {
@@ -1488,9 +1503,13 @@
             },
             // 只检查规则显式指定的入站。「所有用户」规则不逐个检查——保持本
             // 功能上线前的行为，避免这次改动顺带引入一堆无关的新告警。
-            sniffingOffNames(rule) {
+            sniffingOffIds(rule) {
                 if (!rule.inboundIds.length) return [];
-                return rule.inboundIds.filter(id => this.sniffingOff(id)).map(this.inboundName);
+                return rule.inboundIds.filter(id => this.sniffingOff(id));
+            },
+            isProxyInbound(inboundId) {
+                const inbound = this.inbounds.find(x => x.id === inboundId);
+                return !!inbound && (inbound.protocol === 'socks' || inbound.protocol === 'http');
             },
             // ruleConflict 检出违反「同一域名组下每个入站至多被一条规则覆盖」的
             // 历史数据。迁移不改动这类数据（改了就是在管理员不知情时改变分流

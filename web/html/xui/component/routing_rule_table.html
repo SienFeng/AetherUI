@@ -74,6 +74,10 @@
             <a-icon type="warning" style="color: var(--aui-warning)"
                     :aria-label="ruleIssue(rule)"></a-icon>
         </a-tooltip>
+        <a-tooltip v-else-if="ruleNote(rule)" :title="ruleNote(rule)">
+            <a-icon type="check-circle" style="color: var(--aui-success)"
+                    :aria-label="'这条规则会生效。' + ruleNote(rule)"></a-icon>
+        </a-tooltip>
         <a-icon v-else type="check-circle" style="color: var(--aui-success)"
                 aria-label="这条规则会生效"></a-icon>
     </template>
