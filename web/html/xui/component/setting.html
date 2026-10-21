@@ -2,7 +2,18 @@
 <a-list-item style="padding: 20px">
     <a-row type="flex" align="middle" style="width: 100%">
         <a-col :lg="24" :xl="12">
-            <a-list-item-meta :title="title" :description="desc"></a-list-item-meta>
+            <a-list-item-meta>
+                <template slot="title">
+                    <span v-text="title"></span>
+                    <a-tooltip v-if="desc" placement="topLeft" overlay-class-name="setting-hint-tip"
+                               :trigger="['hover', 'focus']">
+                        <template slot="title"><span v-text="desc"></span></template>
+                        <span class="setting-hint" tabindex="0" :aria-label="'说明：' + desc">
+                            <a-icon type="info-circle"></a-icon>
+                        </span>
+                    </a-tooltip>
+                </template>
+            </a-list-item-meta>
         </a-col>
         <a-col :lg="24" :xl="12">
             <template v-if="type === 'text'">
@@ -26,8 +37,18 @@
 <a-list-item style="padding: 20px">
     <a-row type="flex" align="middle" style="width: 100%">
         <a-col :lg="24" :xl="12">
-            <a-list-item-meta :title="title">
-                <template slot="description"><span v-html="desc"></span></template>
+            <a-list-item-meta>
+                <template slot="title">
+                    <span v-text="title"></span>
+                    <a-tooltip v-if="hint" placement="topLeft" overlay-class-name="setting-hint-tip"
+                               :trigger="['hover', 'focus']">
+                        <template slot="title"><span v-html="hint"></span></template>
+                        <span class="setting-hint" tabindex="0" :aria-label="'说明：' + plainHint">
+                            <a-icon type="info-circle"></a-icon>
+                        </span>
+                    </a-tooltip>
+                </template>
+                <template v-if="desc" slot="description"><span v-html="desc"></span></template>
             </a-list-item-meta>
         </a-col>
         <a-col :lg="24" :xl="12" class="setting-action-col">
@@ -39,6 +60,9 @@
 
 {{define "component/setting"}}
 <script>
+    // 说明文字不再常驻在标题下面：好几项写了三五行，整页读起来像说明书。
+    // 收进标题旁的 ⓘ，悬停或键盘聚焦时弹出，内容一个字不删——「需重启」
+    //「必须留空」这类注意事项仍然找得到。
     Vue.component('setting-list-item', {
         props: ["type", "title", "desc", "value"],
         template: `{{template "component/settingListItem"}}`,
@@ -47,8 +71,17 @@
     // 与 setting-list-item 同一套两栏栅格，只是右边放按钮/状态而不是输入框。
     // 状态行不用它的话就会退化成「标题、说明、按钮」三行左对齐，
     // 和这个页面上其余的行完全对不齐。
+    //
+    // desc 是会变的状态（「生成于…收录…」「限速规则已下发」），照旧常驻显示；
+    // 静态的解释性文字走 hint，与 setting-list-item 一样收进 ⓘ。两者都可含
+    // <code> 等标记，所以用 v-html，读屏用的 aria-label 去掉标记。
     Vue.component('setting-action-item', {
-        props: ["title", "desc"],
+        props: ["title", "desc", "hint"],
+        computed: {
+            plainHint() {
+                return (this.hint || '').replace(/<[^>]+>/g, '');
+            },
+        },
         template: `{{template "component/settingActionItem"}}`,
     });
 </script>

@@ -198,7 +198,6 @@ class AllSetting {
         this.xrayTemplateConfig = "";
 
         this.timeLocation = "Asia/Shanghai";
-        this.subscriptionUpdateTime = "04:00";
 
         this.ipdbSourceUrl = "";
         this.qqwrySourceUrl = "";

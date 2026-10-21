@@ -38,8 +38,6 @@ type AllSetting struct {
 
 	TimeLocation string `json:"timeLocation" form:"timeLocation"`
 
-	SubscriptionUpdateTime string `json:"subscriptionUpdateTime" form:"subscriptionUpdateTime"`
-
 	IPDBSourceUrl        string `json:"ipdbSourceUrl" form:"ipdbSourceUrl"`
 	QQWrySourceUrl       string `json:"qqwrySourceUrl" form:"qqwrySourceUrl"`
 	IP2LocationSourceUrl string `json:"ip2locationSourceUrl" form:"ip2locationSourceUrl"`
@@ -167,6 +165,21 @@ func validInterfaceName(name string) bool {
 	return true
 }
 
+// CheckSubscriptionUpdateTime 校验域名组订阅的每日更新时刻。
+//
+// 这一项不在 AllSetting 里：它在分流管理页单独保存（见 RoutingController），
+// 设置页整份提交时不再带它——两个页面都提交同一个 key 的话，一个开着没刷新
+// 的设置页一保存，就会把刚在分流页改的值静默写回旧值。
+//
+// 用 time.Parse 而不是手写正则：标准库负责格式与范围，25:00 / 04:60 这类
+// 越界值它会直接拒绝。
+func CheckSubscriptionUpdateTime(v string) error {
+	if _, err := time.Parse("15:04", v); err != nil {
+		return common.NewError("订阅更新时间格式不正确，应为 HH:MM:", v)
+	}
+	return nil
+}
+
 func (s *AllSetting) CheckValid() error {
 	if s.WebListen != "" {
 		ip := net.ParseIP(s.WebListen)
@@ -241,12 +254,6 @@ func (s *AllSetting) CheckValid() error {
 	_, err = time.LoadLocation(s.TimeLocation)
 	if err != nil {
 		return common.NewError("time location not exist:", s.TimeLocation)
-	}
-
-	// 用 time.Parse 而不是手写正则：标准库负责格式与范围，
-	// 25:00 / 04:60 这类越界值它会直接拒绝。
-	if _, err := time.Parse("15:04", s.SubscriptionUpdateTime); err != nil {
-		return common.NewError("订阅更新时间格式不正确，应为 HH:MM:", s.SubscriptionUpdateTime)
 	}
 
 	// 两个归属地数据源的地址：留空表示不启用该源，但不能两个都空——

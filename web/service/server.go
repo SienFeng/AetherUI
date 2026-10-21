@@ -266,8 +266,17 @@ func openXrayZip(zipPath string) (*zip.Reader, func(), error) {
 	return r, func() { f.Close() }, nil
 }
 
-// extractXrayFiles 把 zip 里的 xray / geosite.dat / geoip.dat 解到三个显式
-// 给出的路径，语义是**全有或全无**：三个条目先各自写成同目录下的 .tmp 文件，
+// extractXrayFiles 把 zip 里的 xray 解到 binPath；geosite.dat / geoip.dat
+// **只在目标位置还没有这个文件时**才从 zip 里解出，已有的一律保留。
+//
+// geo 数据不跟着核心版本走：Xray 26.10.21 起发布包自带的 geosite.dat 从约
+// 11MB 的增强版换成了约 2.3MB 的基础版，没有 china-list 这类分类。改动前切换
+// 版本会顺手用它覆盖机器上的数据，引用了 geosite:china-list 的配置于是加载
+// 失败、xray 起不来，降级回 26.9.9 又被它包里的增强版覆盖回来——看上去像是
+// 新版核心有问题，其实换的是数据。geo 数据此后只由 a-ui geo（带校验）更新；
+// 全新安装时 bin/ 下已有发版包带的种子数据，同样保留。
+//
+// 写入语义是**全有或全无**：三个条目先各自写成同目录下的 .tmp 文件，
 // 全部写完才逐个 rename 就位；中途任何一步失败都清掉临时文件、一个目标文件
 // 都不动。
 //
@@ -336,11 +345,20 @@ func extractXrayFiles(r *zip.Reader, binPath, geositePath, geoipPath string) err
 		return nil
 	}
 
-	for _, entry := range []struct{ zipName, target string }{
-		{"xray", binPath},
-		{"geosite.dat", geositePath},
-		{"geoip.dat", geoipPath},
+	for _, entry := range []struct {
+		zipName, target string
+		keepExisting    bool
+	}{
+		{"xray", binPath, false},
+		{"geosite.dat", geositePath, true},
+		{"geoip.dat", geoipPath, true},
 	} {
+		if entry.keepExisting {
+			// 空文件不算「已有」：那是某次写到一半的残骸，留着它 xray 照样起不来。
+			if info, err := os.Stat(entry.target); err == nil && info.Size() > 0 {
+				continue
+			}
+		}
 		if err := stageZipFile(entry.zipName, entry.target); err != nil {
 			cleanup()
 			return err
@@ -416,7 +434,8 @@ func (s *ServerService) LatestXrayVersion() (string, error) {
 	return firstReleaseTag(versions)
 }
 
-// ReplaceXrayFiles 下载指定版本并替换 bin/ 下的三个文件，不停也不启核心。
+// ReplaceXrayFiles 下载指定版本并替换 bin/ 下的核心，不停也不启核心；geo 数据
+// 已有就保留（见 extractXrayFiles）。
 //
 // 供 a-ui xray 子命令使用：那是个一次性进程，它用 os/exec 起的 xray 会随
 // 进程退出一起死掉，所以绝不能在这里重启核心。安装脚本随后的

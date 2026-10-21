@@ -137,10 +137,10 @@ func TestExtractXrayFilesMissingBinaryLeavesTargetsIntact(t *testing.T) {
 	assertNoTempResidue(t, dir)
 }
 
-// zip 里**有 xray 但缺 geosite.dat**——这正是修复前会毁掉核心的那条路径：
-// 三个条目各写各的，等到第二个条目报错时核心已经被原地换掉了，「缺条目不会
-// 破坏已有的核心」只对 xray 这一个条目成立。改成先全部写临时文件、全部成功
-// 才 rename 之后，这里三个目标必须一个都没变。
+// zip 里**有 xray 但缺 geosite.dat**，而机器上也还没有 geosite.dat（只有这时
+// 才需要从 zip 里取它）——这正是修复前会毁掉核心的那条路径：三个条目各写各的，
+// 等到第二个条目报错时核心已经被原地换掉了。改成先全部写临时文件、全部成功
+// 才 rename 之后，已有的目标必须一个都没变。
 func TestExtractXrayFilesMissingGeositeLeavesAllTargetsIntact(t *testing.T) {
 	zipPath := writeTestZip(t, map[string]string{
 		"xray":      "NEW-BINARY",
@@ -158,9 +158,8 @@ func TestExtractXrayFilesMissingGeositeLeavesAllTargetsIntact(t *testing.T) {
 	geositePath := filepath.Join(dir, "geosite.dat")
 	geoipPath := filepath.Join(dir, "geoip.dat")
 	old := map[string]string{
-		binPath:     "OLD-BINARY",
-		geositePath: "OLD-GEOSITE",
-		geoipPath:   "OLD-GEOIP",
+		binPath:   "OLD-BINARY",
+		geoipPath: "OLD-GEOIP",
 	}
 	for path, content := range old {
 		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
@@ -169,7 +168,10 @@ func TestExtractXrayFilesMissingGeositeLeavesAllTargetsIntact(t *testing.T) {
 	}
 
 	if err := extractXrayFiles(r, binPath, geositePath, geoipPath); err == nil {
-		t.Fatal("zip 缺 geosite.dat 条目，期望报错，实际成功")
+		t.Fatal("机器上没有 geosite.dat、zip 里也缺，期望报错，实际成功")
+	}
+	if _, err := os.Stat(geositePath); !os.IsNotExist(err) {
+		t.Fatalf("失败路径不应凭空生成 geosite.dat: %v", err)
 	}
 
 	for path, want := range old {
@@ -182,6 +184,54 @@ func TestExtractXrayFilesMissingGeositeLeavesAllTargetsIntact(t *testing.T) {
 		}
 	}
 
+	assertNoTempResidue(t, dir)
+}
+
+// 切换核心版本只换核心，机器上已有的 geo 数据原样保留：Xray 26.10.21 起发布包
+// 自带的 geosite.dat 是不含 china-list 的基础版，覆盖过去会让引用它的配置加载
+// 失败、xray 起不来。空文件不算已有，照常用 zip 里的补上。
+func TestExtractXrayFilesKeepsExistingGeoData(t *testing.T) {
+	zipPath := writeTestZip(t, map[string]string{
+		"xray":        "NEW-BINARY",
+		"geosite.dat": "BASIC-GEOSITE",
+		"geoip.dat":   "BASIC-GEOIP",
+	})
+	r, closeZip, err := openXrayZip(zipPath)
+	if err != nil {
+		t.Fatalf("openXrayZip: %v", err)
+	}
+	defer closeZip()
+
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "xray-linux-amd64")
+	geositePath := filepath.Join(dir, "geosite.dat")
+	geoipPath := filepath.Join(dir, "geoip.dat")
+	for path, content := range map[string]string{
+		binPath:     "OLD-BINARY",
+		geositePath: "ENHANCED-GEOSITE",
+		geoipPath:   "",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+			t.Fatalf("预置 %s: %v", path, err)
+		}
+	}
+
+	if err := extractXrayFiles(r, binPath, geositePath, geoipPath); err != nil {
+		t.Fatalf("extractXrayFiles: %v", err)
+	}
+	for path, want := range map[string]string{
+		binPath:     "NEW-BINARY",
+		geositePath: "ENHANCED-GEOSITE",
+		geoipPath:   "BASIC-GEOIP",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读取 %s: %v", path, err)
+		}
+		if string(got) != want {
+			t.Fatalf("%s 期望 %q，实际 %q", path, want, string(got))
+		}
+	}
 	assertNoTempResidue(t, dir)
 }
 

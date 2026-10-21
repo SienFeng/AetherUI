@@ -166,6 +166,25 @@
                                               @click="confirmExport('domainGroups')">导出</a-button>
                                     <a-button icon="upload" style="margin-left:8px"
                                               @click="pickImportFile()">导入</a-button>
+                                    <!-- 订阅更新时刻原先在设置页「常规」里；它只管域名组订阅，
+                                         放在这里改订阅地址时就能看到。单独保存，不跟设置页整份
+                                         提交（理由见 entity.CheckSubscriptionUpdateTime）。 -->
+                                    <span class="toolbar-spacer"></span>
+                                    <span class="toolbar-group">
+                                        <label for="sub-time-input" class="toolbar-label">订阅每日更新</label>
+                                        <a-input id="sub-time-input" v-model.trim="subTime.value" placeholder="HH:MM"
+                                                 style="width: 88px" @press-enter="saveSubTime"></a-input>
+                                        <a-button :disabled="!subTimeDirty" :loading="subTime.saving"
+                                                  @click="saveSubTime">保存</a-button>
+                                        <a-tooltip placement="topRight" overlay-class-name="setting-hint-tip"
+                                                   :trigger="['hover', 'focus']"
+                                                   title="域名组订阅每天在这个时刻（按面板时区）自动拉取，格式 HH:MM，最多 10 分钟内生效，无需重启面板">
+                                            <span class="setting-hint" tabindex="0"
+                                                  aria-label="说明：域名组订阅每天在这个时刻（按面板时区）自动拉取，格式 HH:MM，最多 10 分钟内生效，无需重启面板">
+                                                <a-icon type="info-circle"></a-icon>
+                                            </span>
+                                        </a-tooltip>
+                                    </span>
                                 </div>
                                 <a-table :columns="groupColumns" :data-source="groups"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
@@ -673,6 +692,8 @@
             nodes: [],
             rules: [],
             inbounds: [],
+            // saved 是服务端当前的值，value 是输入框里的；两者不同才能点保存。
+            subTime: { value: '', saved: '', saving: false },
             groupColumns: [
                 { title: '备注', dataIndex: 'remark', width: 160 },
                 { title: '域名', scopedSlots: { customRender: 'domains' } },
@@ -723,6 +744,9 @@
             },
         },
         computed: {
+            subTimeDirty() {
+                return this.subTime.value !== this.subTime.saved;
+            },
             // 两段各自渲染成一张表。this.rules 已由服务端按 priority asc, id asc
             // 排好，filter 保持相对顺序，所以段内顺序就是生成期的匹配顺序。
             blockRules() {
@@ -821,6 +845,22 @@
                     return await HttpUtil.post(url, data);
                 } finally {
                     this.spinning = false;
+                }
+            },
+            async loadSubTime() {
+                const msg = await HttpUtil.post('aui/routing/subscription-time');
+                if (msg.success) {
+                    this.subTime.value = this.subTime.saved = msg.obj;
+                }
+            },
+            async saveSubTime() {
+                if (!this.subTimeDirty) return;
+                this.subTime.saving = true;
+                try {
+                    const msg = await HttpUtil.post('aui/routing/subscription-time/update', { time: this.subTime.value });
+                    if (msg.success) this.subTime.saved = this.subTime.value;
+                } finally {
+                    this.subTime.saving = false;
                 }
             },
             async loadAll() {
@@ -1543,6 +1583,7 @@
             },
         },
         async mounted() {
+            this.loadSubTime();
             this.spinning = true;
             try {
                 await this.loadAll();
