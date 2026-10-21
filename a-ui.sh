@@ -669,28 +669,73 @@ cron_jobs() {
 }
 
 #update geo data
+# 新数据先下到临时目录，用真实 xray 校验通过后才替换并重启面板；任何一步失败
+# 都保留现有文件、不重启，返回非 0。
+#
+# 原先的写法是 curl -s -L 直接覆盖：不带 -f 时 GitHub 回错误页（限流、5xx）
+# curl 照样退出 0，错误页被当成 dat 写进 bin/，紧接着的重启让 xray 加载不了
+# geo 数据而起不来——整机节点断网，a-ui.service 也没有 Restart= 能自愈。
+# 定时任务每两天在凌晨跑一次，正是没人看着的时候。
 update_geo() {
-    #back up first
-    mv ${PATH_FOR_GEO_IP} ${PATH_FOR_GEO_IP}.bak
-    #update data
-    curl -s -L -o ${PATH_FOR_GEO_IP} ${URL_FOR_GEO_IP}
-    if [[ $? -ne 0 ]]; then
-        echo "update geoip.dat failed"
-        mv ${PATH_FOR_GEO_IP}.bak ${PATH_FOR_GEO_IP}
-    else
-        echo "update geoip.dat succeed"
-        rm -f ${PATH_FOR_GEO_IP}.bak
+    local bin_dir install_dir xray_bin tmp_dir f
+    bin_dir=$(dirname "${PATH_FOR_GEO_SITE}")
+    install_dir=$(dirname "${bin_dir}")
+    xray_bin=$(ls "${bin_dir}"/xray-linux-* 2>/dev/null | head -1)
+    if [[ -z "${xray_bin}" ]]; then
+        LOGE "找不到 xray 核心，无法校验新的 geo 数据，未做任何改动"
+        return 1
     fi
-    mv ${PATH_FOR_GEO_SITE} ${PATH_FOR_GEO_SITE}.bak
-    curl -s -L -o ${PATH_FOR_GEO_SITE} ${URL_FOR_GEO_SITE}
-    if [[ $? -ne 0 ]]; then
-        echo "update geosite.dat failed"
-        mv ${PATH_FOR_GEO_SITE}.bak ${PATH_FOR_GEO_SITE}
-    else
-        echo "update geosite.dat succeed"
-        rm -f ${PATH_FOR_GEO_SITE}.bak
+
+    # 不用 /tmp：两个文件合计近 30MB，systemd 发行版的 /tmp 常是内存 tmpfs
+    # （与 install.sh 的 backup_xray_assets 同理）；放在安装目录旁边还能保证
+    # 下面的 mv 是同一文件系统内的原子 rename。
+    tmp_dir=$(mktemp -d "${install_dir}/.geo-update-XXXXXX") || {
+        LOGE "创建临时目录失败，未做任何改动"
+        return 1
+    }
+    if ! curl -fsSL --retry 2 -o "${tmp_dir}/geoip.dat" "${URL_FOR_GEO_IP}" ||
+        ! curl -fsSL --retry 2 -o "${tmp_dir}/geosite.dat" "${URL_FOR_GEO_SITE}"; then
+        rm -rf "${tmp_dir}"
+        LOGE "下载 geo 数据失败，保留现有文件，未重启面板"
+        return 1
     fi
-    #restart a-ui
+
+    # 配置里可能还引用了 bin/ 下别的数据文件（ext:xxx.dat），校验时换了资源
+    # 目录就找不到它们，会把好数据误判成坏的，所以链接进来。
+    for f in "${bin_dir}"/*.dat; do
+        case "$(basename "${f}")" in
+        geoip.dat | geosite.dat) ;;
+        *) ln -s "${f}" "${tmp_dir}/" 2>/dev/null ;;
+        esac
+    done
+
+    # 用当前配置校验，连「新数据删掉了配置正在用的分类」也能拦住。当前配置
+    # 本身就跑不过（文件不存在或另有问题）时不能拿它当判据，否则数据永远
+    # 更新不了，退回只检查两个文件能否被正常加载的最小配置。
+    local check_cfg="${PATH_FOR_CONFIG}"
+    if ! (cd "${install_dir}" && "${xray_bin}" run -test -c "${check_cfg}") >/dev/null 2>&1; then
+        check_cfg="${tmp_dir}/check.json"
+        cat >"${check_cfg}" <<'EOF'
+{"outbounds":[{"protocol":"freedom","tag":"direct"}],
+ "routing":{"rules":[{"type":"field","domain":["geosite:cn"],"outboundTag":"direct"},
+                     {"type":"field","ip":["geoip:cn"],"outboundTag":"direct"}]}}
+EOF
+    fi
+    if ! (cd "${install_dir}" && XRAY_LOCATION_ASSET="${tmp_dir}" "${xray_bin}" run -test -c "${check_cfg}") >/dev/null 2>&1; then
+        rm -rf "${tmp_dir}"
+        LOGE "新的 geo 数据未通过 xray 校验（下载内容可能不完整或不是 dat 文件），保留现有文件，未重启面板"
+        return 1
+    fi
+
+    mv -f "${tmp_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
+        mv -f "${tmp_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
+    local mv_rc=$?
+    rm -rf "${tmp_dir}"
+    if [[ ${mv_rc} -ne 0 ]]; then
+        LOGE "替换 geo 数据失败，请检查 ${bin_dir} 下的 geoip.dat 与 geosite.dat"
+        return 1
+    fi
+    LOGI "geo 数据已更新并通过校验，正在重启面板"
     systemctl restart a-ui
 }
 
