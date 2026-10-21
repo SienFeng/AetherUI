@@ -439,6 +439,15 @@ func (s *SettingService) GetSubscriptionUpdateTime() (string, error) {
 	return s.getString("subscriptionUpdateTime")
 }
 
+// SetSubscriptionUpdateTime 校验后写入订阅更新时刻。SubscriptionJob 每 10 分钟
+// 自己读一次，所以不用置重启标志，也不用重启面板。
+func (s *SettingService) SetSubscriptionUpdateTime(v string) error {
+	if err := entity.CheckSubscriptionUpdateTime(v); err != nil {
+		return err
+	}
+	return s.setString("subscriptionUpdateTime", v)
+}
+
 // GetIPDBSourceUrl 返回 IP 归属地库的源数据地址。做成可配置是因为默认地址在
 // GitHub，部分网络下不可达。
 func (s *SettingService) GetIPDBSourceUrl() (string, error) {

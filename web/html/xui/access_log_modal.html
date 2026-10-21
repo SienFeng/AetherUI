@@ -3,7 +3,7 @@
          :closable="true" :mask-closable="true" width="1100px" :footer="null">
     <a-alert v-if="!accessLogModal.enabled" type="warning" show-icon style="margin-bottom: 12px"
              message="访问日志未开启"
-             description="请到「面板设置 → 访问日志」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
+             description="请到「面板设置 → 日志与统计」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
     </a-alert>
     <a-tabs :active-key="accessLogModal.tab" @change="k => accessLogModal.switchTab(k)">
         <a-tab-pane key="detail" tab="明细">

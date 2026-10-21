@@ -11,7 +11,6 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
-	"a-ui/web/entity"
 )
 
 func TestParseSubscriptionSurgeFormat(t *testing.T) {
@@ -569,23 +568,41 @@ func TestSubscriptionUpdateTimeDefault(t *testing.T) {
 	}
 }
 
-func TestAllSettingRejectsBadUpdateTime(t *testing.T) {
-	// 用共用基线：CheckValid 逐条串行校验，任何一项不合法都会让本测试
-	// 真正关心的那条走不到。
-	base := func(v string) *entity.AllSetting {
-		s := validBaseSetting()
-		s.SubscriptionUpdateTime = v
-		return s
-	}
+func TestSetSubscriptionUpdateTimeRejectsBadValues(t *testing.T) {
+	setupDB(t)
+	s := &SettingService{}
 	for _, bad := range []string{"25:00", "4:00pm", "0400", "", "04:60", "abc"} {
-		if err := base(bad).CheckValid(); err == nil {
+		if err := s.SetSubscriptionUpdateTime(bad); err == nil {
 			t.Errorf("%q: expected error, got nil", bad)
 		}
 	}
-	for _, good := range []string{"04:00", "00:00", "23:59"} {
-		if err := base(good).CheckValid(); err != nil {
+	// 被拒的值一个都不能落库，否则 SubscriptionJob 读到的就是它。
+	if got, _ := s.GetSubscriptionUpdateTime(); got != "04:00" {
+		t.Fatalf("非法值不应落库，got %q", got)
+	}
+	for _, good := range []string{"00:00", "23:59", "05:30"} {
+		if err := s.SetSubscriptionUpdateTime(good); err != nil {
 			t.Errorf("%q: unexpected error %v", good, err)
 		}
+		if got, _ := s.GetSubscriptionUpdateTime(); got != good {
+			t.Errorf("保存 %q 后读到 %q", good, got)
+		}
+	}
+}
+
+// 设置页整份保存不能再碰这个 key：两个页面都提交它的话，一个开着没刷新的
+// 设置页一保存，就会把分流页刚改的值写回旧值。
+func TestUpdateAllSettingLeavesSubscriptionUpdateTimeAlone(t *testing.T) {
+	setupDB(t)
+	s := &SettingService{}
+	if err := s.SetSubscriptionUpdateTime("05:30"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAllSetting(validBaseSetting()); err != nil {
+		t.Fatalf("UpdateAllSetting: %v", err)
+	}
+	if got, _ := s.GetSubscriptionUpdateTime(); got != "05:30" {
+		t.Fatalf("设置页整份保存改动了订阅更新时间：got %q", got)
 	}
 }
 

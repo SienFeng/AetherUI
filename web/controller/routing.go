@@ -192,6 +192,7 @@ type RoutingController struct {
 	xrayService        service.XrayService
 	portableService    service.RoutingPortableService
 	probeService       service.ProbeService
+	settingService     service.SettingService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -228,6 +229,27 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 
 	g.POST("/export", a.exportRouting)
 	g.POST("/import", a.importRouting)
+
+	g.POST("/subscription-time", a.getSubscriptionTime)
+	g.POST("/subscription-time/update", a.updateSubscriptionTime)
+}
+
+// 订阅更新时刻。原先在设置页「常规」里，但它只管域名组订阅，放在这里管理员
+// 改订阅地址时就能顺手看到；为什么不再跟设置页整份提交，见
+// entity.CheckSubscriptionUpdateTime。
+
+func (a *RoutingController) getSubscriptionTime(c *gin.Context) {
+	v, err := a.settingService.GetSubscriptionUpdateTime()
+	if err != nil {
+		jsonMsg(c, "获取订阅更新时间", err)
+		return
+	}
+	jsonObj(c, v, nil)
+}
+
+func (a *RoutingController) updateSubscriptionTime(c *gin.Context) {
+	err := a.settingService.SetSubscriptionUpdateTime(strings.TrimSpace(c.PostForm("time")))
+	jsonMsg(c, "保存订阅更新时间", err)
 }
 
 // 域名组

@@ -783,6 +783,21 @@ button.status-badge:hover {
     flex: 1 1 auto;
 }
 
+/* 工具栏里必须一起换行的一组控件（标签 + 输入框 + 按钮）：窄屏下各自折行
+ * 会把「保存」甩到下一行，看不出它保存的是哪个框。 */
+.toolbar-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+
+.toolbar-label {
+    font-size: 13px;
+    color: var(--aui-text-2);
+    white-space: nowrap;
+}
+
 /* 结果计数。过滤之后必须说清「看到的是全部还是一部分」，
  * 否则管理员会把过滤后的空表读成「入站被删光了」。 */
 .toolbar-count {
@@ -1209,6 +1224,78 @@ button.chip.is-active {
 
 #setting-tabs .ant-tabs-content {
     padding-left: 20px;
+}
+
+/* 宽屏下导航贴住视口：IP 归属地库、Xray 配置这几页能有好几屏长，滚到下面
+ * 想换分类还得滚回顶部。
+ *
+ * 光给导航条写 sticky 不会生效：antd 给 .ant-tabs 写了 overflow:hidden，它
+ * 因此成了导航条最近的滚动祖先，粘滞永远发生在一个不会滚动的盒子里。换成
+ * overflow:clip——照样裁掉溢出，但不构成滚动容器（不支持 clip 的浏览器退回
+ * visible，只是不裁切）。导航条原本 height:100% 撑满整列，粘滞区间为零，
+ * 必须改回内容高度；左右之间那条分隔线由内容区的 border-left 画，不受影响。
+ *
+ * 未保存提示条（.save-bar，见下）也贴在同一个滚动容器顶部、z-index 更高，
+ * 它出现时导航要让到它下面，否则前两项会被它盖住。66px = 提示条高度 50px
+ * （上下 padding 12 + 边框 1 + small 按钮 24）+ 与平时相同的 16px 间距；
+ * 提示条在宽屏下不会折行，改了它的尺寸要一起改这里。 */
+@media (min-width: 769px) {
+    #setting-tabs {
+        overflow: visible;
+        overflow: clip;
+    }
+
+    #setting-tabs > .ant-tabs-bar {
+        position: sticky;
+        top: 16px;
+        height: auto;
+    }
+
+    .save-bar + #setting-tabs > .ant-tabs-bar {
+        top: 66px;
+    }
+}
+
+/* 合并后的分类里，每段 a-list 前的小标题（保留合并前的分类名）。
+ * 与 .card-section-title 同一档视觉重量：比设置项标题轻，只用来分段。 */
+.setting-group-title {
+    margin: 24px 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text-2);
+}
+
+.setting-group-title.is-first {
+    margin-top: 0;
+}
+
+/* 设置项标题旁的 ⓘ：说明文字收进 tooltip（component/setting.html）。
+ * 颜色用辅助色 --aui-text-3（4.8:1），不抢标题；可聚焦，所以要给回焦点环。 */
+.setting-hint {
+    margin-left: 6px;
+    color: var(--aui-text-3);
+    cursor: help;
+    font-weight: normal;
+}
+
+.setting-hint:hover {
+    color: var(--aui-primary);
+}
+
+.setting-hint:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+    border-radius: 50%;
+}
+
+/* antd 的 tooltip 默认 max-width 250px，几百字的说明会被拉成一根细长条。 */
+.setting-hint-tip,
+.setting-hint-tip .ant-tooltip-inner {
+    max-width: min(420px, calc(100vw - 32px));
+}
+
+.setting-hint-tip .ant-tooltip-inner {
+    line-height: 1.6;
 }
 
 /* 窄屏退回横向：132px 的侧导航在手机上会把右侧内容挤到没法填表。

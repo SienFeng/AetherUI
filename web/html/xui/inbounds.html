@@ -1200,8 +1200,8 @@
                     });
                 });
 
-                // byIP 里剩下的就是「窗口内用过、当前不在线」的。服务端已按
-                // 用量降序排好，这里按 entries 的原顺序取即可。
+                // byIP 里剩下的就是「窗口内用过、当前不在线」的。服务端按用量
+                // 降序给出，下面按时间重排时它是同一小时内的次序。
                 const offline = usage.entries
                     .filter(e => byIP[e.ip] !== undefined)
                     .map(e => ({
@@ -1220,8 +1220,17 @@
                 // 但它们不在连，得跟着离线的一起往后排——刚封掉的来源留在在线区
                 // 顶上，等于当场否认这次操作生效了。它们排在离线区最前面：那是
                 // 管理员上一秒刚动过的行。
-                const live = merged.filter(o => !o.offline);
-                const bannedRows = merged.filter(o => o.offline);
+                //
+                // 每组内部按「上线时间」那一列显示的时间从近到远排：在线行显示
+                // firstSeen，离线行显示 lastSeen，排序键必须与显示的是同一个值，
+                // 否则看上去仍是乱序。lastSeen 是小时粒度，同一小时的行很多，
+                // Array.prototype.sort 是稳定排序，同时刻的保持传进来的次序
+                // （离线按用量降序、在线按 IP）。没有时间的行（被拒绝但未封禁的
+                // 零值行、补不回 lastSeen 的封禁行）按 0 计，落在各组末尾。
+                const newestFirst = key => (a, b) => (b[key] || 0) - (a[key] || 0);
+                const live = merged.filter(o => !o.offline).sort(newestFirst('firstSeen'));
+                const bannedRows = merged.filter(o => o.offline).sort(newestFirst('lastSeen'));
+                offline.sort(newestFirst('lastSeen'));
                 this.$set(this.mergedOnlines, id, live.concat(bannedRows, offline));
             },
             onExpand(expanded, dbInbound) {

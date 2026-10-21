@@ -15,7 +15,6 @@ func validBaseSetting() *entity.AllSetting {
 		WebBasePath:              "/",
 		TimeLocation:             "Asia/Shanghai",
 		XrayTemplateConfig:       "{}",
-		SubscriptionUpdateTime:   "04:00",
 		IPDBSourceUrl:            "https://example.com/ipv4_source.txt",
 		QQWrySourceUrl:           "https://example.com/qqwry.dat",
 		IPDBUpdateTime:           "",

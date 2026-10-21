@@ -113,7 +113,7 @@
                         <!-- 两步验证。状态行沿用其他标签页的 setting-action-item，
                              下面的表单沿用上面改密码那一块的写法。 -->
                         <a-list item-layout="horizontal" style="background: white; margin-top: 16px">
-                            <setting-action-item title="两步验证" :desc="twoFactorDesc()">
+                            <setting-action-item title="两步验证" :hint="twoFactorDesc()">
                                 <span v-if="!twoFactor.loaded" class="chip">读取中</span>
                                 <span v-else-if="twoFactor.enabled" class="status-badge status-ok">
                                     <a-icon type="check-circle"></a-icon>已开启
@@ -182,15 +182,14 @@
                             </a-form-item>
                         </a-form>
                     </a-tab-pane>
-                    <a-tab-pane key="3" tab="Xray 配置">
-                        <a-list item-layout="horizontal" style="background: white">
-                            <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
-                        </a-list>
-                    </a-tab-pane>
-                    <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
-                         都会进入 xray 配置、都由 routing/dns 注入器消费，
-                         和时区、订阅更新时刻不是一类东西。 -->
-                    <a-tab-pane key="11" tab="网络与 DNS">
+                    <!-- 11 个分类合并成 7 个：多数分类只有一两项，左侧导航比内容还长。
+                         合并只挪 a-list 的位置，每段前面的小标题保留原来的分类名，
+                         表单字段与保存逻辑一律不动。 -->
+                    <a-tab-pane key="3" tab="Xray 与网络">
+                        <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
+                             都会进入 xray 配置、都由 routing/dns 注入器消费，
+                             和时区、订阅更新时刻不是一类东西。 -->
+                        <h3 class="setting-group-title is-first">网络与 DNS</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
                                                desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
@@ -198,6 +197,10 @@
                             <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
                                                desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
                                                v-model="allSetting.dnsServers"></setting-list-item>
+                        </a-list>
+                        <h3 class="setting-group-title">Xray 配置</h3>
+                        <a-list item-layout="horizontal" style="background: white">
+                            <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
                     <a-tab-pane key="4" tab="IP 归属地库">
@@ -235,19 +238,15 @@
                                                desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"
                                                v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
                             <setting-list-item type="switch" title="地区限制要求多数数据源认同"
-                                               desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）"
+                                               desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）。后两个源是「旁证」，不是「更准」：实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）"
                                                v-model="allSetting.regionMatchMode"></setting-list-item>
-                            <a-list-item>
-                                <a-alert type="info" show-icon
-                                         message="后两个源是「旁证」，不是「更准」"
-                                         description="实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）。"></a-alert>
-                            </a-list-item>
                             <setting-list-item type="text" title="每日更新时刻"
                                                desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
                                                v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="5" tab="访问日志">
+                    <a-tab-pane key="5" tab="日志与统计">
+                        <h3 class="setting-group-title is-first">访问日志</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="switch" title="记录访问日志"
                                                desc="记录用户在什么时间访问了什么目标、走的哪条路由。开关变化约 10 秒后生效"
@@ -256,8 +255,7 @@
                                                desc="超过该天数的记录每小时自动清除"
                                                v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
                         </a-list>
-                    </a-tab-pane>
-                    <a-tab-pane key="9" tab="流量统计">
+                        <h3 class="setting-group-title">流量统计</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="number" title="小时数据保留天数"
                                                desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
@@ -267,14 +265,14 @@
                                                v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="8" tab="并发限制">
+                    <a-tab-pane key="6" tab="连接限制">
+                        <h3 class="setting-group-title is-first">并发限制</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="number" title="闲置超时（秒）"
                                                desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
                                                v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
                         </a-list>
-                    </a-tab-pane>
-                    <a-tab-pane key="6" tab="端口限速">
+                        <h3 class="setting-group-title">端口限速</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-action-item title="限速状态" :desc="shapingDesc()">
                                 <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
@@ -289,7 +287,7 @@
                                 <span v-else class="chip">未启用</span>
                             </setting-action-item>
                             <setting-action-item title="清除全部限速"
-                                                 desc="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
+                                                 hint="入站上的限速值不会被清空，约 10 秒后会重新下发。若限速把网络掐断导致面板打不开，请从控制台执行 <code>./a-ui tc-clear</code>">
                                 <a-button type="danger" :loading="shapingClearing" @click="clearShaping">
                                     清除全部限速
                                 </a-button>
@@ -302,16 +300,12 @@
                     <a-tab-pane key="7" tab="常规">
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
-                            <setting-list-item type="text" title="订阅更新时间"
-                                               desc="域名组订阅每天在该时刻自动更新，格式 HH:MM，最多 10 分钟内生效，无需重启面板"
-                                               v-model="allSetting.subscriptionUpdateTime"></setting-list-item>
                         </a-list>
-                    </a-tab-pane>
-                    <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
-                         「设置系统」一节），只是新建入站表单的预填值。混在
-                         「面板与访问」里会被读成面板自身的证书设置——而面板
-                         自己的证书是上面那两项，填错地方的后果完全不同。 -->
-                    <a-tab-pane key="10" tab="入站默认值">
+                        <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
+                             「设置系统」一节），只是新建入站表单的预填值。混在
+                             「面板与访问」里会被读成面板自身的证书设置——而面板
+                             自己的证书是上面那两项，填错地方的后果完全不同。 -->
+                        <h3 class="setting-group-title">新建入站默认值</h3>
                         <a-list item-layout="horizontal" style="background: white">
                             <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
                             <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
