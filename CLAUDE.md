@@ -256,6 +256,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 路由要靠 xray 嗅探拿到 SNI/Host。入站若关掉 sniffing 或 `destOverride` 不含 `http`/`tls`，**域名规则永远不会命中且无任何报错**。新建入站默认 `enabled=true, destOverride=['http','tls']`（`web/assets/js/model/xray.js` 的 `Sniffing` 类），页面的规则列表会对不满足的入站打黄色警告图标。
 
+**socks / http 代理入站是例外，不报警告也不计入「未生效规则」**（`routing.html` 的 `ruleIssue` 排除它们，改走 `ruleNote` 给一条前提说明、状态仍是绿色）：客户端把域名交给代理（socks5h、HTTP 代理的 CONNECT）时，xray 不嗅探也拿得到域名，规则照常命中——在生产机上实测过，socks5h 命中、socks5（客户端先自行解析成 IP）不命中。对它们报「永远不会命中」是误报，会让管理员去改一条好好的规则。入站表单也给这两种协议露出了 sniffing 开关（`xray.js` 的 `canSniffing`），打开后客户端先解析成 IP 的情况也能靠嗅探认回域名；核心接受代理类入站上的 sniffing，`TestAddInboundAcceptsSniffingOnProxyInbounds` 守着。
+
 **IP 条件不依赖 sniffing**，它匹配的是连接目标 IP：客户端直接连 IP 字面量时才会命中，客户端连域名时第一遍必然不命中——除非打开 `ipRuleResolveDomain`（见「设置系统」），那时 xray 会在所有规则都没命中后于本机解析域名再走一遍。所以那个黄色警告只对**确实贡献了域名条件**的规则才有意义，对纯 IP 规则报「永远不会命中」是在说反话。
 
 ### 内置 DNS 注入器（`web/service/dns_inject.go`）
