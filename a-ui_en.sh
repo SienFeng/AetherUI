@@ -671,28 +671,77 @@ cron_jobs() {
 }
 
 #update geo data
+# New data is downloaded to a temp dir and checked by the real xray before it
+# replaces anything and the panel restarts; any failure keeps the current files,
+# skips the restart and returns non-zero.
+#
+# The old code overwrote bin/ with curl -s -L: without -f, an error page from
+# GitHub (rate limit, 5xx) still exits 0 and gets written as the .dat file, and
+# the restart that follows leaves xray unable to load geo data - every node on
+# the machine goes down, and a-ui.service has no Restart= to recover. The cron
+# job runs every two days at night, exactly when nobody is watching.
 update_geo() {
-    #back up first
-    mv ${PATH_FOR_GEO_IP} ${PATH_FOR_GEO_IP}.bak
-    #update data
-    curl -s -L -o ${PATH_FOR_GEO_IP} ${URL_FOR_GEO_IP}
-    if [[ $? -ne 0 ]]; then
-        echo "update geoip.dat failed"
-        mv ${PATH_FOR_GEO_IP}.bak ${PATH_FOR_GEO_IP}
-    else
-        echo "update geoip.dat succeed"
-        rm -f ${PATH_FOR_GEO_IP}.bak
+    local bin_dir install_dir xray_bin tmp_dir f
+    bin_dir=$(dirname "${PATH_FOR_GEO_SITE}")
+    install_dir=$(dirname "${bin_dir}")
+    xray_bin=$(ls "${bin_dir}"/xray-linux-* 2>/dev/null | head -1)
+    if [[ -z "${xray_bin}" ]]; then
+        LOGE "xray core not found, cannot check new geo data, nothing changed"
+        return 1
     fi
-    mv ${PATH_FOR_GEO_SITE} ${PATH_FOR_GEO_SITE}.bak
-    curl -s -L -o ${PATH_FOR_GEO_SITE} ${URL_FOR_GEO_SITE}
-    if [[ $? -ne 0 ]]; then
-        echo "update geosite.dat failed"
-        mv ${PATH_FOR_GEO_SITE}.bak ${PATH_FOR_GEO_SITE}
-    else
-        echo "update geosite.dat succeed"
-        rm -f ${PATH_FOR_GEO_SITE}.bak
+
+    # Not /tmp: the two files are ~30MB and /tmp is often an in-memory tmpfs on
+    # systemd distros (same reason as backup_xray_assets in install.sh); staying
+    # next to the install dir also keeps the mv below an atomic rename.
+    tmp_dir=$(mktemp -d "${install_dir}/.geo-update-XXXXXX") || {
+        LOGE "failed to create temp dir, nothing changed"
+        return 1
+    }
+    if ! curl -fsSL --retry 2 -o "${tmp_dir}/geoip.dat" "${URL_FOR_GEO_IP}" ||
+        ! curl -fsSL --retry 2 -o "${tmp_dir}/geosite.dat" "${URL_FOR_GEO_SITE}"; then
+        rm -rf "${tmp_dir}"
+        LOGE "failed to download geo data, kept current files, panel not restarted"
+        return 1
     fi
-    #restart a-ui
+
+    # The config may reference other data files in bin/ (ext:xxx.dat); with the
+    # asset dir swapped they would be missing and good data would be rejected,
+    # so link them in.
+    for f in "${bin_dir}"/*.dat; do
+        case "$(basename "${f}")" in
+        geoip.dat | geosite.dat) ;;
+        *) ln -s "${f}" "${tmp_dir}/" 2>/dev/null ;;
+        esac
+    done
+
+    # Checking against the current config also catches new data that dropped a
+    # category the config uses. If the current config fails on its own (missing
+    # or broken for another reason) it cannot be the judge, or the data could
+    # never be updated; fall back to a minimal config that only loads both files.
+    local check_cfg="${PATH_FOR_CONFIG}"
+    if ! (cd "${install_dir}" && "${xray_bin}" run -test -c "${check_cfg}") >/dev/null 2>&1; then
+        check_cfg="${tmp_dir}/check.json"
+        cat >"${check_cfg}" <<'EOF'
+{"outbounds":[{"protocol":"freedom","tag":"direct"}],
+ "routing":{"rules":[{"type":"field","domain":["geosite:cn"],"outboundTag":"direct"},
+                     {"type":"field","ip":["geoip:cn"],"outboundTag":"direct"}]}}
+EOF
+    fi
+    if ! (cd "${install_dir}" && XRAY_LOCATION_ASSET="${tmp_dir}" "${xray_bin}" run -test -c "${check_cfg}") >/dev/null 2>&1; then
+        rm -rf "${tmp_dir}"
+        LOGE "new geo data failed the xray check (incomplete download or not a .dat file), kept current files, panel not restarted"
+        return 1
+    fi
+
+    mv -f "${tmp_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
+        mv -f "${tmp_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
+    local mv_rc=$?
+    rm -rf "${tmp_dir}"
+    if [[ ${mv_rc} -ne 0 ]]; then
+        LOGE "failed to replace geo data, check geoip.dat and geosite.dat in ${bin_dir}"
+        return 1
+    fi
+    LOGI "geo data updated and checked, restarting panel"
     systemctl restart a-ui
 }
 

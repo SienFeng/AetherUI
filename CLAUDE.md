@@ -603,7 +603,7 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 **改造之前，「发版包会覆盖用户机器上的核心」这条一直是隐性的**，直到配置热更新上线才暴露：仓库里的两个 Linux xray 二进制从 `first commit` 起就没动过，是 Xray 1.4.x 时代（go1.16.2）的构建，**里面根本没有 `RoutingService` 符号**，路由热下发在它上面必然连不上、退回整进程重启（`tryHotApply` 的失败兜底按预期工作，所以不报错、只是功能静默失效）。v1.2.8 起已把它们更新到与 `go.mod` 里 `xray-core` 同 commit 的 26.7.28。**这个坑现在连带修掉了一半**：降级面板到 v1.2.8 之前不再会把核心也拖回 Xray 1.4.x（核心不受降级影响，见上段）；仍然可能踩到它的唯一路径是一台从未装过面板、直接冷启动跑旧版仓库代码的机器。
 
 **仍然建议 `bin/xray-linux-amd64` / `bin/xray-linux-arm64` 与 `go.mod` 的 `xray-core` 同版本，但耦合方向只有一个：面板旧、核心新是安全侧，反过来才危险。** 面板内的 `infra/conf` 负责把管理员在界面上填的配置编译成 typed message 再下发给 gRPC（`xray/api.go` 的控制面热应用）——「面板旧 + 核心新」顶多是核心的新协议/新字段用不上；「面板新 + 核心用旧版 `infra/conf` 编译」才会生成核心读不懂的配置，而且这条链路上没有任何一层会报错。`web/service/xray_hot_reload_e2e_test.go` 的 `requireXrayRoutingService` 守着测试环境这一侧：核心不提供 `RoutingService` 时它跳过并说明原因，而不是以「PID 变了」这种和真实缺陷无法区分的形式失败。核对版本用 `go version -m bin/xray-linux-arm64`（读 Go 构建信息，不需要在目标平台上执行）。**不要为了「保持同版本」去主动降级用户机器上已经在跑的核心**——那正是这次改造要防的事，`bin/xray-*` 只是种子，不是需要与用户机器同步的镜像。
-- `a-ui.sh` / `a-ui_en.sh` — 安装后的管理菜单（0-17 项：安装/更新/卸载、重置账号密码、端口、启停、开机自启、BBR、acme 申请 SSL、定时任务）。同时支持 `a-ui start|stop|restart|status|log|update|clear|geo|cron` 等直接子命令。
+- `a-ui.sh` / `a-ui_en.sh` — 安装后的管理菜单（0-17 项：安装/更新/卸载、重置账号密码、端口、启停、开机自启、BBR、acme 申请 SSL、定时任务）。同时支持 `a-ui start|stop|restart|status|log|update|clear|geo|cron` 等直接子命令。`update_geo`（`a-ui geo`，也是 geo 定时更新任务）必须**先下载到临时目录、用真实 xray 校验通过后才替换并重启**，任何一步失败都保留现有文件、不重启：它由 cron 无人值守地跑，坏数据落进 `bin/` 会让随后的重启起不来 xray、整机断网。`curl` 的 `-f` 不能省——不带它时 GitHub 的错误页照样退出 0。`update_geo_script_test.go` 用真实 xray 守着两个脚本的这条路径。
 
 脚本里硬编码了仓库地址 `SienFeng/AetherUI`，fork 后需一并修改。
 
