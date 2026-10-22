@@ -134,12 +134,14 @@ class DateUtil {
         return new Date(str.replace(/-/g, '/'));
     }
 
+    // 月日时分秒一律补零：不补的话「19:00:00」显示成「19:0:0」，同一列里
+    // 长短不一，也和 Date.prototype.formatDateTime 的写法对不上。
     static formatMillis(millis) {
         const p = DateUtil.panelParts(millis);
         if (!p) {
-            return moment(millis).format('YYYY-M-D H:m:s');
+            return moment(millis).format('YYYY-MM-DD HH:mm:ss');
         }
-        return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+        return `${p.year}-${addZero(p.month)}-${addZero(p.day)} ${addZero(p.hour)}:${addZero(p.minute)}:${addZero(p.second)}`;
     }
 
     // 只要日期的场合（侧栏的版本发布日期）。

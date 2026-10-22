@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"sort"
 	"sync"
@@ -50,6 +51,32 @@ const (
 	// 不留的话"有人正在被拒绝"这件事对管理员完全不可见——被拒的 IP
 	// 恰恰是连接表里没有的那个。
 	onlineRejectRetention = 5 * time.Minute
+
+	// OnlineSampleInterval 是独立采样任务的周期（web.go 的 OnlineSampleJob）。
+	//
+	// 必须不大于 onlineMaxSampleGap。并发判定在无人设额度时一次都不采，页面
+	// 轮询只在管理员开着展开行时才有，此前唯一常驻的采样是 30 秒一次的共享
+	// 采样——每一轮都超过 10 秒的基准门槛，lastActiveAt 永不刷新，来源 30 秒
+	// 后就被判闲置、共享检测收不到它的活跃时长。TestOnlineSampleIntervalWithinBaselineGap
+	// 守着这条不等式，单独调大其中一个都会让它静默失效。
+	OnlineSampleInterval = 5 * time.Second
+
+	// onlinePendingMaxKeys 是待记账表的来源数上限。它每 30 秒被共享采样
+	// drain 一次，正常只有几个来源；上限是给「采样任务不跑（用量库没打开）」
+	// 与分布式扫描准备的天花板。
+	onlinePendingMaxKeys = 4096
+
+	// 已经按销毁通知记过终值的 cookie 保留这么久，期间连接表里再出现它一律
+	// 不记账。只需盖住「读连接表」与「拿锁更新」之间的那一小段，一分钟足够。
+	onlineClosedRetention = time.Minute
+
+	// 从连接表里消失、但还没收到销毁通知的连接，基准保留这么久。
+	//
+	// 连接表只列 ESTABLISHED：一端先关的连接会在 FIN_WAIT2 / CLOSE_WAIT 里
+	// 停一阵才真正销毁。前者受 tcp_fin_timeout（默认 60 秒）约束，后者要等
+	// xray 关掉自己那一端，最坏能拖到它的 connIdle（默认 300 秒）。基准丢得
+	// 比销毁通知早，那条通知就会被当成没见过的短连接按全量再记一遍。
+	onlineGoneRetention = 10 * time.Minute
 )
 
 // onlineUnsupportedReason 是本平台读不到内核连接表时的统一说明。在线明细与
@@ -146,6 +173,26 @@ type onlineTracker struct {
 	// rejectedAt 是最近一次被判超额的时间，按 onlineRejectRetention 过期，
 	// 用于在连接已被断开后仍然把这个 IP 显示出来。
 	rejectedAt map[onlineKey]time.Time
+
+	// pending 是自上一次 drainPending 以来各来源 IP 新增的字节，供按来源 IP
+	// 的用量记账（共享采样每 30 秒 drain 一次）。
+	//
+	// 与 onlineEntry.up/down 分开维护，原因有二：那两个值只在采样间隔不超过
+	// onlineMaxSampleGap 时累加（它们服务的是「实时」语义），且 IP 一断开
+	// 整条 entry 就被删掉；记账要的是「一个字节都别丢」，两者的取舍相反。
+	pending map[onlineKey]connBytes
+	// ports 是最近一次 update 用的入站端口集合，销毁通知据此过滤——它覆盖
+	// 整机的 TCP socket，包括 xray 自己连出去的那些。
+	ports map[int]bool
+	// closed 记录已按销毁通知记过终值的 cookie 及其时间，见 onlineClosedRetention。
+	closed map[uint64]time.Time
+	// gone 是已从连接表消失、还在等销毁通知的连接的最后基准，见 onlineGoneRetention。
+	gone map[uint64]goneConn
+}
+
+type goneConn struct {
+	bytes connBytes
+	at    time.Time
 }
 
 func newOnlineTracker() *onlineTracker {
@@ -154,7 +201,74 @@ func newOnlineTracker() *onlineTracker {
 		ips:         map[onlineKey]*onlineEntry{},
 		rejectedNow: map[onlineKey]bool{},
 		rejectedAt:  map[onlineKey]time.Time{},
+		pending:     map[onlineKey]connBytes{},
+		ports:       map[int]bool{},
+		closed:      map[uint64]time.Time{},
+		gone:        map[uint64]goneConn{},
 	}
+}
+
+// addPendingLocked 把一段字节记到某来源名下。表满时只累加已有来源、丢弃
+// 新来源：已在记账的多半是真实用户，不能让一次扫描把它们挤掉。
+func (t *onlineTracker) addPendingLocked(key onlineKey, up, down uint64) {
+	if up == 0 && down == 0 {
+		return
+	}
+	p, ok := t.pending[key]
+	if !ok && len(t.pending) >= onlinePendingMaxKeys {
+		return
+	}
+	p.up += up
+	p.down += down
+	t.pending[key] = p
+}
+
+// drainPending 取走自上一次调用以来各来源 IP 新增的字节并清零。
+func (t *onlineTracker) drainPending() map[onlineKey]connBytes {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := t.pending
+	t.pending = map[onlineKey]connBytes{}
+	return out
+}
+
+// recordClosed 处理一条内核的连接销毁通知：c 带着这条连接关闭时的最终字节数。
+//
+// 只读连接表的话，两类字节永远看不到：上一次采样之后、关闭之前的尾段，以及
+// 在两次采样之间建立又关闭的短连接的全部字节。连接表只列 ESTABLISHED，
+// 客户端先发 FIN 的连接在 CLOSE_WAIT 期间同样不可见。
+func (t *onlineTracker) recordClosed(c netdiag.Conn, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// 还没有过任何一次采样：拿不到基准，这条连接的字节可能产生于面板启动
+	// 之前的任意时刻。
+	if t.lastSample.IsZero() || !c.HasBytes {
+		return
+	}
+	port := int(c.LocalPort)
+	if !t.ports[port] {
+		return
+	}
+	ip := normalizeIP(c.RemoteIP)
+	if len(ip) == 0 {
+		return
+	}
+	if _, done := t.closed[c.Cookie]; done {
+		return
+	}
+	prev, seen := t.prev[c.Cookie]
+	if !seen {
+		var g goneConn
+		g, seen = t.gone[c.Cookie]
+		prev = g.bytes
+	}
+	t.addPendingLocked(onlineKey{port: port, ip: ip.String()},
+		deltaBytes(c.BytesUp, prev.up, seen), deltaBytes(c.BytesDown, prev.down, seen))
+	t.closed[c.Cookie] = now
+	delete(t.prev, c.Cookie)
+	delete(t.gone, c.Cookie)
 }
 
 // setRejected 记录某入站本轮被判超额的 IP 集合。
@@ -229,15 +343,34 @@ func (t *onlineTracker) update(conns []netdiag.Conn, ports map[int]bool, now tim
 		if !c.HasBytes {
 			continue
 		}
+		// 销毁通知已经记过它的终值：这份连接表读于关闭之前，再按它算一次
+		// 差值就重复计数了。也不放进 cur，否则它下一轮会被当成新连接。
+		if _, done := t.closed[c.Cookie]; done {
+			continue
+		}
 		cur[c.Cookie] = connBytes{up: c.BytesUp, down: c.BytesDown}
-		if !hasBaseline {
+		if t.lastSample.IsZero() {
 			continue
 		}
 		// 上一轮没见过这个 cookie，说明连接是这个周期内新建的，它的字节
-		// 全部产生于本周期，按全量计入。
+		// 全部产生于本周期，按全量计入——除非它只是短暂缺席（某一轮 IPv6
+		// 读取失败时 dumpAllConns 只返回 IPv4），那时用 gone 里留着的基准。
 		prev, seen := t.prev[c.Cookie]
-		a.up += int64(deltaBytes(c.BytesUp, prev.up, seen))
-		a.down += int64(deltaBytes(c.BytesDown, prev.down, seen))
+		if !seen {
+			var g goneConn
+			g, seen = t.gone[c.Cookie]
+			prev = g.bytes
+		}
+		du := deltaBytes(c.BytesUp, prev.up, seen)
+		dd := deltaBytes(c.BytesDown, prev.down, seen)
+		// 记账不看 hasBaseline：间隔再长，差值也是这段时间里真实产生的字节，
+		// 只是不能再折算成「实时」网速。
+		t.addPendingLocked(key, du, dd)
+		if !hasBaseline {
+			continue
+		}
+		a.up += int64(du)
+		a.down += int64(dd)
 	}
 
 	for key, a := range aggs {
@@ -274,8 +407,24 @@ func (t *onlineTracker) update(conns []netdiag.Conn, ports map[int]bool, now tim
 	}
 
 	t.purgeRejectedLocked(now)
+	for cookie, at := range t.closed {
+		if now.Sub(at) > onlineClosedRetention {
+			delete(t.closed, cookie)
+		}
+	}
+	for cookie, b := range t.prev {
+		if _, still := cur[cookie]; !still {
+			t.gone[cookie] = goneConn{bytes: b, at: now}
+		}
+	}
+	for cookie, g := range t.gone {
+		if _, back := cur[cookie]; back || now.Sub(g.at) > onlineGoneRetention {
+			delete(t.gone, cookie)
+		}
+	}
 
 	t.prev = cur
+	t.ports = ports
 	t.lastSample = now
 }
 
@@ -378,7 +527,82 @@ var (
 	onlineSampleLock      sync.Mutex
 	// IPv6 查询失败（内核没编译 IPv6）只需要提示一次，否则每次采样都刷日志。
 	onlineIPv6Warned bool
+
+	// closeWatchOnce 保证整个进程只有一个销毁通知订阅：面板「重启」是 SIGHUP
+	// 重建 Server、再跑一遍 startTask，订阅若跟着再起一个，每条关闭的连接
+	// 都会被记两次账。
+	closeWatchOnce sync.Once
 )
+
+// closeWatchRetry 是订阅失败或中断后的重试间隔。不支持的内核会一直失败，
+// 间隔太短只会刷日志；太长则一次偶发的读错误让尾段字节漏记太久。
+const closeWatchRetry = 10 * time.Minute
+
+// StartCloseWatcher 在后台订阅内核的 TCP 连接销毁通知，把每条关闭连接的
+// 尾段字节补进按来源 IP 的用量（onlineTracker.recordClosed）。
+//
+// 只读连接表的话，在两次采样之间建立又关闭的短连接一个字节都看不到，按
+// 来源 IP 的用量会系统性地小于入站合计。订阅失败（非 Linux、内核太老、没有
+// CAP_NET_ADMIN）时只记日志、照常运行：缺的只是这部分字节，连接表那条
+// 路径不受影响。
+func (s *OnlineService) StartCloseWatcher() {
+	closeWatchOnce.Do(func() {
+		go runCloseWatcher()
+	})
+}
+
+func runCloseWatcher() {
+	var lastOverflowWarn time.Time
+	handle := func(c netdiag.Conn) {
+		onlineTrackerInstance.recordClosed(c, time.Now())
+	}
+	overflow := func() {
+		if now := time.Now(); closeOverflowWarnDue(lastOverflowWarn, now) {
+			lastOverflowWarn = now
+			logger.Warning("连接销毁通知的接收缓冲区溢出，部分短连接的字节没有计入按来源 IP 的用量")
+		}
+	}
+
+	warned := false
+	for {
+		err := watchClosedOnce(handle, overflow)
+		if err == netdiag.ErrUnsupported {
+			return
+		}
+		// 第一次失败说明原因，此后安静重试：内核不支持时每次都会失败。
+		if !warned {
+			warned = true
+			logger.Warning("订阅连接销毁通知失败，按来源 IP 的用量将缺少短连接的尾段字节:", err)
+		}
+		time.Sleep(closeWatchRetry)
+	}
+}
+
+// watchClosedOnce 跑一次订阅。它不经过 cron，那层通用的 panic 恢复覆盖不到
+// 这里，必须自己挡一层，否则一个 panic 会带走整个面板进程。
+func watchClosedOnce(handle func(netdiag.Conn), overflow func()) (err error) {
+	// recover 必须由被 defer 的函数直接调用，套一层 common.Recover 就截不住了。
+	defer func() {
+		if p := recover(); p != nil {
+			logger.Error("连接销毁通知订阅 panic:", p)
+			err = fmt.Errorf("订阅协程 panic: %v", p)
+		}
+	}()
+	return watchClosed(handle, overflow)
+}
+
+// watchClosed 是包级变量而不是直接调用 netdiag.WatchClosed，只为让测试能
+// 注入一个会 panic 的实现，验证 watchClosedOnce 的恢复确实生效。
+var watchClosed = netdiag.WatchClosed
+
+func closeOverflowWarnDue(last, now time.Time) bool {
+	return last.IsZero() || now.Sub(last) >= time.Hour
+}
+
+// Sample 采一次内核连接表，供 OnlineSampleJob 调用，见 OnlineSampleInterval。
+func (s *OnlineService) Sample() error {
+	return s.sample()
+}
 
 type OnlineService struct {
 	inboundService InboundService

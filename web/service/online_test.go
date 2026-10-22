@@ -909,3 +909,214 @@ func TestActivityThresholdUsesCombinedRate(t *testing.T) {
 		t.Error("上下行合计 1400 B/s 应当算活跃——门槛判的是合计速率")
 	}
 }
+
+// pendingOf 取出某来源 IP 在 drain 之后的待记账字节，没有记录时返回零值。
+func pendingOf(drained map[onlineKey]connBytes, ip string) connBytes {
+	return drained[onlineKey{port: testPort, ip: ip}]
+}
+
+// 待记账字节与「实时网速」的 10 秒基准判定无关：页面没开、并发判定也没跑
+// 时，唯一的采样来源是 30 秒一次的共享采样，原来的实现在这种间隔下一个
+// 字节都记不进去，按来源 IP 的用量因此只剩管理员开着页面那段时间的流量。
+func TestPendingBytesSurviveLongSampleGap(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 1000, 2000)}, testPorts, now)
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 31000, 5000)}, testPorts, now.Add(30*time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 30000 || got.down != 3000 {
+		t.Errorf("30 秒间隔的待记账字节 = %+v，期望 up=30000 down=3000", got)
+	}
+}
+
+// drain 之后清零：同一段字节只能被记一次账。
+func TestDrainPendingResets(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, now)
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 500, 0)}, testPorts, now.Add(5*time.Second))
+	tk.drainPending()
+
+	if got := tk.drainPending(); len(got) != 0 {
+		t.Errorf("第二次 drain 仍有字节: %+v", got)
+	}
+}
+
+// 首次采样之前没有任何基准，连接里已有的字节可能产生于面板启动之前的任意
+// 时刻，记进当前小时就是把历史流量挪到现在。
+func TestPendingSkipsFirstSample(t *testing.T) {
+	tk := newOnlineTracker()
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 9000, 9000)}, testPorts, time.Unix(1000, 0))
+
+	if got := tk.drainPending(); len(got) != 0 {
+		t.Errorf("首次采样不该产生待记账字节: %+v", got)
+	}
+}
+
+// 某一轮里这个 IP 一条连接都没有时，tracker 会把它从在线列表里删掉（释放
+// 并发额度依赖这一点），但已经产生的字节不能跟着丢：待记账字节按轮累加，
+// 与在线条目的生命周期无关。
+func TestPendingBytesSurviveIPDisappearing(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, now)
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 4000, 0)}, testPorts, now.Add(5*time.Second))
+	tk.update(nil, testPorts, now.Add(10*time.Second))
+	// 重连：新 cookie 出现在两次采样之间，字节全部产生于本周期。
+	tk.update([]netdiag.Conn{conn(2, testPort, "1.2.3.4", 300, 0)}, testPorts, now.Add(15*time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 4300 {
+		t.Errorf("待记账上行 = %d，期望 4300（断开前 4000 + 重连后 300）", got.up)
+	}
+}
+
+// 连接在两次采样之间关闭时，从上一次采样到关闭那一刻的字节只有内核的
+// 销毁通知能给出。
+func TestRecordClosedCountsTailBytes(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 100, 200)}, testPorts, now)
+	tk.recordClosed(conn(1, testPort, "1.2.3.4", 900, 1200), now.Add(time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 800 || got.down != 1000 {
+		t.Errorf("尾段字节 = %+v，期望 up=800 down=1000", got)
+	}
+}
+
+// 在两次采样之间建立又关闭的短连接，连接表里永远看不到，全部字节都只能
+// 靠销毁通知补上。
+func TestRecordClosedCountsConnectionBornBetweenSamples(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update(nil, testPorts, now)
+	tk.recordClosed(conn(7, testPort, "1.2.3.4", 700, 50), now.Add(time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 700 || got.down != 50 {
+		t.Errorf("短连接字节 = %+v，期望 up=700 down=50", got)
+	}
+}
+
+// 采样是「先读连接表、再拿锁更新」两步：销毁通知可能恰好插在两步之间，
+// 那份连接表里还有这条已经记过终值的连接。再按它算一次差值就重复计数了
+// （终值 > 表里的旧值，deltaBytes 会把旧值当成回退按全量计入）。
+func TestRecordClosedIsNotDoubleCountedByStaleDump(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 100, 0)}, testPorts, now)
+	tk.recordClosed(conn(1, testPort, "1.2.3.4", 900, 0), now.Add(time.Second))
+	// 这份连接表读于关闭之前，此时才拿到锁。
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 500, 0)}, testPorts, now.Add(2*time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 800 {
+		t.Errorf("待记账上行 = %d，期望 800（终值只记一次）", got.up)
+	}
+}
+
+// 销毁通知覆盖整机的 TCP socket（含 xray 自己连出去的连接），只认入站端口。
+func TestRecordClosedIgnoresOtherPorts(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update(nil, testPorts, now)
+	tk.recordClosed(conn(1, 443, "1.2.3.4", 700, 50), now.Add(time.Second))
+
+	if got := tk.drainPending(); len(got) != 0 {
+		t.Errorf("非入站端口的连接被记了账: %+v", got)
+	}
+}
+
+// 面板启动后第一次采样之前收到的销毁通知，同样拿不到基准。
+func TestRecordClosedBeforeFirstSampleIsIgnored(t *testing.T) {
+	tk := newOnlineTracker()
+	tk.recordClosed(conn(1, testPort, "1.2.3.4", 700, 50), time.Unix(1000, 0))
+
+	if got := tk.drainPending(); len(got) != 0 {
+		t.Errorf("没有基准时不该记账: %+v", got)
+	}
+}
+
+// 待记账表由共享采样每 30 秒 drain 一次。采样任务不跑时（用量库没打开）
+// 它不能无限长：一次分布式扫描能在 30 秒里塞进几千个来源。
+func TestPendingIsCapped(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+	tk.update(nil, testPorts, now)
+
+	for i := 0; i < onlinePendingMaxKeys+100; i++ {
+		ip := net.IPv4(10, byte(i>>16), byte(i>>8), byte(i)).String()
+		tk.recordClosed(conn(uint64(i+1), testPort, ip, 10, 10), now.Add(time.Second))
+	}
+
+	if got := len(tk.drainPending()); got != onlinePendingMaxKeys {
+		t.Errorf("待记账来源数 = %d，期望封顶在 %d", got, onlinePendingMaxKeys)
+	}
+}
+
+// 接收缓冲区溢出在繁忙机器上可能每秒都发生；每次都打一行会把面板自己的
+// 日志挤进 journald 的限流窗口。一小时最多提示一次。
+func TestCloseOverflowWarningIsThrottled(t *testing.T) {
+	base := time.Unix(1000, 0)
+	if !closeOverflowWarnDue(time.Time{}, base) {
+		t.Error("从未提示过时应当提示")
+	}
+	if closeOverflowWarnDue(base, base.Add(59*time.Minute)) {
+		t.Error("一小时内不应重复提示")
+	}
+	if !closeOverflowWarnDue(base, base.Add(time.Hour)) {
+		t.Error("满一小时应当再次提示")
+	}
+}
+
+// 订阅协程不经过 cron，那层通用的 panic 恢复覆盖不到它；处理函数里一个
+// 越界就会带走整个面板进程。必须截住并当成一次普通失败交给重试循环。
+func TestWatchClosedOnceRecoversPanic(t *testing.T) {
+	orig := watchClosed
+	defer func() { watchClosed = orig }()
+	watchClosed = func(func(netdiag.Conn), func()) error { panic("boom") }
+
+	if err := watchClosedOnce(func(netdiag.Conn) {}, func() {}); err == nil {
+		t.Error("panic 被吞掉了，重试循环会以为订阅正常结束")
+	}
+}
+
+// 连接表只列 ESTABLISHED。一条连接先进入 FIN_WAIT2 / CLOSE_WAIT（一端先
+// 关、另一端还没关），会先从连接表里消失，过一阵才真正销毁。若它一消失就
+// 丢掉基准，销毁通知到来时会被当成「从没见过的短连接」按全量再记一遍——
+// 按来源 IP 的用量就会超过入站合计。
+func TestRecordClosedAfterLeavingEstablishedIsNotDoubleCounted(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, now)
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 100, 0)}, testPorts, now.Add(5*time.Second))
+	// 进入 FIN_WAIT2，不再出现在连接表里。
+	tk.update(nil, testPorts, now.Add(10*time.Second))
+	tk.update(nil, testPorts, now.Add(40*time.Second))
+	tk.recordClosed(conn(1, testPort, "1.2.3.4", 900, 0), now.Add(45*time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 900 {
+		t.Errorf("待记账上行 = %d，期望 900（前 100 来自连接表，后 800 来自销毁通知，各一次）", got.up)
+	}
+}
+
+// 连接短暂从连接表里缺席后又出现（例如某一轮 IPv6 读取失败、dumpAllConns
+// 只返回了 IPv4），不能当成新连接按全量再记一遍。
+func TestConnectionReappearingInDumpIsNotDoubleCounted(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 0, 0)}, testPorts, now)
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 500, 0)}, testPorts, now.Add(5*time.Second))
+	tk.update(nil, testPorts, now.Add(10*time.Second))
+	tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", 700, 0)}, testPorts, now.Add(15*time.Second))
+
+	if got := pendingOf(tk.drainPending(), "1.2.3.4"); got.up != 700 {
+		t.Errorf("待记账上行 = %d，期望 700", got.up)
+	}
+}

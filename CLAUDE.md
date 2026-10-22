@@ -365,7 +365,15 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **数据复用 `InboundIPHour`（共享检测那张表）的 `ActiveUp`/`ActiveDown` 两列**，不是新表。`ActiveBytes` 保留为独立累加的字段、**绝不能改成两列之和**：它是并存判定的门槛判据（`coexistMinActiveBytes`），而升级前写入的行两个新列恒为 0，改成计算值会让那批历史行的判据当场失效，共享检测的结论在升级瞬间整体改变而界面上没有任何提示。这张表因此有了第二个消费者，两者对采集门槛的要求方向相反（并存判定要过滤噪声，用量统计希望不漏），冲突一律以并存判定为准。
 
-**按来源 IP 的用量永远对不上入站总量，这是物理约束不是缺陷。** xray 的 Stats API 只有 `inbound`/`outbound`/`user` 三类计数器（`xray/process.go` 的 `parseTraffics`），没有来源 IP 维度，所以按 IP 的用量只能来自内核连接表——那是含 TLS 记录层与 WS 帧开销的链路层字节，与 xray 统计的应用层字节天生差 5~15%。叠加三条采集门槛（每小时漏首个采样间隔约 0.83%、单个 IP 某小时活跃不满 60 秒整段丢弃且不跨小时结转、单入站单小时 50 个 IP 上限），分项之和系统性偏小。**界面上那条列头 tooltip 是这个约束的唯一出口，不要因为觉得啰嗦而删掉它**——删掉之后管理员对不上账时没有任何解释来源。
+**按来源 IP 的用量永远对不上入站总量，这是物理约束不是缺陷。** xray 的 Stats API 只有 `inbound`/`outbound`/`user` 三类计数器（`xray/process.go` 的 `parseTraffics`），没有来源 IP 维度，所以按 IP 的用量只能来自内核连接表——那是 TCP 载荷字节（`tcpi_bytes_received/acked`），含 TLS 记录层与 WS 帧开销，与 xray 统计的应用层字节差 5~15%；**无 TLS、无传输层的入站（socks / http 裸代理）两边应当只差几个百分点**，差距远超这个量级就是采集出了问题，不是口径差。剩下的系统性偏小来自两条刻意保留的门槛：单个 IP 某小时活跃不满 60 秒**且**字节不满 `coexistMinActiveBytes`（1 MB）则整段丢弃、不跨小时结转；单入站单小时 50 个 IP 上限。**界面上那条列头 tooltip 是这个约束的唯一出口，不要因为觉得啰嗦而删掉它**——删掉之后管理员对不上账时没有任何解释来源。
+
+**采集链路曾经几乎整个失效，修复后有三条不能退回去的约束**（生产实测：一个 socks 入站当天合计 16 GB，分项只有 140 MB）：
+
+- **常驻采样周期必须不大于 `onlineMaxSampleGap`（10 秒）。** 并发判定在无人设额度时一次都不采，页面轮询只在管理员开着展开行时才有，此前唯一常驻的是 30 秒的共享采样——每一轮都超过 10 秒门槛，只重建基准、不出字节，`lastActiveAt` 永不刷新，来源 30 秒后被判闲置、连观测都进不了累加器。分项里只剩「管理员开着页面那段时间」的流量，**共享检测的活跃时长也同样收不到**。现在由 `OnlineSampleJob`（`cron.Every(service.OnlineSampleInterval)`，5 秒）独立采样，`TestOnlineSampleIntervalWithinBaselineGap` 守着这条不等式。
+- **字节记账与「实时网速」解耦。** `onlineTracker.pending` 按连接 cookie 差分、按轮累加、不看 10 秒基准，也不随 IP 断开而清零；共享采样每 30 秒 `drainPending` 一次，交给累加器的是**增量**（`sharingObservation.Up/Down`）。改动前给的是 tracker「本次在线期间」的累计值、在累加器里做差分：IP 一断开累计值归零，重连后涨回旧值之上时断开前那段被吞掉，cell 新建那一轮还只能当基线。采样时刻不在线或被判闲置、但这 30 秒里传过数据的来源走 `BytesOnly` 观测：不加活跃时长，先进暂存（`sharingLoose`，不占 50 行上限，防扫描挤掉真实用户），攒满 1 MB 才建行落库——这类行的 `ActiveSeconds` 可以是 0。
+- **连接关闭时的尾段字节靠内核销毁通知补**（`netdiag.WatchClosed`，订阅 sock_diag 的 `SKNLGRP_INET{,6}_TCP_DESTROY` 多播组，需 root 与 Linux 4.9+）。连接表只列 ESTABLISHED，两次采样之间建立又关闭的短连接一个字节都看不到。`OnlineService.StartCloseWatcher` 用 `sync.Once` 保证进程内只有一个订阅——SIGHUP 重建 `Server` 时再起一个会让每条连接被记两次账。销毁通知可能插在「读连接表」与「拿锁更新」之间，`onlineTracker.closed` 记住已按终值记过账的 cookie 一分钟，期间连接表里再出现它一律跳过，否则终值 > 表里旧值会被 `deltaBytes` 当成回退按全量再计一次。反方向同样要防：连接表只列 ESTABLISHED，一端先关的连接会先在 FIN_WAIT2 / CLOSE_WAIT 里从表上消失、过一阵才销毁，所以消失的连接的基准要在 `onlineTracker.gone` 里留 10 分钟（盖住 `tcp_fin_timeout` 与 xray 的 `connIdle`），销毁通知按它算尾段——一消失就丢基准的话，整条连接会被记两遍，分项**超过**入站合计（`TestPerIPUsageLongConnectionClosingSlowlyIsCountedOnce`）。订阅失败只记一次日志、10 分钟重试，连接表那条路径不受影响。
+
+改造的代价：共享检测从此真正收到数据，升级后部分入站的风险状态会离开「学习中」；`ActiveBytes` 的语义不变（本小时该来源的字节），只是不再系统性少算。
 
 **窗口翻译与全部钳制在 `service.ParseWindow`（`web/service/traffic_window.go`），controller 只负责调用。** 五类钳制：认不出的档位、不可解析的日期、`start > end`、跨度超 366 天、`End` 超过现在，一律钳制不报错。controller 不得自己解释其中任何一个入参——两处各写一份迟早漂移，而漂移之后界面上的「今日」和测试里的「今日」不是同一段时间，没有任何一层会报错。
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"net"
+	"sort"
 	"time"
 
 	"gorm.io/gorm"
@@ -77,26 +78,7 @@ func (s *SharingService) Sample(now time.Time) error {
 		return err
 	}
 
-	idle := time.Duration(sharingSampleStep) * time.Second
-	var obs []sharingObservation
-	for _, in := range inbounds {
-		if !in.Enable {
-			continue
-		}
-		for _, e := range onlineTrackerInstance.snapshotIdle(in.Port, noLocate, idle) {
-			if !sharingObservable(e) {
-				continue
-			}
-			obs = append(obs, sharingObservation{
-				InboundId: in.Id,
-				IP:        e.IP,
-				Meta:      s.networkMetaOf(e.IP),
-				Up:        e.Up,
-				Down:      e.Down,
-			})
-		}
-	}
-
+	obs := collectSharingObservations(onlineTrackerInstance, inbounds, now, s.networkMetaOf)
 	flushes := sharingAccumulatorInstance.observe(now, obs, sharingSampleStep)
 	if len(flushes) == 0 {
 		return nil
@@ -113,6 +95,62 @@ func (s *SharingService) Sample(now time.Time) error {
 		}
 		return nil
 	})
+}
+
+// collectSharingObservations 取走 tracker 自上一轮以来的待记账字节，组装成
+// 本轮的观测：此刻实质活跃的来源各一条（带上它的增量字节），其余只有字节的
+// 来源各一条 BytesOnly。
+//
+// 第二类不能丢。短连接为主的客户端在采样那一刻往往一条连接都没有，被判闲置
+// 的来源也可能在两次观测之间传过数据；只按「此刻在线」取字节的话，这些流量
+// 在按来源 IP 的用量里永远看不到，而入站合计里有。
+func collectSharingObservations(tk *onlineTracker, inbounds []*model.Inbound, now time.Time, metaOf func(string) NetworkMeta) []sharingObservation {
+	drained := tk.drainPending()
+	idle := time.Duration(sharingSampleStep) * time.Second
+
+	var obs []sharingObservation
+	for _, in := range inbounds {
+		if !in.Enable {
+			continue
+		}
+		for _, e := range tk.snapshotAt(in.Port, noLocate, idle, now) {
+			if !sharingObservable(e) {
+				continue
+			}
+			key := onlineKey{port: in.Port, ip: e.IP}
+			d := drained[key]
+			delete(drained, key)
+			obs = append(obs, sharingObservation{
+				InboundId: in.Id,
+				IP:        e.IP,
+				Meta:      metaOf(e.IP),
+				Up:        int64(d.up),
+				Down:      int64(d.down),
+			})
+		}
+
+		// 按 IP 排序：累加器的暂存与行数上限都是先到先得，遍历 map 的顺序
+		// 会让同一份输入每次挤掉不同的来源。
+		var rest []onlineKey
+		for key := range drained {
+			if key.port == in.Port {
+				rest = append(rest, key)
+			}
+		}
+		sort.Slice(rest, func(i, j int) bool { return rest[i].ip < rest[j].ip })
+		for _, key := range rest {
+			d := drained[key]
+			obs = append(obs, sharingObservation{
+				InboundId: in.Id,
+				IP:        key.ip,
+				Meta:      metaOf(key.ip),
+				Up:        int64(d.up),
+				Down:      int64(d.down),
+				BytesOnly: true,
+			})
+		}
+	}
+	return obs
 }
 
 // sharingObservable 判断一条在线明细是否算作「实质活跃」，可以计入共享

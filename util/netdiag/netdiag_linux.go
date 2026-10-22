@@ -116,3 +116,57 @@ func Destroy(c Conn) error {
 	}
 	return nil
 }
+
+// closeRcvBufSize 是销毁通知 socket 的接收缓冲区。通知是多播，读得慢了内核
+// 直接丢弃、下一次读返回 ENOBUFS；繁忙的代理每秒可能关掉上千条连接（含
+// xray 自己连出去的那些），默认的 200 KB 左右撑不住突发。
+const closeRcvBufSize = 4 << 20
+
+// WatchClosed 订阅内核的 TCP 连接销毁通知，每收到一条就以「关闭时的最终
+// 字节数」调用一次 handle。它会一直阻塞，只在订阅失败或读取出错时返回。
+//
+// 通知覆盖整机的 TCP socket，过滤由调用方做。接收缓冲区溢出时内核已经丢了
+// 若干条通知，调用 overflow 后继续读——丢掉的只是那几条连接的尾段字节，
+// 不该让整个订阅停下来。
+//
+// 需要 root（CAP_NET_ADMIN）以及 Linux 4.9 以上（sock_diag 销毁广播）；缺一
+// 都会在 bind 时返回错误，不会静默订阅到空。
+func WatchClosed(handle func(Conn), overflow func()) error {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_INET_DIAG)
+	if err != nil {
+		return fmt.Errorf("打开 netlink socket 失败: %w", err)
+	}
+	defer syscall.Close(fd)
+
+	// FORCE 版本不受 net.core.rmem_max 限制（需要 CAP_NET_ADMIN）；失败时退回
+	// 普通版本，拿到多少算多少。
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, closeRcvBufSize); err != nil {
+		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, closeRcvBufSize)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: destroyGroups()}); err != nil {
+		return fmt.Errorf("订阅连接销毁通知失败: %w", err)
+	}
+
+	buf := make([]byte, recvBufSize)
+	for {
+		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.ENOBUFS {
+			overflow()
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("读取连接销毁通知失败: %w", err)
+		}
+		// 一段报文解析失败只丢这一段，后面的通知照常处理。
+		conns, _, err := parseDump(buf[:n])
+		if err != nil {
+			continue
+		}
+		for _, c := range conns {
+			handle(c)
+		}
+	}
+}

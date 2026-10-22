@@ -173,9 +173,9 @@ func TestAccumulatorForgetDropsInboundBeforeRollover(t *testing.T) {
 
 // 字节量是并存判定的「实质使用」判据，累加器必须把它攒出来。
 //
-// OnlineIP.Up/Down 是「本次在线期间的累计值」而不是增量，所以要在 cell 里
-// 做差分。cell 刚建立那一轮记 0：进入观测之前的字节属于上一个小时或上一次
-// 在线，算进来就是把别处的流量挪到本小时。
+// sharingObservation.Up/Down 是自上一轮以来的**增量**（tracker 的
+// drainPending），累加器直接相加。首轮的增量同样计入：它就是这 30 秒里
+// 真实产生的字节，不再像改用增量之前那样只能拿来当基线。
 func TestAccumulatorAccumulatesByteDeltas(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
@@ -183,39 +183,17 @@ func TestAccumulatorAccumulatesByteDeltas(t *testing.T) {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up, Down: down}}
 	}
 
-	// 首轮：cell 新建，基线设成 (1000, 2000)，本轮计 0 字节。
 	a.observe(base, obs(1000, 2000), 30)
-	// 次轮：上行 +500、下行 +1500，累计 2000；同时活跃满 60 秒触发落库。
-	got := a.observe(base.Add(30*time.Second), obs(1500, 3500), 30)
+	got := a.observe(base.Add(30*time.Second), obs(500, 1500), 30)
 	if len(got) != 1 {
 		t.Fatalf("满 60 秒没落库: %+v", got)
 	}
-	if got[0].ActiveBytes != 2000 {
-		t.Errorf("ActiveBytes = %d, want 2000（上行 500 + 下行 1500）", got[0].ActiveBytes)
+	if got[0].ActiveUp != 1500 || got[0].ActiveDown != 3500 || got[0].ActiveBytes != 5000 {
+		t.Errorf("落库 up/down/bytes = %d/%d/%d, want 1500/3500/5000",
+			got[0].ActiveUp, got[0].ActiveDown, got[0].ActiveBytes)
 	}
 	if got[0].ActiveSeconds != 60 {
 		t.Errorf("ActiveSeconds = %d, want 60", got[0].ActiveSeconds)
-	}
-}
-
-// 客户端断开重连时，tracker 的累计字节会从头开始。按 now-prev 算会得到负数，
-// 必须按全量计入——这与 online.go 的 deltaBytes 是同一条约束，本测试钉住
-// 累加器确实走了那条路径。
-func TestAccumulatorHandlesCounterResetOnReconnect(t *testing.T) {
-	a := newSharingAccumulator()
-	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
-	obs := func(up, down int64) []sharingObservation {
-		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up, Down: down}}
-	}
-
-	a.observe(base, obs(10000, 20000), 30)
-	// 重连：计数器归零后重新涨到 (300, 700)，本轮应计 1000 而不是负数。
-	got := a.observe(base.Add(30*time.Second), obs(300, 700), 30)
-	if len(got) != 1 {
-		t.Fatalf("满 60 秒没落库: %+v", got)
-	}
-	if got[0].ActiveBytes != 1000 {
-		t.Errorf("ActiveBytes = %d, want 1000（计数器回退按全量计入）", got[0].ActiveBytes)
 	}
 }
 
@@ -231,8 +209,8 @@ func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
 
 	a.observe(h10, obs(0), 30)
 	a.observe(h10.Add(30*time.Second), obs(5000), 30) // 落库，5000 字节
-	a.observe(h10.Add(60*time.Second), obs(9000), 30) // 未到下一次落库门槛
-	got := a.observe(h11, obs(9000), 30)
+	a.observe(h10.Add(60*time.Second), obs(4000), 30) // 未到下一次落库门槛
+	got := a.observe(h11, obs(0), 30)
 	if len(got) == 0 {
 		t.Fatal("跨小时没有补写收尾记录")
 	}
@@ -241,6 +219,104 @@ func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
 	}
 	if got[0].ActiveBytes != 9000 {
 		t.Errorf("收尾记录 ActiveBytes = %d, want 9000", got[0].ActiveBytes)
+	}
+}
+
+func bytesOnly(ip string, up int64) sharingObservation {
+	return sharingObservation{InboundId: 1, IP: ip, Meta: provinceMeta("江苏"), Up: up, BytesOnly: true}
+}
+
+// 只有字节、本轮没被观测为活跃的来源（短连接在采样那一刻恰好都已关闭，或
+// 连接还在但被判闲置）：不满实质使用门槛时不落库，也不占行数上限——否则
+// 一次扫描里每个探测包都能抢走一个名额，把真实用户挤出这一小时。
+func TestAccumulatorBytesOnlyBelowGateIsNotWritten(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+
+	var flood []sharingObservation
+	for i := 0; i < sharingMaxRowsPerHour+10; i++ {
+		flood = append(flood, bytesOnly(fmt.Sprintf("10.0.%v.%v", i/256, i%256), 600))
+	}
+	if got := a.observe(base, flood, 30); len(got) != 0 {
+		t.Fatalf("不满门槛的纯字节来源落库了: %+v", got)
+	}
+
+	real := sharingObservation{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}
+	a.observe(base.Add(30*time.Second), []sharingObservation{real}, 30)
+	got := a.observe(base.Add(60*time.Second), []sharingObservation{real}, 30)
+	if len(got) != 1 || got[0].IP != real.IP {
+		t.Errorf("真实用户被纯字节来源挤出了上限: %+v", got)
+	}
+}
+
+// 纯字节来源攒满实质使用门槛（coexistMinActiveBytes）就落库，活跃时长记 0。
+// 这正是改动前整段丢失的那部分：短连接为主的客户端在 30 秒一次的观测时刻
+// 往往一条连接都没有，按秒计永远到不了 60 秒门槛。
+func TestAccumulatorBytesOnlyIsWrittenOnceOverGate(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	half := int64(coexistMinActiveBytes / 2)
+
+	if got := a.observe(base, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
+		t.Fatalf("半个门槛就落库了: %+v", got)
+	}
+	got := a.observe(base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
+	if len(got) != 1 {
+		t.Fatalf("攒满门槛没落库: %+v", got)
+	}
+	if got[0].ActiveUp != 2*half || got[0].ActiveSeconds != 0 {
+		t.Errorf("落库 = %+v, want ActiveUp=%d ActiveSeconds=0", got[0], 2*half)
+	}
+}
+
+// 先以纯字节出现、随后被观测为活跃的来源：之前攒下的字节并进它的 cell，
+// 不能因为换了一条路径就丢掉。
+func TestAccumulatorAbsorbsLooseBytesWhenObserved(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	active := func(up int64) []sharingObservation {
+		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up}}
+	}
+
+	a.observe(base, []sharingObservation{bytesOnly("1.1.1.1", 700)}, 30)
+	a.observe(base.Add(30*time.Second), active(100), 30)
+	got := a.observe(base.Add(60*time.Second), active(200), 30)
+	if len(got) != 1 || got[0].ActiveUp != 1000 {
+		t.Errorf("落库 = %+v, want ActiveUp=1000（纯字节 700 + 活跃 300）", got)
+	}
+}
+
+// 已经落过库的 cell 之后只收到纯字节（来源还在用、只是观测时刻没有连接）：
+// 字节有变化就要再写，否则这部分流量要等到整点收尾才进库，期间查询看到
+// 的是旧值；但也不能每轮都写，与按秒落库一样至少间隔 sharingFlushThreshold 秒。
+func TestAccumulatorRewritesBytesOnlyProgress(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	active := []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}}
+
+	a.observe(base, active, 30)
+	if got := a.observe(base.Add(30*time.Second), active, 30); len(got) != 1 {
+		t.Fatalf("满 60 秒没落库: %+v", got)
+	}
+	if got := a.observe(base.Add(60*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 4000)}, 30); len(got) != 0 {
+		t.Fatalf("距上次落库只过了 30 秒就又写了: %+v", got)
+	}
+	got := a.observe(base.Add(90*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 1000)}, 30)
+	if len(got) != 1 || got[0].ActiveUp != 5000 || got[0].ActiveSeconds != 60 {
+		t.Errorf("落库 = %+v, want ActiveUp=5000 ActiveSeconds=60（纯字节不加时长）", got)
+	}
+}
+
+// 纯字节只停留在内存、不满门槛的余量，跨小时同样直接丢弃。
+func TestAccumulatorDropsLooseBytesOnRollover(t *testing.T) {
+	a := newSharingAccumulator()
+	h10 := time.Date(2026, 9, 5, 10, 59, 30, 0, time.UTC)
+	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	half := int64(coexistMinActiveBytes / 2)
+
+	a.observe(h10, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
+	if got := a.observe(h11, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
+		t.Errorf("上一小时的余量结转进了新的一小时: %+v", got)
 	}
 }
 
@@ -300,5 +376,24 @@ func TestAccumulatorAcceptsForeignMetaWithoutProvince(t *testing.T) {
 	}
 	if got[0].Meta != foreign {
 		t.Errorf("Meta = %+v, want %+v", got[0].Meta, foreign)
+	}
+}
+
+// 暂存表满（一次扫描留下了上千个小来源）时，单次就超过门槛的新来源仍然要
+// 落库：先判门槛、再判暂存是否有空位。顺序反过来的话，扫描期间整个小时里
+// 所有新的短连接用户都会被静默丢掉。
+func TestAccumulatorPromotesOverGateEvenWhenLooseIsFull(t *testing.T) {
+	a := newSharingAccumulator()
+	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+
+	var flood []sharingObservation
+	for i := 0; i < sharingMaxLoosePerHour; i++ {
+		flood = append(flood, bytesOnly(fmt.Sprintf("10.%v.%v.%v", i>>16&255, i>>8&255, i&255), 100))
+	}
+	a.observe(base, flood, 30)
+
+	got := a.observe(base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", coexistMinActiveBytes)}, 30)
+	if len(got) != 1 || got[0].IP != "1.1.1.1" {
+		t.Errorf("暂存表满时，满门槛的新来源被丢掉了: %+v", got)
 	}
 }
