@@ -346,6 +346,15 @@ func (s *Server) startTask() {
 	// 一致，累加器按它折算活跃时长。
 	s.cron.AddJob("@every 30s", job.NewSharingSampleJob())
 
+	// 独立的连接表采样，周期必须不大于 onlineMaxSampleGap（见
+	// service.OnlineSampleInterval）。用 cron.Every 直接引用那个常量，不写
+	// 字符串，两边就不会各改各的。
+	s.cron.Schedule(cron.Every(service.OnlineSampleInterval), job.NewOnlineSampleJob())
+
+	// 订阅内核的连接销毁通知，补上连接表看不到的短连接与尾段字节。进程内
+	// 只起一个，SIGHUP 重建 Server 时不会重复订阅。
+	new(service.OnlineService).StartCloseWatcher()
+
 	// 每 5 秒把 xray 写下的访问日志读进独立的库；关闭时直接返回
 	// 风险评分：长期行为分析，不是实时防火墙，10 分钟绰绰有余。
 	s.cron.AddJob("@every 10m", job.NewSharingRiskJob())

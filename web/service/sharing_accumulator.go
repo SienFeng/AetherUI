@@ -35,34 +35,54 @@ type sharingCell struct {
 	seconds   int // 本小时累计活跃秒数
 	flushedAt int // 上次落库时 seconds 的值
 
-	// bytes 是本小时累计的上下行字节，upBytes/downBytes 是它的拆分；
-	// lastUp/lastDown 是上一轮观测到的累计值——OnlineIP.Up/Down 给的是
-	//「本次在线期间的累计量」而不是增量，差分必须在这里做。
+	// bytes 是本小时累计的上下行字节，upBytes/downBytes 是它的拆分。
 	//
 	// bytes 独立累加而不是写成 upBytes + downBytes：两者数值恒等，但独立
 	// 赋值让「共享检测的输入逐字节不变」这件事在 diff 上看得见，也避免
 	// 将来某次重构顺手把 bytes 删掉——它是 ActiveBytes 的唯一来源，而
 	// ActiveBytes 是并存判定的门槛判据。
-	//
-	// cell 新建那一轮只设基线、不计字节：进入观测之前的流量属于上一个小时
-	// 或上一次在线，算进来就是把别处的流量挪到本小时。代价是每小时的第一个
-	// 采样间隔（30 秒）的流量不计入，相对 1 MB 的判定门槛可以忽略。
 	bytes     int64
 	upBytes   int64
 	downBytes int64
-	lastUp    int64
-	lastDown  int64
+
+	// flushedBytes / flushedTime 是上次落库时的 bytes 与时刻。只有纯字节
+	// 增长（来源在用、但观测时刻恰好没有连接）时，靠它们判断要不要再写一次。
+	flushedBytes int64
+	flushedTime  time.Time
 }
 
-// sharingObservation 是一轮采样里的一条「这个 IP 此刻正在实质使用这个入站」。
+// sharingLoose 是本小时还没有 cell 的来源攒下的纯字节，见 sharingObservation.BytesOnly。
+type sharingLoose struct {
+	meta     NetworkMeta
+	up, down int64
+}
+
+// sharingMaxLoosePerHour 是纯字节暂存的来源数上限。它不落库、不占
+// sharingMaxRowsPerHour，只是内存里的天花板：扫描器每个探测包都会留下几百
+// 字节，暂存表若不封顶，一次分布式扫描就能让它无限增长。
+const sharingMaxLoosePerHour = 1024
+
+// sharingObservation 是一轮采样里的一条「这个 IP 此刻正在实质使用这个入站」，
+// 或者（BytesOnly 为 true 时）「这个 IP 在这一轮里产生过字节」。
 type sharingObservation struct {
 	InboundId int
 	IP        string
 	Meta      NetworkMeta
 
-	// Up/Down 是 tracker 给出的**本次在线期间累计**字节，不是本轮增量。
+	// Up/Down 是自上一轮以来的**增量**字节（onlineTracker.drainPending），
+	// 含连接表差值与内核销毁通知补上的尾段。
+	//
+	// 改用增量之前这里给的是 tracker「本次在线期间」的累计值、在 cell 里做
+	// 差分：IP 一断开累计值就归零，重连后只要涨回旧值之上，差分就把断开前
+	// 那一段吞掉；cell 新建那一轮还只能拿来当基线。两处都是系统性少算。
 	Up   int64
 	Down int64
+
+	// BytesOnly 为 true 表示这个来源本轮没有被观测为活跃（采样那一刻没有
+	// 连接、或被判闲置），只是有字节要记账。它不增加活跃时长；本小时还没有
+	// cell 时字节先进暂存，攒满 coexistMinActiveBytes 才建 cell 落库——
+	// 既不让短连接为主的客户端整段丢失，也不让扫描探测占用行数上限。
+	BytesOnly bool
 }
 
 // sharingFlush 是一条待写入的记录。
@@ -88,6 +108,7 @@ type sharingAccumulator struct {
 	mu    sync.Mutex
 	hour  int64
 	cells map[sharingKey]*sharingCell
+	loose map[sharingKey]*sharingLoose
 
 	// cappedWarned 记录本小时已经为哪些入站打过上限告警。
 	//
@@ -98,11 +119,15 @@ type sharingAccumulator struct {
 }
 
 func newSharingAccumulator() *sharingAccumulator {
-	return &sharingAccumulator{cells: map[sharingKey]*sharingCell{}, cappedWarned: map[int]int{}}
+	return &sharingAccumulator{
+		cells:        map[sharingKey]*sharingCell{},
+		loose:        map[sharingKey]*sharingLoose{},
+		cappedWarned: map[int]int{},
+	}
 }
 
-// observe 记一轮采样：obs 里的每个 IP 都算作在本轮的 step 秒内持续活跃。
-// 返回本轮需要落库的记录（可能为空）。
+// observe 记一轮采样：obs 里非 BytesOnly 的 IP 都算作在本轮的 step 秒内持续
+// 活跃，所有 IP 的增量字节照单全收。返回本轮需要落库的记录（可能为空）。
 func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, step int) []sharingFlush {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -121,7 +146,12 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 	for _, o := range obs {
 		key := sharingKey{inboundId: o.InboundId, ip: o.IP}
 		cell := a.cells[key]
-		if cell == nil {
+		if cell == nil && o.BytesOnly {
+			cell = a.stashLooseLocked(key, o, perInbound)
+			if cell == nil {
+				continue
+			}
+		} else if cell == nil {
 			// 上限只挡新来源，已在累计的继续累计——否则一次扫描就能把
 			// 真实用户从表里挤掉。
 			if perInbound[o.InboundId] >= sharingMaxRowsPerHour {
@@ -131,21 +161,18 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 				a.cappedWarned[o.InboundId]++
 				continue
 			}
-			cell = &sharingCell{meta: o.Meta, lastUp: o.Up, lastDown: o.Down}
+			cell = &sharingCell{meta: o.Meta}
+			// 之前以纯字节身份攒下的部分并进来，不能因为换了条路径就丢掉。
+			if l := a.loose[key]; l != nil {
+				cell.upBytes, cell.downBytes, cell.bytes = l.up, l.down, l.up+l.down
+				delete(a.loose, key)
+			}
 			a.cells[key] = cell
 			perInbound[o.InboundId]++
-		} else {
-			// 复用 online.go 的 deltaBytes：内核计数器只会单调增长，出现
-			// 回退只可能是客户端断开重连、计数器从头开始，此时按全量计入，
-			// 绝不产生负增量。三个计数器都必须走它——只给 bytes 走、给
-			// up/down 直接相减的话，一次重连会让分项变成负数。
-			du := int64(deltaBytes(uint64(o.Up), uint64(cell.lastUp), true))
-			dd := int64(deltaBytes(uint64(o.Down), uint64(cell.lastDown), true))
-			cell.upBytes += du
-			cell.downBytes += dd
-			cell.bytes += du + dd
-			cell.lastUp, cell.lastDown = o.Up, o.Down
 		}
+		cell.upBytes += o.Up
+		cell.downBytes += o.Down
+		cell.bytes += o.Up + o.Down
 		// 画像以最近一次判定为准：归属地库更新后同一个 IP 的判定可能变，
 		// 用新的比留着旧的合理。查不到时不覆盖已知值——一次查库失败（库正在
 		// 热替换、或这一轮恰好没加载完）不该把已经判定出来的画像抹掉。
@@ -158,17 +185,89 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 		if o.Meta.HasGeo() {
 			cell.meta = o.Meta
 		}
-		cell.seconds += step
-		if cell.seconds-cell.flushedAt >= sharingFlushThreshold {
+		if !o.BytesOnly {
+			cell.seconds += step
+		}
+		if cell.dueForFlush(now) {
 			cell.flushedAt = cell.seconds
-			out = append(out, sharingFlush{
-				InboundId: key.inboundId, IP: key.ip, Meta: cell.meta,
-				HourStart: hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
-				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
-			})
+			cell.flushedBytes = cell.bytes
+			cell.flushedTime = now
+			out = append(out, cell.flushOf(key, hour))
 		}
 	}
 	return out
+}
+
+// stashLooseLocked 处理一条本小时还没有 cell 的纯字节观测。
+//
+// 加上本轮字节后攒满 coexistMinActiveBytes、且行数上限还有余量时，返回一个
+// 带着此前暂存字节的新 cell（本轮字节由调用方照常累加）；否则把本轮字节记进
+// 暂存并返回 nil。暂存表满时丢弃新来源，理由与 sharingMaxRowsPerHour 相同。
+func (a *sharingAccumulator) stashLooseLocked(key sharingKey, o sharingObservation, perInbound map[int]int) *sharingCell {
+	l := a.loose[key]
+	var have int64
+	if l != nil {
+		have = l.up + l.down
+	}
+	// 先判门槛、再判暂存有没有空位：暂存表被一次扫描塞满时，单次就超过
+	// 门槛的新来源仍然要能落库，否则这一小时里新的短连接用户全被静默丢掉。
+	if have+o.Up+o.Down >= coexistMinActiveBytes && perInbound[key.inboundId] < sharingMaxRowsPerHour {
+		cell := &sharingCell{meta: o.Meta}
+		if l != nil {
+			if !o.Meta.HasGeo() {
+				cell.meta = l.meta
+			}
+			cell.upBytes, cell.downBytes, cell.bytes = l.up, l.down, have
+			delete(a.loose, key)
+		}
+		a.cells[key] = cell
+		perInbound[key.inboundId]++
+		return cell
+	}
+	if l == nil {
+		if o.Up+o.Down == 0 || len(a.loose) >= sharingMaxLoosePerHour {
+			return nil
+		}
+		l = &sharingLoose{}
+		a.loose[key] = l
+	}
+	if o.Meta.HasGeo() {
+		l.meta = o.Meta
+	}
+	l.up += o.Up
+	l.down += o.Down
+	return nil
+}
+
+// eligible 判断这个 cell 够不够格落库：活跃满 sharingFlushThreshold 秒，或
+// 字节满 coexistMinActiveBytes。后者与并存判定的「实质使用」是同一道门槛，
+// 扫描探测到不了。
+func (c *sharingCell) eligible() bool {
+	return c.seconds >= sharingFlushThreshold || c.bytes >= coexistMinActiveBytes
+}
+
+// dueForFlush 判断本轮要不要写库。按秒的节奏与改动前一致（每多活跃
+// sharingFlushThreshold 秒写一次）；只有字节在涨时，距上次写库也至少要隔
+// 同样的秒数，免得纯字节来源每 30 秒写一次。
+func (c *sharingCell) dueForFlush(now time.Time) bool {
+	if !c.eligible() {
+		return false
+	}
+	if c.seconds-c.flushedAt >= sharingFlushThreshold {
+		return true
+	}
+	if c.bytes == c.flushedBytes {
+		return false
+	}
+	return c.flushedTime.IsZero() || now.Sub(c.flushedTime) >= sharingFlushThreshold*time.Second
+}
+
+func (c *sharingCell) flushOf(key sharingKey, hour int64) sharingFlush {
+	return sharingFlush{
+		InboundId: key.inboundId, IP: key.ip, Meta: c.meta,
+		HourStart: hour, ActiveSeconds: c.seconds, ActiveBytes: c.bytes,
+		ActiveUp: c.upBytes, ActiveDown: c.downBytes,
+	}
 }
 
 // rolloverLocked 结束上一个小时：把已过门槛、但最后一段还没落库的单元补写
@@ -179,12 +278,8 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 	var out []sharingFlush
 	for key, cell := range a.cells {
-		if cell.seconds >= sharingFlushThreshold && cell.seconds > cell.flushedAt {
-			out = append(out, sharingFlush{
-				InboundId: key.inboundId, IP: key.ip, Meta: cell.meta,
-				HourStart: a.hour, ActiveSeconds: cell.seconds, ActiveBytes: cell.bytes,
-				ActiveUp: cell.upBytes, ActiveDown: cell.downBytes,
-			})
+		if cell.eligible() && (cell.seconds > cell.flushedAt || cell.bytes != cell.flushedBytes) {
+			out = append(out, cell.flushOf(key, a.hour))
 		}
 	}
 	// 上面遍历的是 map，顺序不定。调用方要把这批依次写进库，排序让同一份
@@ -206,6 +301,8 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 	a.cappedWarned = map[int]int{}
 
 	a.cells = map[sharingKey]*sharingCell{}
+	// 不满门槛的纯字节暂存同样不结转，理由同上。
+	a.loose = map[sharingKey]*sharingLoose{}
 	a.hour = newHour
 	return out
 }
@@ -223,6 +320,12 @@ func (a *sharingAccumulator) forget(inboundId int) {
 	for key := range a.cells {
 		if key.inboundId == inboundId {
 			delete(a.cells, key)
+		}
+	}
+	// 暂存不落库，但它可能在本小时内攒满门槛升格成 cell，同样要清。
+	for key := range a.loose {
+		if key.inboundId == inboundId {
+			delete(a.loose, key)
 		}
 	}
 }

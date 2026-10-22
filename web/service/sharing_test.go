@@ -8,6 +8,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/util/netdiag"
 )
 
 // setupSharingTest 建一对全新的临时库，与 setupTrafficTest 同一个模式。
@@ -446,11 +447,11 @@ func TestUpsertIPHourOverwritesSplitBytes(t *testing.T) {
 	}
 }
 
-// 累加器必须并行维护三个计数器，且客户端重连（计数器回退）时不产生负增量。
+// 累加器必须并行维护三个计数器，且上下行之和恒等于 ActiveBytes。
 //
-// deltaBytes 对回退按全量计入，三个计数器都要走它——只给 bytes 走、
-// 给 up/down 直接相减的话，一次重连会让分项变成负数，界面显示成
-// 「-2.3 GB」而没有任何一层会拦住它。
+// 客户端重连（内核计数器回退）的处理已经前移到 onlineTracker：它按连接
+// cookie 做差分、回退按全量计入（deltaBytes），交给累加器的只有非负增量，
+// 见 TestPendingBytesSurviveIPDisappearing / TestReusedCookieDoesNotProduceNegativeDelta。
 func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 10, 5, 0, 0, 0, time.UTC)
@@ -458,26 +459,24 @@ func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
 	// 轮次与落库时机的关系必须算准，否则断言会落在一个空的返回值上：
 	// step=30、sharingFlushThreshold=60，flush 发生在 seconds-flushedAt>=60
 	// 的那一轮。
-	//   轮1 t=0   新建 cell 只设基线不计字节，seconds=30，30-0 <60  不落库
+	//   轮1 t=0   +500/+900，seconds=30，30-0 <60  不落库
 	//   轮2 t=30  +1000/+2000，seconds=60，60-0>=60  落库，flushedAt=60
-	//   轮3 t=60  重连回退按全量 +100/+200，seconds=90，90-60=30<60  不落库
+	//   轮3 t=60  +100/+200，seconds=90，90-60=30<60  不落库
 	//   轮4 t=90  无增量，seconds=120，120-60=60>=60  落库 ← 断言这一轮
 	obs := func(up, down int64) []sharingObservation {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Up: up, Down: down}}
 	}
 	a.observe(base, obs(500, 900), 30)
-	a.observe(base.Add(30*time.Second), obs(1500, 2900), 30)
+	a.observe(base.Add(30*time.Second), obs(1000, 2000), 30)
 	a.observe(base.Add(60*time.Second), obs(100, 200), 30)
-	flushes := a.observe(base.Add(90*time.Second), obs(100, 200), 30)
+	flushes := a.observe(base.Add(90*time.Second), obs(0, 0), 30)
 
 	if len(flushes) != 1 {
 		t.Fatalf("落库条数 = %d，期望 1（第 4 轮累计 120 秒，距上次落库又满 60 秒）", len(flushes))
 	}
 	f := flushes[0]
-	// 轮2 的 +1000/+2000，加上轮3 重连按全量计入的 +100/+200。
-	// 若这里出现负数，说明 up/down 没走 deltaBytes 而是直接相减了。
-	if f.ActiveUp != 1100 || f.ActiveDown != 2200 {
-		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 1100/2200", f.ActiveUp, f.ActiveDown)
+	if f.ActiveUp != 1600 || f.ActiveDown != 3100 {
+		t.Errorf("ActiveUp/ActiveDown = %d/%d，期望 1600/3100", f.ActiveUp, f.ActiveDown)
 	}
 	if f.ActiveUp+f.ActiveDown != f.ActiveBytes {
 		t.Errorf("上下行之和 %d 与 ActiveBytes %d 不等",
@@ -547,5 +546,160 @@ func TestUpsertIPHourKeepsForeignRowsWithCountryOnly(t *testing.T) {
 	}
 	if rows[0].Province != "" || rows[0].City != "" {
 		t.Errorf("境外行不该有省市，得到 Province=%q City=%q", rows[0].Province, rows[0].City)
+	}
+}
+
+// usageSim 驱动「tracker 采样 + 共享采样」这条链路，统计最终落库的字节与时长。
+//
+// 它复现的是一次真实事故：入站合计一天 16 GB，按来源 IP 的分项只有 140 MB。
+// 原因是没设并发额度、也没人开着页面时，唯一的采样来源是 30 秒一次的共享
+// 采样，每一轮都超过 onlineMaxSampleGap，字节一个都记不进去——分项里只剩
+// 管理员开着展开行那段时间的流量。
+type usageSim struct {
+	tk       *onlineTracker
+	acc      *sharingAccumulator
+	inbounds []*model.Inbound
+	// rows 按 (IP, 小时) 保存最后一次落库的值，与 upsertIPHour 的覆盖语义一致。
+	rows map[string]sharingFlush
+}
+
+func newUsageSim() *usageSim {
+	return &usageSim{
+		tk:       newOnlineTracker(),
+		acc:      newSharingAccumulator(),
+		inbounds: []*model.Inbound{{Id: 1, Port: testPort, Enable: true}},
+		rows:     map[string]sharingFlush{},
+	}
+}
+
+func (s *usageSim) observe(now time.Time) {
+	obs := collectSharingObservations(s.tk, s.inbounds, now, func(string) NetworkMeta { return provinceMeta("江苏") })
+	for _, f := range s.acc.observe(now, obs, sharingSampleStep) {
+		s.rows[fmt.Sprintf("%s@%d", f.IP, f.HourStart)] = f
+	}
+}
+
+func (s *usageSim) totals() (up int64, seconds int) {
+	for _, f := range s.rows {
+		up += f.ActiveUp
+		seconds += f.ActiveSeconds
+	}
+	return
+}
+
+// run 模拟 minutes 分钟：一条长连接每秒上传 1 MB，每 trackerStep 采一次连接表，
+// 每 30 秒跑一次共享采样，最后跨过整点把收尾记录写出来。返回实际产生的字节。
+func (s *usageSim) run(base time.Time, minutes int, trackerStep time.Duration) int64 {
+	const rate = 1 << 20
+	end := base.Add(time.Duration(minutes) * time.Minute)
+	nextObs := base
+	for now := base; !now.After(end); now = now.Add(trackerStep) {
+		up := uint64(now.Sub(base).Seconds()) * rate
+		s.tk.update([]netdiag.Conn{conn(1, testPort, "1.2.3.4", up, 0)}, testPorts, now)
+		if !now.Before(nextObs) {
+			s.observe(now)
+			nextObs = now.Add(sharingSampleStep * time.Second)
+		}
+	}
+	s.observe(base.Truncate(time.Hour).Add(time.Hour))
+	return int64(end.Sub(base).Seconds()) * rate
+}
+
+// 按 5 秒的独立采样周期，分项字节与活跃时长都必须几乎完整。
+func TestPerIPUsageMatchesActualTrafficAtOnlineSampleInterval(t *testing.T) {
+	s := newUsageSim()
+	base := time.Date(2026, 10, 22, 3, 0, 0, 0, time.UTC)
+	actual := s.run(base, 50, OnlineSampleInterval)
+
+	up, seconds := s.totals()
+	if float64(up) < 0.99*float64(actual) {
+		t.Errorf("落库上行 %d MB，实际 %d MB，少了 %.1f%%", up>>20, actual>>20, 100-100*float64(up)/float64(actual))
+	}
+	if up > actual {
+		t.Errorf("落库上行 %d 字节，超过实际 %d 字节——多算比少算更糟", up, actual)
+	}
+	if seconds < 50*60*9/10 {
+		t.Errorf("活跃时长 %d 秒，实际在用 3000 秒——来源被误判成闲置了", seconds)
+	}
+}
+
+// 字节记账不能再依赖采样间隔：即使只剩 30 秒一次的共享采样（独立采样任务
+// 因故没跑），字节也必须完整。时长会因闲置判定变少，那是 OnlineSampleInterval
+// 要解决的另一半。
+func TestPerIPUsageBytesSurviveThirtySecondCadence(t *testing.T) {
+	s := newUsageSim()
+	base := time.Date(2026, 10, 22, 3, 0, 0, 0, time.UTC)
+	actual := s.run(base, 50, sharingSampleStep*time.Second)
+
+	if up, _ := s.totals(); float64(up) < 0.99*float64(actual) || up > actual {
+		t.Errorf("落库上行 %d 字节，实际 %d 字节（要求不少于 99%%、不多于实际）", up, actual)
+	}
+}
+
+// 短连接为主的客户端：每个请求在两次采样之间建立又关闭，连接表里一条都
+// 看不到。字节只能靠销毁通知补上，而这个来源在观测时刻从不在线，它的字节
+// 走纯字节路径，攒满门槛后照样要落库。
+func TestPerIPUsageCountsShortConnectionsSeenOnlyByCloseEvents(t *testing.T) {
+	s := newUsageSim()
+	base := time.Date(2026, 10, 22, 3, 0, 0, 0, time.UTC)
+	var actual int64
+	nextObs := base
+	cookie := uint64(100)
+	for now := base; now.Before(base.Add(20 * time.Minute)); now = now.Add(OnlineSampleInterval) {
+		s.tk.update(nil, testPorts, now)
+		// 每个周期中间有一个 512 KB 的请求，开了又关。
+		cookie++
+		s.tk.recordClosed(conn(cookie, testPort, "5.6.7.8", 512<<10, 0), now.Add(2*time.Second))
+		actual += 512 << 10
+		if !now.Before(nextObs) {
+			s.observe(now)
+			nextObs = now.Add(sharingSampleStep * time.Second)
+		}
+	}
+	s.observe(base.Add(time.Hour))
+
+	// 最后一个周期的请求发生在最后一次共享采样之后，下一次 drain 才会带走它。
+	if up, _ := s.totals(); float64(up) < 0.98*float64(actual) || up > actual {
+		t.Errorf("落库上行 %d 字节，实际 %d 字节（要求不少于 98%%、不多于实际）", up, actual)
+	}
+}
+
+// 两个周期常量之间的不等式一旦被打破，来源会在每一轮都被判成「没有基准」，
+// lastActiveAt 永不刷新、30 秒后被判闲置，共享检测的活跃时长又会归零。
+func TestOnlineSampleIntervalWithinBaselineGap(t *testing.T) {
+	if OnlineSampleInterval > onlineMaxSampleGap {
+		t.Fatalf("OnlineSampleInterval (%v) 大于 onlineMaxSampleGap (%v)", OnlineSampleInterval, onlineMaxSampleGap)
+	}
+}
+
+// 长连接先进入 FIN_WAIT2 / CLOSE_WAIT（从连接表里消失），一分多钟后才真正
+// 销毁：连接表记过的部分与销毁通知补上的尾段各记一次，合计等于实际，不多不少。
+func TestPerIPUsageLongConnectionClosingSlowlyIsCountedOnce(t *testing.T) {
+	s := newUsageSim()
+	base := time.Date(2026, 10, 22, 3, 0, 0, 0, time.UTC)
+	const rate = 1 << 20
+	leave := base.Add(20 * time.Minute)
+	destroy := leave.Add(70 * time.Second)
+	nextObs := base
+	for now := base; now.Before(base.Add(30 * time.Minute)); now = now.Add(OnlineSampleInterval) {
+		var conns []netdiag.Conn
+		if now.Before(leave) {
+			conns = []netdiag.Conn{conn(1, testPort, "1.2.3.4", uint64(now.Sub(base).Seconds())*rate, 0)}
+		}
+		s.tk.update(conns, testPorts, now)
+		if !now.Before(destroy) && !now.Add(-OnlineSampleInterval).After(destroy) {
+			// 离开 ESTABLISHED 之后又收了 5 MB 尾段才关掉。
+			s.tk.recordClosed(conn(1, testPort, "1.2.3.4", uint64(leave.Sub(base).Seconds())*rate+5*rate, 0), destroy)
+		}
+		if !now.Before(nextObs) {
+			s.observe(now)
+			nextObs = now.Add(sharingSampleStep * time.Second)
+		}
+	}
+	s.observe(base.Add(time.Hour))
+
+	actual := int64(leave.Sub(base).Seconds())*rate + 5*rate
+	if up, _ := s.totals(); up != actual {
+		t.Errorf("落库上行 %d 字节，实际 %d 字节", up, actual)
 	}
 }

@@ -251,3 +251,38 @@ func TestBuildDestroyRequestCarriesSocketIdentity(t *testing.T) {
 		t.Errorf("idiag_cookie = %#x，期望 %#x；cookie 不对内核会拒绝或误杀别的连接", got, c.Cookie)
 	}
 }
+
+// 订阅组号取自内核 include/uapi/linux/sock_diag.h 的 enum：
+// SKNLGRP_INET_TCP_DESTROY = 1、SKNLGRP_INET6_TCP_DESTROY = 3。
+// sockaddr_nl.nl_groups 是位图，第 group-1 位对应 group，所以是 0b101。
+// 写成 1<<1 | 1<<3 的话订到的是 UDP 销毁通知，TCP 的尾段字节一个都收不到，
+// 而 bind 照样成功、没有任何报错。
+func TestDestroyGroupsSubscribesTCPOnly(t *testing.T) {
+	if got := destroyGroups(); got != 0b101 {
+		t.Errorf("destroyGroups() = %#b，期望 0b101（IPv4 与 IPv6 的 TCP 销毁通知）", got)
+	}
+}
+
+// 销毁通知的报文由 inet_diag_handler_get_info 生成，INET_DIAG_INFO 前面
+// 还有 INET_DIAG_PROTOCOL 与一个 64 位对齐用的 INET_DIAG_PAD；解析必须按
+// 属性类型找 tcp_info，而不是假设它是第一个属性。
+func TestParseDumpReadsDestroyNotification(t *testing.T) {
+	const inetDiagProtocol, inetDiagPad = 10, 14
+	payload := encodeDiagMsg(afInet, 39001, 51234,
+		net.ParseIP("10.0.0.5"), net.ParseIP("1.2.3.4"), 42)
+	payload = append(payload, encodeAttr(inetDiagProtocol, []byte{ipprotoTCP})...)
+	payload = append(payload, encodeAttr(inetDiagPad, nil)...)
+	payload = append(payload, encodeAttr(inetDiagInfo, encodeTCPInfo(1200, 900))...)
+
+	conns, _, err := parseDump(encodeNlMsg(sockDiagByFamily, payload))
+	if err != nil {
+		t.Fatalf("parseDump 报错: %v", err)
+	}
+	if len(conns) != 1 {
+		t.Fatalf("连接数 = %d，期望 1", len(conns))
+	}
+	c := conns[0]
+	if !c.HasBytes || c.BytesUp != 900 || c.BytesDown != 1200 || c.Cookie != 42 {
+		t.Errorf("解析结果 = %+v，期望 cookie=42 up=900 down=1200", c)
+	}
+}

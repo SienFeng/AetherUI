@@ -57,6 +57,19 @@ const (
 	tcpInfoBytesReceivedOff = 128
 )
 
+// 连接销毁通知的多播组号，取自内核 include/uapi/linux/sock_diag.h 的
+// enum sknetlink_groups。UDP 的两个组（2、4）刻意不订：入站统计只看 TCP。
+const (
+	sknlgrpInetTCPDestroy  = 1
+	sknlgrpInet6TCPDestroy = 3
+)
+
+// destroyGroups 是订阅 TCP 销毁通知时 sockaddr_nl.nl_groups 的位图：
+// 内核把第 i 位对应到组号 i+1（net/netlink/af_netlink.c 的 netlink_bind）。
+func destroyGroups() uint32 {
+	return 1<<(sknlgrpInetTCPDestroy-1) | 1<<(sknlgrpInet6TCPDestroy-1)
+}
+
 // Family 是要查询的地址族。
 type Family uint8
 

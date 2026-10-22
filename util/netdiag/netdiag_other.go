@@ -15,3 +15,8 @@ func Dump(Family) ([]Conn, error) {
 func Destroy(Conn) error {
 	return ErrUnsupported
 }
+
+// WatchClosed 在非 Linux 平台上一律返回 ErrUnsupported。
+func WatchClosed(func(Conn), func()) error {
+	return ErrUnsupported
+}
