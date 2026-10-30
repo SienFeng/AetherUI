@@ -1,6 +1,16 @@
 {{define "accessLogModal"}}
-<a-modal id="access-log-modal" v-model="accessLogModal.visible" :title="accessLogModal.title"
+<a-modal id="access-log-modal" v-model="accessLogModal.visible"
          :closable="true" :mask-closable="true" width="1100px" :footer="null">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="file-search"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ accessLogModal.title ]]</span>
+                <span class="modal-head-sub">该入站的连接记录与常访问域名</span>
+            </span>
+        </div>
+    </template>
+
     <a-alert v-if="!accessLogModal.enabled" type="warning" show-icon style="margin-bottom: 12px"
              message="访问日志未开启"
              description="请到「面板设置 → 日志与统计」打开「记录访问日志」。开启后约 10 秒内自动生效，此前发生的访问不会被补记。">
@@ -21,8 +31,8 @@
                     <span style="margin-left: 12px; white-space: nowrap">
                         <a-switch size="small" :checked="accessLogModal.autoRefresh"
                                   @change="on => accessLogModal.toggleAutoRefresh(on)"></a-switch>
-                        <span style="margin-left: 6px; color: rgba(0,0,0,.65)">自动刷新</span>
-                        <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: rgba(0,0,0,.45)">
+                        <span style="margin-left: 6px; color: var(--aui-text-2)">自动刷新</span>
+                        <span v-if="accessLogModal.autoRefresh" style="margin-left: 6px; color: var(--aui-text-3)">
                             <a-tooltip v-if="accessLogModal.refreshError">
                                 <template slot="title">[[ accessLogModal.refreshError ]]</template>
                                 <span style="color: var(--aui-danger); cursor: help">出错</span>
@@ -40,7 +50,7 @@
                 </a-col>
             </a-row>
             <div v-if="accessLogModal.sources.length" style="margin-bottom: 12px">
-                <span style="color: rgba(0,0,0,.45); margin-right: 8px">近期来源：</span>
+                <span style="color: var(--aui-text-3); margin-right: 8px">近期来源：</span>
                 <a-tooltip v-for="src in accessLogModal.sources" :key="src.ip">
                     <template slot="title">
                         <template v-if="src.locationAlt || src.ispAlt">{{ template "ipDivergenceTip" "src" }}</template>
@@ -93,11 +103,10 @@
                 <template slot="route" slot-scope="text, row">
                     <a-tooltip v-if="row.route">
                         <template slot="title">[[ routeTip(row.route) ]]</template>
-                        <!-- 改动前四种走向各一个颜色（红/橙/蓝/绿）。其中只有
-                             「已阻断」和「链式代理」是需要被一眼看见的——前者
-                             是流量被掐断，后者是不常见的拓扑；「直连」与「走了
-                             某个出站节点」都只是分类，蓝绿之分不携带信息。 -->
-                        <span class="status-badge" :class="routeTone(row.route)">
+                        <!-- 走向配色与分流管理页的去向胶囊一致：已阻断红、直连绿、
+                             出站节点用该节点自己的身份色（utils.js 的 NodeTone），
+                             链式代理橙。认不出的出站（模板里手写的）保持中性。 -->
+                        <span class="status-badge" :class="routeTone(row.route)" :style="routeStyle(row.route)">
                             <a-icon v-if="routeIcon(row.route)" :type="routeIcon(row.route)"></a-icon>
                             [[ routeLabel(row.route) ]]
                         </span>
@@ -125,10 +134,10 @@
                     <a-radio-button value="down">按下载</a-radio-button>
                 </a-radio-group>
             </div>
-            <div v-if="!accessLogModal.topMetered" style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
+            <div v-if="!accessLogModal.topMetered" style="margin-bottom: 12px; color: var(--aui-text-3)">
                 统计的是<b>连接次数</b>，不是流量——上传大文件往往只有很少几条长连接，未必排在前面。
             </div>
-            <div v-else style="margin-bottom: 12px; color: rgba(0,0,0,.45)">
+            <div v-else style="margin-bottom: 12px; color: var(--aui-text-3)">
                 <div v-if="accessLogModal.topCoverageText">[[ accessLogModal.topCoverageText ]]</div>
                 <div>
                     字节数只统计<b>走直连出去</b>的流量：被你自己的分流规则带走（走出站节点）的部分不在其中，
@@ -161,17 +170,17 @@
                 </template>
             </a-table>
             <div v-if="accessLogModal.topBreakdown" style="margin-top: 12px; font-size: 12px; line-height: 1.9">
-                <div style="color: rgba(0,0,0,.45); margin-bottom: 2px">
+                <div style="color: var(--aui-text-3); margin-bottom: 2px">
                     用量分解（总量 [[ sizeFormat(accessLogModal.topBreakdown.totalBytes) ]]）
                 </div>
                 <div>已归因合计　<b>[[ sizeFormat(accessLogModal.topBreakdown.attributedBytes) ]]</b>
-                    <span style="color: rgba(0,0,0,.45)">上表各行之和，精确</span></div>
+                    <span style="color: var(--aui-text-3)">上表各行之和，精确</span></div>
                 <div>被封禁丢弃　<b>[[ accessLogModal.topBreakdown.blockedConns ]] 次连接</b>
-                    <span style="color: rgba(0,0,0,.45)">字节数不可得，已计入总量</span></div>
-                <div style="color: rgba(0,0,0,.65)">协议封装开销　约 [[ sizeFormat(accessLogModal.topBreakdown.overheadBytes) ]]
-                    <span style="color: rgba(0,0,0,.45)">估算：入站计加密流、出站计明文流，结构性差 3~8%</span></div>
-                <div style="color: rgba(0,0,0,.65)">未归因　　　　[[ sizeFormat(accessLogModal.topBreakdown.unattributedBytes) ]]
-                    <span style="color: rgba(0,0,0,.45)">余项：被分流规则带走的（上表里 0 B 的那些行）+ 计量池外的长尾</span></div>
+                    <span style="color: var(--aui-text-3)">字节数不可得，已计入总量</span></div>
+                <div style="color: var(--aui-text-2)">协议封装开销　约 [[ sizeFormat(accessLogModal.topBreakdown.overheadBytes) ]]
+                    <span style="color: var(--aui-text-3)">估算：入站计加密流、出站计明文流，结构性差 3~8%</span></div>
+                <div style="color: var(--aui-text-2)">未归因　　　　[[ sizeFormat(accessLogModal.topBreakdown.unattributedBytes) ]]
+                    <span style="color: var(--aui-text-3)">余项：被分流规则带走的（上表里 0 B 的那些行）+ 计量池外的长尾</span></div>
             </div>
         </a-tab-pane>
     </a-tabs>
@@ -179,6 +188,8 @@
 <script>
     const accessLogModal = {
         visible: false,
+        // 出站 tag → 节点 id，只用来给走向标签取节点身份色
+        nodeIdByTag: {},
         loading: false,
         enabled: true,
         // 近期来源：访问日志里出现过的 IP，让「谁来过」不依赖于他此刻是否在线
@@ -258,6 +269,7 @@
             this.visible = true;
             this.load();
             this.loadSources();
+            this.loadNodeTones();
             // 自动刷新的开关状态跨弹窗保留（管理员开过一次就是想一直这么看），
             // 所以每次打开都要按当前状态重新起定时器。
             this.syncTimer();
@@ -267,6 +279,19 @@
             this.ip = ip;
             this.key = '';
             this.search();
+        },
+        // 只为配色服务：失败时静默，走向标签退回中性色，不弹错误打扰管理员，
+        // 所以不走会自动弹提示的 HttpUtil。
+        async loadNodeTones() {
+            try {
+                const resp = await axios.post('/aui/routing/outbound/list');
+                const list = (resp.data && resp.data.success && resp.data.obj) || [];
+                const map = {};
+                list.forEach(n => { map[n.tag] = n.id; });
+                this.nodeIdByTag = map;
+            } catch (e) {
+                this.nodeIdByTag = {};
+            }
         },
         async loadSources() {
             const msg = await HttpUtil.post(`/aui/inbound/recentSources/${this.inboundId}`);
@@ -521,12 +546,21 @@
             },
         },
         methods: {
-            // 只有「阻断」与「链式」上色，其余走向是分类、用中性 chip 底。
             // 图标与文字各自都能独立读出含义，颜色不是唯一信息来源。
             routeTone(route) {
                 if (route === ROUTE_BLOCK) return 'status-danger';
                 if (routeIsChained(route)) return 'status-warn';
+                if (route === ROUTE_DEFAULT || routeIsMeter(route)) return 'route-direct';
                 return 'status-neutral';
+            },
+            // 出站节点：取该节点的身份色，与分流页的节点头像、去向胶囊同色
+            routeStyle(route) {
+                if (route === ROUTE_BLOCK || route === ROUTE_DEFAULT
+                    || routeIsChained(route) || routeIsMeter(route)) {
+                    return null;
+                }
+                const id = accessLogModal.nodeIdByTag[route];
+                return id === undefined ? null : NodeTone.pillStyle(id);
             },
             routeIcon(route) {
                 if (route === ROUTE_BLOCK) return 'stop';

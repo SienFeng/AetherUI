@@ -57,19 +57,16 @@
         </template>
     </template>
     <template slot="target" slot-scope="text, rule">
-        <!-- 「阻断」保留红色：它是唯一一个「这些流量会被掐断」的动作，
-             与旁边两个「送到某处」不是同一类事。「直连」改中性——它只是
-             「从本机出网」，不是健康信号，改动前那个绿色与全站「绿＝成功」
-             的约定对不上。 -->
-        <!-- 去向胶囊（与视觉稿 v3 一致）：封禁红、直连绿、转发到节点蓝，各带一个圆点。
-             直连用绿色是视觉稿定稿时的选择：在这一列里它表示「本机出网」，与「封禁」
-             「走节点」三类去向一眼可分；它不出现在任何健康状态的位置。 -->
+        <!-- 去向胶囊（视觉稿 v3）：封禁红、直连绿、转发到节点用该节点自己的身份色
+             （与节点表头像同色，utils.js 的 NodeTone），多个节点之间一眼可分。
+             直连用绿色是视觉稿定稿时的选择：在这一列里它表示「本机出网」，
+             它不出现在任何健康状态的位置。 -->
         <span v-if="rule.action === 'block'" class="dest-pill is-block">封禁</span>
         <span v-else-if="rule.action === 'direct'" class="dest-pill is-direct">直连（本机出网）</span>
         <span v-else-if="nodeMissing(rule.outboundId)" class="status-badge status-danger">
             <a-icon type="close-circle"></a-icon>[[ nodeName(rule.outboundId) ]]
         </span>
-        <span v-else class="dest-pill is-proxy">[[ nodeName(rule.outboundId) ]]</span>
+        <span v-else class="dest-pill is-proxy" :style="nodePillStyle(rule.outboundId)">[[ nodeName(rule.outboundId) ]]</span>
     </template>
     <template slot="warn" slot-scope="text, rule">
         <!-- #faad14 在白底上只有 2.0:1、#52c41a 只有 2.3:1，两个图标都接近

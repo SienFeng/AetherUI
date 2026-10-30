@@ -1,7 +1,16 @@
 {{define "promptModal"}}
-<a-modal id="prompt-modal" v-model="promptModal.visible" :title="promptModal.title"
+<a-modal id="prompt-modal" v-model="promptModal.visible"
          :closable="true" @ok="promptModal.ok" :mask-closable="false"
          :ok-text="promptModal.okText" cancel-text="取消">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="edit"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title" v-text="promptModal.title"></span>
+                <span class="modal-head-sub">填写后确认</span>
+            </span>
+        </div>
+    </template>
     <a-input id="prompt-modal-input" :type="promptModal.type"
              v-model="promptModal.value"
              :autosize="{minRows: 10, maxRows: 20}"

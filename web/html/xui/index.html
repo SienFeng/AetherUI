@@ -75,7 +75,7 @@
                     <a-card class="usage-card">
                         <div slot="title">
                             流量概览
-                            <div class="card-sub">图为各入站的历史用量（按入站堆叠）；右侧三项为整台机器所有网卡的实时数据</div>
+                            <div class="card-sub">图为各入站各自的历史用量（每个入站一条线）；右侧三项为整台机器所有网卡的实时数据</div>
                         </div>
                         <!-- 时间范围下拉（component/range_select.html，与入站展开行共用） -->
                         <span slot="extra">
@@ -123,10 +123,13 @@
                             </div>
                         </div>
                         <ul class="chart-legend" v-if="overviewLegend.length">
-                            <li v-for="l in overviewLegend" :key="l.name"><i :style="{ background: l.color }"></i>[[ l.name ]]</li>
+                            <li v-for="l in overviewLegend" :key="l.name">
+                                <i :style="{ background: l.color }"></i>[[ l.name ]]
+                                <b class="cell-num">[[ l.total ]]</b><span class="legend-share cell-num">[[ l.share ]]</span>
+                            </li>
                         </ul>
                         <div class="usage-chart">
-                            <canvas id="overview-chart" role="img" aria-label="所选时间范围内按入站堆叠的用量面积图"></canvas>
+                            <canvas id="overview-chart" role="img" aria-label="所选时间范围内各入站的用量折线图"></canvas>
                             <div v-if="overviewGrandTotal === 0" class="chart-empty">这段时间没有用量</div>
                         </div>
                     </a-card>
@@ -175,7 +178,7 @@
                                 <tr v-for="r in rankRows" :key="r.inboundId">
                                     <td>
                                         <div class="who">
-                                            <span class="who-avatar" :style="{ background: r.color }">[[ r.initial ]]</span>
+                                            <span class="who-avatar" :style="{ background: r.color, color: r.ink }">[[ r.initial ]]</span>
                                             <span class="who-text">
                                                 <span class="who-name" :title="r.remark">[[ r.remark || '（无备注）' ]]</span>
                                                 <span class="who-sub">[[ r.sub ]]</span>
@@ -239,20 +242,35 @@
             </a-spin>
         </a-layout-content>
     </a-layout>
-    <a-modal id="version-modal" v-model="versionModal.visible" title="切换版本"
+    <a-modal id="version-modal" v-model="versionModal.visible"
              :closable="true" @ok="() => versionModal.visible = false"
              ok-text="确定" cancel-text="取消">
-        <p style="margin-bottom: 4px">点击要切换到的版本。</p>
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-amber" aria-hidden="true"><a-icon type="swap"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ '切换 Xray 版本' ]]</span>
+                <span class="modal-head-sub">点击要切换到的版本</span>
+            </span>
+        </div>
+    </template>
+
         <p style="color: var(--aui-text-2); font-size: 13px">
             旧版本可能与当前配置不兼容，切换后请确认 Xray 是否正常运行。
         </p>
         <!-- 改动前这里是一排带 @click 的 a-tag，颜色按 index % 2 蓝绿交替——
              颜色在这里不携带任何信息，纯装饰噪声；而且 a-tag 不是按钮，
              键盘拿不到、没有焦点环、读屏软件念出来是普通文本。 -->
-        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px">
-            <a-button v-for="version in versionModal.versions" :key="version"
-                      size="small" @click="switchV2rayVersion(version)">
-                [[ version ]]
+        <!-- 固定网格：每行 4 个等宽、最多显示 6 行，更多的在框内滚动。版本号长短不一，
+             改动前按内容宽度自动换行，每行个数和对齐都不固定，看着乱。
+             当前在跑的核心版本高亮并标「当前」（列表带 v 前缀，status 里不带）。 -->
+        <div class="version-grid" role="list">
+            <a-button v-for="version in versionModal.versions" :key="version" role="listitem"
+                      class="version-cell" :class="{ 'is-current': isCurrentXray(version) }"
+                      :aria-current="isCurrentXray(version) ? 'true' : null"
+                      @click="switchV2rayVersion(version)">
+                <span class="cell-num">[[ version ]]</span>
+                <span v-if="isCurrentXray(version)" class="version-now">当前</span>
             </a-button>
         </div>
     </a-modal>
@@ -339,13 +357,20 @@
     // 用量图与排行共用的入站配色：前 5 名各占一个身份色（与 custom.css 的
     // --aui-id-* 一致），其余合并成灰色的「其他」。琥珀/绿/红刻意不用，
     // 它们在全站是警告/成功/危险。
-    const SERIES_COLORS = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777'];
+    // 流量概览的系列色：dataviz 参考调色板的前 5 个槽位（蓝 / 橙 / 浅绿 / 黄 / 品红），
+    // 按固定顺序分给用量前 5 的入站。validate_palette.js 实测：色弱相邻对 ΔE ≥ 9.1、
+    // 正常视力 ≥ 19.6；后三个对白底不足 3:1，所以图例必须写明数值（见 overviewLegend），
+    // 下方排行表即表格视图。改动前那套蓝/青/紫/靛/粉里紫与靛只差 ΔE 7.5，校验不过。
+    const SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4'];
     const SERIES_OTHER = '#94A3B8';
     const SERIES_SHOWN = SERIES_COLORS.length;
 
-    function hexAlpha(hex, a) {
+    // 彩色底上的字用黑还是白：取对比度更高的那个（排行表头像用）
+    function inkOn(hex) {
         const n = parseInt(hex.slice(1), 16);
-        return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+        const lin = c => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+        const L = 0.2126 * lin(n >> 16) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+        return (1.05 / (L + 0.05)) >= ((L + 0.05) / 0.05) ? '#FFFFFF' : '#0F172A';
     }
 
     // 网速折线保留最近 30 个采样（2 秒一次，约 1 分钟）
@@ -511,8 +536,7 @@
             },
             // 与分流管理页的节点头像同一套配色
             nodeColor(n) {
-                const colors = ['#1266D6', '#7C3AED', '#0D9488', '#4F46E5', '#DB2777', '#0891B2'];
-                return colors[n.id % colors.length];
+                return NodeTone.of(n.id).solid;
             },
             // 延迟颜色条：80ms 内绿、150ms 内橙、更慢红（与分流管理页一致）
             probeBarStyle(ms) {
@@ -542,6 +566,7 @@
             switchV2rayVersion(version) {
                 this.$confirm({
                     title: '切换 xray 版本',
+                    icon: 'swap',
                     content: '是否切换 xray 版本至' + ` ${version}?`,
                     okText: '确定',
                     cancelText: '取消',
@@ -552,6 +577,10 @@
                         this.loading(false);
                     },
                 });
+            },
+            isCurrentXray(version) {
+                const cur = this.status.xray.version;
+                return !!cur && String(version).replace(/^v/, '') === String(cur).replace(/^v/, '');
             },
             onOverviewRangeChange(v) {
                 this.overviewRange = v.range;
@@ -573,7 +602,7 @@
                 this.overviewSeries = data.series || [];
                 this.overviewLabels = data.labels || [];
                 this.overviewGranularity = data.granularity || 'hour';
-                // 按入站堆叠：服务端已按整个范围的总量降序排好、逐点补零。
+                // 每个入站一条线：服务端已按整个范围的总量降序排好、逐点补零。
                 // 前 5 名各一层，其余合并成「其他」一层，图例与配色和排行表一致。
                 const shown = this.overviewSeries.slice(0, SERIES_SHOWN);
                 const rest = this.overviewSeries.slice(SERIES_SHOWN);
@@ -589,7 +618,10 @@
                         color: SERIES_OTHER,
                     });
                 }
-                const totals = this.overviewTotals;
+                // 不堆叠：每个入站一条线，纵轴读到的就是它自己的用量。改动前是堆叠面积，
+                // 每一层画在下一层之上，读到的是累加高度，一个入站占大头时其余几层根本读不出来。
+                const labels = this.overviewLabels;
+                const seriesMax = Math.max(0, ...datasets.map(d => Math.max(0, ...d.data)));
                 this.$nextTick(() => {
                     const canvas = document.getElementById('overview-chart');
                     if (!canvas) {
@@ -601,12 +633,16 @@
                     }
                     // 在共用配置上做本页的局部覆盖，入站页的图不受影响。
                     const options = trafficChartOptions(8);
-                    styleTrafficAxes(options, Math.max(0, ...totals));
+                    styleTrafficAxes(options, seriesMax);
                     options.plugins.legend = { display: false };
+                    // 悬停时竖线对齐的那个时段：逐个入站列出数值（为 0 的不列，按大小排）与合计
+                    options.interaction = { mode: 'index', intersect: false };
+                    options.plugins.tooltip.filter = item => item.parsed.y > 0;
+                    options.plugins.tooltip.itemSort = (a, b) => b.parsed.y - a.parsed.y;
                     options.plugins.tooltip.callbacks.footer =
                         items => '合计 ' + sizeFormat(items.reduce((n, x) => n + x.parsed.y, 0));
-                    options.scales.y.stacked = true;
-                    options.scales.x.stacked = true;
+                    options.scales.y.stacked = false;
+                    options.scales.x.stacked = false;
                     // 服务端标签：小时粒度「10-29 23:00」，日粒度「2026-10-29」。整条放在轴上太挤：
                     // 一天以内的小时刻度只留时刻，跨天的只留日期；tooltip 标题仍是完整标签。
                     const short = this.overviewShortLabel;
@@ -618,17 +654,20 @@
                     overviewChart = new Chart(canvas, {
                         type: 'line',
                         data: {
-                            labels: this.overviewLabels,
-                            datasets: datasets.map((d, i) => ({
+                            labels: labels,
+                            datasets: datasets.map(d => ({
                                 label: d.label,
                                 data: d.data,
                                 borderColor: d.color,
-                                backgroundColor: hexAlpha(d.color, d.color === SERIES_OTHER ? .25 : .5),
-                                fill: i === 0 ? 'origin' : '-1',
-                                borderWidth: 1.5,
+                                backgroundColor: d.color,
+                                fill: false,
+                                borderWidth: 2,
                                 pointRadius: 0,
-                                pointHoverRadius: 3,
-                                tension: 0.35,
+                                // 悬停点带 2px 白圈，压在别的线上也看得清（dataviz 的 surface ring）
+                                pointHoverRadius: 4,
+                                pointHoverBorderWidth: 2,
+                                pointHoverBorderColor: '#FFFFFF',
+                                tension: 0.3,
                             })),
                         },
                         options,
@@ -703,12 +742,22 @@
             overviewAverage() {
                 return this.overviewLabels.length ? this.overviewGrandTotal / this.overviewLabels.length : 0;
             },
+            // 图例直接写出每个入站在所选范围内的合计与占比：一个入站占了大头时，
+            // 其余几层在任何图上都只有细细一条，「谁用了多少」得靠数字回答。
+            // 合计取各点之和（与 Total = Points 之和的口径一致）。
             overviewLegend() {
+                const grand = this.overviewGrandTotal;
+                const sum = pts => pts.reduce((n, v) => n + (v || 0), 0);
+                const item = (name, color, total) => ({
+                    name, color, total: sizeFormat(total),
+                    share: grand ? (total / grand * 100).toFixed(1) + '%' : '—',
+                });
                 const shown = this.overviewSeries.slice(0, SERIES_SHOWN).map((s, i) =>
-                    ({ name: s.remark || ('入站 ' + s.inboundId), color: SERIES_COLORS[i] }));
-                const rest = this.overviewSeries.length - SERIES_SHOWN;
-                if (rest > 0) {
-                    shown.push({ name: `其他 ${rest} 个入站`, color: SERIES_OTHER });
+                    item(s.remark || ('入站 ' + s.inboundId), SERIES_COLORS[i], sum(s.points)));
+                const rest = this.overviewSeries.slice(SERIES_SHOWN);
+                if (rest.length > 0) {
+                    shown.push(item(`其他 ${rest.length} 个入站`, SERIES_OTHER,
+                        rest.reduce((n, s) => n + sum(s.points), 0)));
                 }
                 return this.overviewTotals.some(v => v > 0) ? shown : [];
             },
@@ -735,6 +784,7 @@
                     return Object.assign({}, r, {
                         // 与图表图例同色；停用与否由状态标签表达，不改头像颜色
                         color: SERIES_COLORS[idx] || SERIES_OTHER,
+                        ink: inkOn(SERIES_COLORS[idx] || SERIES_OTHER),
                         initial: (name || '?').slice(0, 1).toUpperCase(),
                         sub: ib ? `${ib.protocol} · 端口 ${ib.port}` : '已删除的入站',
                         online: oc && oc.supported ? oc.count : '—',

@@ -216,17 +216,22 @@
                                 <a-alert v-if="ipUsageOf(dbInbound.id).reason" type="info" show-icon
                                          style="margin-bottom: 12px"
                                          :message="ipUsageOf(dbInbound.id).reason"></a-alert>
+                                <!-- 来源多时（如「近 3 天」几十个 IP）把表体收进固定高度的框里滚动，
+                                     表头固定；不超过 8 个不限高，免得出现一条没必要的滚动条。
+                                     scroll.y 要求每列都有 width（onlineColumns 都写了），否则表头与表体错位。 -->
                                 <a-table v-if="onlineOf(dbInbound.id).supported"
+                                         class="online-source-table"
                                          :columns="onlineColumns"
                                          :data-source="mergedOf(dbInbound.id)"
                                          :row-key="online => online.ip"
+                                         :scroll="mergedOf(dbInbound.id).length > 8 ? { y: 440 } : {}"
                                          :pagination="false" size="small"
                                          :locale="{ emptyText: '这段时间内没有来源连接过。若只是数据已过保留期，上方会有说明；更早的记录可从左侧「操作 → 访问日志」查看' }">
                                     <template slot="firstSeen" slot-scope="text, online">
                                         <template v-if="online.offline && online.lastSeen">
                                             <a-tooltip>
                                                 <template slot="title">该来源在所选时段内有用量，但当前不在线。显示的是最后活跃时间。</template>
-                                                <span style="color: rgba(0,0,0,.45)">[[ DateUtil.formatMillis(online.lastSeen) ]]</span>
+                                                <span style="color: var(--aui-text-3)">[[ DateUtil.formatMillis(online.lastSeen) ]]</span>
                                             </a-tooltip>
                                         </template>
                                         <!-- 被封禁的来源由服务端追加进列表，它在所选窗口内不一定
@@ -449,15 +454,9 @@
                                         <span class="online-dot" aria-hidden="true"></span>
                                         [[ onlineCountOf(dbInbound.id).count ? onlineCountOf(dbInbound.id).count + ' 台设备' : '无人在线' ]]
                                     </div>
-                                    <!-- 上下行分两行：挤在一行时「↑ … · ↓ …」在这个列宽下会
-                                         折行，而断点落在数字与单位之间（「64.38 / KB/s」），
-                                         两个数各被劈成两半。
-                                         .cell-speed 负责把这一格的高度钉死——内容在「两行
-                                         速度」与「一行短横」之间每 2 秒切换一次，不留位的话
-                                         整行会跟着上下弹跳，见 custom.css 里的注释。 -->
-                                    <!-- 速度只写不为 0 的方向（与视觉稿一致：「↓ 82.1 KB/s」一行）。
-                                         .cell-speed 仍把这一格的高度钉住：内容每 2 秒在「有速度」与
-                                         「空」之间切换，不留位的话整行会跟着上下弹跳。 -->
+                                    <!-- 速度只写不为 0 的方向，上下行各占一行：并排放在一行时两个方向都有
+                                         速度就超出列宽、压到风险列上。.cell-speed 按两行钉住高度——内容每
+                                         2 秒在「有速度」与「空」之间切换，不留位的话整行会跟着上下弹跳。 -->
                                     <div class="cell-speed">
                                         <div v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0"
                                              class="cell-sub cell-num online-speed">
@@ -580,6 +579,33 @@
             </a-spin>
         </a-layout-content>
     </a-layout>
+    <!-- 踢下线 / 禁止连接（视觉稿 v3 的弹窗头部 + 选择卡）。放在 #app 内，
+         否则 v-model 等指令不会被编译（CLAUDE.md「Vue 指令写在根元素之外是死代码」）。 -->
+    <a-modal v-model="kickModal.visible" :width="560" :mask-closable="false"
+             :confirm-loading="kickModal.loading" ok-text="确定" cancel-text="取消"
+             :ok-button-props="{ props: { type: kickModal.value === 0 ? 'primary' : 'danger' } }"
+             @ok="confirmKick">
+        <template slot="title">
+            <div class="modal-head">
+                <span class="modal-icon" :class="kickModal.offline ? 'tone-red' : 'tone-amber'" aria-hidden="true">
+                    <a-icon :type="kickModal.offline ? 'stop' : 'disconnect'"></a-icon>
+                </span>
+                <span class="modal-head-text">
+                    <span class="modal-head-title">[[ kickModal.offline ? '禁止连接' : '踢下线' ]] · [[ kickModal.ip ]]</span>
+                    <span class="modal-head-sub">[[ kickModal.offline
+                        ? '该来源当前不在线。封禁期内它每次重连都会被立即断开，且不占用并发额度。'
+                        : '封禁期内该来源每一轮都会被断开，且不占用并发额度。' ]]</span>
+                </span>
+            </div>
+        </template>
+        <div class="kick-label">封禁时长</div>
+        <a-radio-group v-model="kickModal.value" class="action-choices">
+            <a-radio v-for="c in kickModal.choices" :key="c.value" :value="c.value" :class="c.tone">
+                <span class="action-name">[[ c.name ]]</span>
+                <span class="action-desc">[[ c.desc ]]</span>
+            </a-radio>
+        </a-radio-group>
+    </a-modal>
 </a-layout>
 {{template "js" .}}
 {{template "component/rangeSelect"}}
@@ -656,7 +682,8 @@
     }, {
         title: "在线",
         align: 'left',
-        width: 115,
+        // 「↑ 999.99 KB/s」加上左侧 16px 对齐缩进要 ~105px，115 时贴边
+        width: 130,
         scopedSlots: { customRender: 'online' },
     }, {
         title: "风险",
@@ -796,8 +823,16 @@
             onlineCounts: {},
             onlineCountError: '',
             onlineCountTimer: null,
-            // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
-            kickBanSeconds: 0,
+            // 踢下线弹窗。value 是选中的封禁时长（秒）：0 只断开，-1 永久。
+            kickModal: {
+                visible: false,
+                loading: false,
+                dbInbound: null,
+                ip: '',
+                offline: false,
+                choices: [],
+                value: 0,
+            },
             riskMap: {},
             // 最近 24 小时所有入站的用量之和（null = 还没读到 / 读取失败）
             usage24h: null,
@@ -1137,9 +1172,10 @@
             },
             resetTraffic(dbInbound) {
                 this.$confirm({
-                    title: '重置流量',
-                    content: '确定要重置流量吗?',
-                    okText: '重置',
+                    title: '重置「' + (dbInbound.remark || dbInbound.tag) + '」的流量？',
+                    content: '已用流量清零，用量历史曲线不受影响。',
+                    icon: 'reload',
+                    okText: '重置流量',
                     cancelText: '取消',
                     onOk: () => {
                         const inbound = dbInbound.toInbound();
@@ -1163,9 +1199,11 @@
                     plan = null;
                 }
                 this.$confirm({
-                    title: '删除入站',
+                    title: '删除入站「' + (dbInbound.remark || dbInbound.tag) + '」？',
                     content: this.delInboundContent(plan),
-                    okText: '删除',
+                    icon: 'delete',
+                    okType: 'danger',
+                    okText: '删除入站',
                     cancelText: '取消',
                     onOk: () => this.submit('/aui/inbound/del/' + dbInbound.id),
                 });
@@ -1176,24 +1214,33 @@
             delInboundContent(plan) {
                 const removed = (plan && plan.removed) || [];
                 const detached = (plan && plan.detached) || [];
-                if (removed.length === 0 && detached.length === 0) {
-                    return '确定要删除入站吗?';
-                }
                 const names = rules => rules.map(r => '「' + r.label + '」').join('、');
-                const lines = ['确定要删除入站吗?'];
+                // 与视觉稿 v3 一致：一句「不可撤销」+ 红色清单列出会一并清理的东西。
+                // 访问日志 / 用量历史 / 封禁记录由 DelInbound 无条件清理，始终列出。
+                const items = ['该入站的访问日志、用量历史与封禁记录'];
                 if (removed.length > 0) {
-                    lines.push('将同时删除 ' + removed.length + ' 条分流规则：' + names(removed)
-                        + '。它们只覆盖这一个用户，删掉后不再有作用对象。');
+                    items.push('将同时删除 ' + removed.length + ' 条分流规则：' + names(removed)
+                        + '（它们只覆盖这一个用户）');
                 }
                 if (detached.length > 0) {
-                    lines.push('将从 ' + detached.length + ' 条分流规则中移除该用户：' + names(detached)
-                        + '。规则本身保留，其余用户不受影响。');
+                    items.push('将从 ' + detached.length + ' 条分流规则中移除该用户：' + names(detached)
+                        + '（规则本身保留）');
                 }
-                return (h) => h('div', lines.map(line => h('p', { style: { marginBottom: '8px' } }, line)));
+                // 拿不到预检结果时不编造分流规则的去向，只如实说明没能预检。
+                if (!plan) {
+                    items.push('未能预检分流规则引用：引用该入站的规则会被一并清理');
+                }
+                return (h) => h('div', [
+                    h('div', '此操作不可撤销。'),
+                    h('div', { class: 'confirm-danger-box' }, [
+                        '删除后会同时清理：',
+                        h('ul', items.map(t => h('li', t))),
+                    ]),
+                ]);
             },
             showQrcode(dbInbound) {
                 const link = dbInbound.genLink();
-                qrModal.show('二维码', link);
+                qrModal.show('分享 · ' + (dbInbound.remark || dbInbound.tag), link);
             },
             showInfo(dbInbound) {
                 infoModal.show(dbInbound);
@@ -1514,64 +1561,55 @@
                 // 离线来源去掉「仅断开」这一项：它对一个已经没有连接的来源是一次
                 // 空操作，而放在首位就成了默认值——点开确认框直接回车，什么都没发生。
                 // 默认落在永久封禁，因为管理员是先看到一段异常用量才来点这个按钮的。
+                // 颜色只按后果分三档：只断开蓝、限时封禁橙、永久封禁红。
+                const timed = [
+                    { value: 300, name: '5 分钟', desc: '短暂封禁', tone: 'is-warn' },
+                    { value: 1800, name: '30 分钟', desc: '到期自动解除', tone: 'is-warn' },
+                    { value: 3600, name: '1 小时', desc: '到期自动解除', tone: 'is-warn' },
+                    { value: 86400, name: '24 小时', desc: '到期自动解除', tone: 'is-warn' },
+                ];
+                const forever = { value: -1, name: '永久封禁', desc: '需手动解除', tone: 'is-block' };
                 const choices = offline
-                    ? [
-                        [-1, '永久封禁（需手动解除）'],
-                        [86400, '封禁 24 小时'],
-                        [3600, '封禁 1 小时'],
-                        [1800, '封禁 30 分钟'],
-                        [300, '封禁 5 分钟'],
-                    ]
-                    : [
-                        [0, '仅断开（客户端可立即重连）'],
-                        [300, '封禁 5 分钟'],
-                        [1800, '封禁 30 分钟'],
-                        [3600, '封禁 1 小时'],
-                        [86400, '封禁 24 小时'],
-                        [-1, '永久封禁（需手动解除）'],
-                    ];
-                this.kickBanSeconds = choices[0][0];
-                this.$confirm({
-                    title: `${offline ? '禁止连接' : '踢下线'} - ${online.ip}`,
-                    okText: '确定',
-                    cancelText: '取消',
-                    content: (h) => h('div', [
-                        h('p', offline
-                            ? '该来源当前不在线。封禁期内它每次重连都会被立即断开，且不占用并发额度。'
-                            : '选择封禁时长。封禁期内该来源每一轮都会被断开，且不占用并发额度。'),
-                        // 用非受控的 defaultValue：$confirm 的 content 只渲染一次，
-                        // 传受控 value 的话点了选不上（组件拿不到更新后的值）。
-                        h('a-radio-group', {
-                            props: { defaultValue: choices[0][0] },
-                            on: { change: (e) => { this.kickBanSeconds = e.target.value; } },
-                        }, choices.map(function (choice) {
-                            return h('a-radio', {
-                                props: { value: choice[0] },
-                                style: { display: 'block', lineHeight: '30px' },
-                            }, choice[1]);
-                        })),
-                    ]),
-                    onOk: async () => {
-                        const banSeconds = this.kickBanSeconds;
-                        const msg = await HttpUtil.post(`/aui/inbound/kick/${dbInbound.id}`,
-                            { ip: online.ip, banSeconds: banSeconds });
-                        if (msg.success) {
-                            // 离线来源没有连接可断，复用在线那句会弹出「已断开 0 条连接」，
-                            // 读起来像是操作失败了，而封禁其实已经写进去了。
-                            if (offline) {
-                                this.$message.success(`已封禁 ${online.ip}，重连会被立即断开`);
-                            } else {
-                                const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
-                                this.$message.success(`已断开 ${msg.obj} 条连接${suffix}`);
-                            }
-                            await this.loadOnlines(dbInbound.id);
-                        }
-                    },
+                    ? [forever].concat(timed.slice().reverse())
+                    : [{ value: 0, name: '仅断开', desc: '客户端可立即重连', tone: 'is-proxy' }].concat(timed, [forever]);
+                Object.assign(this.kickModal, {
+                    visible: true,
+                    loading: false,
+                    dbInbound: dbInbound,
+                    ip: online.ip,
+                    offline: !!offline,
+                    choices: choices,
+                    value: choices[0].value,
                 });
+            },
+            async confirmKick() {
+                const m = this.kickModal;
+                const banSeconds = m.value;
+                m.loading = true;
+                try {
+                    const msg = await HttpUtil.post(`/aui/inbound/kick/${m.dbInbound.id}`,
+                        { ip: m.ip, banSeconds: banSeconds });
+                    if (!msg.success) {
+                        return;
+                    }
+                    m.visible = false;
+                    // 离线来源没有连接可断，复用在线那句会弹出「已断开 0 条连接」，
+                    // 读起来像是操作失败了，而封禁其实已经写进去了。
+                    if (m.offline) {
+                        this.$message.success(`已封禁 ${m.ip}，重连会被立即断开`);
+                    } else {
+                        const suffix = banSeconds === 0 ? '' : '，已加入封禁名单';
+                        this.$message.success(`已断开 ${msg.obj} 条连接${suffix}`);
+                    }
+                    await this.loadOnlines(m.dbInbound.id);
+                } finally {
+                    m.loading = false;
+                }
             },
             unbanOnline(dbInbound, online) {
                 this.$confirm({
                     title: '解除封禁',
+                    icon: 'unlock',
                     content: `确定解除对 ${online.ip} 的封禁吗？解除后它可以立即重新连接。`,
                     okText: '解除',
                     cancelText: '取消',

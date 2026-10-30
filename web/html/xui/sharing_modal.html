@@ -1,6 +1,16 @@
 {{define "sharingModal"}}
-<a-modal id="sharing-modal" v-model="sharingModal.visible" :title="sharingModal.title"
+<a-modal id="sharing-modal" v-model="sharingModal.visible"
          :closable="true" :mask-closable="true" width="900px" :footer="null">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-violet" aria-hidden="true"><a-icon type="team"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ sharingModal.title ]]</span>
+                <span class="modal-head-sub">按来源网络判断这个入站是否被多人共用</span>
+            </span>
+        </div>
+    </template>
+
     <a-alert v-if="sharingModal.stat.byIp" type="warning" show-icon style="margin-bottom: 12px"
              message="当前只能按来源网络判定，不是按地区"
              description="IP 归属地库未加载，或该入站的来源都是 IPv6（归属地库只收录 IPv4）。此时按网络段归并来源（IPv4 按 /24、IPv6 按 /64），同一台设备轮换出来的多个地址算一个来源；但同一个人的手机与宽带仍然是两个网络，误报率远高于按省份判定。">
@@ -75,7 +85,8 @@
     <a-card v-if="sharingModal.risk.profiles.length > 0" size="small" title="网络画像"
             style="margin-bottom: 12px">
         <a-table :columns="sharingModal.profileColumns" :data-source="sharingModal.risk.profiles"
-                 :row-key="p => p.key" :pagination="false" size="small">
+                 :row-key="p => p.key" :pagination="false" size="small"
+                 :locale="{ emptyText: '还没有来源网络画像' }">
             <template slot="who" slot-scope="text, p">
                 [[ sharingModal.profileName(p) ]]
                 <!-- 与入站页展开行同一条：紫色本身不说明任何事，直接写字。 -->
@@ -142,7 +153,8 @@
     </a-card>
 
     <a-table :columns="sharingModal.columns" :data-source="sharingModal.hours"
-             :row-key="h => h.t" :pagination="{ pageSize: 10 }" size="small">
+             :row-key="h => h.t" :pagination="{ pageSize: 10 }" size="small"
+             :locale="{ emptyText: '这段时间内没有发生并存的小时' }">
         <template slot="label" slot-scope="text, h">[[ h.label ]]</template>
         <template slot="entries" slot-scope="text, h">
             <span v-for="e in h.entries" :key="e.ip" class="chip cell-num">
@@ -150,7 +162,7 @@
             </span>
         </template>
     </a-table>
-    <p style="margin-top: 8px; color: rgba(0,0,0,.45)">
+    <p style="margin-top: 8px; color: var(--aui-text-3)">
         只列出发生过并存的小时，最多回溯 [[ sharingModal.retentionDays ]] 天。时间按面板设置的时区显示。
         <br>
         每条后面的流量是判定用的「实质使用」判据：一小时不足 1 MB 的来源不计入并存——

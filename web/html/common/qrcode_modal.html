@@ -1,7 +1,6 @@
 {{define "qrcodeModal"}}
 <a-modal id="qrcode-modal" v-model="qrModal.visible"
-         :closable="true" width="360px" :ok-text="qrModal.okText"
-         cancel-text='{{ i18n "close" }}' :ok-button-props="{attrs:{id:'qr-modal-ok-btn'}}">
+         :closable="true" width="420px" :footer="null">
     <template slot="title">
         <div class="modal-head">
             <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="qrcode"></a-icon></span>
@@ -13,8 +12,12 @@
         </div>
     </template>
     <div class="qr-frame"><canvas id="qrCode" style="width: 100%; height: 100%;"></canvas></div>
-    <!-- 二维码下方给出同一段内容的文本形式，便于核对；复制仍用底部的按钮 -->
-    <a-input class="qr-text" :value="qrModal.copyText" read-only aria-label="分享内容"></a-input>
+    <!-- 视觉稿 v3：二维码下方是「分享文本 + 复制」一行，没有底栏。
+         复制按钮保留 id="qr-modal-ok-btn"，ClipboardJS 按这个 id 绑定。 -->
+    <div class="qr-copy">
+        <a-input class="qr-text" :value="qrModal.copyText" read-only aria-label="分享内容"></a-input>
+        <a-button type="primary" id="qr-modal-ok-btn" v-text="qrModal.okText"></a-button>
+    </div>
 </a-modal>
 
 <script>

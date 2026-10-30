@@ -32,16 +32,16 @@
                            v-model="renewModal.customDate" style="width: 100%"
                            @change="renewModal.onCustomDateChange"></a-date-picker>
         </a-form-item>
-        <a-alert :type="isNeverExpire ? 'warning' : 'info'">
-            <template slot="message">
-                当前到期时间：<b>[[ currentText ]]</b> → 续期后：<b>[[ newText ]]</b>
-            </template>
-            <template slot="description">
-                <span v-if="isNeverExpire">该入站当前为<b>无限期</b>，续期后将变成有期限的。</span>
-                <span v-if="willReenable">续期后将<b>重置已用流量</b>并<b>重新启用</b>该入站。</span>
-                <span v-else>新的到期时间不在将来，等同于立即停用：<b>不会</b>重置流量，也<b>不会</b>重新启用。</span>
-            </template>
-        </a-alert>
+        <!-- 视觉稿 v3：底部一条「续期后到期」预览，附带的影响说明放在它下面一行小字。 -->
+        <div class="renew-preview" :class="{ 'is-warn': !willReenable }">
+            <span>续期后到期</span>
+            <b class="cell-num">[[ newText ]]</b>
+        </div>
+        <div class="renew-note">
+            <template v-if="willReenable">续期后将重置已用流量并重新启用该入站。</template>
+            <template v-else>新的到期时间不在将来，等同于立即停用：不会重置流量，也不会重新启用。</template>
+            <template v-if="isNeverExpire">该入站当前为无限期，续期后将变成有期限的。</template>
+        </div>
     </a-form>
 </a-modal>
 
