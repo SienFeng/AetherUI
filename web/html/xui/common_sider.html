@@ -130,8 +130,18 @@
         </a-popover>
     </div>
 </a-layout-sider>
-<a-modal :visible="upgradeState !== 'idle'" title="面板更新"
+<a-modal :visible="upgradeState !== 'idle'"
          :closable="false" :mask-closable="false" :footer="null" :width="460">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="cloud-download"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ '面板更新' ]]</span>
+                <span class="modal-head-sub">更新在后台独立进程中执行</span>
+            </span>
+        </div>
+    </template>
+
     <div style="text-align:center;padding:12px 0">
         <template v-if="upgradeState === 'starting'">
             <a-spin size="large"></a-spin>
@@ -189,10 +199,17 @@
     </div>
 </a-modal>
 
-<a-modal v-model="upgradeLogVisible" title="更新日志" :footer="null" :width="800">
-    <p style="color:var(--aui-text-3);font-size:12px">
-        服务器上的 /var/log/a-ui-update.log，只显示最后 200 行
-    </p>
+<a-modal v-model="upgradeLogVisible" :footer="null" :width="800">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="file-text"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ '更新日志' ]]</span>
+                <span class="modal-head-sub">服务器上 /var/log/a-ui-update.log 的最后 200 行</span>
+            </span>
+        </div>
+    </template>
+
     <pre class="upgrade-log"><template v-for="line in upgradeLogLines">[[ line ]]
 </template></pre>
     <div v-if="!upgradeLogLines.length" style="color:var(--aui-text-3)">

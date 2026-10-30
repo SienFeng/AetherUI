@@ -271,7 +271,9 @@
                                 <span v-else class="status-badge status-warn">
                                     <a-icon type="exclamation-circle"></a-icon>未下载
                                 </span>
-                                <a-button type="primary" size="small" style="margin-left: 8px"
+                                <!-- 行内「更新」用普通按钮：一屏四个蓝色主按钮会分不出主次，
+                                     主按钮只留给下面的「立即更新全部」。 -->
+                                <a-button size="small" style="margin-left: 8px"
                                           :disabled="!src.enabled"
                                           :loading="ipdbUpdating === src.key"
                                           @click="updateIPDB(src.key)">更新</a-button>
@@ -473,6 +475,7 @@
             discardChanges() {
                 this.$confirm({
                     title: '放弃修改',
+                    icon: 'rollback',
                     content: '将丢弃当前页面上所有未保存的改动，恢复成服务端的当前配置。',
                     okText: '放弃',
                     cancelText: '取消',
@@ -529,6 +532,7 @@
             clearShaping() {
                 this.$confirm({
                     title: '清除全部限速',
+                    icon: 'thunderbolt',
                     content: '将撤销本面板下发的所有 tc 队列规则并删除专用的 ifb 网卡。' +
                              '入站上配置的限速值不会被清空，下一轮（约 10 秒）会重新下发。',
                     okText: '清除',
@@ -640,6 +644,7 @@
                 await new Promise(resolve => {
                     this.$confirm({
                         title: '重启面板',
+                        icon: 'reload',
                         content: '确定要重启面板吗？点击确定将于 3 秒后重启，若重启后无法访问面板，请前往服务器查看面板日志信息',
                         okText: '确定',
                         cancelText: '取消',

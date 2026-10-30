@@ -93,9 +93,9 @@
     .import-messages {
         max-height: 360px;
         overflow: auto;
-        background: #fafafa;
-        border: 1px solid #f0f0f0;
-        border-radius: 4px;
+        background: #F7F9FC;
+        border: 1px solid var(--aui-line);
+        border-radius: 10px;
         padding: 12px;
         font-size: 13px;
         line-height: 1.8;
@@ -533,7 +533,7 @@
                             此处只显示前 [[ groupModal.subscribedPreview.length ]] 条。
                         </span>
                     </div>
-                    <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
+                    <div style="max-height: 180px; overflow-y: auto; background: #F7F9FC; border: 1px solid var(--aui-line); padding: 8px 10px; border-radius: 8px;">
                         <span v-for="d in groupModal.subscribedPreview" :key="d" class="chip">[[ d ]]</span>
                     </div>
                 </div>
@@ -550,7 +550,7 @@
                         此处只显示前 [[ groupModal.subscribedCidrPreview.length ]] 条。
                     </span>
                 </div>
-                <div style="max-height: 180px; overflow-y: auto; background: #fafafa; padding: 8px; border-radius: 4px;">
+                <div style="max-height: 180px; overflow-y: auto; background: #F7F9FC; border: 1px solid var(--aui-line); padding: 8px 10px; border-radius: 8px;">
                     <span v-for="c in groupModal.subscribedCidrPreview" :key="c" class="chip">[[ c ]]</span>
                 </div>
             </a-form-item>
@@ -578,11 +578,17 @@
                 <a-input v-model="nodeModal.remark"></a-input>
             </a-form-item>
             <a-form-item label="分享链接">
-                <a-input type="textarea" :rows="4" v-model="nodeModal.link"
+                <a-input type="textarea" :rows="4" v-model="nodeModal.link" @input="nodeModal.parsed = null"
                          placeholder="vmess:// vless:// trojan:// ss:// socks:// hysteria2://"></a-input>
             </a-form-item>
             <a-form-item>
                 <a-button @click="parseLink" :disabled="!nodeModal.link.trim()">解析预览</a-button>
+                <!-- 解析成功后的核对框（视觉稿 v3）。链接被改动后摘要可能已过期，随之隐藏。 -->
+                <div v-if="nodeModal.parsed && nodeModal.link.trim()" class="parsed-box">
+                    <span>协议</span><b>[[ nodeModal.parsed.protocol || '—' ]]</b>
+                    <span>地址</span><b>[[ nodeModal.parsed.address ]]</b>
+                    <span>tag</span><b>[[ nodeModal.id ? nodeModal.tag + '（不可修改）' : '保存时分配，之后不可修改' ]]</b>
+                </div>
             </a-form-item>
             <a-form-item label="或直接粘贴 outbound JSON（高级）">
                 <a-input type="textarea" :rows="6" v-model="nodeModal.config"
@@ -606,6 +612,11 @@
             <a-form-item label="备注">
                 <a-input v-model="ruleModal.rule.remark"></a-input>
             </a-form-item>
+            <!-- 用户与域名组按视觉稿 v3 改成「已选项以标签放在输入框里」的多选。
+                 与稿子的一处刻意差别：稿里写「留空 = 全部用户」，这里仍保留一个显式的
+                 「所有用户」勾选项。inboundIds 的空数组就是「对所有入站生效」，若把它
+                 交给多选框的「删光标签」来表达，一次手滑就会把只管某几个人的规则静默
+                 放大到全体（CLAUDE.md「InboundIds 为空数组」一条）。 -->
             <a-form-item label="用户（入站）">
                 <a-checkbox :checked="ruleModal.allUsers" :disabled="allUsersDisabled"
                             @change="e => toggleAllUsers(e.target.checked)">
@@ -615,89 +626,53 @@
                      style="color: var(--aui-warning); font-size: 12px; margin: 4px 0 0 24px;">
                     [[ allUsersDisabledReason ]]
                 </div>
-                <div style="margin-top: 6px;">
-                    <!-- 不用 v-model：勾了「所有用户」时这一项必须显示为勾上且
-                         禁用（空数组本来就含未来新建的入站），而 allUsers 的变化
-                         有两条路径——toggleAllUsers 和 openRule 里的直接赋值，
-                         watch 也只盖得住其中一条。把联动写进 :checked 表达式，
-                         两条路径自动都对。
+                <template v-if="!ruleModal.allUsers">
+                    <div v-if="!inbounds.length" class="rule-pick-empty">还没有任何入站</div>
+                    <a-select v-else mode="multiple" class="rule-pick" :value="ruleModal.rule.inboundIds"
+                              placeholder="选择入站" option-filter-prop="title" option-label-prop="title" :max-tag-count="12"
+                              :get-popup-container="t => t.parentNode"
+                              @change="setRuleInbounds">
+                        <!-- 被别的规则占用的入站置灰并写明原因：同一个域名组下一个入站至多
+                             被一条规则覆盖（checkConflict），选了也会被后端拒绝。 -->
+                        <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id"
+                                         :title="i.remark || i.tag"
+                                         :disabled="!!inboundOccupiedBy(i.id) && !ruleModal.rule.inboundIds.includes(i.id)">
+                            [[ i.remark || i.tag ]]
+                            <span v-if="inboundOccupiedBy(i.id)" class="rule-pick-note">
+                                已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖
+                            </span>
+                        </a-select-option>
+                    </a-select>
+                </template>
+                <!-- 不用 v-model：勾了「所有用户」时这一项必须显示为勾上且
+                     禁用（空数组本来就含未来新建的入站），而 allUsers 的变化
+                     有两条路径——toggleAllUsers 和 openRule 里的直接赋值，
+                     watch 也只盖得住其中一条。把联动写进 :checked 表达式，
+                     两条路径自动都对。
 
-                         allUsers 为真时提交体里这一项可能仍是 false，无妨：
-                         AttachInbound 对空数组一律跳过，两种取值行为完全一致
-                         （spec §5.2 明确后端不做强制改写）。 -->
+                     allUsers 为真时提交体里这一项可能仍是 false，无妨：
+                     AttachInbound 对空数组一律跳过，两种取值行为完全一致
+                     （spec §5.2 明确后端不做强制改写）。 -->
+                <div style="margin-top: 8px;">
                     <a-checkbox :checked="ruleModal.allUsers || ruleModal.rule.applyToNewInbounds"
                                 :disabled="ruleModal.allUsers"
                                 @change="e => ruleModal.rule.applyToNewInbounds = e.target.checked">
-                        以后新增的用户自动应用此规则
+                        以后新增的用户自动应用这条规则
                     </a-checkbox>
                 </div>
-                <a-divider style="margin: 8px 0;"></a-divider>
-                <div v-if="!inbounds.length" style="color: var(--aui-text-3);">还没有任何入站</div>
-                <template v-else>
-                    <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                        <!-- 入站少的时候搜索框纯属噪音，超过 5 个才出现 -->
-                        <a-input v-if="inbounds.length > 5" v-model="ruleModal.filter"
-                                 placeholder="搜索用户" size="small" allow-clear
-                                 :disabled="ruleModal.allUsers" style="width: 160px;">
-                            <a-icon slot="prefix" type="search"></a-icon>
-                        </a-input>
-                        <span style="margin-left: auto; font-size: 12px; color: var(--aui-text-3);">
-                            已选 [[ ruleModal.rule.inboundIds.length ]] 人
-                            <template v-if="!ruleModal.allUsers">
-                                <a @click="selectAllVisible" style="margin-left: 8px;">[[ selectAllLabel ]]</a>
-                                <a @click="clearSelection" style="margin-left: 8px;">清空</a>
-                            </template>
-                        </span>
-                    </div>
-                    <!-- 固定高度内部滚动：入站再多，弹窗总高也不变，「保存」按钮
-                         永远留在视口里。约 9 行，超出的在这里滚。 -->
-                    <div style="max-height: 236px; overflow-y: auto; padding-right: 4px;">
-                        <div v-for="i in visibleInbounds" :key="i.id" style="margin-bottom: 4px;">
-                            <a-checkbox :checked="ruleModal.rule.inboundIds.includes(i.id)"
-                                        :disabled="ruleModal.allUsers || !!inboundOccupiedBy(i.id)"
-                                        @change="e => toggleInbound(i.id, e.target.checked)">
-                                [[ i.remark || i.tag ]]
-                            </a-checkbox>
-                            <span v-if="inboundOccupiedBy(i.id)"
-                                  style="color: var(--aui-text-3); font-size: 12px; margin-left: 8px;">
-                                已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖
-                            </span>
-                        </div>
-                        <div v-if="!visibleInbounds.length" style="color: var(--aui-text-3); font-size: 12px;">
-                            没有匹配的用户
-                        </div>
-                    </div>
-                </template>
             </a-form-item>
             <a-form-item label="域名组">
-                <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                    <!-- 域名组少的时候搜索框纯属噪音，超过 5 个才出现 -->
-                    <a-input v-if="groups.length > 5" v-model="ruleModal.groupFilter"
-                             placeholder="搜索域名组" size="small" allow-clear
-                             style="width: 160px;">
-                        <a-icon slot="prefix" type="search"></a-icon>
-                    </a-input>
-                    <span style="margin-left: auto; font-size: 12px; color: var(--aui-text-3);">
-                        已选 [[ ruleModal.rule.domainGroupIds.length ]] 组
-                        <a @click="selectAllVisibleGroups" style="margin-left: 8px;">[[ selectAllGroupsLabel ]]</a>
-                        <a @click="clearGroupSelection" style="margin-left: 8px;">清空</a>
-                    </span>
-                </div>
-                <!-- 固定高度内部滚动：域名组再多，弹窗总高也不变，
-                     「保存」按钮永远留在视口里。 -->
-                <div style="max-height: 156px; overflow-y: auto; padding-right: 4px;">
-                    <div v-for="g in visibleGroups" :key="g.id" style="margin-bottom: 4px;">
-                        <!-- 域名组复选框永不禁用：能不能选取决于当前选了哪些用户，
-                             两边互相依赖。被禁用的是「用户」那一侧。 -->
-                        <a-checkbox :checked="ruleModal.rule.domainGroupIds.includes(g.id)"
-                                    @change="e => toggleDomainGroup(g.id, e.target.checked)">
-                            [[ g.remark ]]
-                        </a-checkbox>
-                    </div>
-                    <div v-if="!visibleGroups.length" style="color: var(--aui-text-3); font-size: 12px;">
-                        没有匹配的域名组
-                    </div>
-                </div>
+                <a-select mode="multiple" class="rule-pick rule-pick-groups" :value="ruleModal.rule.domainGroupIds"
+                          placeholder="添加域名组…" option-filter-prop="title"
+                          option-label-prop="label"
+                          :get-popup-container="t => t.parentNode"
+                          @change="setRuleGroups">
+                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id" :title="g.remark"
+                                     :label="g.remark + ' · ' + groupCount(g.id)">
+                        [[ g.remark ]]
+                        <span class="rule-pick-note">[[ groupCount(g.id) ]] 条</span>
+                    </a-select-option>
+                </a-select>
             </a-form-item>
             <a-form-item label="动作">
                 <!-- 三张选择卡（与视觉稿 v3 一致）。仍是 a-radio-group，取值与改动前相同，
@@ -723,9 +698,12 @@
                 </div>
             </a-form-item>
             <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
-                <a-select v-model="ruleModal.rule.outboundId" style="width: 100%;">
+                <!-- 与视觉稿一致：节点名 · 协议 · 最近一次测得的延迟（没测过就不写） -->
+                <!-- outboundId 为 0 表示还没选：交给 placeholder，不让下拉框里显示一个「0」 -->
+                <a-select :value="ruleModal.rule.outboundId || undefined" placeholder="选择出站节点"
+                          style="width: 100%;" @change="v => ruleModal.rule.outboundId = v">
                     <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
-                        [[ n.remark ]] ([[ n.protocol ]])
+                        [[ n.remark ]] · [[ n.protocol ]]<template v-if="n.probe && n.probe.status === 'ok'"> · [[ n.probe.latencyMs ]] ms</template>
                     </a-select-option>
                 </a-select>
             </a-form-item>
@@ -735,30 +713,33 @@
     <input type="file" ref="importFile" accept=".json,application/json"
            style="display:none" @change="onImportFileChosen">
 
-    <a-modal v-model="importReportVisible" title="导入结果" :footer="null" :width="720">
-        <a-row style="margin-bottom:12px">
-            <a-col :span="8">
-                域名组：<span class="chip">新增 [[ importReport.domainGroups.created ]]</span>
-                <span class="chip">跳过 [[ importReport.domainGroups.skipped ]]</span>
-                <span v-if="importReport.domainGroups.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
-                    失败 [[ importReport.domainGroups.failed ]]
+    <a-modal v-model="importReportVisible" :footer="null" :width="720">
+        <template slot="title">
+            <div class="modal-head">
+                <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="import"></a-icon></span>
+                <span class="modal-head-text">
+                    <span class="modal-head-title">导入结果</span>
+                    <span class="modal-head-sub">逐条独立成败；同名的已有项一律跳过，不覆盖</span>
                 </span>
-            </a-col>
-            <a-col :span="8">
-                出站节点：<span class="chip">新增 [[ importReport.outbounds.created ]]</span>
-                <span class="chip">跳过 [[ importReport.outbounds.skipped ]]</span>
-                <span v-if="importReport.outbounds.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
-                    失败 [[ importReport.outbounds.failed ]]
-                </span>
-            </a-col>
-            <a-col :span="8">
-                分流规则：<span class="chip">新增 [[ importReport.rules.created ]]</span>
-                <span class="chip">跳过 [[ importReport.rules.skipped ]]</span>
-                <span v-if="importReport.rules.failed" class="status-badge status-danger"><a-icon type="close-circle"></a-icon>
-                    失败 [[ importReport.rules.failed ]]
-                </span>
-            </a-col>
-        </a-row>
+            </div>
+        </template>
+        <!-- 三块统计卡（视觉稿 v3 的统计块样式），失败数大于 0 时标红 -->
+        <div class="import-stats">
+            <div v-for="sec in [
+                     { key: 'domainGroups', label: '域名组' },
+                     { key: 'outbounds', label: '出站节点' },
+                     { key: 'rules', label: '分流规则' },
+                 ]" :key="sec.key" class="import-stat">
+                <div class="import-stat-title">[[ sec.label ]]</div>
+                <div class="import-stat-nums">
+                    <span><b class="cell-num">[[ importReport[sec.key].created ]]</b>新增</span>
+                    <span><b class="cell-num">[[ importReport[sec.key].skipped ]]</b>跳过</span>
+                    <span :class="{ 'is-failed': importReport[sec.key].failed > 0 }">
+                        <b class="cell-num">[[ importReport[sec.key].failed ]]</b>失败
+                    </span>
+                </div>
+            </div>
+        </div>
         <div v-if="importReport.messages && importReport.messages.length" class="import-messages">
             <div v-for="(m, i) in importReport.messages" :key="i">[[ m ]]</div>
         </div>
@@ -820,8 +801,8 @@
                 subscribedCidrPreview: [], subscribedCidrCount: 0,
                 subscriptionStates: [],
             },
-            nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '' },
-            ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true, filter: '', groupFilter: '' },
+            nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '', parsed: null },
+            ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true },
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
             drag: { id: 0, section: '', overId: 0 },
@@ -886,34 +867,6 @@
             },
             allUsersDisabled() {
                 return Object.keys(this.occupiedInbounds).length > 0;
-            },
-            // visibleInbounds 是搜索框过滤后的列表。过滤只影响显示，不影响已勾选
-            // 的集合——被过滤掉的选择仍然保留，所以工具行要一直显示「已选 N 人」，
-            // 否则用户会以为过滤掉的人被取消了。
-            visibleInbounds() {
-                const kw = (this.ruleModal.filter || '').trim().toLowerCase();
-                if (!kw) return this.inbounds;
-                return this.inbounds.filter(i =>
-                    ((i.remark || '') + ' ' + (i.tag || '')).toLowerCase().includes(kw));
-            },
-            // 「全选」只动当前可见、且没被别的规则占用的入站。
-            selectableVisible() {
-                return this.visibleInbounds.filter(i => !this.inboundOccupiedBy(i.id));
-            },
-            selectAllLabel() {
-                if ((this.ruleModal.filter || '').trim()) {
-                    return '全选这 ' + this.selectableVisible.length + ' 项';
-                }
-                return '全选可选';
-            },
-            visibleGroups() {
-                const kw = (this.ruleModal.groupFilter || '').trim().toLowerCase();
-                if (!kw) return this.groups;
-                return this.groups.filter(g => (g.remark || '').toLowerCase().includes(kw));
-            },
-            selectAllGroupsLabel() {
-                const ids = this.ruleModal.rule.domainGroupIds;
-                return this.visibleGroups.every(g => ids.includes(g.id)) ? '取消全选' : '全选';
             },
             allUsersDisabledReason() {
                 const map = this.occupiedInbounds;
@@ -1075,8 +1028,11 @@
                 return /^[A-Za-z0-9]/.test(name) ? name.slice(0, 2).toUpperCase() : (name.slice(0, 1) || '#');
             },
             nodeColorOf(node) {
-                const colors = ['#1266D6', '#7C3AED', '#0D9488', '#4F46E5', '#DB2777', '#0891B2'];
-                return colors[node.id % colors.length];
+                return NodeTone.of(node.id).solid;
+            },
+            // 规则去向胶囊跟节点头像同色（utils.js 的 NodeTone）
+            nodePillStyle(id) {
+                return NodeTone.pillStyle(id);
             },
             // 延迟颜色条：80ms 内绿、150ms 内橙、更慢红；条长按 200ms 封顶
             probeBarStyle(ms) {
@@ -1110,6 +1066,22 @@
                     // 配置损坏时落到下面的「—」
                 }
                 return '—';
+            },
+            // 解析结果摘要（视觉稿 v3 的绿色核对框）：只取配置里真实存在的字段，
+            // 不预测保存时才分配的 tag。
+            summarizeOutbound(config) {
+                try {
+                    const ob = JSON.parse(config || '{}');
+                    const sec = ob.streamSettings && ob.streamSettings.security;
+                    const net = ob.streamSettings && ob.streamSettings.network;
+                    return {
+                        protocol: [ob.protocol, net, sec && sec !== 'none' ? sec : '']
+                            .filter(Boolean).join(' · '),
+                        address: this.nodeAddress({ config: config }),
+                    };
+                } catch (e) {
+                    return null;
+                }
             },
             groupName(id) {
                 const g = this.groups.find(x => x.id === id);
@@ -1256,9 +1228,11 @@
             },
             delGroup(group) {
                 this.$confirm({
-                    title: '删除域名组',
-                    content: '确定要删除域名组「' + (group.remark || group.id) + '」吗?',
-                    okText: '删除',
+                    title: '删除域名组「' + (group.remark || group.id) + '」？',
+                    content: '此操作不可撤销。',
+                    icon: 'delete',
+                    okType: 'danger',
+                    okText: '删除域名组',
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/domain-group/del/' + group.id);
@@ -1274,6 +1248,7 @@
                 // 链接框在编辑时留空：它是「重新解析覆盖」的入口，不是当前值的回显。
                 this.nodeModal.link = '';
                 this.nodeModal.config = node ? node.config : '';
+                this.nodeModal.parsed = null;
                 this.nodeModal.visible = true;
             },
             async saveNode() {
@@ -1303,9 +1278,11 @@
             },
             delNode(node) {
                 this.$confirm({
-                    title: '删除出站节点',
-                    content: '确定要删除出站节点「' + (node.remark || node.tag) + '」吗?',
-                    okText: '删除',
+                    title: '删除出站节点「' + (node.remark || node.tag) + '」？',
+                    content: '此操作不可撤销。',
+                    icon: 'delete',
+                    okType: 'danger',
+                    okText: '删除节点',
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/outbound/del/' + node.id);
@@ -1344,10 +1321,6 @@
                     this.ruleModal.rule.applyToNewInbounds = true;
                 }
                 this.ruleModal.allUsers = this.ruleModal.rule.inboundIds.length === 0;
-                // 搜索词不跨弹窗保留，否则下次打开会看到一个被过滤过的列表
-                // 却想不起来为什么少了人。
-                this.ruleModal.filter = '';
-                this.ruleModal.groupFilter = '';
                 this.ruleModal.visible = true;
             },
             inboundOccupiedBy(id) {
@@ -1358,60 +1331,24 @@
                 this.ruleModal.allUsers = checked;
                 if (checked) this.ruleModal.rule.inboundIds = [];
             },
-            // 全选只作用于「当前可见且可选」的入站，与眼前看到的一致：过滤出一批
-            // 人再点全选，不该顺手把过滤掉的人也勾上。清空与之对称，同样只动可见
-            // 的——「已选 N 人」会如实反映被过滤掉的那些选择还在。
-            selectAllVisible() {
-                if (this.ruleModal.allUsers) return;
-                const ids = this.ruleModal.rule.inboundIds.slice();
-                for (const i of this.selectableVisible) {
-                    if (!ids.includes(i.id)) ids.push(i.id);
-                }
-                this.ruleModal.rule.inboundIds = ids.sort((a, b) => a - b);
+            // 多选框给出的是整份新数组。被别的规则占用的入站在下拉里已置灰，
+            // 这里再滤一遍兜底；升序提交，和后端 EncodeInboundIds 的存储顺序对齐。
+            setRuleInbounds(ids) {
+                const keep = this.ruleModal.rule.inboundIds;
+                this.ruleModal.rule.inboundIds = ids
+                    .filter(id => keep.includes(id) || !this.inboundOccupiedBy(id))
+                    .sort((a, b) => a - b);
             },
-            clearSelection() {
-                if (this.ruleModal.allUsers) return;
-                const visible = new Set(this.visibleInbounds.map(i => i.id));
-                this.ruleModal.rule.inboundIds =
-                    this.ruleModal.rule.inboundIds.filter(id => !visible.has(id));
-            },
-            toggleInbound(id, checked) {
-                const ids = this.ruleModal.rule.inboundIds.slice();
-                const idx = ids.indexOf(id);
-                if (checked && idx < 0) ids.push(id);
-                if (!checked && idx >= 0) ids.splice(idx, 1);
-                // 升序提交，和后端 EncodeInboundIds 的存储顺序对齐
-                this.ruleModal.rule.inboundIds = ids.sort((a, b) => a - b);
-            },
-            // 勾选/取消一个域名组后，占用集合跟着变。已勾选但在新集合下不可用
-            // 的用户必须剔除，否则会带着一个必被后端拒绝的选择去点保存。
+            // 换了域名组，占用集合跟着变：已选但在新集合下不可用的用户必须剔除，
+            // 否则会带着一个必被后端拒绝的选择去点保存。
             //
-            // 用复选框自己的 @change 而不是 watch：Vue 的 watcher 在 nextTick
+            // 在 @change 里显式处理而不是 watch：Vue 的 watcher 在 nextTick
             // 异步触发，openRule 先换 rule 再把 visible 置真，等 watcher 跑起来
             // visible 已经是 true，守卫拦不住它——打开编辑弹窗会顺手把已勾选的
             // 项过滤一遍。这里显式赋值再读 computed，时序完全可控。
-            toggleDomainGroup(groupId, checked) {
-                const ids = [...this.ruleModal.rule.domainGroupIds];
-                const idx = ids.indexOf(groupId);
-                if (checked && idx < 0) ids.push(groupId);
-                if (!checked && idx >= 0) ids.splice(idx, 1);
+            setRuleGroups(ids) {
                 // 升序提交，和后端 EncodeDomainGroupIds 的存储顺序对齐
-                this.ruleModal.rule.domainGroupIds = ids.sort((a, b) => a - b);
-                this.reconcileInboundSelection();
-            },
-            selectAllVisibleGroups() {
-                const ids = [...this.ruleModal.rule.domainGroupIds];
-                const all = this.visibleGroups.every(g => ids.includes(g.id));
-                for (const g of this.visibleGroups) {
-                    const idx = ids.indexOf(g.id);
-                    if (all && idx >= 0) ids.splice(idx, 1);
-                    if (!all && idx < 0) ids.push(g.id);
-                }
-                this.ruleModal.rule.domainGroupIds = ids.sort((a, b) => a - b);
-                this.reconcileInboundSelection();
-            },
-            clearGroupSelection() {
-                this.ruleModal.rule.domainGroupIds = [];
+                this.ruleModal.rule.domainGroupIds = ids.slice().sort((a, b) => a - b);
                 this.reconcileInboundSelection();
             },
             // 按当前域名组集合重算占用，剔除已不可用的用户选择。
@@ -1454,9 +1391,11 @@
                 // 规则没有引用守卫兜底（没有别的东西引用规则），删掉即不可恢复，
                 // 而删掉一条 block 规则意味着那批域名当场恢复直连，所以必须确认。
                 this.$confirm({
-                    title: '删除分流规则',
-                    content: '确定要删除规则「' + (rule.remark || rule.id) + '」吗? 删除后该规则立即失效，不可恢复。',
-                    okText: '删除',
+                    title: '删除分流规则「' + (rule.remark || rule.id) + '」？',
+                    content: '删除后该规则立即失效，此操作不可撤销。',
+                    icon: 'delete',
+                    okType: 'danger',
+                    okText: '删除规则',
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/rule/del/' + rule.id);
@@ -1470,7 +1409,7 @@
                 });
                 if (msg.success) {
                     this.nodeModal.config = msg.obj;
-                    this.$message.success('解析成功，可在下方核对后保存');
+                    this.nodeModal.parsed = this.summarizeOutbound(msg.obj);
                 }
             },
             relativeTime(ms) {
@@ -1703,6 +1642,7 @@
                     : '';
                 this.$confirm({
                     title: '导出' + scopeLabel,
+                    icon: 'export',
                     content: h => h('div', [
                         h('p', '导出文件包含出站节点的 UUID / 密码等凭据，任何拿到该文件的人都可以直接使用这些节点。'),
                         h('p', '请妥善保管，不要发到公开渠道。'),

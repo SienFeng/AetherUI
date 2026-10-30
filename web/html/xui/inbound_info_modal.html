@@ -1,8 +1,18 @@
 {{define "inboundInfoModal"}}
 {{template "component/inboundInfo"}}
-<a-modal id="inbound-info-modal" v-model="infoModal.visible" title="详细信息" @ok="infoModal.ok"
+<a-modal id="inbound-info-modal" v-model="infoModal.visible" @ok="infoModal.ok"
          :closable="true" :mask-closable="true"
          ok-text="复制链接" cancel-text='{{ i18n "close" }}' :ok-button-props="infoModal.okBtnPros">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="profile"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ '详细信息' ]]</span>
+                <span class="modal-head-sub">协议、传输、限制与分享链接</span>
+            </span>
+        </div>
+    </template>
+
     <inbound-info :db-inbound="dbInbound" :inbound="inbound"></inbound-info>
 </a-modal>
 <script>

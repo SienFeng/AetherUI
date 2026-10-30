@@ -2,6 +2,30 @@
 <script src="{{ .base_path }}assets/vue@2.6.12/vue.min.js"></script>
 <script src="{{ .base_path }}assets/moment/moment.min.js"></script>
 <script src="{{ .base_path }}assets/ant-design-vue@1.7.2/antd.min.js"></script>
+<script>
+    // 关掉 antd 在两个汉字的按钮里自动插空格（「取 消」「确 定」「更 新」）。视觉稿 v3
+    // 一律写「取消」「确定」。本项目没有用 a-config-provider 包住各个 Vue 根实例
+    // （每个弹窗还各有自己的根），所以直接改按钮注入的默认 configProvider：
+    // 全局注册的 AButton 管模板里的按钮，antd.Button 原始定义管 Modal / $confirm
+    // 内部渲染的底栏按钮——两处缺一处，就会有一半按钮还带空格。
+    (function () {
+        // 登录页保持原样，不受这条补丁影响（它目前只用原生 button，这里再显式跳过一次）
+        if (document.querySelector('.login-page')) {
+            return;
+        }
+        const patch = function (inject) {
+            if (!inject || !inject.configProvider || typeof inject.configProvider.default !== 'function') {
+                return;
+            }
+            const orig = inject.configProvider.default;
+            inject.configProvider.default = function () {
+                return Object.assign({}, orig.call(this), { autoInsertSpaceInButton: false });
+            };
+        };
+        patch(Vue.options.components.AButton && Vue.options.components.AButton.options.inject);
+        patch(window.antd && antd.Button && antd.Button.inject);
+    })();
+</script>
 <script src="{{ .base_path }}assets/base64/base64.min.js"></script>
 <script src="{{ .base_path }}assets/axios/axios.min.js"></script>
 <script src="{{ .base_path }}assets/qs/qs.min.js"></script>

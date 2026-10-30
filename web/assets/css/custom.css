@@ -892,7 +892,7 @@ button:focus-visible,
  * 34px = 16px 行高 × 2 + 两行之间的 2px。 */
 .cell-speed {
     margin-top: 2px;
-    min-height: 18px;   /* 速度现在只占一行（上下行并排） */
+    min-height: 36px;   /* 上下行各一行，两行留位：内容每 2 秒在「有速度」与「空」之间切换 */
 }
 
 /* 上边距交给 .cell-speed 自己出，否则它与内部第一行的 margin 会折叠，
@@ -952,6 +952,8 @@ button:focus-visible,
 .status-ok      { background: #F0FDF4; color: var(--aui-success); }
 .status-warn    { background: #FFFBEB; color: var(--aui-warning); }
 .status-danger  { background: #FEF2F2; color: var(--aui-danger); }
+/* 访问日志的「直连」走向：与分流页 .dest-pill.is-direct 同色（5.2:1） */
+.route-direct   { background: #ECFDF5; color: #047857; }
 
 /* 可点开明细的徽标（风险那一列）。必须能被键盘拿到：它是这个入站
  * 唯一的风险弹窗入口。 */
@@ -2140,8 +2142,99 @@ button.chip.is-active {
     border-top: 1px solid #EEF1F6;
 }
 
+/* ── 确认框（this.$confirm）按视觉稿 v3 的弹窗头部重排 ──────────────────
+ * 图标放进 38px 浅色方块、标题 17px、正文与标题左对齐、按钮落在灰色底栏里，
+ * 与自定义弹窗的 .modal-head / .ant-modal-footer 是同一套外观。
+ * 方块颜色按图标类型取（调用处用 icon 选项指定）：删除 / 禁止红，
+ * 导出 / 解锁 / 信息蓝，其余（问号、重置、切换）橙。 */
 .ant-modal-confirm .ant-modal-body {
-    padding: 24px;
+    padding: 22px 24px 0;
+}
+
+.ant-modal-confirm .ant-modal-confirm-body > .anticon,
+.ant-modal-confirm-confirm .ant-modal-confirm-body > .anticon,
+.ant-modal-confirm-info .ant-modal-confirm-body > .anticon,
+.ant-modal-confirm-warning .ant-modal-confirm-body > .anticon {
+    --c: #B45309;
+    --s: #FFF5E6;
+    width: 38px;
+    height: 38px;
+    margin-right: 12px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: var(--c);
+    background: var(--s);
+}
+
+.ant-modal-confirm .ant-modal-confirm-body > .anticon-delete,
+.ant-modal-confirm .ant-modal-confirm-body > .anticon-stop,
+.ant-modal-confirm-error .ant-modal-confirm-body > .anticon {
+    --c: #B91C1C;
+    --s: #FEF2F2;
+}
+
+.ant-modal-confirm .ant-modal-confirm-body > .anticon-export,
+.ant-modal-confirm .ant-modal-confirm-body > .anticon-unlock,
+.ant-modal-confirm-info .ant-modal-confirm-body > .anticon-info-circle {
+    --c: var(--aui-id-blue);
+    --s: #EFF4FF;
+}
+
+.ant-modal-confirm .ant-modal-confirm-body .ant-modal-confirm-title {
+    display: block;
+    min-height: 38px;
+    padding-top: 7px;
+    font-size: 17px;
+    line-height: 24px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+/* 正文与标题文字左缘对齐：38px 方块 + 12px 间距 */
+.ant-modal-confirm .ant-modal-confirm-body > .anticon + .ant-modal-confirm-title + .ant-modal-confirm-content {
+    margin-left: 50px;
+}
+
+.ant-modal-confirm .ant-modal-confirm-body .ant-modal-confirm-content {
+    margin-top: 2px;
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--aui-text-2);
+}
+
+.ant-modal-confirm .ant-modal-confirm-btns {
+    float: none;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin: 22px -24px 0;
+    padding: 12px 24px;
+    background: #F8FAFC;
+    border-top: 1px solid #EEF1F6;
+}
+
+.ant-modal-confirm .ant-modal-confirm-btns .ant-btn + .ant-btn {
+    margin-left: 0;
+}
+
+/* 删除类确认框的「会一并清理什么」清单（视觉稿 v3 的 danger-box） */
+.confirm-danger-box {
+    margin-top: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #FEF2F2;
+    border: 1px solid #FBD5D5;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #991B1B;
+}
+
+.confirm-danger-box ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
 }
 
 .ant-modal-mask {
@@ -2312,6 +2405,18 @@ button.chip.is-active {
     gap: 6px 18px;
     font-size: 12px;
     color: var(--aui-text-2);
+}
+
+/* 图例里的合计与占比：数值用正文色，占比用次级色 */
+.chart-legend b {
+    margin-left: 6px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.chart-legend .legend-share {
+    margin-left: 4px;
+    color: var(--aui-text-3);
 }
 
 .chart-legend i {
@@ -3241,10 +3346,11 @@ button.chip.is-active {
     vertical-align: 0;
 }
 
-/* 上下行并排且不换行：这一格每 2 秒刷新，折成两行会让整行随采样上下跳动 */
+/* 上下行各占一行、行内不换行。并排放在一行时，两个方向都有速度就超出列宽、
+ * 压到右边的风险列上。高度由 .cell-speed 的 min-height 钉住，不随采样跳动。 */
 .online-speed {
     display: flex;
-    gap: 0 8px;
+    flex-direction: column;
     white-space: nowrap;
 }
 
@@ -3275,6 +3381,7 @@ button.chip.is-active {
 .modal-icon.tone-teal   { --c: var(--aui-id-teal);   --s: #E6F7F5; }
 .modal-icon.tone-violet { --c: var(--aui-id-violet); --s: #F3EEFF; }
 .modal-icon.tone-amber  { --c: #B45309;              --s: #FFF5E6; }
+.modal-icon.tone-red    { --c: #B91C1C;              --s: #FEF2F2; }
 
 .modal-head-text {
     display: flex;
@@ -3323,14 +3430,29 @@ button.chip.is-active {
 
 /* 二维码：白底细边框里居中 */
 .qr-frame {
+    width: 244px;
+    height: 244px;
+    margin: 4px auto 0;
     padding: 12px;
     border: 1px solid var(--aui-line);
     border-radius: 14px;
     background: #FFFFFF;
 }
 
-.qr-text {
-    margin-top: 12px;
+/* 分享文本 + 复制按钮一行（视觉稿 v3） */
+.qr-copy {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.qr-copy .qr-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.qr-copy .ant-btn {
+    flex: none;
 }
 
 .qr-text.ant-input {
@@ -3363,6 +3485,14 @@ button.chip.is-active {
 .action-choices .ant-radio-wrapper.is-direct { --c: #059669; --s: #ECFDF5; }
 .action-choices .ant-radio-wrapper.is-proxy  { --c: var(--aui-primary); --s: #EFF4FF; }
 .action-choices .ant-radio-wrapper.is-block  { --c: var(--aui-danger); --s: #FEF2F2; }
+.action-choices .ant-radio-wrapper.is-warn   { --c: #D97706; --s: #FFFBEB; }
+
+/* 踢下线弹窗：选择卡上方的小标题，与表单 label 同一个字号 */
+.kick-label {
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: var(--aui-text-2);
+}
 
 .action-choices .ant-radio-wrapper:hover {
     border-color: #C3CEDD;
@@ -3608,4 +3738,371 @@ button.chip.is-active {
     display: flex;
     justify-content: flex-end;
     margin-top: 12px;
+}
+
+/* ── 分流规则弹窗：用户 / 域名组多选（视觉稿 v3：已选项以标签放在输入框里） ── */
+.rule-pick {
+    width: 100%;
+    margin-top: 8px;
+}
+
+.rule-pick .ant-select-selection--multiple {
+    min-height: 36px;
+    padding-bottom: 3px;
+    border-radius: 9px;
+}
+
+/* 用户标签：主色浅底（#1D4ED8 on #EFF4FF，6.1:1） */
+.rule-pick .ant-select-selection__choice {
+    height: 26px;
+    margin-top: 4px;
+    line-height: 24px;
+    border: 0;
+    border-radius: 7px;
+    background: #EFF4FF;
+    color: #1D4ED8;
+}
+
+/* 域名组标签：中性灰底，与规则列表里的域名组 chip 一致 */
+.rule-pick-groups .ant-select-selection__choice {
+    background: #F1F5F9;
+    color: #334155;
+}
+
+.rule-pick .ant-select-selection__choice__remove {
+    color: inherit;
+    opacity: .6;
+}
+
+.rule-pick-note {
+    margin-left: 6px;
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.rule-pick-empty {
+    margin-top: 8px;
+    color: var(--aui-text-3);
+}
+
+/* ── 续期弹窗：底部「续期后到期」预览条（视觉稿 v3 的 preview-exp） ── */
+.renew-preview {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #EFF6FF;
+    color: #1E40AF;            /* on #EFF6FF 8.2:1 */
+    font-size: 13px;
+}
+
+.renew-preview b {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+/* 新到期时间不在将来 = 立即停用，换成橙色提醒 */
+.renew-preview.is-warn {
+    background: #FFFBEB;
+    color: #92400E;            /* on #FFFBEB 6.8:1 */
+}
+
+.renew-note {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--aui-text-3);
+}
+
+/* ── 出站节点弹窗：解析结果核对框（视觉稿 v3 的 parsed） ── */
+.parsed-box {
+    margin-top: 10px;
+    padding: 12px 14px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 14px;
+    border-radius: 10px;
+    background: #F0FDF4;
+    border: 1px solid #BBF7D0;
+    font-size: 12.5px;
+    color: #166534;            /* on #F0FDF4 6.9:1 */
+}
+
+.parsed-box b {
+    font-weight: 500;
+    color: #14532D;
+    word-break: break-all;
+}
+
+/* 入站展开行的在线来源表：表体在固定高度里滚动时，滚到头不再带着整页一起滚 */
+.online-source-table .ant-table-body {
+    overscroll-behavior: contain;
+}
+
+/* ── 危险按钮（视觉稿 v3）──────────────────────────────────────────
+ * antd 出厂是 #FF4D4F 底白字，只有 3.3:1。页面内的危险操作用描边款
+ * （btn-danger-ghost：#B91C1C 字 6.5:1），弹窗底栏里的最终确认用实底款
+ * （btn-danger：#DC2626 底白字 4.8:1）。 */
+.ant-btn-danger,
+.ant-btn-danger:focus {
+    color: #B91C1C;
+    background: #FFFFFF;
+    border-color: #F5C2C2;
+}
+
+.ant-btn-danger:hover {
+    color: #B91C1C;
+    background: #FEF2F2;
+    border-color: #F0A8A8;
+}
+
+.ant-modal-footer .ant-btn-danger,
+.ant-modal-footer .ant-btn-danger:focus,
+.ant-modal-confirm-btns .ant-btn-danger,
+.ant-modal-confirm-btns .ant-btn-danger:focus {
+    color: #FFFFFF;
+    background: #DC2626;
+    border-color: #DC2626;
+}
+
+.ant-modal-footer .ant-btn-danger:hover,
+.ant-modal-confirm-btns .ant-btn-danger:hover {
+    color: #FFFFFF;
+    background: #B91C1C;
+    border-color: #B91C1C;
+}
+
+/* ── 提示条 a-alert（视觉稿 v3：10px 圆角、浅色底、细边，文字用正文色）──
+ * antd 出厂是 4px 圆角 + 饱和色边框，与 v3 的预览条 / 核对框不是一套。
+ * 图标保留语义色，正文统一走文字 token（不用系列色写字）。 */
+.ant-alert {
+    border-radius: 10px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+    color: var(--aui-text);
+}
+
+.ant-alert-info    { background: #EFF6FF; border-color: #DBEAFE; }
+.ant-alert-warning { background: #FFFBEB; border-color: #FDE68A; }
+.ant-alert-error   { background: #FEF2F2; border-color: #FBD5D5; }
+.ant-alert-success { background: #F0FDF4; border-color: #BBF7D0; }
+
+.ant-alert-info    .ant-alert-icon { color: var(--aui-id-blue); }
+.ant-alert-warning .ant-alert-icon { color: #B45309; }
+.ant-alert-error   .ant-alert-icon { color: var(--aui-danger); }
+.ant-alert-success .ant-alert-icon { color: var(--aui-success); }
+
+.ant-alert-message {
+    color: var(--aui-text);
+}
+
+.ant-alert-description {
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--aui-text-2);
+}
+
+/* ── 浮层菜单：「更多」下拉、下拉框的选项列表（视觉稿 v3：圆角浮层 + 圆角选项）── */
+.ant-dropdown-menu,
+.ant-select-dropdown {
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--aui-line);
+    box-shadow: var(--aui-sh-float);
+}
+
+.ant-dropdown-menu-item,
+.ant-select-dropdown-menu-item {
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: var(--aui-text);
+}
+
+.ant-dropdown-menu-item:hover,
+.ant-select-dropdown-menu-item:hover:not(.ant-select-dropdown-menu-item-disabled),
+.ant-select-dropdown-menu-item-active:not(.ant-select-dropdown-menu-item-disabled) {
+    background: #F1F5F9;
+}
+
+.ant-select-dropdown-menu-item-selected {
+    background: #EFF4FF;
+    color: #1D4ED8;
+    font-weight: 500;
+}
+
+.ant-select-dropdown-menu {
+    padding: 0;
+}
+
+/* ── 折叠面板：TLS / REALITY 高级设置、共享检测的说明 ── */
+.ant-collapse {
+    border-radius: 10px;
+    border-color: var(--aui-line);
+    background: #F7F9FC;
+}
+
+.ant-collapse > .ant-collapse-item {
+    border-bottom-color: var(--aui-line);
+}
+
+.ant-collapse > .ant-collapse-item:last-child,
+.ant-collapse > .ant-collapse-item:last-child > .ant-collapse-header {
+    border-radius: 0 0 10px 10px;
+}
+
+.ant-collapse > .ant-collapse-item > .ant-collapse-header {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.ant-collapse-content {
+    border-top-color: var(--aui-line);
+}
+
+.ant-collapse-borderless {
+    background: #F7F9FC;
+    border-radius: 10px;
+}
+
+/* ── 描述表（共享检测顶部）：与表格同一套边线与表头底色 ── */
+.ant-descriptions-bordered .ant-descriptions-view {
+    border-color: var(--aui-line);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.ant-descriptions-bordered .ant-descriptions-row,
+.ant-descriptions-bordered .ant-descriptions-item-label,
+.ant-descriptions-bordered .ant-descriptions-item-content {
+    border-color: var(--aui-line);
+}
+
+.ant-descriptions-bordered .ant-descriptions-item-label {
+    background: #F7F9FC;
+    color: var(--aui-text-2);
+    font-size: 13px;
+}
+
+/* ── 分页器（访问日志）── */
+.ant-pagination-item,
+.ant-pagination-prev .ant-pagination-item-link,
+.ant-pagination-next .ant-pagination-item-link {
+    border-radius: 8px;
+    border-color: var(--aui-line);
+}
+
+.ant-pagination-item-active {
+    border-color: var(--aui-primary);
+    background: #EFF4FF;
+}
+
+.ant-pagination-item-active a {
+    color: #1D4ED8;
+    font-weight: 600;
+}
+
+/* ── 空状态：antd 出厂的灰色插图在白卡里过重，缩小并用次级文字色 ── */
+.ant-empty-normal {
+    margin: 20px 0;
+    color: var(--aui-text-3);
+}
+
+.ant-empty-normal .ant-empty-image {
+    height: 32px;
+    opacity: .6;
+}
+
+/* ── 切换 Xray 版本：固定 4 列等宽网格，最多 6 行，超出在框内滚动 ── */
+.version-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 12px;
+    max-height: 238px;          /* 6 行 × 34px + 5 个 8px 间距 */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 2px;               /* 给焦点环留位，不被滚动容器裁掉 */
+}
+
+.version-grid .version-cell {
+    height: 34px;
+    padding: 0 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border-radius: 8px;
+}
+
+.version-grid .version-cell.is-current {
+    border-color: var(--aui-primary);
+    background: #EFF4FF;
+    color: #1D4ED8;
+    font-weight: 600;
+}
+
+.version-now {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 0 5px;
+    line-height: 16px;
+    border-radius: 999px;
+    background: #DBEAFE;
+    color: #1E40AF;
+}
+
+@media (max-width: 480px) {
+    .version-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+/* ── 分流页「导入结果」：三块统计卡 ── */
+.import-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.import-stat {
+    padding: 12px 14px;
+    border: 1px solid var(--aui-line);
+    border-radius: 12px;
+    background: #F7F9FC;
+}
+
+.import-stat-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--aui-text);
+    margin-bottom: 8px;
+}
+
+.import-stat-nums {
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.import-stat-nums b {
+    display: block;
+    font-size: 18px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--aui-text);
+}
+
+.import-stat-nums .is-failed,
+.import-stat-nums .is-failed b {
+    color: var(--aui-danger);
+}
+
+@media (max-width: 576px) {
+    .import-stats {
+        grid-template-columns: 1fr;
+    }
 }

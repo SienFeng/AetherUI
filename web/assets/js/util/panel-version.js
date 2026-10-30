@@ -96,6 +96,7 @@ const panelVersionMixin = {
                 : ('确定要更新到 ' + tag + ' 吗？\n\n面板会在更新过程中短暂不可用。');
             this.$confirm({
                 title: goingBack ? '回退到旧版本' : '更新面板',
+                icon: goingBack ? 'rollback' : 'cloud-download',
                 content: h => h('div', content.split('\n').map(line => h('p', line))),
                 okText: '确定',
                 cancelText: '取消',

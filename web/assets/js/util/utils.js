@@ -289,3 +289,30 @@ class ObjectUtil {
     }
 
 }
+
+// 出站节点的身份色：系统状态页的节点头像、分流页的节点头像与规则去向胶囊、
+// 访问日志的走向标签共用这一张表，同一个节点在任何地方都是同一个颜色。
+// 按节点 id 取色而不是按 tag 哈希：id 是连续分配的，相邻节点必然不同色；
+// 哈希在只有两三个节点时也可能撞色，而那正是最常见的部署规模。
+// solid 是头像底色（白字 ≥ 5.3:1），text/bg 是胶囊的文字与底色（≥ 5.1:1）。
+// 刻意不含红/粉/绿/橙：去向这一列里红是封禁、绿是直连、橙是链式代理，
+// 粉色胶囊挨着红色「封禁」时一眼分不开。
+const NODE_TONES = [
+    { solid: '#1266D6', text: '#1D4ED8', bg: '#EFF4FF' },   // 蓝
+    { solid: '#7C3AED', text: '#6D28D9', bg: '#F5F3FF' },   // 紫
+    { solid: '#0E7490', text: '#0E7490', bg: '#ECFEFF' },   // 青
+    { solid: '#4F46E5', text: '#4338CA', bg: '#EEF2FF' },   // 靛
+];
+
+class NodeTone {
+    static of(id) {
+        const n = Number(id) || 0;
+        return NODE_TONES[((n % NODE_TONES.length) + NODE_TONES.length) % NODE_TONES.length];
+    }
+
+    // 去向胶囊 / 走向标签的内联样式（圆点用 currentColor，跟着文字色走）
+    static pillStyle(id) {
+        const t = NodeTone.of(id);
+        return { color: t.text, background: t.bg };
+    }
+}
