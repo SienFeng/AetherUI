@@ -109,7 +109,7 @@
 </div>
 
 <!-- 限制与配额 -->
-<div class="form-section">
+<div class="form-section tone-amber">
     <div class="form-section-title">限制与配额</div>
     <a-form layout="horizontal">
         <a-row :gutter="16">
@@ -204,7 +204,7 @@
 </div>
 
 <!-- 协议参数 -->
-<div class="form-section">
+<div class="form-section tone-indigo">
     <div class="form-section-title">协议参数</div>
     <!-- vmess settings -->
     <template v-if="inbound.protocol === Protocols.VMESS">
@@ -248,7 +248,7 @@
      REALITY 设置原来嵌套在「安全层」卡片（canEnableTls）内部、自身又带
      canEnableStream 条件，这里用同样的嵌套（外层 canEnableTls 的 template
      包住安全层单选 + tlsSettings + realitySettings）保持复合条件不变。 -->
-<div class="form-section"
+<div class="form-section tone-violet"
      v-if="inbound.canEnableStream() || inbound.canEnableTls() || inbound.canSniffing()">
     <div class="form-section-title">传输与安全</div>
     <!-- 传输 -->

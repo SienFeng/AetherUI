@@ -9,19 +9,29 @@ import (
 // 时间窗口的档位名。与前端 inbounds.html 里 a-radio-button 的 value 一一对应，
 // 两边改一处就必须改另一处——认不出的档位会静默回落「今日」，不会报错。
 //
+// 系统状态页的总览图（/traffic/overview）也走这里，它额外用到 yesterday /
+// 24h / 14d / month / lastMonth 几档，与 web/html/xui/index.html 那个时间下拉的选项
+// 一一对应。
+//
 // **注意 Window7d/Window30d 与 traffic_history.go 里的 Range7d/Range30d
 // 字符串相同但语义不同**：这里是日历窗口（包含今天在内的 N 个自然日），
-// 那里是滑动窗口（从此刻往回数 N×24 小时）。两套档位分别服务两个接口
-// ——ParseWindow 用于 /traffic/history 与 /ipUsage，rangeSpec 用于
-// /traffic/overview（系统状态页），互不调用。把它们合并成一套是一次
-// 独立的改动，需要连带改掉系统状态页，不在本次范围。
+// 那里是滑动窗口（从此刻往回数 N×24 小时）。rangeSpec 那套如今只剩
+// History / Overview 两个旧函数（及其测试）在用，接口都已改走 ParseWindow。
+//
+// Window24h 是这里唯一的滑动窗口：「近 24 小时」字面意思就是从此刻往回
+// 24 小时，按日历切会在凌晨只剩几个小时的数据。
 const (
-	WindowToday  = "today"
-	Window3d     = "3d"
-	Window7d     = "7d"
-	Window30d    = "30d"
-	Window1y     = "1y"
-	WindowCustom = "custom"
+	WindowToday     = "today"
+	WindowYesterday = "yesterday"
+	Window24h       = "24h"
+	Window3d        = "3d"
+	Window7d        = "7d"
+	Window14d       = "14d"
+	Window30d       = "30d"
+	Window1y        = "1y"
+	WindowThisMonth = "month"
+	WindowLastMonth = "lastMonth"
+	WindowCustom    = "custom"
 )
 
 // windowMaxSpanDays 是自定义区间的跨度上限。
@@ -100,12 +110,27 @@ func ParseWindow(name, startDate, endDate string, loc *time.Location, now time.T
 		}
 		// 结束日是**包含**的，所以右端取它的次日 0 点。
 		start, end = s, e.AddDate(0, 0, 1)
+	case WindowYesterday:
+		start, end = midnight.AddDate(0, 0, -1), midnight
+	case Window24h:
+		// 含当前这个小时在内的 24 个整点小时桶（与改动前系统状态页「24 小时」
+		// 那一档的 24 个刻度相同）。按面板时区对齐，半小时时区同样正确。
+		start, end = time.Unix(model.AlignHour(now, loc), 0).In(loc).Add(-23*time.Hour), now
 	case Window3d:
 		start, end = midnight.AddDate(0, 0, -2), now
 	case Window7d:
 		start, end = midnight.AddDate(0, 0, -6), now
+	case Window14d:
+		start, end = midnight.AddDate(0, 0, -13), now
 	case Window30d:
 		start, end = midnight.AddDate(0, 0, -29), now
+	case WindowThisMonth:
+		start, end = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc), now
+	case WindowLastMonth:
+		// AddDate(0, -1, 0) 作用在每月 1 号上是安全的（1 号不存在「下月没有这一天」
+		// 的归一化问题），结果就是上月 1 号。
+		first := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
+		start, end = first.AddDate(0, -1, 0), first
 	case Window1y:
 		start, end = midnight.AddDate(0, 0, -364), now
 	default:

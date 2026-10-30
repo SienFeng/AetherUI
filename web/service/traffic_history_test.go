@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -643,5 +644,74 @@ func TestLegacyHistoryStillWorks(t *testing.T) {
 	// 旧路径也要填 Total，两条路径的语义必须一致。
 	if res.Total.Up != 0 || res.Total.Down != 0 {
 		t.Errorf("Total = %+v，期望零值（库里没写任何桶）", res.Total)
+	}
+}
+
+// 右端在过去的窗口（「昨天」）不能把右端之后的用量算进 Top N：今天用得最多
+// 的入站在昨天一个字节都没用，就不该出现在昨天的排名里。
+func TestOverviewWindowExcludesBucketsAfterWindowEnd(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	today := mkTrafficInbound(t, 30401, "今天的大户")
+	yesterday := mkTrafficInbound(t, 30402, "昨天的")
+	writeBucket(t, model.GranularityHour, today.Id, model.AlignHour(now, sh), 5000, 5000)
+	writeBucket(t, model.GranularityHour, yesterday.Id,
+		time.Date(2026, 9, 3, 20, 0, 0, 0, sh).Unix(), 10, 10)
+
+	w := ParseWindow(WindowYesterday, "", "", sh, now)
+	res, err := svc.OverviewWindow(w, 12, now)
+	if err != nil {
+		t.Fatalf("OverviewWindow: %v", err)
+	}
+	if len(res.Series) != 1 || res.Series[0].Remark != "昨天的" {
+		names := []string{}
+		for _, s := range res.Series {
+			names = append(names, s.Remark)
+		}
+		t.Fatalf("系列 = %v，期望只有「昨天的」", names)
+	}
+	if len(res.Labels) != 24 {
+		t.Errorf("刻度数 = %d，期望 24（昨天的 24 个小时）", len(res.Labels))
+	}
+	var sum int64
+	for _, v := range res.Series[0].Points {
+		sum += v
+	}
+	if sum != 20 {
+		t.Errorf("昨天合计 = %d，期望 20", sum)
+	}
+}
+
+// 「近 24 小时」与改动前固定档位的 24 小时给出同样的刻度与数据。
+func TestOverviewWindow24hMatchesLegacyRange(t *testing.T) {
+	setupTrafficTest(t)
+	svc := TrafficHistoryService{}
+	sh := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 4, 17, 30, 0, 0, sh)
+
+	in := mkTrafficInbound(t, 30403, "对照")
+	writeBucket(t, model.GranularityHour, in.Id, model.AlignHour(now, sh)-5*3600, 7, 8)
+
+	legacy, err := svc.Overview(Range24h, 12, now)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	win, err := svc.OverviewWindow(ParseWindow(Window24h, "", "", sh, now), 12, now)
+	if err != nil {
+		t.Fatalf("OverviewWindow: %v", err)
+	}
+	if strings.Join(legacy.Labels, ",") != strings.Join(win.Labels, ",") {
+		t.Errorf("刻度不一致：\n旧 %v\n新 %v", legacy.Labels, win.Labels)
+	}
+	if len(win.Series) != 1 || len(legacy.Series) != 1 {
+		t.Fatalf("系列数 旧=%d 新=%d，期望都为 1", len(legacy.Series), len(win.Series))
+	}
+	for i := range legacy.Series[0].Points {
+		if legacy.Series[0].Points[i] != win.Series[0].Points[i] {
+			t.Errorf("第 %d 点 旧=%d 新=%d", i, legacy.Series[0].Points[i], win.Series[0].Points[i])
+		}
 	}
 }

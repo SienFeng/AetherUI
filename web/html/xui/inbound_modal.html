@@ -1,10 +1,26 @@
 {{define "inboundModal"}}
-<a-modal id="inbound-modal" v-model="inModal.visible" :title="inModal.title" @ok="inModal.ok"
+<a-modal id="inbound-modal" v-model="inModal.visible" @ok="inModal.ok"
          :confirm-loading="inModal.confirmLoading" :closable="true" :mask-closable="false"
-         :ok-text="inModal.okText" cancel-text='{{ i18n "close" }}'
-         :width="900"
-         :ok-button-props="{ props: { disabled: inbound.deprecatedFeatures.length > 0 } }">
+         :width="900">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="user-add"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ inModal.title ]]</span>
+                <span class="modal-head-sub">一个入站对应一个用户</span>
+            </span>
+        </div>
+    </template>
     {{template "form/inbound"}}
+    <!-- 底部：左侧说明保存前会经过 xray 校验（ValidateInboundReplacing），右侧两个按钮。
+         按钮的 loading / disabled 条件与改动前 ok-button-props 一致。 -->
+    <template slot="footer">
+        <span class="modal-foot-note">保存前会交给 Xray 校验配置</span>
+        <a-button @click="inModal.close()">{{ i18n "close" }}</a-button>
+        <a-button type="primary" :loading="inModal.confirmLoading"
+                  :disabled="inbound.deprecatedFeatures.length > 0"
+                  @click="inModal.ok()">[[ inModal.okText ]]</a-button>
+    </template>
 </a-modal>
 <script>
 

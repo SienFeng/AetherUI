@@ -1,0 +1,120 @@
+{{define "component/rangeSelect"}}
+<script>
+    // 时间范围下拉：快捷档位 + 自定义日期。系统状态页的流量概览与入站展开行共用。
+    //
+    // 档位 key 与服务端 ParseWindow 的档位名一一对应（web/service/traffic_window.go），
+    // 两边改一处就必须改另一处——认不出的档位会被服务端静默回落成「今天」。
+    // 档位到区间的翻译在服务端（按面板时区），这里只传档位名或两个日期。
+    const RANGE_SELECT_PRESETS = [
+        { key: 'today', label: '今天' },
+        { key: 'yesterday', label: '昨天' },
+        { key: '24h', label: '近 24 小时' },
+        { key: '3d', label: '近 3 天' },
+        { key: '7d', label: '近 7 天' },
+        { key: '14d', label: '近 14 天' },
+        { key: '30d', label: '近 30 天' },
+        { key: '1y', label: '近 1 年' },
+        { key: 'month', label: '本月' },
+        { key: 'lastMonth', label: '上月' },
+    ];
+
+    // 按钮与卡片副标题上显示的文字。start / end 是 'YYYY-MM-DD'（含首尾两天）。
+    function rangeSelectLabel(range, start, end) {
+        if (range === 'custom' && start && end) {
+            return start === end ? start : `${start} ~ ${end}`;
+        }
+        const p = RANGE_SELECT_PRESETS.find(x => x.key === range);
+        return p ? p.label : '';
+    }
+
+    // 用法：<range-select :range="r" :start="s" :end="e" @change="v => ..."></range-select>
+    // change 事件给出 { range } 或 { range: 'custom', start, end }。
+    Vue.component('range-select', {
+        delimiters: ['[[', ']]'],
+        props: ['range', 'start', 'end'],
+        data() {
+            return {
+                visible: false,
+                draftStart: null,
+                draftEnd: null,
+                presets: RANGE_SELECT_PRESETS,
+            };
+        },
+        computed: {
+            label() {
+                return rangeSelectLabel(this.range, this.start, this.end);
+            },
+        },
+        watch: {
+            // 打开面板时填好两个日期草稿：当前是自定义区间就沿用它，否则给「昨天 → 今天」。
+            // 选择器拿的是 DateUtil.toPanelMoment 生成的 moment：它的本地字段就是面板时区的
+            // 钟面日期，取 format('YYYY-MM-DD') 交给服务端即可。
+            visible(v) {
+                if (!v) return;
+                const today = DateUtil.toPanelMoment(Date.now());
+                const day = str => today.clone().set({ year: +str.slice(0, 4), month: +str.slice(5, 7) - 1, date: +str.slice(8, 10) });
+                if (this.range === 'custom' && this.start && this.end) {
+                    this.draftStart = day(this.start);
+                    this.draftEnd = day(this.end);
+                } else {
+                    this.draftStart = today.clone().subtract(1, 'day');
+                    this.draftEnd = today;
+                }
+            },
+        },
+        methods: {
+            select(key) {
+                this.visible = false;
+                this.$emit('change', { range: key });
+            },
+            apply() {
+                let a = this.draftStart.format('YYYY-MM-DD');
+                let b = this.draftEnd.format('YYYY-MM-DD');
+                // 选反了就交换（服务端也会交换，这里换好让按钮上的文字顺序正确）
+                if (a > b) [a, b] = [b, a];
+                this.visible = false;
+                this.$emit('change', { range: 'custom', start: a, end: b });
+            },
+            // 未来的日子不可选：面板时区的「今天」之后一律置灰
+            isFutureDay(d) {
+                return d && d.isAfter(DateUtil.toPanelMoment(Date.now()), 'day');
+            },
+        },
+        template: `
+<a-popover v-model="visible" trigger="click" placement="bottomRight" overlay-class-name="range-popover">
+    <template slot="content">
+        <div class="range-presets" role="group" aria-label="快捷时间范围">
+            <button v-for="p in presets" :key="p.key" type="button" class="range-preset"
+                    :aria-pressed="range === p.key ? 'true' : 'false'"
+                    @click="select(p.key)">[[ p.label ]]</button>
+        </div>
+        <div class="range-custom">
+            <div class="range-dates">
+                <label class="range-date">
+                    <span>开始日期</span>
+                    <a-date-picker v-model="draftStart" format="YYYY-MM-DD" :show-today="false"
+                                   :allow-clear="false" :disabled-date="isFutureDay"
+                                   placeholder="开始日期"></a-date-picker>
+                </label>
+                <a-icon type="arrow-right" class="range-arrow"></a-icon>
+                <label class="range-date">
+                    <span>结束日期</span>
+                    <a-date-picker v-model="draftEnd" format="YYYY-MM-DD" :show-today="false"
+                                   :allow-clear="false" :disabled-date="isFutureDay"
+                                   placeholder="结束日期"></a-date-picker>
+                </label>
+            </div>
+            <div class="range-apply">
+                <a-button type="primary" :disabled="!draftStart || !draftEnd" @click="apply">应用</a-button>
+            </div>
+        </div>
+    </template>
+    <button type="button" class="range-trigger" :aria-expanded="visible ? 'true' : 'false'">
+        <a-icon type="calendar"></a-icon>
+        <span>[[ label ]]</span>
+        <a-icon type="down" class="range-caret" :class="{ 'is-open': visible }"></a-icon>
+    </button>
+</a-popover>`,
+    });
+</script>
+{{end}}

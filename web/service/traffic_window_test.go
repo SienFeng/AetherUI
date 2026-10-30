@@ -182,3 +182,87 @@ func TestParseWindowClampsFutureEnd(t *testing.T) {
 		t.Errorf("End = %d，期望截到现在 %d", w.End, now.Unix())
 	}
 }
+
+// 「昨天」是昨天 0 点到今天 0 点，右端在过去。
+func TestParseWindowYesterday(t *testing.T) {
+	loc := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, loc)
+
+	w := ParseWindow(WindowYesterday, "", "", loc, now)
+
+	if want := time.Date(2026, 9, 9, 0, 0, 0, 0, loc).Unix(); w.Start != want {
+		t.Errorf("Start = %d，期望 %d（昨天 0 点）", w.Start, want)
+	}
+	if want := time.Date(2026, 9, 10, 0, 0, 0, 0, loc).Unix(); w.End != want {
+		t.Errorf("End = %d，期望 %d（今天 0 点，不是现在）", w.End, want)
+	}
+	if w.Granularity != model.GranularityHour {
+		t.Errorf("Granularity = %v，期望小时", w.Granularity)
+	}
+}
+
+// 「近 24 小时」是滑动窗口：含当前小时在内的 24 个整点小时桶，跨过午夜。
+func TestParseWindow24hIsRollingTwentyFourHourSlots(t *testing.T) {
+	loc := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 2, 30, 0, 0, loc)
+
+	w := ParseWindow(Window24h, "", "", loc, now)
+
+	if want := time.Date(2026, 9, 9, 3, 0, 0, 0, loc).Unix(); w.Start != want {
+		t.Errorf("Start = %d，期望 %d（昨天 03:00，不是今天 0 点）", w.Start, want)
+	}
+	if w.End != now.Unix() {
+		t.Errorf("End = %d，期望现在", w.End)
+	}
+	if n := len(buildSlotsInWindow(w.Granularity, w, loc)); n != 24 {
+		t.Errorf("刻度数 = %d，期望 24", n)
+	}
+}
+
+func TestParseWindow14d(t *testing.T) {
+	loc := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, loc)
+
+	w := ParseWindow(Window14d, "", "", loc, now)
+
+	if want := time.Date(2026, 8, 28, 0, 0, 0, 0, loc).Unix(); w.Start != want {
+		t.Errorf("Start = %d，期望 %d（含今天在内的 14 个自然日）", w.Start, want)
+	}
+}
+
+// 「本月」从 1 号 0 点到现在；「上月」是上月 1 号到本月 1 号。
+func TestParseWindowThisAndLastMonth(t *testing.T) {
+	loc := mustLoadShanghai(t)
+	now := time.Date(2026, 9, 10, 14, 30, 0, 0, loc)
+
+	m := ParseWindow(WindowThisMonth, "", "", loc, now)
+	if want := time.Date(2026, 9, 1, 0, 0, 0, 0, loc).Unix(); m.Start != want {
+		t.Errorf("本月 Start = %d，期望 %d", m.Start, want)
+	}
+	if m.End != now.Unix() {
+		t.Errorf("本月 End = %d，期望现在", m.End)
+	}
+
+	l := ParseWindow(WindowLastMonth, "", "", loc, now)
+	if want := time.Date(2026, 8, 1, 0, 0, 0, 0, loc).Unix(); l.Start != want {
+		t.Errorf("上月 Start = %d，期望 %d", l.Start, want)
+	}
+	if want := time.Date(2026, 9, 1, 0, 0, 0, 0, loc).Unix(); l.End != want {
+		t.Errorf("上月 End = %d，期望 %d（本月 1 号 0 点）", l.End, want)
+	}
+}
+
+// 1 月看「上月」要回到去年 12 月。
+func TestParseWindowLastMonthCrossesYear(t *testing.T) {
+	loc := mustLoadShanghai(t)
+	now := time.Date(2027, 1, 15, 9, 0, 0, 0, loc)
+
+	w := ParseWindow(WindowLastMonth, "", "", loc, now)
+
+	if want := time.Date(2026, 12, 1, 0, 0, 0, 0, loc).Unix(); w.Start != want {
+		t.Errorf("Start = %d，期望 %d（2026-12-01）", w.Start, want)
+	}
+	if want := time.Date(2027, 1, 1, 0, 0, 0, 0, loc).Unix(); w.End != want {
+		t.Errorf("End = %d，期望 %d（2027-01-01）", w.End, want)
+	}
+}

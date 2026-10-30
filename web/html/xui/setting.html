@@ -73,68 +73,99 @@
                 <div v-if="dirty" class="save-bar" role="status">
                     <a-icon type="exclamation-circle" theme="filled"
                             style="color: var(--aui-warning)"></a-icon>
-                    <span class="save-bar-text">有未保存的修改</span>
-                    <a-button size="small" @click="discardChanges">放弃修改</a-button>
-                    <a-button type="primary" size="small" @click="updateAllSetting">保存配置</a-button>
+                    <span class="save-bar-text">有未保存的修改。标着「需重启面板」的项保存后要重启面板才生效。</span>
+                    <a-button @click="discardChanges">放弃修改</a-button>
+                    <a-button type="primary" @click="updateAllSetting">保存配置</a-button>
                 </div>
                 <!-- 9 个分类改成左侧二级导航。只加 tab-position 一个属性，
                      9 个 a-tab-pane 与它们内部的表单一律不动。 -->
                 <a-tabs id="setting-tabs" default-active-key="1" tab-position="left">
-                    <a-tab-pane key="1" tab="面板与访问">
-                        <a-list item-layout="horizontal" style="background: white">
-                            <setting-list-item type="text" title="面板监听 IP" desc="默认留空监听所有 IP，重启面板生效" v-model="allSetting.webListen"></setting-list-item>
-                            <setting-list-item type="number" title="面板监听端口" desc="重启面板生效" v-model.number="allSetting.webPort"></setting-list-item>
-                            <setting-list-item type="text" title="面板证书公钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webCertFile"></setting-list-item>
-                            <setting-list-item type="text" title="面板证书密钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" v-model="allSetting.webKeyFile"></setting-list-item>
-                            <setting-list-item type="text" title="面板 url 根路径" desc="必须以 '/' 开头，以 '/' 结尾，重启面板生效" v-model="allSetting.webBasePath"></setting-list-item>
+                    <a-tab-pane key="1">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-blue"><a-icon type="desktop"></a-icon></span>
+                            面板与访问
+                            <span v-if="paneDirty('1')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-blue is-large"><a-icon type="desktop"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">面板与访问</h2>
+                                <div class="card-sub">面板监听地址、端口、证书与访问路径</div>
+                            </div>
+                        </div>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <setting-list-item type="text" title="面板监听 IP" desc="默认留空监听所有 IP，重启面板生效" :changed="isChanged('webListen')" v-model="allSetting.webListen"></setting-list-item>
+                            <setting-list-item type="number" title="面板监听端口" desc="重启面板生效" :changed="isChanged('webPort')" v-model.number="allSetting.webPort"></setting-list-item>
+                            <setting-list-item type="text" title="面板证书公钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" :changed="isChanged('webCertFile')" v-model="allSetting.webCertFile"></setting-list-item>
+                            <setting-list-item type="text" title="面板证书密钥文件路径" desc="填写一个 '/' 开头的绝对路径，重启面板生效；面板监听 127.0.0.1（藏在反向代理后面）时必须留空，TLS 由反代终结" :changed="isChanged('webKeyFile')" v-model="allSetting.webKeyFile"></setting-list-item>
+                            <setting-list-item type="text" title="面板 url 根路径" desc="必须以 '/' 开头，以 '/' 结尾，重启面板生效" :changed="isChanged('webBasePath')" v-model="allSetting.webBasePath"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="2" tab="账号与密码">
-                        <a-form style="background: white; padding: 20px">
-                            <a-form-item label="原用户名">
-                                <a-input v-model="user.oldUsername" style="max-width: 300px"></a-input>
-                            </a-form-item>
-                            <a-form-item label="原密码">
-                                <a-input type="password" v-model="user.oldPassword"
-                                         style="max-width: 300px"></a-input>
-                            </a-form-item>
-                            <a-form-item label="新用户名">
-                                <a-input v-model="user.newUsername" style="max-width: 300px"></a-input>
-                            </a-form-item>
-                            <a-form-item label="新密码">
-                                <a-input type="password" v-model="user.newPassword"
-                                         style="max-width: 300px"></a-input>
-                            </a-form-item>
-                            <a-form-item>
-                                <a-button type="primary" @click="updateUser">修改</a-button>
-                            </a-form-item>
-                        </a-form>
+                    <a-tab-pane key="2">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-violet"><a-icon type="lock"></a-icon></span>
+                            账号与密码
+                            <span v-if="paneDirty('2')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-violet is-large"><a-icon type="lock"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">账号与密码</h2>
+                                <div class="card-sub">登录账号与两步验证</div>
+                            </div>
+                        </div>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <a-list-item class="setting-row">
+                                <div class="setting-row-main">
+                                    <div class="setting-row-title">当前账号</div>
+                                    <div class="setting-row-desc">先验证当前的用户名与密码</div>
+                                </div>
+                                <div class="setting-row-ctl setting-row-pair">
+                                    <a-input v-model="user.oldUsername" placeholder="原用户名" aria-label="原用户名"></a-input>
+                                    <a-input type="password" v-model="user.oldPassword" placeholder="原密码" aria-label="原密码"></a-input>
+                                </div>
+                            </a-list-item>
+                            <a-list-item class="setting-row">
+                                <div class="setting-row-main">
+                                    <div class="setting-row-title">新账号</div>
+                                    <div class="setting-row-desc">修改后需要重新登录</div>
+                                </div>
+                                <div class="setting-row-ctl setting-row-pair">
+                                    <a-input v-model="user.newUsername" placeholder="新用户名" aria-label="新用户名"></a-input>
+                                    <a-input type="password" v-model="user.newPassword" placeholder="新密码" aria-label="新密码"></a-input>
+                                </div>
+                            </a-list-item>
+                            <a-list-item class="setting-row setting-row-end">
+                                <a-button type="primary" @click="updateUser">修改账号密码</a-button>
+                            </a-list-item>
+                        </a-list>
 
                         <!-- 两步验证。状态行沿用其他标签页的 setting-action-item，
                              下面的表单沿用上面改密码那一块的写法。 -->
-                        <a-list item-layout="horizontal" style="background: white; margin-top: 16px">
-                            <setting-action-item title="两步验证" :hint="twoFactorDesc()">
-                                <span v-if="!twoFactor.loaded" class="chip">读取中</span>
-                                <span v-else-if="twoFactor.enabled" class="status-badge status-ok">
-                                    <a-icon type="check-circle"></a-icon>已开启
-                                </span>
-                                <span v-else class="chip">未开启</span>
-                            </setting-action-item>
-                        </a-list>
-
-                        <!-- 未开启 · 第一步：再输一次密码，换取密钥。 -->
-                        <a-form v-if="twoFactor.loaded && !twoFactor.enabled && !twoFactor.secret"
-                                style="background: white; padding: 0 20px 20px">
-                            <a-form-item label="当前密码">
-                                <a-input type="password" autocomplete="current-password"
-                                         v-model="twoFactor.password" style="max-width: 300px"
+                        <!-- 两步验证卡片（与视觉稿 v3 一致）：盾牌图标 + 标题与状态 + 说明，右侧是
+                             当前这一步的操作。第一步（再输一次密码换取密钥）就放在卡片右侧；
+                             第二步扫码、以及关闭，字段多，仍在卡片下方展开。逻辑与改动前相同。 -->
+                        <div class="tfa-card">
+                            <span class="tfa-icon" aria-hidden="true"><a-icon type="safety"></a-icon></span>
+                            <div class="tfa-text">
+                                <div class="setting-row-title">
+                                    两步验证
+                                    <span v-if="!twoFactor.loaded" class="chip">读取中</span>
+                                    <span v-else-if="twoFactor.enabled" class="status-badge status-ok">
+                                        <a-icon type="check-circle"></a-icon>已开启
+                                    </span>
+                                    <span v-else class="chip">未开启</span>
+                                </div>
+                                <div class="setting-row-desc is-full" v-html="twoFactorDesc()"></div>
+                            </div>
+                            <div v-if="twoFactor.loaded && !twoFactor.enabled && !twoFactor.secret" class="tfa-ctl">
+                                <a-input type="password" autocomplete="current-password" placeholder="当前密码"
+                                         aria-label="当前密码" v-model="twoFactor.password"
                                          @keydown.enter.native="setupTwoFactor"></a-input>
-                            </a-form-item>
-                            <a-form-item>
                                 <a-button type="primary" :loading="twoFactor.busy"
-                                          :disabled="!twoFactor.password" @click="setupTwoFactor">开始设置</a-button>
-                            </a-form-item>
-                        </a-form>
+                                          :disabled="!twoFactor.password" @click="setupTwoFactor">开启两步验证</a-button>
+                            </div>
+                        </div>
 
                         <!-- 未开启 · 第二步：扫码，再用一个验证码证明验证器配好了。
                              只有这一步通过才真正开启，扫码失败不会把自己锁在门外。 -->
@@ -185,26 +216,50 @@
                     <!-- 11 个分类合并成 7 个：多数分类只有一两项，左侧导航比内容还长。
                          合并只挪 a-list 的位置，每段前面的小标题保留原来的分类名，
                          表单字段与保存逻辑一律不动。 -->
-                    <a-tab-pane key="3" tab="Xray 与网络">
+                    <a-tab-pane key="3">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-teal"><a-icon type="global"></a-icon></span>
+                            Xray 与网络
+                            <span v-if="paneDirty('3')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-teal is-large"><a-icon type="global"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">Xray 与网络</h2>
+                                <div class="card-sub">DNS、IP 规则与 xray 配置模板</div>
+                            </div>
+                        </div>
                         <!-- 从「其他设置」里拆出来。DNS 与「IP 规则是否解析域名」
                              都会进入 xray 配置、都由 routing/dns 注入器消费，
                              和时区、订阅更新时刻不是一类东西。 -->
                         <h3 class="setting-group-title is-first">网络与 DNS</h3>
-                        <a-list item-layout="horizontal" style="background: white">
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="switch" title="让 IP 规则也匹配域名目标"
                                                desc="关闭时 IP 分流规则只对客户端直接连 IP 的连接生效；打开后访问域名的连接也会被 IP 规则匹配（xray 在域名规则都没命中时于本机解析一次）。代价是未命中的连接多一次解析。改动需重启 xray（约 10 秒后自动完成）"
-                                               v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
+                                               :changed="isChanged('ipRuleResolveDomain')" v-model="allSetting.ipRuleResolveDomain"></setting-list-item>
                             <setting-list-item type="textarea" title="DNS 服务器（一行一条）"
                                                desc="留空则由系统的 /etc/resolv.conf 解析；填写后本机 xray 的域名解析改走这里，云服务商的解析器不再看得到用户访问的域名（客户端自己的 DNS 不经过本机，不受影响）。推荐这几个加密 DNS（IP 型端点，不需要先解析域名）：https://1.1.1.1/dns-query、https://8.8.8.8/dns-query、https://9.9.9.9/dns-query、https://223.5.5.5/dns-query。也可填裸 IP（如 8.8.8.8）；udp:// tls:// quic:// 与「IP:端口」不支持。改动需重启 xray（约 10 秒后自动完成）"
-                                               v-model="allSetting.dnsServers"></setting-list-item>
+                                               :changed="isChanged('dnsServers')" v-model="allSetting.dnsServers"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">Xray 配置</h3>
-                        <a-list item-layout="horizontal" style="background: white">
-                            <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <setting-list-item type="textarea" title="xray 配置模版" desc="以该模版为基础生成最终的 xray 配置文件，重启面板生效" :changed="isChanged('xrayTemplateConfig')" v-model="allSetting.xrayTemplateConfig"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="4" tab="IP 归属地库">
-                        <a-list item-layout="horizontal" style="background: white">
+                    <a-tab-pane key="4">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-amber"><a-icon type="environment"></a-icon></span>
+                            IP 归属地库
+                            <span v-if="paneDirty('4')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-amber is-large"><a-icon type="environment"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">IP 归属地库</h2>
+                                <div class="card-sub">归属地数据源与每日更新</div>
+                            </div>
+                        </div>
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-action-item v-for="src in ipdb.sources" :key="src.key"
                                                  :title="src.name" :desc="ipdbSourceDesc(src)">
                                 <span v-if="!src.enabled" class="chip">未启用</span>
@@ -227,53 +282,77 @@
                             </setting-action-item>
                             <setting-list-item type="text" title="ip2region 源地址"
                                                desc="源数据约 35 MB，留空表示不启用"
-                                               v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
+                                               :changed="isChanged('ipdbSourceUrl')" v-model.trim="allSetting.ipdbSourceUrl"></setting-list-item>
                             <setting-list-item type="text" title="纯真库源地址"
                                                desc="源数据约 25 MB，留空表示不启用。四个源不能都留空"
-                                               v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
+                                               :changed="isChanged('qqwrySourceUrl')" v-model.trim="allSetting.qqwrySourceUrl"></setting-list-item>
                             <setting-list-item type="text" title="IP2Location LITE 源地址"
                                                desc="可选的第三个源，留空表示不启用。需自行在 ip2location.com 免费注册后在 Download 页取得 token，地址形如 https://www.ip2location.com/download?token=你的TOKEN&amp;file=DB3LITE（源数据约 33 MB）。注意上游限制每 24 小时最多下载 5 次，超出后会返回一行提示文本而不是数据（面板会把上游原话显示在错误里），等满 24 小时即可恢复。数据使用需署名 IP2Location LITE"
-                                               v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
+                                               :changed="isChanged('ip2locationSourceUrl')" v-model.trim="allSetting.ip2locationSourceUrl"></setting-list-item>
                             <setting-list-item type="text" title="DB-IP City Lite 源地址"
                                                desc="可选的第四个源，留空表示不启用。地址填 https://download.db-ip.com/free/dbip-city-lite-{YYYY-MM}.csv.gz，其中 {YYYY-MM} 会自动替换成当前年月（每月前两天用上一个月，避开上游发布延迟）。源数据约 82 MB，数据使用需署名 DB-IP（CC BY 4.0）"
-                                               v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
+                                               :changed="isChanged('dbipSourceUrl')" v-model.trim="allSetting.dbipSourceUrl"></setting-list-item>
                             <setting-list-item type="switch" title="地区限制要求多数数据源认同"
                                                desc="关闭（默认）时按并集放行：任一个源认为该 IP 属于所选地区即放行。打开后改为多数判据——认定它属于所选地区的源数必须严格多于认定它属于其他地区的源数；没有该 IP 数据的源不计入任何一边（那是数据缺口，不是反对）。打开会收窄放行范围，代价是被误拦的用户完全连不上，请在启用多个数据源之后再考虑。改动需重启 xray（约 10 秒后自动完成）。后两个源是「旁证」，不是「更准」：实测四个源对同一批中国 IP 的省级判定两两一致度在 75%~93% 之间，城市级只有 30%~42%，没有哪一个是权威。多接一个源的价值是让分歧显形、并在前面的源查不到时兜底，归属地判定本身不会因此变准。地区限制默认按并集合并，实测启用新源后可放行的地址范围只扩大 1%~18%（按覆盖的 IP 地址数；CIDR 条数会涨得多得多，那是各源切分粒度不同造成的，不代表范围变宽）"
-                                               v-model="allSetting.regionMatchMode"></setting-list-item>
+                                               :changed="isChanged('regionMatchMode')" v-model="allSetting.regionMatchMode"></setting-list-item>
                             <setting-list-item type="text" title="每日更新时刻"
                                                desc="格式 HH:MM，例如 04:00。留空表示关闭自动更新。上游内容没变时不会重建库，此时「生成于」保持不动、只有「最近检查」前进"
-                                               v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
+                                               :changed="isChanged('ipdbUpdateTime')" v-model.trim="allSetting.ipdbUpdateTime"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="5" tab="日志与统计">
+                    <a-tab-pane key="5">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-pink"><a-icon type="file-text"></a-icon></span>
+                            日志与统计
+                            <span v-if="paneDirty('5')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-pink is-large"><a-icon type="file-text"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">日志与统计</h2>
+                                <div class="card-sub">访问日志与用量历史的保留期</div>
+                            </div>
+                        </div>
                         <h3 class="setting-group-title is-first">访问日志</h3>
-                        <a-list item-layout="horizontal" style="background: white">
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="switch" title="记录访问日志"
                                                desc="记录用户在什么时间访问了什么目标、走的哪条路由。开关变化约 10 秒后生效"
-                                               v-model="allSetting.accessLogEnable"></setting-list-item>
+                                               :changed="isChanged('accessLogEnable')" v-model="allSetting.accessLogEnable"></setting-list-item>
                             <setting-list-item type="number" title="日志保留天数"
                                                desc="超过该天数的记录每小时自动清除"
-                                               v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
+                                               :changed="isChanged('accessLogRetentionDays')" v-model.number="allSetting.accessLogRetentionDays"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">流量统计</h3>
-                        <a-list item-layout="horizontal" style="background: white">
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="小时数据保留天数"
                                                desc="入站列表与系统状态页的用量图，「24 小时 / 7 天 / 30 天」三档用的就是这一级数据。超过该天数的记录每小时自动清除。可填 1 ~ 365，默认 30"
-                                               v-model.number="allSetting.trafficHourRetentionDays"></setting-list-item>
+                                               :changed="isChanged('trafficHourRetentionDays')" v-model.number="allSetting.trafficHourRetentionDays"></setting-list-item>
                             <setting-list-item type="number" title="每日数据保留天数"
                                                desc="用量图「1 年」这一档用的数据，一个入站一年只占 365 行。可填 1 ~ 3650，默认 365"
-                                               v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
+                                               :changed="isChanged('trafficDayRetentionDays')" v-model.number="allSetting.trafficDayRetentionDays"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="6" tab="连接限制">
+                    <a-tab-pane key="6">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-cyan"><a-icon type="api"></a-icon></span>
+                            连接限制
+                            <span v-if="paneDirty('6')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-cyan is-large"><a-icon type="api"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">连接限制</h2>
+                                <div class="card-sub">并发闲置超时与端口限速</div>
+                            </div>
+                        </div>
                         <h3 class="setting-group-title is-first">并发限制</h3>
-                        <a-list item-layout="horizontal" style="background: white">
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="闲置超时（秒）"
                                                desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
-                                               v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
+                                               :changed="isChanged('concurrencyIdleTimeout')" v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">端口限速</h3>
-                        <a-list item-layout="horizontal" style="background: white">
+                        <a-list item-layout="horizontal" class="setting-list">
                             <setting-action-item title="限速状态" :desc="shapingDesc()">
                                 <!-- 「不支持」是环境事实（内核缺 tc / ifb），不是故障，
                                      用中性；「已自动撤销」才是真出了事，保留红。 -->
@@ -294,22 +373,34 @@
                             </setting-action-item>
                             <setting-list-item type="text" title="限速网卡"
                                                desc="留空则按默认路由自动探测。多网卡机器可手动指定"
-                                               v-model.trim="allSetting.tcInterface"></setting-list-item>
+                                               :changed="isChanged('tcInterface')" v-model.trim="allSetting.tcInterface"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
-                    <a-tab-pane key="7" tab="常规">
-                        <a-list item-layout="horizontal" style="background: white">
-                            <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" v-model="allSetting.timeLocation"></setting-list-item>
+                    <a-tab-pane key="7">
+                        <span slot="tab" class="setting-tab">
+                            <span class="setting-tab-icon tone-slate"><a-icon type="setting"></a-icon></span>
+                            常规
+                            <span v-if="paneDirty('7')" class="setting-tab-dot" aria-label="有未保存的修改"></span>
+                        </span>
+                        <div class="setting-pane-head">
+                            <span class="setting-tab-icon tone-slate is-large"><a-icon type="setting"></a-icon></span>
+                            <div>
+                                <h2 class="setting-pane-title">常规</h2>
+                                <div class="card-sub">时区与新建入站的默认值</div>
+                            </div>
+                        </div>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <setting-list-item type="text" title="时区" desc="定时任务按照该时区的时间运行，重启面板生效" :changed="isChanged('timeLocation')" v-model="allSetting.timeLocation"></setting-list-item>
                         </a-list>
                         <!-- 这三项不是面板自己的配置，面板从不加载它们（见 CLAUDE.md
                              「设置系统」一节），只是新建入站表单的预填值。混在
                              「面板与访问」里会被读成面板自身的证书设置——而面板
                              自己的证书是上面那两项，填错地方的后果完全不同。 -->
                         <h3 class="setting-group-title">新建入站默认值</h3>
-                        <a-list item-layout="horizontal" style="background: white">
-                            <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" v-model.trim="allSetting.defaultDomain"></setting-list-item>
-                            <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
-                            <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <setting-list-item type="text" title="新建入站默认域名" desc="新建入站时自动填入 TLS 域名，留空则不填充" :changed="isChanged('defaultDomain')" v-model.trim="allSetting.defaultDomain"></setting-list-item>
+                            <setting-list-item type="text" title="新建入站默认证书公钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" :changed="isChanged('defaultCertFile')" v-model.trim="allSetting.defaultCertFile"></setting-list-item>
+                            <setting-list-item type="text" title="新建入站默认证书密钥路径" desc="填写一个 '/' 开头的绝对路径，新建入站时自动填入" :changed="isChanged('defaultKeyFile')" v-model.trim="allSetting.defaultKeyFile"></setting-list-item>
                         </a-list>
                     </a-tab-pane>
                 </a-tabs>
@@ -320,6 +411,17 @@
 {{template "js" .}}
 {{template "component/setting"}}
 <script>
+
+    // 每个分类包含的设置字段，与上面模板里各 a-tab-pane 的 v-model 一一对应
+    const SETTING_PANE_KEYS = {
+                '1': ['webBasePath', 'webCertFile', 'webKeyFile', 'webListen', 'webPort'],
+                '2': [],
+                '3': ['dnsServers', 'ipRuleResolveDomain', 'xrayTemplateConfig'],
+                '4': ['dbipSourceUrl', 'ip2locationSourceUrl', 'ipdbSourceUrl', 'ipdbUpdateTime', 'qqwrySourceUrl', 'regionMatchMode'],
+                '5': ['accessLogEnable', 'accessLogRetentionDays', 'trafficDayRetentionDays', 'trafficHourRetentionDays'],
+                '6': ['concurrencyIdleTimeout', 'tcInterface'],
+                '7': ['defaultCertFile', 'defaultDomain', 'defaultKeyFile', 'timeLocation']
+    };
 
     const app = new Vue({
         mixins: [panelVersionMixin],
@@ -345,6 +447,14 @@
             shapingClearing: false,
         },
         methods: {
+            // 这一项改过、还没保存。按字符串比较：输入框给的是字符串，库里可能是数字。
+            isChanged(key) {
+                return String(this.oldAllSetting[key]) !== String(this.allSetting[key]);
+            },
+            // 左侧分类后面的橙点：这个分类里有任何一项改过
+            paneDirty(pane) {
+                return (SETTING_PANE_KEYS[pane] || []).some(k => this.isChanged(k));
+            },
             loading(spinning = true) {
                 this.spinning = spinning;
             },

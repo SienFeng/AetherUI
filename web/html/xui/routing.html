@@ -50,26 +50,44 @@
     /* 落点提示画在目标行的上/下边缘，而不是整行高亮——整行高亮说不清
        松手后是插在这一行之前还是之后。 */
     tr.rule-drop-before > td {
-        border-top: 2px solid #1890ff !important;
+        border-top: 2px solid var(--aui-primary) !important;
     }
 
     tr.rule-drop-after > td {
-        border-bottom: 2px solid #1890ff !important;
+        border-bottom: 2px solid var(--aui-primary) !important;
     }
 
     /* 段头是表格外的独立元素，不用 a-table 的 title——那是个函数 prop，
        slot 形式在 1.7.2 上没有把握，写错只会让段头整个不显示。 */
+    /* 段头：左侧一个色块（封禁红 / 分流蓝）+ 标题 + 灰色说明 */
     .rule-section-title {
-        font-weight: 500;
-        margin-top: 24px;
-        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--aui-text);
+        margin-top: 22px;
+        margin-bottom: 10px;
     }
 
+    .rule-section-title::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        background: var(--aui-primary);
+    }
+
+    .rule-section-title.is-block::before {
+        background: var(--aui-danger);
+    }
+
+    /* rgba(0,0,0,.45) 只有 3.36:1，换成 --aui-text-3（4.8:1） */
     .rule-section-hint {
         font-weight: normal;
-        color: rgba(0, 0, 0, 0.45);
+        color: var(--aui-text-3);
         font-size: 12px;
-        margin-left: 8px;
     }
 
     .import-messages {
@@ -107,13 +125,15 @@
                                 <span class="stat-label">域名组</span>
                                 <div class="stat-value">[[ groups.length ]]</div>
                             </div>
+                            <div class="stat-foot"><span>[[ groups.filter(g => g.subscribed).length ]] 个带订阅</span></div>
                         </div>
                         <div class="stat-card tone-cyan">
                             <span class="stat-icon"><a-icon type="cloud-server"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">出站节点</span>
-                                <div class="stat-value">[[ enabledNodeCount ]]<span class="unit">/ [[ nodes.length ]] 已启用</span></div>
+                                <div class="stat-value">[[ enabledNodeCount ]]<span class="unit">/ [[ nodes.length ]]</span></div>
                             </div>
+                            <div class="stat-foot"><span>已启用</span></div>
                         </div>
                         <div class="stat-card tone-purple">
                             <span class="stat-icon"><a-icon type="branches"></a-icon></span>
@@ -121,6 +141,7 @@
                                 <span class="stat-label">分流规则</span>
                                 <div class="stat-value">[[ rules.length ]]</div>
                             </div>
+                            <div class="stat-foot"><span>[[ blockRules.length ]] 条封禁 · [[ routeRules.length ]] 条分流</span></div>
                         </div>
                         <!-- tabindex 不是可有可无的：tooltip 挂在普通元素上，没有它键盘
                              用户永远看不到「哪几条规则没生效」。图标与 aria-label 同理——
@@ -136,6 +157,10 @@
                                     <span class="stat-label">未生效规则</span>
                                     <div class="stat-value">[[ brokenRules.length ]]</div>
                                 </div>
+                                <div class="stat-foot">
+                                    <span>[[ brokenRules.length ? '悬停查看原因' : '全部规则都会生效' ]]</span>
+                                    <span v-if="brokenRules.length" class="stat-tag is-danger">待处理</span>
+                                </div>
                             </div>
                         </a-tooltip>
                         <div class="stat-card" :class="subscriptionErrorCount ? 'tone-alert' : 'tone-ok'"
@@ -147,12 +172,16 @@
                                 <span class="stat-label">订阅异常</span>
                                 <div class="stat-value">[[ subscriptionErrorCount ]]</div>
                             </div>
+                            <div class="stat-foot">
+                                <span>[[ subscriptionErrorCount ? '在域名组里查看失败原因' : '订阅都已正常拉取' ]]</span>
+                                <span v-if="subscriptionErrorCount" class="stat-tag is-danger">待处理</span>
+                            </div>
                         </div>
                     </div>
                 </transition>
 
                 <transition name="list" appear>
-                    <a-tabs id="routing-tabs" default-active-key="1">
+                    <a-tabs id="routing-tabs" default-active-key="1" @change="onRoutingTabChange">
                         <a-tab-pane key="1">
                             <!-- 数量放进标签本身：切过去才知道有几条，等于每次都要
                                  先点一遍。 -->
@@ -160,7 +189,7 @@
                                 <span class="cell-muted">[[ groups.length ]]</span>
                             </span>
                             <a-card>
-                                <div slot="title" class="toolbar" style="margin-bottom: 0">
+                                <div class="toolbar">
                                     <a-button type="primary" icon="plus" @click="openGroup()">添加域名组</a-button>
                                     <a-button icon="download" style="margin-left:8px"
                                               @click="confirmExport('domainGroups')">导出</a-button>
@@ -186,75 +215,74 @@
                                         </a-tooltip>
                                     </span>
                                 </div>
-                                <a-table :columns="groupColumns" :data-source="groups"
-                                         :row-key="r => r.id" :loading="spinning" :pagination="false"
-                                         :locale="{ emptyText: '还没有域名组。域名组是一批域名或 IP 段的集合，分流规则引用它来决定哪些流量走哪个出站。' }"
-                                         style="margin-top: 20px">
-                                    <template slot="domains" slot-scope="text, group">
-                                        <span v-if="group.broken" style="color: var(--aui-danger)">
-                                            数据损坏，这条组的规则不会写进配置
-                                        </span>
-                                        <template v-else>
-                                            <span v-for="d in group.preview" :key="d" class="chip">[[ d ]]</span>
-                                            <span v-if="group.effectiveCount > group.preview.length" class="cell-muted">
-                                                +[[ group.effectiveCount - group.preview.length ]]
+                                <!-- 卡片网格。每张卡用到的字段与原来的表格完全相同，按钮也都接回
+                                     原有方法（refreshGroup / clickGroupAction），没有新增后端能力。 -->
+                                <div v-if="!groups.length" class="empty-block">
+                                    还没有域名组。域名组是一批域名或 IP 段的集合，分流规则引用它来决定哪些流量走哪个出站。
+                                </div>
+                                <div v-else class="gcards">
+                                    <div v-for="group in groups" :key="group.id" class="gcard"
+                                         :class="{ 'is-error': group.broken || group.subscribeState === 'error' }">
+                                        <div class="gcard-top">
+                                            <span class="gcard-icon" :style="{ background: groupColorOf(group) }"
+                                                  aria-hidden="true">[[ groupInitials(group) ]]</span>
+                                            <span class="gcard-title">
+                                                <span class="gcard-name" :title="group.remark">[[ group.remark || '未命名' ]]</span>
+                                                <span class="gcard-meta">
+                                                    [[ groupRefCount(group.id) ? '被 ' + groupRefCount(group.id) + ' 条规则引用' : '未被规则引用' ]]
+                                                </span>
                                             </span>
-                                            <!-- 纯 IP 组不是「空」：buildRule 的跳过条件是
-                                                 域名和 IP 段都为空，纯 IP 组照样会生成一条 ip 规则。
-                                                 这一列只说域名，红字留给真正两侧都空的组。 -->
-                                            <span v-if="group.effectiveCount === 0 && group.cidrCount" class="cell-muted">—</span>
-                                            <span v-else-if="group.effectiveCount === 0" style="color: var(--aui-danger)">
-                                                空（引用它的规则不会写进配置）
-                                            </span>
-                                        </template>
-                                    </template>
-                                    <template slot="cidrs" slot-scope="text, group">
-                                        <!-- broken 是两列共用的标记（Cidrs 解码失败同样置位），
-                                             后端已把 cidrCount 强制归零。不单独渲染的话，
-                                             只有 IP 段损坏的组在这一列显示「—」，与「本来就没填」
-                                             完全分不开，而它引用的规则其实整条都不会写进配置。 -->
-                                        <span v-if="group.broken" style="color: var(--aui-danger)">数据损坏</span>
-                                        <span v-else-if="!group.cidrCount" class="cell-muted">—</span>
-                                        <span v-else>[[ group.cidrCount ]] 条</span>
-                                    </template>
-                                    <template slot="subscribe" slot-scope="text, group">
-                                        <span v-if="group.subscribeState === 'none'" class="cell-muted">—</span>
-                                        <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
-                                            <span class="status-badge status-danger"><a-icon type="close-circle"></a-icon>拉取失败</span>
-                                        </a-tooltip>
-                                        <span v-else-if="group.subscribeState === 'pending'"
-                                              class="status-badge status-warn"><a-icon type="clock-circle"></a-icon>等待首次拉取</span>
-                                        <!-- 订阅现在也收 IP-CIDR/IP-CIDR6/GEOIP，两类都要报数：
-                                             只报域名的话，一个纯 IP 订阅会显示「共 0 条」而实际拉到了几千条。
-                                             lastSkipped 也不再是「非域名规则」——IP 段已经收下了，
-                                             跳过的是 IP-ASN、SRC-IP-CIDR、进程/UA 这些没法忠实翻译的。 -->
-                                        <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
-                                            <span class="status-badge status-ok"><a-icon type="check-circle"></a-icon>[[ relativeTime(group.lastUpdatedAt) ]]</span>
-                                            <!-- 多地址时报个数：合并后只剩一个时间戳，不说明来源有几个的话，
-                                                 管理员无从知道这条绿标签背后其实有好几个地址在拉。 -->
-                                            <span v-if="group.subscribeUrls.length > 1" class="cell-muted">
-                                                · [[ group.subscribeUrls.length ]] 个地址
-                                            </span>
-                                        </a-tooltip>
-                                    </template>
-                                    <template slot="action" slot-scope="text, group">
-                                        <a-button v-if="group.subscribed" type="link" size="small"
-                                                  @click="refreshGroup(group)">立即更新</a-button>
-                                        <a-dropdown :trigger="['click']">
-                                            <a @click="e => e.preventDefault()">操作</a>
-                                            <a-menu slot="overlay" @click="a => clickGroupAction(a, group)">
-                                                <a-menu-item key="edit">
-                                                    <a-icon type="edit"></a-icon>编辑
-                                                </a-menu-item>
-                                                <a-menu-item key="delete">
-                                                    <span style="color: var(--aui-danger)">
-                                                        <a-icon type="delete"></a-icon>删除
-                                                    </span>
-                                                </a-menu-item>
-                                            </a-menu>
-                                        </a-dropdown>
-                                    </template>
-                                </a-table>
+                                            <a-dropdown :trigger="['click']">
+                                                <button type="button" class="icon-btn" @click="e => e.preventDefault()"
+                                                        :aria-label="'更多操作：' + (group.remark || '域名组')"><a-icon type="ellipsis"></a-icon></button>
+                                                <a-menu slot="overlay" @click="a => clickGroupAction(a, group)">
+                                                    <a-menu-item key="edit">
+                                                        <a-icon type="edit"></a-icon>编辑
+                                                    </a-menu-item>
+                                                    <a-menu-item key="delete">
+                                                        <span style="color: var(--aui-danger)">
+                                                            <a-icon type="delete"></a-icon>删除
+                                                        </span>
+                                                    </a-menu-item>
+                                                </a-menu>
+                                            </a-dropdown>
+                                        </div>
+                                        <div class="gcard-stats">
+                                            <div><b>[[ group.broken ? '—' : group.manualCount ]]</b><span>手工域名</span></div>
+                                            <div><b>[[ group.broken || !group.subscribed ? '—' : group.subscribedCount ]]</b><span>订阅域名</span></div>
+                                            <div><b>[[ group.broken ? '—' : (group.cidrCount || 0) ]]</b><span>IP 段</span></div>
+                                        </div>
+                                        <div class="gcard-domains">
+                                            <span v-if="group.broken" class="gcard-warn">数据损坏，这条组的规则不会写进配置</span>
+                                            <template v-else>
+                                                <code v-for="d in group.preview" :key="d">[[ d ]]</code>
+                                                <span v-if="group.effectiveCount > group.preview.length" class="gcard-more">
+                                                    等 [[ group.effectiveCount ]] 条
+                                                </span>
+                                                <!-- 纯 IP 组不是「空」：域名和 IP 段都为空才会被跳过 -->
+                                                <span v-if="group.effectiveCount === 0 && !group.cidrCount" class="gcard-warn">
+                                                    空（引用它的规则不会写进配置）
+                                                </span>
+                                                <span v-else-if="group.effectiveCount === 0" class="gcard-more">只有 IP 段</span>
+                                            </template>
+                                        </div>
+                                        <div class="gcard-sub" :class="'is-' + group.subscribeState">
+                                            <span class="gcard-dot" aria-hidden="true"></span>
+                                            <span class="gcard-sub-text" v-if="group.subscribeState === 'none'">未配置订阅，仅手工内容</span>
+                                            <a-tooltip v-else-if="group.subscribeState === 'error'" :title="group.lastError">
+                                                <span class="gcard-sub-text">订阅拉取失败：[[ group.lastError ]]</span>
+                                            </a-tooltip>
+                                            <span class="gcard-sub-text" v-else-if="group.subscribeState === 'pending'">等待首次拉取</span>
+                                            <a-tooltip v-else :title="'订阅到域名 ' + group.subscribedCount + ' 条、IP 段 ' + group.subscribedCidrCount + ' 条，已忽略 ' + group.lastSkipped + ' 条无法忠实翻译的规则（IP-ASN、SRC-IP-CIDR、进程/UA 等）'">
+                                                <span class="gcard-sub-text">
+                                                    [[ relativeTime(group.lastUpdatedAt) ]]更新<template v-if="group.subscribeUrls.length > 1"> · [[ group.subscribeUrls.length ]] 个地址</template>
+                                                </span>
+                                            </a-tooltip>
+                                            <a-button v-if="group.subscribed" type="link" size="small"
+                                                      @click="refreshGroup(group)">立即更新</a-button>
+                                        </div>
+                                    </div>
+                                </div>
                             </a-card>
                         </a-tab-pane>
 
@@ -265,7 +293,7 @@
                                 <span class="cell-muted">[[ nodes.length ]]</span>
                             </span>
                             <a-card>
-                                <div slot="title" class="toolbar" style="margin-bottom: 0">
+                                <div class="toolbar">
                                     <a-button type="primary" icon="plus" @click="openNode()">添加出站节点</a-button>
                                     <a-button icon="thunderbolt" style="margin-left:8px"
                                               :loading="probingAll" :disabled="nodes.length === 0"
@@ -277,10 +305,26 @@
                                 </div>
                                 <a-table :columns="nodeColumns" :data-source="nodes"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
-                                         :locale="{ emptyText: '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }"
-                                         style="margin-top: 20px">
+                                         :locale="{ emptyText: '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }">
+                                    <template slot="node" slot-scope="text, node">
+                                        <div class="who">
+                                            <span class="who-avatar" :style="{ background: node.enable ? nodeColorOf(node) : '#94A3B8' }"
+                                                  aria-hidden="true">[[ nodeInitials(node) ]]</span>
+                                            <span class="who-text">
+                                                <span class="who-name" :title="node.remark">[[ node.remark || node.tag ]]</span>
+                                                <span class="who-sub">[[ node.enable ? '已启用' : '已停用' ]]</span>
+                                            </span>
+                                        </div>
+                                    </template>
+                                    <template slot="address" slot-scope="text, node">
+                                        <span class="mono-text" :title="nodeAddress(node)">[[ nodeAddress(node) ]]</span>
+                                    </template>
+                                    <template slot="refs" slot-scope="text, node">
+                                        <span v-if="nodeRefCount(node.id)"><b>[[ nodeRefCount(node.id) ]]</b> 条规则</span>
+                                        <span v-else class="cell-muted">未被引用</span>
+                                    </template>
                                     <template slot="tag" slot-scope="text, node">
-                                        <span class="chip cell-num">[[ node.tag ]]</span>
+                                        <span class="chip mono-chip" :title="node.tag">[[ node.tag ]]</span>
                                     </template>
                                     <template slot="protocol" slot-scope="text, node">
                                         <span>[[ node.protocol ]]</span>
@@ -290,46 +334,53 @@
                                          命中取决于域名组、入站选择与 sniffing，那由规则列表
                                          自己的警告图标负责。措辞不要越过这条边界。 -->
                                     <template slot="probe" slot-scope="text, node">
-                                        <a-spin v-if="node.probing" size="small"></a-spin>
-                                        <span v-else-if="!node.probe" class="status-badge status-neutral">未测试</span>
-                                        <a-tooltip v-else-if="node.probe.status === 'ok'"
-                                                   :title="'测试于 ' + probeTime(node.probe)">
-                                            <span class="status-badge status-ok">
-                                                <a-icon type="check-circle"></a-icon>[[ node.probe.latencyMs ]] ms
-                                            </span>
-                                        </a-tooltip>
-                                        <a-tooltip v-else
-                                                   :title="node.probe.error + '（' + probeTime(node.probe) + '）'">
-                                            <span class="status-badge"
-                                                  :class="node.probe.status === 'fail' ? 'status-danger' : 'status-warn'">
-                                                <a-icon :type="node.probe.status === 'fail' ? 'close-circle' : 'question-circle'"></a-icon>
-                                                [[ node.probe.status === 'fail' ? '不通' : '无法测试' ]]
-                                            </span>
-                                        </a-tooltip>
-                                        <a v-if="!node.probing" style="margin-left: 4px"
-                                           @click="probeNode(node)">测试</a>
+                                        <div class="probe">
+                                            <a-spin v-if="node.probing" size="small"></a-spin>
+                                            <template v-else-if="node.probe && node.probe.status === 'ok'">
+                                                <a-tooltip :title="'测试于 ' + probeTime(node.probe)">
+                                                    <span class="probe-ms">[[ node.probe.latencyMs ]]<small> ms</small></span>
+                                                </a-tooltip>
+                                                <span class="probe-track"><i :style="probeBarStyle(node.probe.latencyMs)"></i></span>
+                                            </template>
+                                            <a-tooltip v-else-if="node.probe"
+                                                       :title="node.probe.error + '（' + probeTime(node.probe) + '）'">
+                                                <span class="probe-ms" :class="node.probe.status === 'fail' ? 'is-fail' : 'is-unknown'">
+                                                    [[ node.probe.status === 'fail' ? '不通' : '无法测试' ]]
+                                                </span>
+                                            </a-tooltip>
+                                            <template v-else>
+                                                <span class="probe-ms is-none">未测试</span>
+                                                <span class="probe-track"></span>
+                                            </template>
+                                            <a v-if="!node.probing" class="probe-link" @click="probeNode(node)">探测</a>
+                                        </div>
                                     </template>
                                     <template slot="enable" slot-scope="text, node">
                                         <a-switch :checked="node.enable"
                                                   @change="toggleNode(node)"></a-switch>
                                     </template>
                                     <template slot="action" slot-scope="text, node">
-                                        <a-dropdown :trigger="['click']">
-                                            <a @click="e => e.preventDefault()">操作</a>
-                                            <a-menu slot="overlay" @click="a => clickNodeAction(a, node)">
-                                                <a-menu-item key="edit">
-                                                    <a-icon type="edit"></a-icon>编辑
-                                                </a-menu-item>
-                                                <a-menu-item key="copyTag">
-                                                    <a-icon type="copy"></a-icon>复制 tag
-                                                </a-menu-item>
-                                                <a-menu-item key="delete">
-                                                    <span style="color: var(--aui-danger)">
-                                                        <a-icon type="delete"></a-icon>删除
-                                                    </span>
-                                                </a-menu-item>
-                                            </a-menu>
-                                        </a-dropdown>
+                                        <!-- @click.stop：与入站表一致，行内按钮不冒泡到行 -->
+                                        <span class="row-actions" @click.stop>
+                                            <a-tooltip title="编辑">
+                                                <button type="button" class="icon-btn" aria-label="编辑"
+                                                        @click="clickNodeAction({ key: 'edit' }, node)"><a-icon type="edit"></a-icon></button>
+                                            </a-tooltip>
+                                            <a-dropdown :trigger="['click']">
+                                                <button type="button" class="icon-btn" @click="e => e.preventDefault()"
+                                                        :aria-label="'更多操作：' + (node.remark || node.tag)"><a-icon type="ellipsis"></a-icon></button>
+                                                <a-menu slot="overlay" @click="a => clickNodeAction(a, node)">
+                                                    <a-menu-item key="copyTag">
+                                                        <a-icon type="copy"></a-icon>复制 tag
+                                                    </a-menu-item>
+                                                    <a-menu-item key="delete">
+                                                        <span style="color: var(--aui-danger)">
+                                                            <a-icon type="delete"></a-icon>删除
+                                                        </span>
+                                                    </a-menu-item>
+                                                </a-menu>
+                                            </a-dropdown>
+                                        </span>
                                     </template>
                                 </a-table>
                             </a-card>
@@ -342,7 +393,7 @@
                                 <span class="cell-muted">[[ rules.length ]]</span>
                             </span>
                             <a-card>
-                                <div slot="title" class="toolbar" style="margin-bottom: 0">
+                                <div class="toolbar">
                                     <a-button type="primary" icon="plus" @click="openRule()">添加分流规则</a-button>
                                     <a-button icon="download" style="margin-left:8px"
                                               @click="confirmExport('rules')">导出</a-button>
@@ -357,11 +408,11 @@
                                      员能把封禁拖到最后一行，而它实际仍然第一个匹
                                      配，没有任何一层会报错。两张独立的表还天然拒
                                      绝段间 drop。 -->
-                                <div v-if="blockRules.length" class="rule-section-title">
+                                <div v-if="blockRules.length" class="rule-section-title is-block">
                                     封禁规则
                                     <span class="rule-section-hint">始终优先于下方所有分流规则</span>
                                 </div>
-                                <a-table v-if="blockRules.length" :columns="ruleColumns"
+                                <a-table v-if="blockRules.length" class="rule-table is-block" :columns="ruleColumns"
                                          :data-source="blockRules" :custom-row="ruleRow"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false">
 {{template "routingRuleTableSlots" .}}
@@ -371,7 +422,7 @@
                                     分流规则
                                     <span class="rule-section-hint">越靠上越先匹配，拖动左侧手柄调整顺序</span>
                                 </div>
-                                <a-table :columns="ruleColumns" :data-source="routeRules"
+                                <a-table class="rule-table" :columns="ruleColumns" :data-source="routeRules"
                                          :locale="{ emptyText: '还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。' }"
                                          :custom-row="ruleRow"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false">
@@ -390,8 +441,17 @@
          写在外面的 <a-modal> 不会被编译，点「添加 / 编辑」只会改数据、
          界面毫无反应，且没有任何报错。
          若要挪到外面，得照 inbound_modal.html 的做法给它自己的根元素和 new Vue。 -->
-    <a-modal v-model="groupModal.visible" title="域名组"
+    <a-modal v-model="groupModal.visible"
              @ok="saveGroup" ok-text="保存" cancel-text="取消">
+        <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="folder"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ groupModal.id ? '编辑域名组' : '添加域名组' ]]</span>
+                <span class="modal-head-sub">一组域名与 IP 段，可被多条规则引用</span>
+            </span>
+        </div>
+    </template>
         <a-form layout="vertical">
             <a-form-item label="备注">
                 <a-input v-model="groupModal.remark"></a-input>
@@ -497,8 +557,17 @@
         </a-form>
     </a-modal>
 
-    <a-modal v-model="nodeModal.visible" :title="nodeModal.id ? '编辑出站节点' : '添加出站节点'"
+    <a-modal v-model="nodeModal.visible"
              @ok="saveNode" ok-text="保存" cancel-text="取消">
+        <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-teal" aria-hidden="true"><a-icon type="cloud-server"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ nodeModal.id ? '编辑出站节点' : '添加出站节点' ]]</span>
+                <span class="modal-head-sub">粘贴分享链接即可，保存前会交给 Xray 校验</span>
+            </span>
+        </div>
+    </template>
         <a-form layout="vertical">
             <!-- tag 一经分配即不可变：改 tag 会让所有引用它的规则悬空，
                  而 xray 对悬空 outboundTag 不报错，流量会静默回落到直连。 -->
@@ -522,8 +591,17 @@
         </a-form>
     </a-modal>
 
-    <a-modal v-model="ruleModal.visible" title="分流规则"
+    <a-modal v-model="ruleModal.visible"
              @ok="saveRule" ok-text="保存" cancel-text="取消">
+        <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-violet" aria-hidden="true"><a-icon type="fork"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">[[ ruleModal.rule && ruleModal.rule.id ? '编辑分流规则' : '添加分流规则' ]]</span>
+                <span class="modal-head-sub">哪些用户访问哪些域名时，走哪里</span>
+            </span>
+        </div>
+    </template>
         <a-form layout="vertical">
             <a-form-item label="备注">
                 <a-input v-model="ruleModal.rule.remark"></a-input>
@@ -622,12 +700,24 @@
                 </div>
             </a-form-item>
             <a-form-item label="动作">
-                <a-radio-group v-model="ruleModal.rule.action">
-                    <a-radio value="direct">直连（本机出网）</a-radio>
-                    <a-radio value="proxy">代理（走节点）</a-radio>
-                    <a-radio value="block">阻断（黑洞）</a-radio>
+                <!-- 三张选择卡（与视觉稿 v3 一致）。仍是 a-radio-group，取值与改动前相同，
+                     键盘方向键照常切换。 -->
+                <a-radio-group v-model="ruleModal.rule.action" class="action-choices">
+                    <a-radio value="direct" class="is-direct">
+                        <span class="action-name">直连</span>
+                        <span class="action-desc">从本机直接出网</span>
+                    </a-radio>
+                    <a-radio value="proxy" class="is-proxy">
+                        <span class="action-name">出站节点</span>
+                        <span class="action-desc">转发到指定落地节点</span>
+                    </a-radio>
+                    <a-radio value="block" class="is-block">
+                        <span class="action-name">封禁</span>
+                        <span class="action-desc">直接丢弃，优先于所有分流</span>
+                    </a-radio>
                 </a-radio-group>
-                <div style="color: rgba(0,0,0,.45); font-size: 12px; line-height: 1.6">
+                <!-- rgba(0,0,0,.45) 只有 3.36:1，换成 --aui-text-3 -->
+                <div style="margin-top: 8px; color: var(--aui-text-3); font-size: 12px; line-height: 1.6">
                     直连即从这台机器本机出网，不经过任何出站节点。它不等于「不写这条规则」：
                     显式的直连规则会先命中，从而挡住后面那些本该把这批目标代理出去的规则。
                 </div>
@@ -679,6 +769,9 @@
 {{template "js" .}}
 <script src="{{ .base_path }}assets/js/model/routing.js?{{ .cur_ver }}"></script>
 <script>
+    // 自动探测时，这么近之内测过的节点跳过（与系统状态页同一口径）
+    const PROBE_FRESH_MS = 60 * 1000;
+
     const app = new Vue({
         mixins: [panelVersionMixin],
         delimiters: ['[[', ']]'],
@@ -694,35 +787,32 @@
             inbounds: [],
             // saved 是服务端当前的值，value 是输入框里的；两者不同才能点保存。
             subTime: { value: '', saved: '', saving: false },
-            groupColumns: [
-                { title: '备注', dataIndex: 'remark', width: 160 },
-                { title: '域名', scopedSlots: { customRender: 'domains' } },
-                { title: 'IP 段', width: 100, scopedSlots: { customRender: 'cidrs' } },
-                { title: '订阅', width: 220, scopedSlots: { customRender: 'subscribe' } },
-                { title: '操作', width: 140, scopedSlots: { customRender: 'action' } },
-            ],
+            // 列宽按比例分：固定像素宽 + 一列不设宽时，那一列会吃掉所有剩余宽度，
+            // 节点名只有几个字，中间就空出一大块。
             nodeColumns: [
-                { title: '备注', dataIndex: 'remark', width: 160 },
-                { title: 'tag', width: 200, scopedSlots: { customRender: 'tag' } },
-                { title: '协议', width: 100, scopedSlots: { customRender: 'protocol' } },
-                { title: '连通性', width: 180, scopedSlots: { customRender: 'probe' } },
-                { title: '启用', width: 80, scopedSlots: { customRender: 'enable' } },
-                { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
+                { title: '节点', width: '18%', scopedSlots: { customRender: 'node' } },
+                { title: '地址', width: '19%', scopedSlots: { customRender: 'address' } },
+                { title: 'tag', width: '16%', scopedSlots: { customRender: 'tag' } },
+                { title: '协议', width: '9%', scopedSlots: { customRender: 'protocol' } },
+                { title: '被引用', width: '10%', scopedSlots: { customRender: 'refs' } },
+                { title: '连通性', width: '15%', scopedSlots: { customRender: 'probe' } },
+                { title: '启用', width: '6%', scopedSlots: { customRender: 'enable' } },
+                { title: '操作', width: '7%', scopedSlots: { customRender: 'action' } },
             ],
             ruleColumns: [
                 // 优先级不再是一个可编辑的数字：它由行的先后决定，拖手柄改。
-                { title: '', width: 40, scopedSlots: { customRender: 'drag' } },
-                { title: '备注', dataIndex: 'remark', width: 140 },
+                { title: '', width: 72, scopedSlots: { customRender: 'drag' } },
+                { title: '备注', dataIndex: 'remark', width: '18%' },
                 // rule-flow-cell 在单元格右缘用 ::after 画一个 →，把「哪些用户
                 // → 访问哪批域名 → 去哪」这条链路说出来。不单开一列：三列本来
                 // 就窄，再挤两列箭头会让每列各缩一截。
-                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: 140,
+                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: '22%',
                   className: 'rule-flow-cell' },
-                { title: '域名组', scopedSlots: { customRender: 'group' }, width: 140,
+                { title: '域名组', scopedSlots: { customRender: 'group' }, width: '26%',
                   className: 'rule-flow-cell' },
-                { title: '去向', scopedSlots: { customRender: 'target' }, width: 140 },
-                { title: '状态', width: 60, scopedSlots: { customRender: 'warn' } },
-                { title: '操作', width: 80, scopedSlots: { customRender: 'action' } },
+                { title: '去向', scopedSlots: { customRender: 'target' }, width: '18%' },
+                { title: '状态', width: 52, scopedSlots: { customRender: 'warn' } },
+                { title: '操作', width: 52, scopedSlots: { customRender: 'action' } },
             ],
             groupModal: {
                 visible: false, id: 0, remark: '', domains: '', cidrs: '', subscribeUrls: [''],
@@ -967,6 +1057,60 @@
                     }
                 }
             },
+            // ── 卡片与表格里的派生展示（只读，不改任何数据） ──
+            groupInitials(group) {
+                const name = (group.remark || '').trim();
+                // 拉丁字母取前两个字母大写（Netflix → NE），其它取首字
+                return /^[A-Za-z0-9]/.test(name) ? name.slice(0, 2).toUpperCase() : (name.slice(0, 1) || '#');
+            },
+            groupColorOf(group) {
+                const colors = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777', '#0891B2'];
+                return colors[group.id % colors.length];
+            },
+            groupRefCount(id) {
+                return this.rules.filter(r => (r.domainGroupIds || []).includes(id)).length;
+            },
+            nodeInitials(node) {
+                const name = (node.remark || node.tag || '').trim();
+                return /^[A-Za-z0-9]/.test(name) ? name.slice(0, 2).toUpperCase() : (name.slice(0, 1) || '#');
+            },
+            nodeColorOf(node) {
+                const colors = ['#1266D6', '#7C3AED', '#0D9488', '#4F46E5', '#DB2777', '#0891B2'];
+                return colors[node.id % colors.length];
+            },
+            // 延迟颜色条：80ms 内绿、150ms 内橙、更慢红；条长按 200ms 封顶
+            probeBarStyle(ms) {
+                const color = ms < 80 ? '#10B981' : ms < 150 ? '#D97706' : '#DC2626';
+                return { width: Math.min(100, Math.max(6, ms / 200 * 100)) + '%', background: color };
+            },
+            groupCount(id) {
+                const g = this.groups.find(x => x.id === id);
+                return g ? g.effectiveCount : 0;
+            },
+            nodeRefCount(id) {
+                return this.rules.filter(r => r.action === 'proxy' && r.outboundId === id).length;
+            },
+            // 从节点保存的 outbound JSON 里取「服务器:端口」。vless / vmess 传统写法在
+            // settings.vnext[0]，新版 xray 的扁平写法直接是 settings.address / port；
+            // trojan / shadowsocks / socks / http 在 settings.servers[0]；wireguard 在
+            // settings.peers[0].endpoint。解析不了就显示「—」，不猜。
+            nodeAddress(node) {
+                try {
+                    const st = (JSON.parse(node.config || '{}').settings) || {};
+                    // wireguard 的 settings.address 是本机接口地址数组，不是服务器，先走 peers
+                    if (st.peers && st.peers[0] && st.peers[0].endpoint) {
+                        return st.peers[0].endpoint;
+                    }
+                    const flat = typeof st.address === 'string' ? st : null;
+                    const v = (st.vnext && st.vnext[0]) || (st.servers && st.servers[0]) || flat;
+                    if (v && v.address) {
+                        return v.port ? `${v.address}:${v.port}` : v.address;
+                    }
+                } catch (e) {
+                    // 配置损坏时落到下面的「—」
+                }
+                return '—';
+            },
             groupName(id) {
                 const g = this.groups.find(x => x.id === id);
                 return g ? g.remark : '(已删除)';
@@ -996,26 +1140,39 @@
                     node.probing = false;
                 }
             },
+            // 服务端的全局并发上限是 3，前端按同样的宽度分批发起：
+            // 一次把 N 个请求全丢出去的话，长时间挂起的连接会占满
+            // 浏览器对同域的连接数，页面上其它请求会一起被堵住。
+            async probeList(list) {
+                const queue = list.slice();
+                const width = Math.min(3, queue.length);
+                const workers = [];
+                for (let i = 0; i < width; i++) {
+                    workers.push((async () => {
+                        while (queue.length > 0) {
+                            await this.probeNode(queue.shift());
+                        }
+                    })());
+                }
+                await Promise.all(workers);
+            },
             async probeAll() {
                 if (this.probingAll) return;
                 this.probingAll = true;
                 try {
-                    // 服务端的全局并发上限是 3，前端按同样的宽度分批发起：
-                    // 一次把 N 个请求全丢出去的话，长时间挂起的连接会占满
-                    // 浏览器对同域的连接数，页面上其它请求会一起被堵住。
-                    const queue = this.nodes.slice();
-                    const width = Math.min(3, queue.length);
-                    const workers = [];
-                    for (let i = 0; i < width; i++) {
-                        workers.push((async () => {
-                            while (queue.length > 0) {
-                                await this.probeNode(queue.shift());
-                            }
-                        })());
-                    }
-                    await Promise.all(workers);
+                    await this.probeList(this.nodes);
                 } finally {
                     this.probingAll = false;
+                }
+            },
+            // 切到「出站节点」标签页时自动探测一次。只测已启用、且最近 1 分钟内
+            // 没有结果的节点：每次探测都会临时起一个 xray 进程并真实出网，
+            // 来回切标签或连续刷新不该每次都把所有节点重测一遍。
+            onRoutingTabChange(key) {
+                if (String(key) === '2') {
+                    const fresh = Date.now() - PROBE_FRESH_MS;
+                    this.probeList(this.nodes.filter(n =>
+                        n.enable && !n.probing && !(n.probe && n.probe.checkedAt * 1000 > fresh)));
                 }
             },
             inboundName(id) {
