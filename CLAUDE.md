@@ -361,7 +361,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 ## 按来源 IP 的分时段用量
 
-入站展开行里每个来源 IP 的用量列，窗口由展开行顶部那个控件决定（今日 / 近 3 日 / 近 7 日 / 近 30 日 / 近 1 年 / 自定义区间）。设计文档在 `docs/superpowers/specs/2026-09-10-per-ip-usage-window-design.md`。
+入站展开行里每个来源 IP 的用量列，窗口由展开行顶部那个时间范围下拉决定（今天 / 昨天 / 近 24 小时 / 近 3、7、14、30 天 / 近 1 年 / 本月 / 上月 / 自定义日期区间）。这个下拉是共用组件 `range-select`（`web/html/xui/component/range_select.html`），系统状态页的流量概览也用它；档位名与 `ParseWindow` 一一对应，认不出的档位会被服务端静默回落成「今天」，两边改一处必须改另一处。设计文档在 `docs/superpowers/specs/2026-09-10-per-ip-usage-window-design.md`。
 
 **数据复用 `InboundIPHour`（共享检测那张表）的 `ActiveUp`/`ActiveDown` 两列**，不是新表。`ActiveBytes` 保留为独立累加的字段、**绝不能改成两列之和**：它是并存判定的门槛判据（`coexistMinActiveBytes`），而升级前写入的行两个新列恒为 0，改成计算值会让那批历史行的判据当场失效，共享检测的结论在升级瞬间整体改变而界面上没有任何提示。这张表因此有了第二个消费者，两者对采集门槛的要求方向相反（并存判定要过滤噪声，用量统计希望不漏），冲突一律以并存判定为准。
 
@@ -383,7 +383,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **新接口 `/aui/inbound/ipUsage/:id` 刻意不并进 `/onlines/:id`**：后者每 2 秒轮询一次且按展开的入站数逐个请求（`inbounds.html` 的 `syncOnlineTimer`），并进去等于每 2 秒对一张 30 天的表做一次聚合查询再乘以展开的入站数。
 
-**系统状态页的总览图（`Overview`）没有跟着改**，仍用旧的 `TrafficRange` 四档滑动窗口。因此面板里同时存在两套时间语义：入站展开行是日历（今日 / 近 N 日），系统状态页是滑动（24 小时 / 7 天 / 30 天 / 1 年）。两个页面之间不互相引用同一个数字，不会产生对账问题，但确实是不一致；将来若把系统状态页也改掉，`rangeSpec` 与 `Range24h` 等常量可以一并退役。
+**系统状态页的总览图也走 `ParseWindow`**（`InboundController.getTrafficOverview` → `TrafficHistoryService.OverviewWindow`，与展开行的 `HistoryWindow` 共用 `windowGranularity` 选粒度），两个页面因此是同一套时间语义。新增的 `24h` 是唯一的滑动档（`AlignHour(now)-23h` 起的 24 个小时桶），其余都是日历窗口；`Overview` 聚合必须带 `bucket_start < end` 上界（`overviewForSlots`），否则「昨天」「上月」这类已结束的窗口会把窗口之后的桶也算进 Top N 排名（`TestOverviewWindowExcludesBucketsAfterWindowEnd`）。旧的 `TrafficRange` / `rangeSpec` / `Overview` / `History` 已没有生产调用方、只剩测试在用，可以连同对应测试一并退役，这次没动。
 
 ## IP 归属地库（四个源）
 

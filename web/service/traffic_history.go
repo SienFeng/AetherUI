@@ -321,24 +321,7 @@ func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow, no
 		return nil, err
 	}
 
-	// 窗口起点早于小时桶保留期时改用日桶。
-	//
-	// ParseWindow 只按跨度选粒度（它是纯函数，读不到设置项）。对所有 End 恒为
-	// now 的档位这没问题，但自定义区间可以整个落在过去：「3 个月前的那 10 天」
-	// 跨度只有 10 天、选出小时粒度，而小时桶只留 trafficHourRetentionDays 天，
-	// 查出来是一片空白——**同一段时间的日桶其实还在库里**（默认留 365 天），
-	// 只是没被查。「数据明明有却显示没有」比换个粒度画图糟糕得多，所以这里
-	// 覆盖粒度。读不到设置项时不覆盖：那是一次设置读取失败，不该顺带改变
-	// 图的粒度。
-	g := w.Granularity
-	if g == model.GranularityHour {
-		if days, err := s.settingService.GetTrafficHourRetentionDays(); err == nil && days > 0 {
-			if w.Start < now.AddDate(0, 0, -days).Unix() {
-				g = model.GranularityDay
-			}
-		}
-	}
-
+	g := s.windowGranularity(w, now)
 	slots := buildSlotsInWindow(g, w, loc)
 	result := &TrafficHistoryResult{
 		Granularity: granularityName(g),
@@ -378,6 +361,27 @@ func (s *TrafficHistoryService) HistoryWindow(inboundId int, w TrafficWindow, no
 	}
 	result.Total = sumPoints(result.Points)
 	return result, nil
+}
+
+// windowGranularity 返回窗口实际要查的粒度：窗口起点早于小时桶保留期时改用日桶。
+//
+// ParseWindow 只按跨度选粒度（它是纯函数，读不到设置项）。对所有 End 恒为
+// now 的档位这没问题，但自定义区间（以及「上月」）可以整个落在过去：「3 个月
+// 前的那 10 天」跨度只有 10 天、选出小时粒度，而小时桶只留
+// trafficHourRetentionDays 天，查出来是一片空白——**同一段时间的日桶其实还在
+// 库里**（默认留 365 天），只是没被查。「数据明明有却显示没有」比换个粒度
+// 画图糟糕得多，所以这里覆盖粒度。读不到设置项时不覆盖：那是一次设置读取
+// 失败，不该顺带改变图的粒度。HistoryWindow 与 OverviewWindow 共用这一处判断。
+func (s *TrafficHistoryService) windowGranularity(w TrafficWindow, now time.Time) model.TrafficGranularity {
+	g := w.Granularity
+	if g == model.GranularityHour {
+		if days, err := s.settingService.GetTrafficHourRetentionDays(); err == nil && days > 0 {
+			if w.Start < now.AddDate(0, 0, -days).Unix() {
+				g = model.GranularityDay
+			}
+		}
+	}
+	return g
 }
 
 // formatLabels 在服务端把刻度格式化成 x 轴文字。放在服务端是因为时区也在
@@ -438,13 +442,37 @@ func (s *TrafficHistoryService) History(inboundId int, r TrafficRange, now time.
 }
 
 // Overview 返回范围内用量最大的前 topN 个入站的分时曲线，按总量降序。
+//
+// 旧的固定档位版本，接口已改走 OverviewWindow；保留它是因为既有测试覆盖的
+// 排序、补零、备注回落等行为都在共用的 overviewForSlots 里，这里只负责算刻度。
 func (s *TrafficHistoryService) Overview(r TrafficRange, topN int, now time.Time) (*TrafficOverviewResult, error) {
 	g, count := rangeSpec(r)
 	loc, err := s.settingService.GetTimeLocation()
 	if err != nil {
 		return nil, err
 	}
-	slots := buildSlots(g, now, loc, count)
+	return s.overviewForSlots(g, buildSlots(g, now, loc, count), 0, topN, loc)
+}
+
+// OverviewWindow 与 Overview 相同，只是范围来自 TrafficWindow（系统状态页的
+// 时间下拉：今天 / 昨天 / 近 24 小时 / 近 N 天 / 本月 / 上月 / 自定义）。
+func (s *TrafficHistoryService) OverviewWindow(w TrafficWindow, topN int, now time.Time) (*TrafficOverviewResult, error) {
+	loc, err := s.settingService.GetTimeLocation()
+	if err != nil {
+		return nil, err
+	}
+	g := s.windowGranularity(w, now)
+	return s.overviewForSlots(g, buildSlotsInWindow(g, w, loc), w.End, topN, loc)
+}
+
+// overviewForSlots 是 Overview / OverviewWindow 的共同实现。
+//
+// end 是右端（不含）的 Unix 秒，0 表示不设上界：固定档位的窗口永远截止到
+// 现在，没有更晚的桶；而「昨天」「上月」和自定义区间的右端在过去，**必须**
+// 带上 bucket_start < end，否则右端之后的用量也会被算进 Top N 的排名里——
+// 排名与图上画出来的线对不上，且没有任何一层会报错。
+func (s *TrafficHistoryService) overviewForSlots(g model.TrafficGranularity, slots []int64, end int64,
+	topN int, loc *time.Location) (*TrafficOverviewResult, error) {
 	result := &TrafficOverviewResult{
 		Granularity: granularityName(g),
 		Labels:      formatLabels(g, slots, loc),
@@ -456,8 +484,17 @@ func (s *TrafficHistoryService) Overview(r TrafficRange, topN int, now time.Time
 		result.Reason = trafficDBUnavailable
 		return result, nil
 	}
+	if len(slots) == 0 {
+		return result, nil
+	}
 	if topN <= 0 {
 		topN = 12
+	}
+	cond := "granularity = ? and bucket_start >= ?"
+	args := []any{g, slots[0]}
+	if end > 0 {
+		cond += " and bucket_start < ?"
+		args = append(args, end)
 	}
 
 	// 先只算出 Top N 的 id，再取这几个的明细。一次把范围内所有行拉进内存
@@ -467,9 +504,9 @@ func (s *TrafficHistoryService) Overview(r TrafficRange, topN int, now time.Time
 		Total     int64
 	}
 	var tops []topRow
-	err = db.Model(&model.TrafficBucket{}).
+	err := db.Model(&model.TrafficBucket{}).
 		Select("inbound_id, sum(up + down) as total").
-		Where("granularity = ? and bucket_start >= ?", g, slots[0]).
+		Where(cond, args...).
 		Group("inbound_id").
 		// 次级排序按 id：总量相同时顺序也要稳定，否则每次刷新图例都在跳。
 		Order("total desc, inbound_id asc").
@@ -497,7 +534,7 @@ func (s *TrafficHistoryService) Overview(r TrafficRange, topN int, now time.Time
 	}
 
 	var rows []model.TrafficBucket
-	err = db.Where("granularity = ? and bucket_start >= ? and inbound_id in ?", g, slots[0], ids).
+	err = db.Where(cond+" and inbound_id in ?", append(args, ids)...).
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
@@ -508,7 +545,7 @@ func (s *TrafficHistoryService) Overview(r TrafficRange, topN int, now time.Time
 	}
 	byInbound := make(map[int][]int64, len(ids))
 	for _, id := range ids {
-		byInbound[id] = make([]int64, count)
+		byInbound[id] = make([]int64, len(slots))
 	}
 	for _, row := range rows {
 		points, ok := byInbound[row.InboundId]

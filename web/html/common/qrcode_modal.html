@@ -1,8 +1,20 @@
 {{define "qrcodeModal"}}
-<a-modal id="qrcode-modal" v-model="qrModal.visible" :title="qrModal.title"
-         :closable="true" width="300px" :ok-text="qrModal.okText"
+<a-modal id="qrcode-modal" v-model="qrModal.visible"
+         :closable="true" width="360px" :ok-text="qrModal.okText"
          cancel-text='{{ i18n "close" }}' :ok-button-props="{attrs:{id:'qr-modal-ok-btn'}}">
-    <canvas id="qrCode" style="width: 100%; height: 100%;"></canvas>
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="qrcode"></a-icon></span>
+            <span class="modal-head-text">
+                <!-- 这个实例没设 [[ ]] 分隔符，用 v-text 绑定 -->
+                <span class="modal-head-title" v-text="qrModal.title"></span>
+                <span class="modal-head-sub">用客户端扫码导入</span>
+            </span>
+        </div>
+    </template>
+    <div class="qr-frame"><canvas id="qrCode" style="width: 100%; height: 100%;"></canvas></div>
+    <!-- 二维码下方给出同一段内容的文本形式，便于核对；复制仍用底部的按钮 -->
+    <a-input class="qr-text" :value="qrModal.copyText" read-only aria-label="分享内容"></a-input>
 </a-modal>
 
 <script>

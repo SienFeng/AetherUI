@@ -396,8 +396,12 @@ func (a *InboundController) getTrafficHistory(c *gin.Context) {
 }
 
 func (a *InboundController) getTrafficOverview(c *gin.Context) {
+	// range/start/end 与 getTrafficHistory 同一套（ParseWindow）；系统状态页的
+	// 时间下拉另外用到 yesterday / 24h / 14d / month / lastMonth 几档。
 	form := struct {
 		Range string `form:"range"`
+		Start string `form:"start"`
+		End   string `form:"end"`
 		Top   int    `form:"top"`
 	}{}
 	if err := c.ShouldBind(&form); err != nil {
@@ -410,7 +414,16 @@ func (a *InboundController) getTrafficOverview(c *gin.Context) {
 	if form.Top <= 0 || form.Top > 50 {
 		form.Top = 12
 	}
-	result, err := a.trafficHistoryService.Overview(service.TrafficRange(form.Range), form.Top, time.Now())
+	loc, err := a.settingService.GetTimeLocation()
+	if err != nil {
+		jsonMsg(c, "获取用量总览", err)
+		return
+	}
+	// 全部钳制在 ParseWindow 里，这里不自己解释任何一个入参；now 只取一次，
+	// 理由同 getTrafficHistory（窗口与保留期判据必须用同一个时刻）。
+	now := time.Now()
+	w := service.ParseWindow(form.Range, form.Start, form.End, loc, now)
+	result, err := a.trafficHistoryService.OverviewWindow(w, form.Top, now)
 	if err != nil {
 		jsonMsg(c, "获取用量总览", err)
 		return

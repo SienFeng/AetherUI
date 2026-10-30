@@ -1,70 +1,74 @@
 {{define "component/settingListItem"}}
-<a-list-item style="padding: 20px">
-    <a-row type="flex" align="middle" style="width: 100%">
-        <a-col :lg="24" :xl="12">
-            <a-list-item-meta>
-                <template slot="title">
-                    <span v-text="title"></span>
-                    <a-tooltip v-if="desc" placement="topLeft" overlay-class-name="setting-hint-tip"
-                               :trigger="['hover', 'focus']">
-                        <template slot="title"><span v-text="desc"></span></template>
-                        <span class="setting-hint" tabindex="0" :aria-label="'说明：' + desc">
-                            <a-icon type="info-circle"></a-icon>
-                        </span>
-                    </a-tooltip>
-                </template>
-            </a-list-item-meta>
-        </a-col>
-        <a-col :lg="24" :xl="12">
-            <template v-if="type === 'text'">
-                <a-input :value="value" @input="$emit('input', $event.target.value)"></a-input>
-            </template>
-            <template v-else-if="type === 'number'">
-                <a-input type="number" :value="value" @input="$emit('input', $event.target.value)"></a-input>
-            </template>
-            <template v-else-if="type === 'switch'">
-                <a-switch :checked="value === 1" @change="checked => $emit('input', checked ? 1 : 0)"></a-switch>
-            </template>
-            <template v-else-if="type === 'textarea'">
-                <a-textarea :value="value" @input="$emit('input', $event.target.value)" :auto-size="{ minRows: 10, maxRows: 10 }"></a-textarea>
-            </template>
-        </a-col>
-    </a-row>
+<!-- 一行设置：左边标题 + 说明，右边控件（与视觉稿 v3 一致）。
+     说明常驻在标题下、最多两行；更长的完整内容仍在 ⓘ 里，不删一个字。
+     需要重启面板才生效的项带「需重启面板」标签；改过未保存的行左侧一条橙色竖条。 -->
+<a-list-item class="setting-row" :class="{ 'is-changed': changed, 'is-stacked': type === 'textarea' }">
+    <div class="setting-row-main">
+        <div class="setting-row-title">
+            <span v-text="title"></span>
+            <span v-if="needsRestart" class="setting-badge">需重启面板</span>
+            <a-tooltip v-if="desc && desc.length > 60" placement="topLeft" overlay-class-name="setting-hint-tip"
+                       :trigger="['hover', 'focus']">
+                <template slot="title"><span v-text="desc"></span></template>
+                <span class="setting-hint" tabindex="0" :aria-label="'完整说明：' + desc">
+                    <a-icon type="info-circle"></a-icon>
+                </span>
+            </a-tooltip>
+        </div>
+        <div v-if="desc" class="setting-row-desc" v-text="desc"></div>
+    </div>
+    <div class="setting-row-ctl">
+        <template v-if="type === 'text'">
+            <a-input :value="value" @input="$emit('input', $event.target.value)" :aria-label="title"></a-input>
+        </template>
+        <template v-else-if="type === 'number'">
+            <a-input type="number" :value="value" @input="$emit('input', $event.target.value)" :aria-label="title"></a-input>
+        </template>
+        <template v-else-if="type === 'switch'">
+            <a-switch :checked="value === 1" @change="checked => $emit('input', checked ? 1 : 0)" :aria-label="title"></a-switch>
+        </template>
+        <template v-else-if="type === 'textarea'">
+            <a-textarea :value="value" @input="$emit('input', $event.target.value)" :auto-size="{ minRows: 10, maxRows: 10 }" :aria-label="title"></a-textarea>
+        </template>
+    </div>
 </a-list-item>
 {{end}}
 
 {{define "component/settingActionItem"}}
-<a-list-item style="padding: 20px">
-    <a-row type="flex" align="middle" style="width: 100%">
-        <a-col :lg="24" :xl="12">
-            <a-list-item-meta>
-                <template slot="title">
-                    <span v-text="title"></span>
-                    <a-tooltip v-if="hint" placement="topLeft" overlay-class-name="setting-hint-tip"
-                               :trigger="['hover', 'focus']">
-                        <template slot="title"><span v-html="hint"></span></template>
-                        <span class="setting-hint" tabindex="0" :aria-label="'说明：' + plainHint">
-                            <a-icon type="info-circle"></a-icon>
-                        </span>
-                    </a-tooltip>
-                </template>
-                <template v-if="desc" slot="description"><span v-html="desc"></span></template>
-            </a-list-item-meta>
-        </a-col>
-        <a-col :lg="24" :xl="12" class="setting-action-col">
-            <slot></slot>
-        </a-col>
-    </a-row>
+<a-list-item class="setting-row">
+    <div class="setting-row-main">
+        <div class="setting-row-title">
+            <span v-text="title"></span>
+            <a-tooltip v-if="hint" placement="topLeft" overlay-class-name="setting-hint-tip"
+                       :trigger="['hover', 'focus']">
+                <template slot="title"><span v-html="hint"></span></template>
+                <span class="setting-hint" tabindex="0" :aria-label="'说明：' + plainHint">
+                    <a-icon type="info-circle"></a-icon>
+                </span>
+            </a-tooltip>
+        </div>
+        <div v-if="desc" class="setting-row-desc is-full"><span v-html="desc"></span></div>
+    </div>
+    <div class="setting-row-ctl">
+        <slot></slot>
+    </div>
 </a-list-item>
 {{end}}
 
 {{define "component/setting"}}
 <script>
-    // 说明文字不再常驻在标题下面：好几项写了三五行，整页读起来像说明书。
-    // 收进标题旁的 ⓘ，悬停或键盘聚焦时弹出，内容一个字不删——「需重启」
-    //「必须留空」这类注意事项仍然找得到。
+    // 说明文字常驻在标题下但最多两行：好几项写了三五行，全部展开整页读起来像
+    // 说明书。完整内容在标题旁的 ⓘ 里，悬停或键盘聚焦时弹出，一个字不删。
+    // 说明常驻显示在标题下（最多两行），超过 60 字的完整内容另放进 ⓘ。
+    // changed：这一项改过、还没保存（由页面按字段比对后传入）。
     Vue.component('setting-list-item', {
-        props: ["type", "title", "desc", "value"],
+        props: ["type", "title", "desc", "value", "changed"],
+        computed: {
+            // 只认「重启面板」：「重启 xray（约 10 秒后自动完成）」不需要管理员动手
+            needsRestart() {
+                return /重启面板/.test(this.desc || '');
+            },
+        },
         template: `{{template "component/settingListItem"}}`,
     });
 

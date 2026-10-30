@@ -1,46 +1,45 @@
 {{define "menuItems"}}
-<a-menu-item key="{{ .base_path }}aui/">
-    <a-icon type="dashboard"></a-icon>
-    <span>系统状态</span>
-</a-menu-item>
-<a-menu-item key="{{ .base_path }}aui/inbounds">
-    <a-icon type="user"></a-icon>
-    <span>入站列表</span>
-</a-menu-item>
-<a-menu-item key="{{ .base_path }}aui/routing">
-    <a-icon type="fork"></a-icon>
-    <span>分流管理</span>
-</a-menu-item>
-<a-menu-item key="{{ .base_path }}aui/setting">
-    <a-icon type="setting"></a-icon>
-    <span>面板设置</span>
-</a-menu-item>
-<!--<a-menu-item key="{{ .base_path }}aui/clients">-->
-<!--    <a-icon type="laptop"></a-icon>-->
-<!--    <span>客户端</span>-->
-<!--</a-menu-item>-->
-<a-sub-menu>
-    <template slot="title">
-        <a-icon type="link"></a-icon>
-        <span>其他</span>
-    </template>
+<!-- 分组：概览 / 管理 / 其他。sider 与窄屏抽屉共用这一份。
+     GitHub 改成直接放在「其他」组里：改动前它是「其他」子菜单下唯一一项，
+     得先点开一层才看得到。 -->
+<a-menu-item-group title="概览">
+    <a-menu-item key="{{ .base_path }}aui/">
+        <a-icon type="dashboard"></a-icon>
+        <span>系统状态</span>
+    </a-menu-item>
+</a-menu-item-group>
+<a-menu-item-group title="管理">
+    <a-menu-item key="{{ .base_path }}aui/inbounds">
+        <a-icon type="user"></a-icon>
+        <span>入站列表</span>
+    </a-menu-item>
+    <a-menu-item key="{{ .base_path }}aui/routing">
+        <a-icon type="fork"></a-icon>
+        <span>分流管理</span>
+    </a-menu-item>
+    <a-menu-item key="{{ .base_path }}aui/setting">
+        <a-icon type="setting"></a-icon>
+        <span>面板设置</span>
+    </a-menu-item>
+</a-menu-item-group>
+<a-menu-item-group title="其他">
     <a-menu-item key="https://github.com/SienFeng/AetherUI/">
         <a-icon type="github"></a-icon>
-        <span>Github</span>
+        <span>GitHub</span>
     </a-menu-item>
-</a-sub-menu>
-<a-menu-item key="{{ .base_path }}logout">
-    <a-icon type="logout"></a-icon>
-    <span>退出登录</span>
-</a-menu-item>
+    <a-menu-item key="{{ .base_path }}logout">
+        <a-icon type="logout"></a-icon>
+        <span>退出登录</span>
+    </a-menu-item>
+</a-menu-item-group>
 {{end}}
 
 
 {{define "commonSider"}}
-<!-- width 收窄到 160（antd 默认 200）：菜单项最长四个字，160 装得下，
-     腾出来的宽度留给入站列表——那张表的列已经排到十四列。布局是 flex，
+<!-- width 200：菜单项最长四个字，加上图标与左右留白，160 显得局促；
+     入站列表那张表的列多，200 是在两者之间的折中。布局是 flex，
      内容区会自动变宽，没有任何一处硬编码过侧栏宽度。 -->
-<a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0" :width="160">
+<a-layout-sider id="sider" collapsible breakpoint="md" collapsed-width="0" :width="200">
     <!-- 品牌头。改动前侧栏顶部直接就是第一个菜单项，整个面板没有一处写着
          自己叫什么。标识与登录页 .panel-brand 用同一个内联 SVG。
          aria-hidden：紧挨着就是「AetherUI」这几个字，读屏软件念两遍是噪音。 -->
@@ -55,7 +54,9 @@
         </span>
         <span class="sider-brand-name">AetherUI</span>
     </div>
-    <a-menu theme="dark" mode="inline" :selected-keys="['{{ .request_uri }}']"
+    <!-- 浅色侧栏：颜色留给数据和状态，导航本身退到背景里。
+         与窄屏抽屉（下方 #sider-drawer）同为 light，两处不再是两套配色。 -->
+    <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>

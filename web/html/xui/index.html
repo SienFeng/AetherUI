@@ -19,8 +19,25 @@
         <a-layout-content>
             <div class="page-header">
                 <div class="page-heading">
-                    <h1 class="page-title">系统状态</h1>
-                    <p class="page-description">面板、Xray 与服务器资源的实时运行情况</p>
+                    <!-- 「实时」只在最近一次 /server/status 成功后 6 秒内显示；轮询断了就
+                         改成「N 秒前更新」并变灰，不让一个停住的页面冒充实时。 -->
+                    <h1 class="page-title">系统状态
+                        <span class="page-live" :class="{ 'is-stale': statusStale }">[[ liveText ]]</span>
+                    </h1>
+                    <div class="page-meta">
+                        <span class="xray-badge" :class="xrayDotClass">
+                            Xray [[ xrayStateText ]]
+                            <a-tooltip v-if="status.xray.state === State.Error">
+                                <template slot="title">
+                                    <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
+                                </template>
+                                <a-icon type="question-circle" theme="filled"></a-icon>
+                            </a-tooltip>
+                        </span>
+                        <span>核心版本 <b>[[ status.xray.version || '—' ]]</b></span>
+                        <!-- status.uptime 是**系统**启动时长，不是 Xray 进程的 -->
+                        <span>系统已运行 <b>[[ formatSecond(status.uptime) ]]</b></span>
+                    </div>
                 </div>
                 <div class="page-actions">
                     <!-- 改动前「切换版本」是一个带 @click 的蓝色 a-tag。那不是按钮：
@@ -30,154 +47,195 @@
             </div>
             <a-spin :spinning="spinning" :delay="200" :tip="loadingTip">
                 <!-- 第一屏回答的是「系统健康吗、有没有人异常」，不是「CPU 多少」。
-                     四张卡全部来自已有接口，没有为了排版虚构任何指标：
+                     全部数据来自已有接口，没有为了排版虚构任何指标：
                      /server/status、/aui/inbound/list、/aui/inbound/onlineCounts、
-                     /aui/inbound/sharing/risk/summary。 -->
-                <transition name="list" appear>
-                    <div class="stat-row">
-                        <div class="stat-card" :class="xrayTone">
-                            <span class="stat-icon">
-                                <a-icon :type="xrayIcon" theme="filled"></a-icon>
-                            </span>
-                            <div class="stat-text">
-                                <span class="stat-label">Xray</span>
-                                <div class="stat-value" style="font-size: 18px">
-                                    [[ xrayStateText ]]
-                                    <a-tooltip v-if="status.xray.state === State.Error">
-                                        <template slot="title">
-                                            <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
-                                        </template>
-                                        <a-icon type="question-circle" theme="filled"></a-icon>
-                                    </a-tooltip>
-                                    <span class="unit">[[ status.xray.version || '—' ]]</span>
-                                </div>
-                            </div>
+                     /aui/inbound/sharing/risk/summary、/aui/inbound/traffic/overview。
+                     「分布在 N 个入站」「峰值时段」「网速折线」都是前端从这些数据派生的。 -->
+                <!-- 顶部是这台机器的四项资源。入站相关的指标（入站数、在线设备、
+                     用量）在入站列表页；这一页回答「机器与 Xray 怎么样」。
+                     越过 80% / 90% 时整张卡变橙 / 红（阈值沿用 CurTotal.tone），
+                     百分比数字同时在卡上——颜色不是唯一信息来源。 -->
+                <div class="stat-row res-row">
+                    <div class="stat-card res-stat" v-for="r in resourceBars" :key="r.name" :class="r.cardTone">
+                        <svg class="stat-ring" viewBox="0 0 64 64" aria-hidden="true">
+                            <circle cx="32" cy="32" r="26" fill="none" stroke="#E8EDF4" stroke-width="8"></circle>
+                            <circle cx="32" cy="32" r="26" fill="none" :stroke="r.ringColor" stroke-width="8"
+                                    stroke-linecap="round" transform="rotate(-90 32 32)"
+                                    :stroke-dasharray="r.dash"></circle>
+                        </svg>
+                        <div class="stat-text">
+                            <span class="stat-label">[[ r.name ]]</span>
+                            <div class="stat-value">[[ r.percent ]]<span class="unit">%</span></div>
                         </div>
-                        <div class="stat-card tone-geek">
-                            <span class="stat-icon"><a-icon type="team"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">入站</span>
-                                <div class="stat-value">
-                                    [[ enabledInboundCount ]]<span class="unit">/ [[ dbInbounds.length ]] 已启用</span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="stat-card tone-cyan">
-                            <span class="stat-icon"><a-icon type="wifi"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">在线设备</span>
-                                <!-- 读不到连接表时显示「—」而不是 0：把「看不到」渲染成
-                                     「没人在线」，管理员就会对着一个假的 0 做判断。
-                                     与入站列表那两列同一条口径。 -->
-                                <div class="stat-value">[[ onlineDeviceText ]]</div>
-                            </div>
-                        </div>
-                        <a-tooltip :title="attentionSummary">
-                            <div class="stat-card" tabindex="0"
-                                 :class="attentionCount ? 'tone-alert' : 'tone-ok'"
-                                 :aria-label="attentionCount ? attentionSummary : '没有需要关注的入站'">
-                                <span class="stat-icon">
-                                    <a-icon :type="attentionCount ? 'exclamation-circle' : 'check-circle'"
-                                            theme="filled"></a-icon>
-                                </span>
-                                <div class="stat-text">
-                                    <span class="stat-label">需要关注</span>
-                                    <div class="stat-value">[[ attentionCount ]]</div>
-                                </div>
-                            </div>
-                        </a-tooltip>
+                        <div class="stat-foot"><span :title="r.text">[[ r.text ]]</span></div>
                     </div>
-                </transition>
+                </div>
 
-                <transition name="list" appear>
-                    <a-card>
-                        <div slot="title">最近使用 (Top [[ overviewSeriesCount ]])</div>
-                        <a-radio-group size="small" :value="overviewRange" @change="changeOverviewRange">
-                            <a-radio-button value="24h">24 小时</a-radio-button>
-                            <a-radio-button value="7d">7 天</a-radio-button>
-                            <a-radio-button value="30d">30 天</a-radio-button>
-                            <a-radio-button value="1y">1 年</a-radio-button>
-                        </a-radio-group>
-                        <a-alert v-if="overviewReason" type="info" show-icon style="margin-top: 12px"
+                <div class="dash-row">
+                    <a-card class="usage-card">
+                        <div slot="title">
+                            流量概览
+                            <div class="card-sub">图为各入站的历史用量（按入站堆叠）；右侧三项为整台机器所有网卡的实时数据</div>
+                        </div>
+                        <!-- 时间范围下拉（component/range_select.html，与入站展开行共用） -->
+                        <span slot="extra">
+                            <range-select :range="overviewRange" :start="overviewCustom && overviewCustom[0]"
+                                          :end="overviewCustom && overviewCustom[1]"
+                                          @change="onOverviewRangeChange"></range-select>
+                        </span>
+                        <a-alert v-if="overviewReason" type="info" show-icon style="margin-bottom: 12px"
                                  :message="overviewReason"></a-alert>
-                        <div style="position: relative; height: 320px; margin-top: 12px">
-                            <canvas id="overview-chart"></canvas>
+                        <div class="usage-meta">
+                            <div><div class="usage-meta-label">合计</div><div class="usage-meta-value">[[ sizeFormat(overviewGrandTotal) ]]</div></div>
+                            <div><div class="usage-meta-label">峰值时段</div><div class="usage-meta-value">[[ overviewPeak ? sizeFormat(overviewPeak.value) : '—' ]]</div></div>
+                            <div><div class="usage-meta-label">[[ overviewGranularity === 'day' ? '平均每天' : '平均每小时' ]]</div><div class="usage-meta-value">[[ sizeFormat(overviewAverage) ]]</div></div>
+                            <!-- 竖线左边是上方时间范围内入站的历史用量，右边是整机网卡的实时值，
+                                 两种口径不能混着读 -->
+                            <span class="usage-meta-divider" aria-hidden="true"></span>
+                            <div>
+                                <div class="usage-meta-label">
+                                    实时网速
+                                    <a-tooltip title="整台机器所有网卡的总上传 / 下载速度"><a-icon type="question-circle"></a-icon></a-tooltip>
+                                </div>
+                                <div class="usage-meta-value usage-speed">
+                                    ↓ [[ sizeFormat(status.netIO.down) ]]/s
+                                    <svg class="stat-spark" viewBox="0 0 96 28" preserveAspectRatio="none" aria-hidden="true">
+                                        <polyline :points="speedSparkPoints" fill="none" stroke="#7C3AED" stroke-width="1.8"
+                                                  stroke-linejoin="round" stroke-linecap="round"></polyline>
+                                    </svg>
+                                </div>
+                                <div class="usage-meta-sub">↑ [[ sizeFormat(status.netIO.up) ]]/s</div>
+                            </div>
+                            <div>
+                                <div class="usage-meta-label">
+                                    TCP / UDP 连接
+                                    <a-tooltip title="整台机器所有网卡的总连接数"><a-icon type="question-circle"></a-icon></a-tooltip>
+                                </div>
+                                <div class="usage-meta-value">[[ status.tcpCount ]] / [[ status.udpCount ]]</div>
+                            </div>
+                            <div>
+                                <div class="usage-meta-label">
+                                    系统累计流量
+                                    <a-tooltip title="系统启动以来所有网卡的总上传 / 下载流量"><a-icon type="question-circle"></a-icon></a-tooltip>
+                                </div>
+                                <div class="usage-meta-value">↓ [[ sizeFormat(status.netTraffic.recv) ]]</div>
+                                <div class="usage-meta-sub">↑ [[ sizeFormat(status.netTraffic.sent) ]]</div>
+                            </div>
+                        </div>
+                        <ul class="chart-legend" v-if="overviewLegend.length">
+                            <li v-for="l in overviewLegend" :key="l.name"><i :style="{ background: l.color }"></i>[[ l.name ]]</li>
+                        </ul>
+                        <div class="usage-chart">
+                            <canvas id="overview-chart" role="img" aria-label="所选时间范围内按入站堆叠的用量面积图"></canvas>
+                            <div v-if="overviewGrandTotal === 0" class="chart-empty">这段时间没有用量</div>
                         </div>
                     </a-card>
-                </transition>
 
-                <!-- 系统资源降到最后一段：它回答的是「这台机器累不累」，是背景
-                     信息，不是打开面板要先看的东西。四个 dashboard 大圆环换成
-                     细条，百分比数字就在条的正上方——颜色不是唯一信息来源。 -->
-                <transition name="list" appear>
-                    <a-card>
-                        <div slot="title">服务器资源</div>
-                        <div class="card-section">
-                            <div class="res-grid">
-                                <div v-for="r in resourceBars" :key="r.name">
-                                    <div class="res-head">
-                                        <span class="res-name">[[ r.name ]]</span>
-                                        <span class="res-value">[[ r.text ]]</span>
-                                    </div>
-                                    <div class="res-bar">
-                                        <div class="res-bar-fill" :class="r.tone"
-                                             :style="{ width: r.percent + '%' }"></div>
-                                    </div>
-                                </div>
-                            </div>
+                    <!-- 改动前「需要关注」是一个整卡染红的数字，四类明细只藏在 tooltip 里。
+                         现在逐类成行、点名到入站；计数口径（attentionItems /
+                         attentionCount）没有改。颜色按状态给：有数时才上色，为 0 一律中性；
+                         已停用是管理员的主动操作，始终中性。 -->
+                    <a-card class="attn-card">
+                        <div slot="title">
+                            需要关注
+                            <div class="card-sub">共 [[ attentionCount ]] 项<template v-if="attentionUrgent">，其中 [[ attentionUrgent ]] 项需要立即处理</template></div>
                         </div>
-                        <div class="card-section">
-                            <div class="metric-grid">
-                                <div>
-                                    <div class="metric-name">系统负载</div>
-                                    <div class="metric-value">
-                                        [[ status.loads[0] ]] · [[ status.loads[1] ]] · [[ status.loads[2] ]]
-                                    </div>
-                                </div>
-                                <div>
-                                    <div class="metric-name">
-                                        TCP / UDP 连接
-                                        <a-tooltip title="所有网卡的总连接数">
-                                            <a-icon type="question-circle"></a-icon>
-                                        </a-tooltip>
-                                    </div>
-                                    <div class="metric-value">[[ status.tcpCount ]] / [[ status.udpCount ]]</div>
-                                </div>
-                                <div>
-                                    <div class="metric-name">
-                                        实时网速
-                                        <a-tooltip title="所有网卡的总上传 / 下载速度">
-                                            <a-icon type="question-circle"></a-icon>
-                                        </a-tooltip>
-                                    </div>
-                                    <div class="metric-value">
-                                        ↑ [[ sizeFormat(status.netIO.up) ]]/s · ↓ [[ sizeFormat(status.netIO.down) ]]/s
-                                    </div>
-                                </div>
-                                <div>
-                                    <div class="metric-name">
-                                        累计流量
-                                        <a-tooltip title="系统启动以来所有网卡的总上传 / 下载流量">
-                                            <a-icon type="question-circle"></a-icon>
-                                        </a-tooltip>
-                                    </div>
-                                    <div class="metric-value">
-                                        ↑ [[ sizeFormat(status.netTraffic.sent) ]] · ↓ [[ sizeFormat(status.netTraffic.recv) ]]
-                                    </div>
-                                </div>
-                                <div>
-                                    <div class="metric-name">
-                                        运行时间
-                                        <a-tooltip title="系统自启动以来的运行时间">
-                                            <a-icon type="question-circle"></a-icon>
-                                        </a-tooltip>
-                                    </div>
-                                    <div class="metric-value">[[ formatSecond(status.uptime) ]]</div>
-                                </div>
-                            </div>
-                        </div>
+                        <ul class="attn-list">
+                            <li class="attn-item" v-for="row in attentionRows" :key="row.key"
+                                :class="row.items.length ? row.tone : 'is-neutral'">
+                                <span class="attn-icon" aria-hidden="true"><a-icon :type="row.icon"></a-icon></span>
+                                <span class="attn-text">
+                                    <span class="attn-name">[[ row.label ]]</span>
+                                    <span class="attn-who" :title="row.allNames">[[ row.items.length ? row.names : '暂无' ]]</span>
+                                </span>
+                                <span class="attn-count">[[ row.items.length ]]</span>
+                            </li>
+                        </ul>
+                        <a class="attn-foot" href="{{ .base_path }}aui/inbounds">在入站列表中处理 →</a>
                     </a-card>
-                </transition>
+                </div>
+
+                <div class="dash-row dash-row-bottom">
+                    <a-card class="rank-card">
+                        <div slot="title">
+                            入站用量排行
+                            <div class="card-sub">[[ rangeLabel ]]</div>
+                        </div>
+                        <table class="rank-table" v-if="rankRows.length">
+                            <thead>
+                                <tr>
+                                    <th>入站</th>
+                                    <th style="width: 18%">状态</th>
+                                    <th class="r" style="width: 9%">在线</th>
+                                    <th class="r" style="width: 10%">占比</th>
+                                    <th class="r" style="width: 30%">用量</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="r in rankRows" :key="r.inboundId">
+                                    <td>
+                                        <div class="who">
+                                            <span class="who-avatar" :style="{ background: r.color }">[[ r.initial ]]</span>
+                                            <span class="who-text">
+                                                <span class="who-name" :title="r.remark">[[ r.remark || '（无备注）' ]]</span>
+                                                <span class="who-sub">[[ r.sub ]]</span>
+                                            </span>
+                                        </div>
+                                    </td>
+                                    <td><span class="stat-tag" :class="r.statusTone">[[ r.statusText ]]</span></td>
+                                    <td class="r num">[[ r.online ]]</td>
+                                    <td class="r num">[[ r.percent ]]</td>
+                                    <td class="r">
+                                        <div class="rank-bar">
+                                            <span class="rank-track"><i :style="{ width: r.share + '%', background: r.color }"></i></span>
+                                            <span class="rank-size num">[[ sizeFormat(r.total) ]]</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-else class="rank-empty">这段时间没有用量</div>
+                    </a-card>
+
+                    <!-- 出站节点的连通性。打开本页时自动探测一次——只测已启用、且最近
+                         1 分钟内没有结果的节点（每次探测会临时起一个 xray 进程并真实出网）。 -->
+                    <a-card class="net-card">
+                        <div slot="title">
+                            出站节点
+                            <div class="card-sub">连通性与延迟，打开本页时自动探测</div>
+                        </div>
+                        <a-button slot="extra" type="link" size="small" :loading="nodeProbing" :disabled="!nodes.length"
+                                  @click="probeNodes(true)">重新探测</a-button>
+                        <div v-if="nodesError" class="net-empty">[[ nodesError ]]</div>
+                        <div v-else-if="!nodes.length" class="net-empty">
+                            还没有出站节点。<a href="{{ .base_path }}aui/routing">去分流管理添加</a>
+                        </div>
+                        <ul v-else class="net-nodes">
+                            <li v-for="n in nodes" :key="n.id" class="net-node">
+                                <span class="who-avatar" :style="{ background: n.enable ? nodeColor(n) : '#94A3B8' }"
+                                      aria-hidden="true">[[ nodeInitials(n) ]]</span>
+                                <span class="who-text">
+                                    <span class="who-name" :title="n.remark || n.tag">[[ n.remark || n.tag ]]</span>
+                                    <span class="who-sub">[[ n.protocol ]]<template v-if="!n.enable"> · 已停用</template><template v-else-if="n.probe && n.probe.checkedAt"> · [[ probeAgo(n.probe) ]]</template></span>
+                                </span>
+                                <span class="net-lat">
+                                    <a-spin v-if="n.probing" size="small"></a-spin>
+                                    <template v-else-if="n.probe && n.probe.status === 'ok'">
+                                        <span class="probe-ms">[[ n.probe.latencyMs ]]<small> ms</small></span>
+                                        <span class="probe-track"><i :style="probeBarStyle(n.probe.latencyMs)"></i></span>
+                                    </template>
+                                    <a-tooltip v-else-if="n.probe" :title="n.probe.error">
+                                        <span class="probe-ms" :class="n.probe.status === 'fail' ? 'is-fail' : 'is-unknown'">
+                                            [[ n.probe.status === 'fail' ? '不通' : '无法测试' ]]
+                                        </span>
+                                    </a-tooltip>
+                                    <span v-else class="probe-ms is-none">[[ n.enable ? '未测试' : '—' ]]</span>
+                                </span>
+                            </li>
+                        </ul>
+                        <a class="attn-foot" href="{{ .base_path }}aui/routing">在分流管理中查看 →</a>
+                    </a-card>
+                </div>
             </a-spin>
         </a-layout-content>
     </a-layout>
@@ -200,6 +258,7 @@
     </a-modal>
 </a-layout>
 {{template "js" .}}
+{{template "component/rangeSelect"}}
 <script src="{{ .base_path }}assets/chart.js/chart.umd.min.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
@@ -268,19 +327,29 @@
             this.uptime = data.uptime;
             // 不再在这里塞 color：改动前它把 stop 映射成 orange，而橙色在全站
             // 表示「警告 / 降级」——管理员手动停掉 xray 是正常状态，不是警告。
-            // 现在由下面的 xrayTone 决定，stop 走中性档。
+            // 现在由下面的 xrayDotClass 决定，stop 走中性档。
             this.xray = data.xray;
         }
     }
 
     let overviewChart = null;
 
-    // 12 个区分度足够的颜色，按系列顺序取，超过 12 个入站时循环
-    // （Top N 默认就是 12，正常取不到循环）。
-    const OVERVIEW_COLORS = [
-        '#1266D6', '#15803D', '#B45309', '#B91C1C', '#722ed1', '#eb2f96',
-        '#13c2c2', '#fa8c16', '#2f54eb', '#a0d911', '#08979c', '#c41d7f',
-    ];
+    // niceByteAxis / shortSize / styleTrafficAxes 在 chart-util.js，入站页的图也用同一套。
+
+    // 用量图与排行共用的入站配色：前 5 名各占一个身份色（与 custom.css 的
+    // --aui-id-* 一致），其余合并成灰色的「其他」。琥珀/绿/红刻意不用，
+    // 它们在全站是警告/成功/危险。
+    const SERIES_COLORS = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777'];
+    const SERIES_OTHER = '#94A3B8';
+    const SERIES_SHOWN = SERIES_COLORS.length;
+
+    function hexAlpha(hex, a) {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+    }
+
+    // 网速折线保留最近 30 个采样（2 秒一次，约 1 分钟）
+    const SPEED_SAMPLES = 30;
 
     const versionModal = {
         visible: false,
@@ -305,8 +374,16 @@
             spinning: false,
             loadingTip: '加载中',
             overviewRange: '24h',
+            // 自定义区间：['YYYY-MM-DD', 'YYYY-MM-DD']，含首尾两天（仅 overviewRange 为 custom 时有值）
+            overviewCustom: null,
             overviewReason: '',
-            overviewSeriesCount: 0,
+            overviewSeries: [],
+            overviewLabels: [],
+            overviewGranularity: 'hour',
+            speedHistory: [],
+            // 最近一次 /server/status 成功的时刻与当前时刻，用来判断「实时」是否属实
+            lastStatusAt: 0,
+            nowTick: Date.now(),
             // 这三份数据来自入站页已有的接口，本页只读不写，也不新增任何
             // 后端接口。刷新频率远低于 /server/status 的 2 秒——它们一小时
             // 量级才有意义的变化，跟着 CPU 一起每 2 秒拉一次纯属浪费。
@@ -315,6 +392,11 @@
             onlineCountError: '',
             riskMap: {},
             businessTimer: null,
+            clockTimer: null,
+            // 出站节点与连通性（来自分流管理的接口，本页只读）
+            nodes: [],
+            nodesError: '',
+            nodeProbing: false,
         },
         methods: {
             loading(spinning, tip = '加载中') {
@@ -366,10 +448,87 @@
                 const msg = await HttpUtil.post('/server/status');
                 if (msg.success) {
                     this.setStatus(msg.obj);
+                    this.lastStatusAt = Date.now();
                 }
             },
             setStatus(data) {
                 this.status = new Status(data);
+                this.speedHistory = this.speedHistory.concat([this.status.netIO.down || 0]).slice(-SPEED_SAMPLES);
+            },
+            async loadNodes() {
+                try {
+                    const resp = await axios.post('/aui/routing/outbound/list');
+                    if (resp.data && resp.data.success) {
+                        this.nodes = (resp.data.obj || []).map(n => Object.assign({ probing: false }, n));
+                        this.nodesError = '';
+                    } else {
+                        this.nodesError = (resp.data && resp.data.msg) || '读取出站节点失败';
+                    }
+                } catch (e) {
+                    this.nodesError = '读取出站节点失败';
+                }
+            },
+            // 探测出站节点。打开本页时 force=false：只测已启用、且最近 1 分钟内没有
+            // 结果的节点（每次探测都会临时起一个 xray 进程并真实出网，连续刷新不该
+            // 每次重测）。点「重新探测」时 force=true，已启用的全部重测。
+            // 并发宽度 3，与服务端的全局上限一致。不走 HttpUtil：失败不弹提示，
+            // 结果就地显示在这一行。
+            async probeNodes(force) {
+                if (this.nodeProbing) return;
+                const fresh = Date.now() - 60 * 1000;
+                const queue = this.nodes.filter(n => n.enable &&
+                    (force || !(n.probe && n.probe.checkedAt * 1000 > fresh)));
+                if (!queue.length) return;
+                this.nodeProbing = true;
+                const probeOne = async n => {
+                    n.probing = true;
+                    try {
+                        const resp = await axios.post('/aui/routing/outbound/probe/' + n.id);
+                        if (resp.data && resp.data.success) {
+                            n.probe = resp.data.obj;
+                        }
+                    } catch (e) {
+                        // 请求本身失败：保留上一次结果，不伪造成「不通」
+                    } finally {
+                        n.probing = false;
+                    }
+                };
+                try {
+                    const workers = [];
+                    for (let i = 0; i < Math.min(3, queue.length); i++) {
+                        workers.push((async () => {
+                            while (queue.length) await probeOne(queue.shift());
+                        })());
+                    }
+                    await Promise.all(workers);
+                } finally {
+                    this.nodeProbing = false;
+                }
+            },
+            nodeInitials(n) {
+                const name = (n.remark || n.tag || '').trim();
+                return /^[A-Za-z0-9]/.test(name) ? name.slice(0, 2).toUpperCase() : (name.slice(0, 1) || '#');
+            },
+            // 与分流管理页的节点头像同一套配色
+            nodeColor(n) {
+                const colors = ['#1266D6', '#7C3AED', '#0D9488', '#4F46E5', '#DB2777', '#0891B2'];
+                return colors[n.id % colors.length];
+            },
+            // 延迟颜色条：80ms 内绿、150ms 内橙、更慢红（与分流管理页一致）
+            probeBarStyle(ms) {
+                const color = ms < 80 ? '#10B981' : ms < 150 ? '#D97706' : '#DC2626';
+                return { width: Math.min(100, Math.max(6, ms / 200 * 100)) + '%', background: color };
+            },
+            probeAgo(probe) {
+                const sec = Math.max(0, Math.round((this.nowTick - probe.checkedAt * 1000) / 1000));
+                if (sec < 60) return '刚刚测得';
+                if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前测得';
+                return Math.floor(sec / 3600) + ' 小时前测得';
+            },
+            // 「170.60 KB」→ ['170.60', 'KB']，数值与单位分开排版
+            splitSize(v) {
+                const parts = sizeFormat(v || 0).split(' ');
+                return [parts[0], parts[1] || ''];
             },
             async openSelectV2rayVersion() {
                 this.loading(true);
@@ -394,21 +553,43 @@
                     },
                 });
             },
-            changeOverviewRange(e) {
-                this.overviewRange = e.target.value;
+            onOverviewRangeChange(v) {
+                this.overviewRange = v.range;
+                this.overviewCustom = v.range === 'custom' ? [v.start, v.end] : null;
                 this.loadOverviewChart();
             },
             async loadOverviewChart() {
-                const msg = await HttpUtil.post('/aui/inbound/traffic/overview', {
-                    range: this.overviewRange,
-                    top: 12,
-                });
+                const params = { range: this.overviewRange, top: 12 };
+                if (this.overviewRange === 'custom' && this.overviewCustom) {
+                    params.start = this.overviewCustom[0];
+                    params.end = this.overviewCustom[1];
+                }
+                const msg = await HttpUtil.post('/aui/inbound/traffic/overview', params);
                 if (!msg.success) {
                     return;
                 }
                 const data = msg.obj;
                 this.overviewReason = data.reason || '';
-                this.overviewSeriesCount = data.series.length;
+                this.overviewSeries = data.series || [];
+                this.overviewLabels = data.labels || [];
+                this.overviewGranularity = data.granularity || 'hour';
+                // 按入站堆叠：服务端已按整个范围的总量降序排好、逐点补零。
+                // 前 5 名各一层，其余合并成「其他」一层，图例与配色和排行表一致。
+                const shown = this.overviewSeries.slice(0, SERIES_SHOWN);
+                const rest = this.overviewSeries.slice(SERIES_SHOWN);
+                const datasets = shown.map((s, i) => ({
+                    label: s.remark || ('入站 ' + s.inboundId),
+                    data: s.points,
+                    color: SERIES_COLORS[i],
+                }));
+                if (rest.length) {
+                    datasets.push({
+                        label: `其他 ${rest.length} 个入站`,
+                        data: this.overviewLabels.map((_, i) => rest.reduce((n, s) => n + (s.points[i] || 0), 0)),
+                        color: SERIES_OTHER,
+                    });
+                }
+                const totals = this.overviewTotals;
                 this.$nextTick(() => {
                     const canvas = document.getElementById('overview-chart');
                     if (!canvas) {
@@ -418,19 +599,39 @@
                         overviewChart.destroy();
                         overviewChart = null;
                     }
+                    // 在共用配置上做本页的局部覆盖，入站页的图不受影响。
+                    const options = trafficChartOptions(8);
+                    styleTrafficAxes(options, Math.max(0, ...totals));
+                    options.plugins.legend = { display: false };
+                    options.plugins.tooltip.callbacks.footer =
+                        items => '合计 ' + sizeFormat(items.reduce((n, x) => n + x.parsed.y, 0));
+                    options.scales.y.stacked = true;
+                    options.scales.x.stacked = true;
+                    // 服务端标签：小时粒度「10-29 23:00」，日粒度「2026-10-29」。整条放在轴上太挤：
+                    // 一天以内的小时刻度只留时刻，跨天的只留日期；tooltip 标题仍是完整标签。
+                    const short = this.overviewShortLabel;
+                    // 刻度数跟着图宽走（约 70px 一个），手机上不挤成一串
+                    options.scales.x.ticks.maxTicksLimit = Math.max(3, Math.min(8, Math.floor(canvas.clientWidth / 70)));
+                    options.scales.x.ticks.callback = function (v) {
+                        return short(this.getLabelForValue(v) || '');
+                    };
                     overviewChart = new Chart(canvas, {
                         type: 'line',
                         data: {
-                            labels: data.labels,
-                            datasets: data.series.map((s, i) => ({
-                                label: s.remark,
-                                data: s.points,
-                                borderColor: OVERVIEW_COLORS[i % OVERVIEW_COLORS.length],
-                                backgroundColor: OVERVIEW_COLORS[i % OVERVIEW_COLORS.length],
-                                borderWidth: 2, pointRadius: 2, tension: 0.3, fill: false,
+                            labels: this.overviewLabels,
+                            datasets: datasets.map((d, i) => ({
+                                label: d.label,
+                                data: d.data,
+                                borderColor: d.color,
+                                backgroundColor: hexAlpha(d.color, d.color === SERIES_OTHER ? .25 : .5),
+                                fill: i === 0 ? 'origin' : '-1',
+                                borderWidth: 1.5,
+                                pointRadius: 0,
+                                pointHoverRadius: 3,
+                                tension: 0.35,
                             })),
                         },
-                        options: trafficChartOptions(14),
+                        options,
                     });
                 });
             },
@@ -442,38 +643,137 @@
             },
             // stop 走中性而不是橙：管理员手动停掉 xray 是正常状态。
             // 橙色在全站只表示「警告 / 等待 / 降级」。
-            xrayTone() {
+            xrayDotClass() {
                 switch (this.status.xray.state) {
-                    case State.Running: return 'tone-ok';
-                    case State.Error:   return 'tone-alert';
+                    case State.Running: return 'is-ok';
+                    case State.Error:   return 'is-danger';
                     default:            return '';
                 }
             },
-            xrayIcon() {
-                switch (this.status.xray.state) {
-                    case State.Running: return 'check-circle';
-                    case State.Error:   return 'close-circle';
-                    default:            return 'pause-circle';
-                }
+            // 最近一次状态刷新距今：6 秒内算实时（轮询间隔 2 秒，留出两次失败的余量）
+            statusStale() {
+                return !this.lastStatusAt || this.nowTick - this.lastStatusAt > 6000;
             },
-            enabledInboundCount() {
-                return this.dbInbounds.filter(i => i.enable).length;
+            liveText() {
+                if (!this.lastStatusAt) {
+                    return '连接中';
+                }
+                if (!this.statusStale) {
+                    return '实时';
+                }
+                return Math.round((this.nowTick - this.lastStatusAt) / 1000) + ' 秒前更新';
             },
-            // 读不到连接表时是「—」而不是 0，与入站列表那两列同一条口径：
-            // 把「看不到」渲染成「没人在线」，管理员就会对着一个假的 0 做判断。
-            onlineDeviceText() {
-                if (this.onlineCountError) {
-                    return '—';
+            speedSparkPoints() {
+                const h = this.speedHistory;
+                if (h.length < 2) {
+                    return '';
                 }
-                const list = Object.values(this.onlineCounts);
-                if (list.length === 0) {
-                    return '—';
+                const max = Math.max(...h) || 1;
+                return h.map((v, i) => `${(i / (h.length - 1) * 96).toFixed(1)},${(26 - v / max * 22).toFixed(1)}`).join(' ');
+            },
+            rangeLabel() {
+                const c = this.overviewCustom || [];
+                return rangeSelectLabel(this.overviewRange, c[0], c[1]);
+            },
+            // 小时粒度且不超过 25 个刻度：横轴与峰值只写时刻
+            overviewWithinDay() {
+                return this.overviewGranularity !== 'day' && this.overviewLabels.length <= 25;
+            },
+            // 横轴短标签：一天以内「23:00」，跨天的小时刻度「10-29」，日刻度「10-29」
+            overviewShortLabel() {
+                const withinDay = this.overviewWithinDay;
+                const isDay = this.overviewGranularity === 'day';
+                return label => withinDay ? label.slice(-5) : (isDay ? label.slice(5) : label.slice(0, 5));
+            },
+            overviewTotals() {
+                return this.overviewLabels.map((_, i) =>
+                    this.overviewSeries.reduce((n, s) => n + (s.points[i] || 0), 0));
+            },
+            overviewPeak() {
+                const t = this.overviewTotals;
+                let best = -1;
+                t.forEach((v, i) => { if (v > 0 && (best < 0 || v > t[best])) best = i; });
+                if (best < 0) {
+                    return null;
                 }
-                const usable = list.filter(c => c.supported);
-                if (usable.length === 0) {
-                    return '—';
+                // 标签由服务端按面板时区格式化。一天以内只写时刻，跨天写完整标签
+                const label = this.overviewLabels[best] || '';
+                return { value: t[best], label: this.overviewWithinDay ? label.slice(-5) : label };
+            },
+            overviewAverage() {
+                return this.overviewLabels.length ? this.overviewGrandTotal / this.overviewLabels.length : 0;
+            },
+            overviewLegend() {
+                const shown = this.overviewSeries.slice(0, SERIES_SHOWN).map((s, i) =>
+                    ({ name: s.remark || ('入站 ' + s.inboundId), color: SERIES_COLORS[i] }));
+                const rest = this.overviewSeries.length - SERIES_SHOWN;
+                if (rest > 0) {
+                    shown.push({ name: `其他 ${rest} 个入站`, color: SERIES_OTHER });
                 }
-                return String(usable.reduce((n, c) => n + (c.count || 0), 0));
+                return this.overviewTotals.some(v => v > 0) ? shown : [];
+            },
+            // 排行表：服务端 Top N 与入站列表按 id 对上，补协议、端口、在线数与状态
+            rankRows() {
+                const byId = {};
+                this.dbInbounds.forEach(i => { byId[i.id] = i; });
+                const rows = this.overviewRanking;
+                const total = this.overviewGrandTotal;
+                const now = Date.now();
+                return rows.map(r => {
+                    const ib = byId[r.inboundId];
+                    const idx = this.overviewSeries.findIndex(s => s.inboundId === r.inboundId);
+                    let statusText = '正常', statusTone = 'is-ok';
+                    if (ib && !ib.enable) {
+                        statusText = '已停用'; statusTone = '';
+                    } else if (ib && ib.expiryTime > 0 && ib.expiryTime <= now) {
+                        statusText = '已过期'; statusTone = 'is-danger';
+                    } else if (ib && ib.expiryTime > now && ib.expiryTime - now <= 7 * 86400000) {
+                        statusText = Math.ceil((ib.expiryTime - now) / 86400000) + ' 天后到期'; statusTone = 'is-warn';
+                    }
+                    const oc = this.onlineCounts[r.inboundId];
+                    const name = (r.remark || '').replace(/^微信[：:]\s*/, '');
+                    return Object.assign({}, r, {
+                        // 与图表图例同色；停用与否由状态标签表达，不改头像颜色
+                        color: SERIES_COLORS[idx] || SERIES_OTHER,
+                        initial: (name || '?').slice(0, 1).toUpperCase(),
+                        sub: ib ? `${ib.protocol} · 端口 ${ib.port}` : '已删除的入站',
+                        online: oc && oc.supported ? oc.count : '—',
+                        percent: total ? (r.total / total * 100).toFixed(1) + '%' : '—',
+                        statusText,
+                        statusTone,
+                    });
+                });
+            },
+            overviewRanking() {
+                const rows = this.overviewSeries.map(s => ({
+                    inboundId: s.inboundId,
+                    remark: s.remark,
+                    total: s.points.reduce((n, v) => n + v, 0),
+                })).filter(r => r.total > 0).sort((a, b) => b.total - a.total);
+                const max = rows.length ? rows[0].total : 0;
+                rows.forEach(r => { r.share = max ? Math.max(2, r.total / max * 100) : 0; });
+                return rows;
+            },
+            overviewGrandTotal() {
+                return this.overviewRanking.reduce((n, r) => n + r.total, 0);
+            },
+            // 需要关注的四类逐行展示，每行点名到入站（最多列 3 个）。
+            attentionRows() {
+                const a = this.attentionItems;
+                const name = i => i.remark || ('端口 ' + i.port);
+                return [
+                    { key: 'expired',  label: '已过期',     tone: 'is-danger',  icon: 'clock-circle', items: a.expired },
+                    { key: 'expiring', label: '7 天内到期', tone: 'is-warn',    icon: 'calendar',     items: a.expiring },
+                    { key: 'highRisk', label: '共享高风险', tone: 'is-danger',  icon: 'safety',       items: a.highRisk },
+                    { key: 'disabled', label: '已停用',     tone: 'is-neutral', icon: 'pause-circle', items: a.disabled },
+                ].map(row => {
+                    const all = row.items.map(name);
+                    const shown = all.slice(0, 3).join('、');
+                    return Object.assign(row, {
+                        allNames: all.join('、'),
+                        names: all.length > 3 ? `${shown} 等 ${all.length} 个` : shown,
+                    });
+                });
             },
             // 「需要关注」的四类，逐项都能点名，不是一个说不清来源的数字。
             // 未评估出结论的风险（learning / unobservable / degraded）**不计入**：
@@ -497,6 +797,10 @@
                 });
                 return { highRisk, expired, expiring, disabled };
             },
+            // 需要立即处理的：已过期与共享高风险。即将到期与已停用不算紧急。
+            attentionUrgent() {
+                return this.attentionItems.expired.length + this.attentionItems.highRisk.length;
+            },
             attentionCount() {
                 const a = this.attentionItems;
                 return a.highRisk.length + a.expired.length + a.expiring.length + a.disabled.length;
@@ -512,16 +816,31 @@
             },
             resourceBars() {
                 const s = this.status;
+                const RING = 2 * Math.PI * 26;
+                const COLORS = { CPU: '#1266D6', '内存': '#7C3AED', Swap: '#0D9488', '硬盘': '#4F46E5' };
                 return [
-                    { name: 'CPU', percent: s.cpu.percent, tone: s.cpu.tone,
-                      text: s.cpu.percent + '%' },
-                    { name: '内存', percent: s.mem.percent, tone: s.mem.tone,
-                      text: `${sizeFormat(s.mem.current)} / ${sizeFormat(s.mem.total)}` },
-                    { name: 'Swap', percent: s.swap.percent, tone: s.swap.tone,
-                      text: `${sizeFormat(s.swap.current)} / ${sizeFormat(s.swap.total)}` },
-                    { name: '硬盘', percent: s.disk.percent, tone: s.disk.tone,
-                      text: `${sizeFormat(s.disk.current)} / ${sizeFormat(s.disk.total)}` },
-                ];
+                    { name: 'CPU', v: s.cpu, text: `负载 ${s.loads[0]} · ${s.loads[1]} · ${s.loads[2]}` },
+                    { name: '内存', v: s.mem, text: `${sizeFormat(s.mem.current)} / ${sizeFormat(s.mem.total)}` },
+                    { name: 'Swap', v: s.swap, text: `${sizeFormat(s.swap.current)} / ${sizeFormat(s.swap.total)}` },
+                    { name: '硬盘', v: s.disk, text: `${sizeFormat(s.disk.current)} / ${sizeFormat(s.disk.total)}` },
+                ].map(r => {
+                    const p = Math.max(0, Math.min(100, Number(r.v.percent) || 0));
+                    // 阈值沿用 CurTotal.tone：80% 起橙、90% 起红
+                    const ringColor = r.v.tone === 'is-danger' ? '#B91C1C'
+                        : r.v.tone === 'is-warn' ? '#B45309' : COLORS[r.name];
+                    return {
+                        name: r.name,
+                        percent: r.v.percent,
+                        text: r.text,
+                        // 卡片顶部色条与圆环同色：平时是各自的身份色，越过阈值换成橙 / 红
+                        cardTone: r.v.tone === 'is-danger' ? 'tone-alert'
+                            : r.v.tone === 'is-warn' ? 'tone-warn'
+                            : { CPU: 'tone-blue', '内存': 'tone-purple', Swap: 'tone-cyan', '硬盘': 'tone-geek' }[r.name],
+                        ringColor,
+                        dash: `${(RING * p / 100).toFixed(1)} ${RING.toFixed(1)}`,
+                        short: (p < 10 ? p.toFixed(1) : Math.round(p)) + '%',
+                    };
+                });
             },
         },
         beforeDestroy() {
@@ -529,14 +848,21 @@
                 clearInterval(this.businessTimer);
                 this.businessTimer = null;
             }
+            if (this.clockTimer != null) {
+                clearInterval(this.clockTimer);
+                this.clockTimer = null;
+            }
         },
         async mounted() {
             this.loadOverviewChart();
             this.loadBusiness();
+            this.loadNodes().then(() => this.probeNodes(false));
             // 30 秒一次。入站数量、到期、风险结论都是小时量级才变的东西，
             // 跟着下面那个 2 秒的状态轮询一起拉纯属浪费——风险汇总还要扫
             // 共享检测的快照表。
             this.businessTimer = setInterval(() => this.loadBusiness(), 30000);
+            // 独立的 1 秒时钟：状态请求挂住时它照样前进，「N 秒前更新」才会如实变大
+            this.clockTimer = setInterval(() => { this.nowTick = Date.now(); }, 1000);
             while (true) {
                 try {
                     await this.getStatus();

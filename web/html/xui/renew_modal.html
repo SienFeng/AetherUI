@@ -1,7 +1,18 @@
 {{define "renewModal"}}
-<a-modal id="renew-modal" v-model="renewModal.visible" title="续期"
+<a-modal id="renew-modal" v-model="renewModal.visible"
          :confirm-loading="renewModal.confirmLoading" :closable="true" :mask-closable="false"
          ok-text="确认续期" cancel-text="取消" @ok="renewModal.ok">
+    <template slot="title">
+        <div class="modal-head">
+            <span class="modal-icon tone-amber" aria-hidden="true"><a-icon type="calendar"></a-icon></span>
+            <span class="modal-head-text">
+                <span class="modal-head-title">续期<template v-if="renewModal.dbInbound && renewModal.dbInbound.remark"> · [[ renewModal.dbInbound.remark ]]</template></span>
+                <span class="modal-head-sub">
+                    当前到期：[[ currentText ]]
+                </span>
+            </span>
+        </div>
+    </template>
     <a-form layout="vertical">
         <a-form-item label="续期时长">
             <!-- 选了自定义日期后预设失效，这里直接置灰，避免"看着选中却不生效"的歧义 -->

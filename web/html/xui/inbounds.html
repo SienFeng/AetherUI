@@ -42,33 +42,66 @@
             </div>
             <a-spin :spinning="spinning" :delay="500" tip="loading">
                 <transition name="list" appear>
-                    <div class="stat-row">
+                    <!-- 四张卡全部来自本页已有的数据：dbInbounds、onlineCounts、riskMap。 -->
+                    <div class="stat-row stat-row-5">
                         <div class="stat-card tone-blue">
-                            <span class="stat-icon"><a-icon type="cloud-upload"></a-icon></span>
+                            <span class="stat-icon"><a-icon type="team"></a-icon></span>
                             <div class="stat-text">
-                                <span class="stat-label">总上传</span>
-                                <div class="stat-value">[[ sizeFormat(total.up) ]]</div>
+                                <span class="stat-label">入站</span>
+                                <div class="stat-value">[[ enabledCount ]]<span class="unit">/ [[ dbInbounds.length ]]</span></div>
+                            </div>
+                            <div class="stat-foot">
+                                <span>已启用</span>
+                                <span v-if="dbInbounds.length - enabledCount > 0" class="stat-tag">
+                                    [[ dbInbounds.length - enabledCount ]] 个停用
+                                </span>
                             </div>
                         </div>
                         <div class="stat-card tone-cyan">
-                            <span class="stat-icon"><a-icon type="cloud-download"></a-icon></span>
+                            <span class="stat-icon"><a-icon type="wifi"></a-icon></span>
                             <div class="stat-text">
-                                <span class="stat-label">总下载</span>
-                                <div class="stat-value">[[ sizeFormat(total.down) ]]</div>
+                                <span class="stat-label">在线设备</span>
+                                <!-- 读不到连接表时是「—」，不是 0 -->
+                                <div class="stat-value">[[ onlineSummary.text ]]</div>
                             </div>
+                            <div class="stat-foot"><span>[[ onlineSummary.foot ]]</span></div>
                         </div>
+                        <!-- 入站实时网速：各入站在线速度之和（与「在线」列同一份数据）。
+                             它不是服务器网卡的总速度——那个在系统状态页。 -->
                         <div class="stat-card tone-purple">
-                            <span class="stat-icon"><a-icon type="database"></a-icon></span>
+                            <span class="stat-icon"><a-icon type="swap"></a-icon></span>
                             <div class="stat-text">
-                                <span class="stat-label">总用量</span>
-                                <div class="stat-value">[[ sizeFormat(total.up + total.down) ]]</div>
+                                <span class="stat-label">入站实时网速</span>
+                                <div class="stat-value">[[ inboundSpeed.down === null ? '—' : splitSize(inboundSpeed.down)[0] ]]<span v-if="inboundSpeed.down !== null" class="unit">[[ splitSize(inboundSpeed.down)[1] ]]/s ↓</span></div>
+                            </div>
+                            <div class="stat-foot">
+                                <span>[[ inboundSpeed.up === null ? '暂时读不到连接表' : '↑ ' + sizeFormat(inboundSpeed.up) + '/s' ]]</span>
                             </div>
                         </div>
+                        <!-- 24 小时用量：用量历史里所有入站（Top 50）最近 24 小时之和；
+                             底部是累计计数器（重置流量会清零的那个）。 -->
                         <div class="stat-card tone-geek">
-                            <span class="stat-icon"><a-icon type="team"></a-icon></span>
+                            <span class="stat-icon"><a-icon type="line-chart"></a-icon></span>
                             <div class="stat-text">
-                                <span class="stat-label">入站数量</span>
-                                <div class="stat-value">[[ dbInbounds.length ]]</div>
+                                <span class="stat-label">24 小时用量</span>
+                                <div class="stat-value">[[ usage24h === null ? '—' : splitSize(usage24h)[0] ]]<span v-if="usage24h !== null" class="unit">[[ splitSize(usage24h)[1] ]]</span></div>
+                            </div>
+                            <div class="stat-foot">
+                                <span :title="'↑ ' + sizeFormat(total.up) + ' · ↓ ' + sizeFormat(total.down)">累计 [[ sizeFormat(total.up + total.down) ]]</span>
+                            </div>
+                        </div>
+                        <!-- 过期、7 天内到期、共享风险达到「高」以上的入站数。有数才变红。 -->
+                        <div class="stat-card" :class="dueSummary.total ? 'tone-alert' : 'tone-ok'">
+                            <span class="stat-icon">
+                                <a-icon :type="dueSummary.total ? 'warning' : 'check-circle'"></a-icon>
+                            </span>
+                            <div class="stat-text">
+                                <span class="stat-label">到期与风险</span>
+                                <div class="stat-value">[[ dueSummary.total ]]</div>
+                            </div>
+                            <div class="stat-foot">
+                                <span>[[ dueSummary.text ]]</span>
+                                <span v-if="dueSummary.total" class="stat-tag is-danger">需处理</span>
                             </div>
                         </div>
                     </div>
@@ -147,40 +180,29 @@
                                  @expand="onExpand"
                                  @change="() => getDBInbounds()">
                             <template slot="expandedRowRender" slot-scope="dbInbound">
-                                <!-- 展开区分三段：时间窗（控制区）／来源明细／用量趋势。
+                                <div class="expand-panel">
+                                <!-- 展开区分两段：在线来源（段头右侧是时间窗）／用量曲线。
                                      刻意不用 a-tabs：图表所在的面板未激活时 canvas 不在 DOM 里，
                                      而 loadTrafficChart 是在 $nextTick 里 getElementById 取它的，
                                      取不到就整段静默跳过——图永远不画且不报错。 -->
                                 <div class="row-section">
-                                    <a-radio-group size="small" :value="trafficRangeOf(dbInbound.id)"
-                                                   @change="e => changeTrafficRange(dbInbound.id, e.target.value)">
-                                        <a-radio-button value="today">今日</a-radio-button>
-                                        <a-radio-button value="3d">近 3 日</a-radio-button>
-                                        <a-radio-button value="7d">近 7 日</a-radio-button>
-                                        <a-radio-button value="30d">近 30 日</a-radio-button>
-                                        <a-radio-button value="1y">近 1 年</a-radio-button>
-                                    </a-radio-group>
-                                    <a-range-picker size="small" style="margin-left: 8px; width: 240px"
-                                                    :value="customRangeOf(dbInbound.id)"
-                                                    @change="d => changeCustomRange(dbInbound.id, d)"></a-range-picker>
-                                    <span style="margin-left: 16px" class="cell-num">
-                                        <span class="cell-muted">本段入站用量</span>
-                                        ↑ [[ sizeFormat(totalOf(dbInbound.id).up) ]]
-                                        · ↓ [[ sizeFormat(totalOf(dbInbound.id).down) ]]
-                                        <a-tooltip>
-                                            <template slot="title">
-                                                来自 xray 的流量统计，是代理转发的应用层字节，与下方按来源 IP 的分项口径不同。
-                                            </template>
-                                            <a-icon type="info-circle"></a-icon>
-                                        </a-tooltip>
-                                    </span>
-                                </div>
-                                <div class="row-section">
-                                <div class="row-section-title">
-                                    <a-icon type="global"></a-icon>来源明细
-                                    <span style="font-weight: 400; color: var(--aui-text-3)">
-                                        · 窗口内活跃过的来源，不只是当前在线
-                                    </span>
+                                <!-- 段头：标题在左，时间窗在右。时间窗同时决定下方来源明细与用量曲线
+                                     两段的范围（与改动前一致，只是挪了位置）。 -->
+                                <div class="row-section-head">
+                                    <div class="row-section-title">
+                                        在线来源
+                                        <span class="row-section-note">窗口内活跃过的来源，不只是当前在线</span>
+                                    </div>
+                                    <div class="row-section-tools">
+                                        <!-- 时间范围下拉（component/range_select.html，与系统状态页共用）。
+                                             @click.stop：展开区在表格行里，点击不能冒泡成「收起这一行」。 -->
+                                        <span @click.stop>
+                                            <range-select :range="trafficRangeOf(dbInbound.id)"
+                                                          :start="(customRangeOf(dbInbound.id) || [])[0]"
+                                                          :end="(customRangeOf(dbInbound.id) || [])[1]"
+                                                          @change="v => changeWindow(dbInbound.id, v)"></range-select>
+                                        </span>
+                                    </div>
                                 </div>
                                 <a-alert v-if="onlineOf(dbInbound.id).reason"
                                          type="info" show-icon style="margin-bottom: 12px"
@@ -343,8 +365,23 @@
                                     </div>
                                 </div>
                                 <div class="row-section">
-                                    <div class="row-section-title">
-                                        <a-icon type="line-chart"></a-icon>用量趋势
+                                    <div class="row-section-head">
+                                        <div class="row-section-title">
+                                            用量曲线
+                                            <!-- 色块即图例：与柱子同色，图上不再另画图例 -->
+                                            <span class="row-section-figure cell-num">
+                                                <span><i class="legend-swatch" style="background: #93C5FD"></i>上行</span> [[ sizeFormat(totalOf(dbInbound.id).up) ]]
+                                            </span>
+                                            <span class="row-section-figure cell-num">
+                                                <span><i class="legend-swatch" style="background: #1266D6"></i>下行</span> [[ sizeFormat(totalOf(dbInbound.id).down) ]]
+                                            </span>
+                                            <a-tooltip>
+                                                <template slot="title">
+                                                    来自 xray 的流量统计，是代理转发的应用层字节，与上方按来源 IP 的分项口径不同。
+                                                </template>
+                                                <a-icon type="info-circle" class="row-section-info"></a-icon>
+                                            </a-tooltip>
+                                        </div>
                                     </div>
                                     <a-alert v-if="trafficReasonOf(dbInbound.id)" type="info" show-icon
                                              style="margin-bottom: 12px"
@@ -353,6 +390,7 @@
                                         <canvas :id="'traffic-chart-' + dbInbound.id"></canvas>
                                     </div>
                                 </div>
+                                </div>
                             </template>
                             <!-- ══ 一级表格的列渲染 ══
                                  改动前这里每一列都套 a-tag：协议、传输、流量数值、到期日期、地区、
@@ -360,42 +398,56 @@
                                  里 .stat-row 早就写明的那条——分类是装饰、状态才是信息——所以下面
                                  只有「风险」「已过期」「超额」用得上颜色，其余一律文本或无色 chip。 -->
 
+                            <template slot="caret" slot-scope="text, dbInbound">
+                                <a-icon type="right" class="row-caret"
+                                        :class="{ 'is-open': expandedKeys.includes(dbInbound.id) }"
+                                        :aria-label="expandedKeys.includes(dbInbound.id) ? '收起详情' : '展开详情'"></a-icon>
+                            </template>
                             <template slot="identity" slot-scope="text, dbInbound">
-                                <div class="cell-main">[[ dbInbound.remark || '未命名' ]]</div>
-                                <div class="cell-sub cell-num">#[[ dbInbound.id ]] · :[[ dbInbound.port ]]</div>
+                                <div class="who">
+                                    <span class="who-avatar" :style="{ background: avatarColorOf(dbInbound) }"
+                                          aria-hidden="true">[[ avatarTextOf(dbInbound) ]]</span>
+                                    <span class="who-text">
+                                        <span class="who-name">[[ dbInbound.remark || '未命名' ]]</span>
+                                        <span class="who-sub cell-num" :title="'#' + dbInbound.id">[[ dbInbound.protocol ]] · 端口 [[ dbInbound.port ]]</span>
+                                    </span>
+                                </div>
                             </template>
 
                             <template slot="conn" slot-scope="text, dbInbound">
-                                <div class="cell-main">[[ dbInbound.protocol ]]</div>
                                 <!-- 传输层按 id 取，**不能再用 inbounds[index]**：inbounds 与
                                      dbInbounds 是两个下标对齐的平行数组，而表格现在吃的是过滤后的
                                      列表，index 是过滤后的下标——照旧写法会把别人的传输方式显示到
                                      这一行上，且不会报任何错。 -->
-                                <div class="cell-sub">[[ connSubOf(dbInbound) ]]</div>
+                                <div class="conn-chips">
+                                    <span v-for="c in connChipsOf(dbInbound)" :key="c.text" class="conn-chip"
+                                          :class="c.tone">[[ c.text ]]</span>
+                                </div>
                             </template>
 
                             <template slot="traffic" slot-scope="text, dbInbound">
-                                <div class="cell-main cell-num">
-                                    [[ sizeFormat(dbInbound.up + dbInbound.down) ]]
-                                    <template v-if="dbInbound.total > 0"> / [[ sizeFormat(dbInbound.total) ]]</template>
-                                    <span v-else class="cell-muted"> / 不限</span>
-                                </div>
-                                <!-- 进度条只在真的设了额度时出现。没有额度就没有「用了百分之多少」
-                                     这回事，画一条空槽会让人以为额度是 0。 -->
-                                <div v-if="dbInbound.total > 0" class="usage-bar">
-                                    <div class="usage-bar-fill" :class="usageToneOf(dbInbound)"
-                                         :style="{ width: usagePercentOf(dbInbound) + '%' }"></div>
-                                </div>
-                                <div class="cell-sub cell-num">
-                                    ↑ [[ sizeFormat(dbInbound.up) ]] · ↓ [[ sizeFormat(dbInbound.down) ]]
+                                <!-- 已用量粗体、上限靠右；不限量时槽是空的并写明「无流量上限」，
+                                     不画一条会被读成「额度是 0」的满槽。上下行拆分放在 title 里。 -->
+                                <div class="usage-cell"
+                                     :title="'↑ ' + sizeFormat(dbInbound.up) + ' · ↓ ' + sizeFormat(dbInbound.down)">
+                                    <div class="usage-top cell-num">
+                                        <b>[[ sizeFormat(dbInbound.up + dbInbound.down) ]]</b>
+                                        <span>[[ dbInbound.total > 0 ? '/ ' + sizeFormat(dbInbound.total) : '不限量' ]]</span>
+                                    </div>
+                                    <div class="usage-bar">
+                                        <div class="usage-bar-fill" :class="usageToneOf(dbInbound)"
+                                             :style="{ width: usagePercentOf(dbInbound) + '%' }"></div>
+                                    </div>
+                                    <div v-if="dbInbound.total <= 0" class="cell-sub">无流量上限</div>
                                 </div>
                             </template>
 
                             <template slot="online" slot-scope="text, dbInbound">
                                 <template v-if="onlineCountOf(dbInbound.id).supported">
-                                    <div class="cell-main cell-num"
-                                         :class="onlineCountOf(dbInbound.id).count ? '' : 'cell-muted'">
-                                        [[ onlineCountOf(dbInbound.id).count ]] 台
+                                    <div class="online-main cell-num"
+                                         :class="onlineCountOf(dbInbound.id).count ? 'is-on' : 'cell-muted'">
+                                        <span class="online-dot" aria-hidden="true"></span>
+                                        [[ onlineCountOf(dbInbound.id).count ? onlineCountOf(dbInbound.id).count + ' 台设备' : '无人在线' ]]
                                     </div>
                                     <!-- 上下行分两行：挤在一行时「↑ … · ↓ …」在这个列宽下会
                                          折行，而断点落在数字与单位之间（「64.38 / KB/s」），
@@ -403,22 +455,19 @@
                                          .cell-speed 负责把这一格的高度钉死——内容在「两行
                                          速度」与「一行短横」之间每 2 秒切换一次，不留位的话
                                          整行会跟着上下弹跳，见 custom.css 里的注释。 -->
+                                    <!-- 速度只写不为 0 的方向（与视觉稿一致：「↓ 82.1 KB/s」一行）。
+                                         .cell-speed 仍把这一格的高度钉住：内容每 2 秒在「有速度」与
+                                         「空」之间切换，不留位的话整行会跟着上下弹跳。 -->
                                     <div class="cell-speed">
-                                        <template v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0">
-                                            <div class="cell-sub cell-num"
-                                                 :class="speedToneOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed)"
-                                                 :title="speedHintOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed, '上行')">
-                                                ↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s
-                                            </div>
-                                            <div class="cell-sub cell-num"
-                                                 :class="speedToneOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed)"
-                                                 :title="speedHintOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed, '下行')">
-                                                ↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s
-                                            </div>
-                                        </template>
-                                        <!-- 都是 0 时收成一条短横：一整列的「↑ 0 B/s ↓ 0 B/s」只会淹掉
-                                             真正在跑的那几行。 -->
-                                        <div v-else class="cell-sub">—</div>
+                                        <div v-if="onlineCountOf(dbInbound.id).upSpeed > 0 || onlineCountOf(dbInbound.id).downSpeed > 0"
+                                             class="cell-sub cell-num online-speed">
+                                            <span v-if="onlineCountOf(dbInbound.id).upSpeed > 0"
+                                                  :class="speedToneOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed)"
+                                                  :title="speedHintOf(dbInbound.upMbit, onlineCountOf(dbInbound.id).upSpeed, '上行')">↑ [[ sizeFormat(onlineCountOf(dbInbound.id).upSpeed) ]]/s</span>
+                                            <span v-if="onlineCountOf(dbInbound.id).downSpeed > 0"
+                                                  :class="speedToneOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed)"
+                                                  :title="speedHintOf(dbInbound.downMbit, onlineCountOf(dbInbound.id).downSpeed, '下行')">↓ [[ sizeFormat(onlineCountOf(dbInbound.id).downSpeed) ]]/s</span>
+                                        </div>
                                     </div>
                                 </template>
                                 <!-- 数不出来必须显示「—」而不是 0：把「看不到」渲染成「没人在线」，
@@ -455,14 +504,12 @@
 
                             <template slot="expiryTime" slot-scope="text, dbInbound">
                                 <template v-if="dbInbound.expiryTime > 0">
-                                    <div class="cell-main" :class="expiryToneOf(dbInbound)">
-                                        [[ expiryTextOf(dbInbound) ]]
-                                    </div>
-                                    <div class="cell-sub cell-num">[[ DateUtil.formatMillis(dbInbound.expiryTime) ]]</div>
+                                    <div class="cell-main cell-num">[[ DateUtil.formatMillis(dbInbound.expiryTime).slice(0, 10) ]]</div>
+                                    <span class="stat-tag expiry-tag" :class="expiryTagToneOf(dbInbound)"
+                                          :title="DateUtil.formatMillis(dbInbound.expiryTime)">[[ expiryTagOf(dbInbound) ]]</span>
                                 </template>
-                                <!-- 「无限期」是中性事实，不是健康信号。改动前它是绿色 a-tag，
-                                     与同一张表里表示上行速度的绿色撞了含义。 -->
-                                <div v-else class="cell-main cell-muted">不限</div>
+                                <!-- 「无期限」是中性事实，不是健康信号 -->
+                                <div v-else class="cell-main cell-muted">无期限</div>
                             </template>
 
                             <!-- 地区 / 并发 / 限速三项合一。三者都没设时是一条短横——那是绝大多数
@@ -483,9 +530,20 @@
                             </template>
 
                             <template slot="action" slot-scope="text, dbInbound">
+                                <!-- 常用的两项（二维码、编辑）直接给图标按钮，其余收进「更多」。
+                                     @click.stop：整行点击会展开，按钮不能顺带触发它。 -->
+                                <span class="row-actions" @click.stop>
+                                    <a-tooltip v-if="dbInbound.hasLink()" title="二维码">
+                                        <button type="button" class="icon-btn" aria-label="二维码"
+                                                @click="clickAction({ key: 'qrcode' }, dbInbound)"><a-icon type="qrcode"></a-icon></button>
+                                    </a-tooltip>
+                                    <a-tooltip title="编辑">
+                                        <button type="button" class="icon-btn" aria-label="编辑"
+                                                @click="clickAction({ key: 'edit' }, dbInbound)"><a-icon type="edit"></a-icon></button>
+                                    </a-tooltip>
                                 <a-dropdown :trigger="['click']">
-                                    <a @click="e => { e.preventDefault(); e.stopPropagation(); }"
-                                       :aria-label="'操作：' + (dbInbound.remark || ('入站 #' + dbInbound.id))">操作</a>
+                                    <button type="button" class="icon-btn" @click="e => e.preventDefault()"
+                                       :aria-label="'更多操作：' + (dbInbound.remark || ('入站 #' + dbInbound.id))"><a-icon type="ellipsis"></a-icon></button>
                                     <a-menu slot="overlay" @click="a => clickAction(a, dbInbound)">
                                         <a-menu-item v-if="dbInbound.hasLink()" key="qrcode">
                                             <a-icon type="qrcode"></a-icon>二维码
@@ -514,6 +572,7 @@
                                         </a-menu-item>
                                     </a-menu>
                                 </a-dropdown>
+                                </span>
                             </template>
                         </a-table>
                     </a-card>
@@ -523,6 +582,7 @@
     </a-layout>
 </a-layout>
 {{template "js" .}}
+{{template "component/rangeSelect"}}
 <script src="{{ .base_path }}assets/chart.js/chart.umd.min.js?{{ .cur_ver }}"></script>
 <script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
@@ -572,12 +632,19 @@
     // 平时是「—」，一旦有值才出现——比三列常驻的「不限制」绿标签更能让
     // 真正设了限制的那几行跳出来。
     const columns = [{
+        // 展开箭头：只是「这一行能点开」的提示与状态指示，点击沿用整行展开
+        title: "",
+        align: 'center',
+        width: 36,
+        scopedSlots: { customRender: 'caret' },
+    }, {
         title: "入站",
         align: 'left',
-        width: 150,
+        // 多了 32px 的首字母头像
+        width: 190,
         scopedSlots: { customRender: 'identity' },
     }, {
-        title: "连接",
+        title: "传输",
         align: 'left',
         width: 120,
         scopedSlots: { customRender: 'conn' },
@@ -614,7 +681,8 @@
     }, {
         title: "操作",
         align: 'center',
-        width: 60,
+        // 二维码 / 编辑 / 更多三个图标按钮
+        width: 120,
         scopedSlots: { customRender: 'action' },
     }];
 
@@ -712,7 +780,7 @@
             // inboundId -> IPUsageResult。与 onlines 分开存：那个每 2 秒
             // 刷新一次，这个只在切换档位时拉。
             ipUsages: {},
-            // inboundId -> [moment, moment]，自定义区间。为空表示走档位。
+            // inboundId -> ['YYYY-MM-DD', 'YYYY-MM-DD']，自定义区间（含首尾两天）。为空表示走档位。
             customRanges: {},
             // inboundId -> {up, down}，入站合计。
             trafficTotals: {},
@@ -731,6 +799,8 @@
             // 踢下线弹窗里选中的封禁时长（秒）：0 只断开，-1 永久。
             kickBanSeconds: 0,
             riskMap: {},
+            // 最近 24 小时所有入站的用量之和（null = 还没读到 / 读取失败）
+            usage24h: null,
         },
         methods: {
             loading(spinning=true) {
@@ -811,6 +881,42 @@
             // 下标对齐推进去的两个平行数组，而表格现在吃的是**过滤后**的
             // 列表——继续用 inbounds[index] 会把别人的传输方式画到这一行，
             // 而且不会报任何错。
+            // 传输方式拆成小标签：传输层一个灰标签，安全层（TLS / Reality）各自上色
+            connChipsOf(dbInbound) {
+                const sub = this.connSubOf(dbInbound);
+                return sub.split(' · ').map(t => {
+                    const tone = { TLS: 'is-blue', Reality: 'is-violet', XTLS: 'is-blue' }[t] || '';
+                    // 传输层名（tcp / ws / grpc …）统一大写；安全层保留原写法（Reality）
+                    return { text: tone || t === '无传输层' || t === '—' ? t : t.toUpperCase(), tone };
+                });
+            },
+            // 头像：备注首字（去掉「微信：」这类前缀），颜色按 id 在身份色里轮换；停用的灰掉
+            avatarTextOf(dbInbound) {
+                const name = (dbInbound.remark || '').replace(/^微信[：:]\s*/, '');
+                return (name || '#').slice(0, 1).toUpperCase();
+            },
+            avatarColorOf(dbInbound) {
+                if (!dbInbound.enable) return '#94A3B8';
+                const colors = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777', '#0891B2'];
+                return colors[dbInbound.id % colors.length];
+            },
+            // 24 小时用量：复用系统状态页的总览接口（服务端已按入站求好每个时段），
+            // 取 top 50（controller 的上限）求和。失败时保持「—」，不伪造 0。
+            async loadUsage24h() {
+                try {
+                    const resp = await axios.post('/aui/inbound/traffic/overview', { range: '24h', top: 50 });
+                    if (resp.data && resp.data.success) {
+                        const series = (resp.data.obj && resp.data.obj.series) || [];
+                        this.usage24h = series.reduce((n, s) => n + s.points.reduce((m, v) => m + v, 0), 0);
+                    }
+                } catch (e) {
+                    // 保持上一次的值
+                }
+            },
+            splitSize(v) {
+                const parts = sizeFormat(v || 0).split(' ');
+                return [parts[0], parts[1] || ''];
+            },
             connSubOf(dbInbound) {
                 if (!(dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS)) {
                     return '无传输层';
@@ -848,17 +954,16 @@
                 if (r.state !== 'ready') return 'question-circle';
                 return RISK_LEVEL_ICON[r.level] || '';
             },
-            // 剩余天数按整天向上取整：剩 3 小时显示「1 天」而不是「0 天」，
-            // 后者读起来像已经过期了。
-            expiryTextOf(dbInbound) {
+            // 到期标签：「62 天后」「5 天后」「已过期」，7 天内橙、过期红、其余灰
+            expiryTagOf(dbInbound) {
                 const ms = dbInbound.expiryTime - Date.now();
                 if (ms <= 0) return '已过期';
-                const days = Math.ceil(ms / 86400000);
-                return days > 365 ? Math.floor(days / 365) + ' 年+' : '剩 ' + days + ' 天';
+                return Math.ceil(ms / 86400000) + ' 天后';
             },
-            expiryToneOf(dbInbound) {
-                if (dbInbound.isExpiry) return 'status-text-danger';
-                if (dbInbound.expiryTime - Date.now() <= 7 * 86400000) return 'status-text-warn';
+            expiryTagToneOf(dbInbound) {
+                const ms = dbInbound.expiryTime - Date.now();
+                if (ms <= 0) return 'is-danger';
+                if (ms <= 7 * 86400000) return 'is-warn';
                 return '';
             },
             // 地区 / 并发 / 限速三项合成一列。只输出**已经设了**的那几项，
@@ -1301,32 +1406,20 @@
             trafficReasonOf(id) {
                 return this.trafficReasons[id] || '';
             },
-            changeCustomRange(id, dates) {
-                const has = dates && dates.length === 2 && dates[0] && dates[1];
-                this.$set(this.customRanges, id, has ? dates : null);
-                // 'custom' 不匹配任何一个 a-radio-button 的 value，于是整组都不
-                // 高亮——数据用的是自定义区间，视觉上就不该有哪个档位亮着。
-                //
-                // 清空 trafficRanges 是不行的：trafficRangeOf 有 `|| 'today'`
-                // 兜底，清空后会回落并把「今日」重新点亮。而且这不只是「先点
-                // 档位再选区间」的问题——一进展开行就直接选区间时，「今日」
-                // 本来就是高亮的，因为那是默认值。
-                //
-                // 清掉日期时回到 'today'，让数据与高亮同时回正：只置空会出现
-                //「一个档位都不高亮、显示的却是今日」这第二种不一致。
-                this.$set(this.trafficRanges, id, has ? 'custom' : 'today');
+            // 时间范围下拉的 change：{ range } 或 { range: 'custom', start, end }。
+            // 档位与自定义区间互斥：选档位时清掉区间，否则 windowParamsOf 仍会
+            // 优先返回那个区间，界面纹丝不动。
+            changeWindow(id, v) {
+                this.$set(this.trafficRanges, id, v.range);
+                this.$set(this.customRanges, id, v.range === 'custom' ? [v.start, v.end] : null);
                 this.reloadWindowed(id);
             },
             // 把档位或自定义区间翻译成请求体。服务端 ParseWindow 认 range
             // 为 custom 时才看 start/end，所以两者互斥地发出去。
             windowParamsOf(id) {
                 const dates = this.customRangeOf(id);
-                if (dates && dates.length === 2 && dates[0] && dates[1]) {
-                    return {
-                        range: 'custom',
-                        start: dates[0].format('YYYY-MM-DD'),
-                        end: dates[1].format('YYYY-MM-DD'),
-                    };
+                if (dates && dates[0] && dates[1]) {
+                    return { range: 'custom', start: dates[0], end: dates[1] };
                 }
                 return { range: this.trafficRangeOf(id) };
             },
@@ -1353,14 +1446,6 @@
                 this.$set(this.ipUsages, id, msg.obj);
                 this.recomputeMerged(id);
             },
-            changeTrafficRange(id, range) {
-                // Vue 2 无法侦测新增的对象属性，必须走 $set。
-                this.$set(this.trafficRanges, id, range);
-                // 档位与自定义区间互斥：不清的话点了档位按钮界面纹丝不动，
-                // 因为 windowParamsOf 仍然优先返回那个区间。
-                this.$set(this.customRanges, id, null);
-                this.reloadWindowed(id);
-            },
             async loadTrafficChart(id) {
                 const msg = await HttpUtil.post('/aui/inbound/traffic/history/' + id, this.windowParamsOf(id));
                 if (!msg.success) {
@@ -1377,28 +1462,34 @@
                         return;
                     }
                     this.destroyTrafficChart(id);
+                    // 上行 / 下行堆叠成柱：每个时段的合计一眼可见，下行（通常是大头）用主色
+                    const up = data.points.map(p => p.up);
+                    const down = data.points.map(p => p.down);
+                    const options = styleTrafficAxes(trafficChartOptions(12),
+                        Math.max(0, ...data.points.map(p => p.up + p.down)));
+                    options.scales.x.stacked = true;
+                    options.scales.y.stacked = true;
+                    options.plugins.legend = { display: false };
+                    // 服务端标签：小时「10-30 21:00」、日「2026-10-30」。一天以内的小时刻度只留时刻，
+                    // 跨天的小时刻度只留日期，日刻度去掉年份；刻度数跟着图宽走（约 70px 一个）。
+                    // tooltip 标题仍是完整标签。
+                    const withinDay = data.granularity !== 'day' && data.labels.length <= 25;
+                    const isDay = data.granularity === 'day';
+                    options.scales.x.ticks.maxTicksLimit = Math.max(3, Math.min(12, Math.floor(canvas.clientWidth / 70)));
+                    options.scales.x.ticks.callback = function (v) {
+                        const label = this.getLabelForValue(v) || '';
+                        return withinDay ? label.slice(-5) : (isDay ? label.slice(5) : label.slice(0, 5));
+                    };
                     trafficCharts[id] = new Chart(canvas, {
-                        type: 'line',
+                        type: 'bar',
                         data: {
                             labels: data.labels,
                             datasets: [
-                                {
-                                    label: '上传',
-                                    data: data.points.map(p => p.up),
-                                    borderColor: '#15803D',
-                                    backgroundColor: 'rgba(21, 128, 61, 0.1)',
-                                    borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
-                                },
-                                {
-                                    label: '下载',
-                                    data: data.points.map(p => p.down),
-                                    borderColor: '#1266D6',
-                                    backgroundColor: 'rgba(18, 102, 214, 0.1)',
-                                    borderWidth: 2, pointRadius: 0, tension: 0.3, fill: true,
-                                },
+                                { label: '下载', data: down, backgroundColor: '#1266D6', borderRadius: 3, stack: 'traffic', maxBarThickness: 28 },
+                                { label: '上传', data: up, backgroundColor: '#93C5FD', borderRadius: 3, stack: 'traffic', maxBarThickness: 28 },
                             ],
                         },
-                        options: trafficChartOptions(12),
+                        options,
                     });
                 });
             },
@@ -1532,6 +1623,9 @@
             // 与展开行同频。两者共用同一份采样快照（sample() 有 500ms 闸门），
             // 所以多开一个轮询不会增加读内核连接表的次数。
             this.onlineCountTimer = setInterval(() => this.loadOnlineCounts(), 2000);
+            // 用量历史是小时桶，几分钟刷新一次足够
+            this.loadUsage24h();
+            this.usageTimer = setInterval(() => this.loadUsage24h(), 5 * 60 * 1000);
             // sharing_modal.html 有自己的 Vue 根实例（照 access_log_modal 的
             // 做法），两棵树之间靠事件通信。
             window.addEventListener('sharing-adopt-regions', (e) => {
@@ -1553,6 +1647,10 @@
             if (this.onlineCountTimer != null) {
                 clearInterval(this.onlineCountTimer);
                 this.onlineCountTimer = null;
+            }
+            if (this.usageTimer != null) {
+                clearInterval(this.usageTimer);
+                this.usageTimer = null;
             }
         },
         computed: {
@@ -1631,6 +1729,48 @@
                     return '还没有任何入站。点右上角「添加入站」创建第一个。';
                 }
                 return '没有符合当前筛选条件的入站。点工具栏右侧「清除筛选」看全部。';
+            },
+            // 各入站在线速度之和；一个都读不到连接表时为 null（显示「—」而不是 0）
+            inboundSpeed() {
+                const usable = Object.values(this.onlineCounts).filter(c => c.supported);
+                if (this.onlineCountError || !usable.length) {
+                    return { up: null, down: null };
+                }
+                return {
+                    up: usable.reduce((n, c) => n + (c.upSpeed || 0), 0),
+                    down: usable.reduce((n, c) => n + (c.downSpeed || 0), 0),
+                };
+            },
+            enabledCount() {
+                return this.dbInbounds.filter(i => i.enable).length;
+            },
+            onlineSummary() {
+                if (this.onlineCountError) {
+                    return { text: '—', foot: '读取连接表失败' };
+                }
+                const usable = Object.values(this.onlineCounts).filter(c => c.supported);
+                if (!usable.length) {
+                    return { text: '—', foot: '暂时读不到连接表' };
+                }
+                const sum = usable.reduce((n, c) => n + (c.count || 0), 0);
+                const spread = usable.filter(c => c.count > 0).length;
+                return { text: String(sum), foot: spread ? `分布在 ${spread} 个入站` : '当前没有设备在线' };
+            },
+            // 与系统状态页「需要关注」同一套口径：过期、7 天内到期、风险结论为高 / 严重
+            dueSummary() {
+                const now = Date.now();
+                let expired = 0, soon = 0, risky = 0;
+                this.dbInbounds.forEach(i => {
+                    if (i.expiryTime > 0 && i.expiryTime <= now) expired++;
+                    else if (i.expiryTime > now && i.expiryTime - now <= 7 * 86400000) soon++;
+                    const r = this.riskOf(i.id);
+                    if (r.state === 'ready' && (r.level === 'high' || r.level === 'severe')) risky++;
+                });
+                const parts = [];
+                if (expired) parts.push(`${expired} 已过期`);
+                if (soon) parts.push(`${soon} 即将到期`);
+                if (risky) parts.push(`${risky} 高风险`);
+                return { total: expired + soon + risky, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
             },
             total() {
                 let down = 0, up = 0;

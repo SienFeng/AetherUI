@@ -10,7 +10,8 @@
  * ════════════════════════════════════════════════════════════════════ */
 :root {
     /* ── Surface ───────────────────────────────────────────────── */
-    --aui-bg:            #F1F5F9;   /* 页面底。取代 antd 的 #f0f2f5，与登录页同族 */
+    --aui-bg:            #F5F7FA;   /* 页面底：浅冷灰。白色卡片浮在上面靠这一档色差出层次，
+                                     * 纯白底时卡片只剩极淡的边框与投影，整页发平 */
     --aui-surface:       #FFFFFF;
     --aui-surface-soft:  #F8FAFC;   /* 表头、只读区、代码块底 */
 
@@ -42,6 +43,18 @@
     --aui-danger:        #B91C1C;   /* 白底 6.47:1 */
     --aui-muted:         #64748B;   /* 白底 4.8:1 */
 
+    /* ── 身份色 ────────────────────────────────────────────────────
+     * 只用来区分「这是哪一个指标 / 哪一个入站」，不携带状态含义。
+     * 琥珀、绿、红刻意不在这里：它们是警告 / 成功 / 危险的语义色，
+     * 拿来当装饰会让一张「没出事」的卡看上去像在报警。
+     * 均作图形使用（色条、图标、头像底），白底上 ≥ 3:1。 */
+    --aui-id-blue:       #1266D6;   /* = --aui-primary */
+    --aui-id-teal:       #0D9488;   /* 3.7:1 */
+    --aui-id-violet:     #7C3AED;   /* 5.7:1 */
+    --aui-id-indigo:     #4F46E5;   /* 6.3:1 */
+    --aui-id-pink:       #DB2777;   /* 4.4:1 */
+    --aui-id-cyan:       #0891B2;   /* 3.7:1 */
+
     /* ── Radius ────────────────────────────────────────────────────
      * 改动前全站有七种取值（30/20/13/10/8/6/4），收敛成四档。
      * 30px 这个默认值本身就不成立——本文件下方 .stat-card 的原注释已经
@@ -49,7 +62,7 @@
      * index.html 里那些 60px 高的卡片只会更成立。 */
     --aui-r-sm:   6px;    /* chip、tag、小按钮 */
     --aui-r-md:  10px;    /* 输入框、按钮、图标块 */
-    --aui-r-lg:  12px;    /* 卡片、弹窗 */
+    --aui-r-lg:  14px;    /* 卡片、面板、弹窗 */
     --aui-r-pill: 999px;  /* 仅状态 badge */
 
     /* ── Shadow ────────────────────────────────────────────────────
@@ -57,6 +70,10 @@
     --aui-sh-1: 0 1px 2px rgba(15, 23, 42, .04);
     --aui-sh-2: 0 2px 8px rgba(15, 23, 42, .06);
     --aui-sh-3: 0 8px 24px -8px rgba(15, 23, 42, .16);
+    /* 卡片与面板在浅灰底上的投影：一层贴边的细影 + 一层向下扩散的柔影 */
+    --aui-sh-card:  0 1px 2px rgba(14, 23, 38, .04), 0 6px 20px -14px rgba(14, 23, 38, .16);
+    --aui-sh-float: 0 1px 2px rgba(14, 23, 38, .05), 0 8px 24px -14px rgba(14, 23, 38, .20);
+    --aui-line-card: #E6EAF0;
 
     /* ── Motion ────────────────────────────────────────────────── */
     --aui-dur:  180ms;
@@ -149,9 +166,12 @@ html, body {
         transform: none;
     }
 
-    /* 进度条与资源条的宽度变化是位移的一种 */
+    /* 进度条、资源圆环的长度变化与展开箭头的旋转都是位移的一种 */
     .usage-bar-fill,
-    .res-bar-fill {
+    .res-bar-fill,
+    .stat-ring circle,
+    .row-caret,
+    .range-caret {
         transition: none;
     }
 
@@ -184,11 +204,12 @@ button:focus-visible,
     outline-offset: 2px;
 }
 
-/* 侧栏是 #001529 的深底，主色蓝在上面对比度不够，单独给一个亮环。 */
+/* 侧栏改成浅底之后焦点环回到主色；outline-offset 取负值，让环画在菜单项
+ * 内侧——菜单项贴着侧栏边缘，外扩的环会被 sider 的 overflow 裁掉一半。 */
 #sider .ant-menu-item:focus-visible,
 #sider .ant-menu-submenu-title:focus-visible,
 #sider .sider-version-tag:focus-visible {
-    outline: 2px solid #FFFFFF;
+    outline: 2px solid var(--aui-primary);
     outline-offset: -2px;
 }
 
@@ -202,10 +223,31 @@ button:focus-visible,
 
 .ant-card {
     border-radius: var(--aui-r-lg);
+    border: 1px solid var(--aui-line-card);
+    box-shadow: var(--aui-sh-card);
 }
 
 .ant-card+.ant-card {
     margin-top: 20px;
+}
+
+/* 卡片头不画分隔线，标题与正文靠字号与间距区分 */
+.ant-card-head {
+    border-bottom: 0;
+    padding: 0 24px;
+    min-height: 56px;
+}
+
+.ant-card-head-title {
+    padding: 20px 0 4px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+.ant-card-body {
+    padding: 20px 24px 24px;
 }
 
 /* 手机上打开侧栏的唯一入口——侧栏在 breakpoint="md" 下 collapsed-width="0"
@@ -288,22 +330,36 @@ button:focus-visible,
  * 结构，不加这层限定的话 display:flex 会把 inline 表单的
  * display:inline-block 一并覆盖掉，把本该并排的字段拆成逐行堆叠——这不是
  * 本次要解决的问题，也不在「预期效果」范围内。 */
+/* 标签在控件上方（与视觉稿 v3 一致）：标签长短不一也互不挤占，控件始终占满整列。 */
 #inbound-modal .ant-form-horizontal .ant-form-item {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
+    margin-bottom: 14px;
 }
 
 #inbound-modal .ant-form-horizontal .ant-form-item-label {
-    flex: 0 0 auto;      /* 标签宽度随内容 */
+    flex: 0 0 auto;
     width: auto;
     max-width: none;
-    padding-right: 8px;  /* 标签与控件之间的固定间距 */
-    line-height: 32px;   /* 与 antd 默认控件高度对齐 */
+    padding: 0 0 6px;
+    line-height: 20px;
     white-space: nowrap; /* 标签不折行 */
 }
 
+#inbound-modal .ant-form-horizontal .ant-form-item-label > label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+/* 标签后的冒号在上下排时是多余的 */
+#inbound-modal .ant-form-horizontal .ant-form-item-label > label::after {
+    display: none;
+}
+
 #inbound-modal .ant-form-horizontal .ant-form-item-control-wrapper {
-    flex: 1 1 auto;      /* 控件填满剩余空间 */
+    flex: 1 1 auto;      /* 控件填满整列 */
     min-width: 0;        /* 允许收缩，避免溢出列宽 */
 }
 
@@ -323,40 +379,119 @@ button:focus-visible,
  * 标识与登录页用同一个内联 SVG（一个字母 A），不引图标字体也不用 emoji。
  *
  * 高度 56px 与 antd 菜单项（40px）+ 上下留白对齐，不额外占视觉重量。
- * 侧栏是 #001529 深底，这里的浅色都要按深底重新核算，不能照搬内页那套。 */
+ * 侧栏已改为白底（见下方「浅色侧栏」），品牌蓝只留在这一个标识上。 */
 .sider-brand {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 56px;
-    padding: 0 16px;
+    gap: 11px;
+    height: 64px;
+    padding: 0 20px;
     box-sizing: border-box;
-    border-bottom: 1px solid rgba(255, 255, 255, .08);
 }
 
+/* 品牌标识：蓝到靛紫的渐变方块，全站唯一一处装饰性渐变。
+ * 里面的字母是图形不是正文，白色对两端都 ≥ 3:1（SC 1.4.11）。 */
 .sider-brand-mark {
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
-    height: 26px;
-    border-radius: var(--aui-r-sm);
-    /* 深底上用主色的高亮档，#1266D6 本身在 #001529 上偏暗 */
-    color: #7FB0F0;
-    background: rgba(18, 102, 214, .22);
-    border: 1px solid rgba(127, 176, 240, .28);
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    color: #FFFFFF;
+    background: linear-gradient(135deg, #3B82F6 0%, #6D5BF5 100%);
+    box-shadow: 0 6px 14px -6px rgba(79, 110, 247, .7);
 }
 
-/* rgba(255,255,255,.85) 在 #001529 上约 14:1 */
 .sider-brand-name {
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
-    letter-spacing: -.005em;
-    color: rgba(255, 255, 255, .85);
+    letter-spacing: -.01em;
+    color: var(--aui-text);
     white-space: nowrap;
     overflow: hidden;
+}
+
+/* ── 浅色侧栏 ──────────────────────────────────────────────────────
+ * 改动前是 antd 的 #001529 深底 + 实心蓝选中块：整屏最重的两块颜色都是
+ * 导航，数据反而是灰的。现在侧栏是白底 + 一条 1px 分隔线，与浅灰的内容区
+ * 拉开一档；选中项是浅蓝底 + 左侧主色条。
+ *
+ * antd light 菜单的选中项自带主色浅底与右侧 3px 主色竖条（::after），
+ * 两者都要盖掉，否则选中态仍是一块蓝。 */
+#sider.ant-layout-sider {
+    background: var(--aui-surface);
+    border-right: 1px solid var(--aui-line);
+}
+
+#sider .ant-menu {
+    border-right: 0;
+    background: transparent;
+    padding: 0 10px;
+}
+
+#sider .ant-menu-item,
+#sider .ant-menu-submenu-title {
+    width: auto;
+    margin: 2px 0;
+    padding-left: 12px !important; /* antd 用行内 style 写 padding-left: 24px */
+    height: 38px;
+    line-height: 38px;
+    border-radius: var(--aui-r-md);
+    color: var(--aui-text-2);
+}
+
+/* 子菜单展开后的子项：比父级多缩进一档 */
+#sider .ant-menu-sub .ant-menu-item {
+    padding-left: 36px !important;
+}
+
+#sider .ant-menu-sub {
+    background: transparent;
+}
+
+#sider .ant-menu-item:hover,
+#sider .ant-menu-submenu-title:hover,
+#sider .ant-menu-item:hover .anticon,
+#sider .ant-menu-submenu-title:hover .anticon {
+    color: var(--aui-text);
+}
+
+#sider .ant-menu-item:hover,
+#sider .ant-menu-submenu-title:hover {
+    background: var(--aui-surface-soft);
+}
+
+/* 选中项：浅蓝底 + 主色字 + 左侧 3px 主色条。#1D4ED8 在 #EEF3FF 上 6.1:1 */
+#sider .ant-menu:not(.ant-menu-horizontal) .ant-menu-item-selected {
+    background: #EEF3FF;
+    color: #1D4ED8;
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 var(--aui-primary);
+}
+
+#sider .ant-menu-item-selected .anticon {
+    color: var(--aui-primary);
+}
+
+/* 分组标题（概览 / 管理 / 其他）。#6B7690 在白底上 4.6:1 */
+#sider .ant-menu-item-group-title,
+#sider-drawer .ant-menu-item-group-title {
+    padding: 14px 12px 6px;
+    font-size: 12px;
+    line-height: 18px;
+    color: #6B7690;
+}
+
+#sider .ant-menu-item::after {
+    display: none;
+}
+
+#sider .ant-menu-submenu-arrow::before,
+#sider .ant-menu-submenu-arrow::after {
+    background: var(--aui-text-3) !important; /* antd 用渐变画箭头，单独盖 */
 }
 
 /* ── 统一页面标题区 ────────────────────────────────────────────────
@@ -369,11 +504,11 @@ button:focus-visible,
  * 这是管理后台，垂直空间要留给表格。 */
 .page-header {
     display: flex;
-    align-items: flex-start;
+    align-items: flex-end;
     justify-content: space-between;
     gap: 16px;
     flex-wrap: wrap;
-    margin-bottom: 20px;
+    margin-bottom: 24px;
 }
 
 .page-heading {
@@ -386,15 +521,44 @@ button:focus-visible,
  * 登录页的 .login-title 注释里记过同一个坑。 */
 .page-title {
     margin: 0;
-    font-size: 20px;
-    line-height: 28px;
+    font-size: 26px;
+    line-height: 34px;
     font-weight: 600;
-    letter-spacing: -.01em;
+    letter-spacing: -.02em;
     color: var(--aui-text);
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+}
+
+/* 标题右侧紧贴的一句状态（「实时」等）。只写前端确实能证实的事。 */
+.page-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--aui-text-2);
+}
+
+.page-live::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #34D399;
+    box-shadow: 0 0 0 3px rgba(52, 211, 153, .2);
+}
+
+.page-live.is-stale::before {
+    background: var(--aui-muted);
+    box-shadow: none;
 }
 
 .page-description {
-    margin: 4px 0 0;
+    margin: 6px 0 0;
     font-size: 13px;
     line-height: 20px;
     color: var(--aui-text-2);
@@ -409,7 +573,9 @@ button:focus-visible,
 
 .sider-version {
     flex: 0 0 auto;
-    padding: 12px 16px;
+    margin: 0 12px;
+    border-top: 1px solid #EDF0F5;
+    padding: 12px 4px;
     text-align: center;
 }
 
@@ -418,15 +584,16 @@ button:focus-visible,
     padding: 2px 10px;
     border-radius: 10px;
     font-size: 12px;
-    color: rgba(255, 255, 255, .65);
-    background: rgba(255, 255, 255, .08);
+    font-variant-numeric: tabular-nums;
+    color: var(--aui-text-2);
+    background: var(--aui-bg);
     cursor: pointer;
     user-select: none;
 }
 
 .sider-version-tag:hover {
-    color: #fff;
-    background: rgba(255, 255, 255, .16);
+    color: var(--aui-text);
+    background: var(--aui-line);
 }
 
 .version-panel {
@@ -522,99 +689,158 @@ button:focus-visible,
 }
 /* 页面顶部的指标卡行。
  *
- * 改动前是 a-row/a-col 的 24 栅格：入站页 3 项 × lg=12、分流页 5 项 × lg=6，
- * 都超过 24，最后一项必然换行；而 24 除不尽 5，分流页用栅格根本排不出一行。
+ * 每项一张白卡、grid 平分整行（数值短到只有「4 B」「9」，撑得住宽度的是有边界的块，
+ * 不是文字间距）。卡片布局：左上标签、右上图标、中间大号数值、底部一行补充说明；
+ * 顶部一条 3px 身份色条。
  *
- * 中间试过「裸文字 + 间距」的紧凑条，实机上很难看：面板内容区约 1750px，
- * 而数值短到只有「4 B」「9」，文字缩在左边三百多像素，右边一千多像素全是
- * 空白，卡片看起来像没加载完。撑得住宽度的是**有边界的块**，不是文字间距。
- * 所以改成每项一张卡、grid 平分整行。
+ * 颜色分两种用途，不能混：身份色（蓝/青/紫/靛）只区分「这是哪一个指标」；
+ * 红色只用于异常（tone-alert），是信息。异常同时带图标与 aria-label，不只靠颜色。
  *
- * 颜色分两种用途，不能混：冷色（蓝/青/紫/靛）只用来区分不同指标，是装饰；
- * 红色只用于异常，是信息。所以正常项一律不用红也不用绿，红色出现时才有
- * 「出事了」这个含义。异常同时带图标与 aria-label，不只靠颜色。 */
+ * 标记沿用 stat-card > stat-icon + stat-text(stat-label, stat-value) [+ stat-foot]，
+ * 用 grid-template-areas 重排位置，所以三个页面的模板不必重写。 */
 .stat-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    gap: 16px;
+    gap: 20px;
     margin-bottom: 20px;
 }
 
-/* 圆角与卡片同档。改动前这里是 20px、.ant-card 是 30px，理由是「大卡八百多
- * 像素高，30px 只占一小截；指标卡才 110px 高，30px 会圆到像药丸」——那段推理
- * 本身是对的，它证明的是 30px 这个默认值不成立，而不是指标卡该有自己的一档。
- * 现在 .ant-card 已经收敛到 12px，两者用同一个 token，不再需要例外。 */
 .stat-card {
-    display: flex;
+    --c: var(--aui-id-blue);
+    --c-soft: var(--aui-primary-soft);
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "label icon"
+        "value value"
+        "foot  foot";
     align-items: center;
-    gap: 14px;
-    padding: 16px 20px;
-    background: #fff;
-    border: 1px solid var(--aui-line);
+    column-gap: 12px;
+    padding: 20px 22px 18px;
+    background: var(--aui-surface);
+    border: 1px solid var(--aui-line-card);
     border-radius: var(--aui-r-lg);
-    transition: border-color var(--aui-dur) var(--aui-ease),
-                box-shadow var(--aui-dur) var(--aui-ease);
+    box-shadow: var(--aui-sh-float);
+    transition: box-shadow var(--aui-dur) var(--aui-ease), transform var(--aui-dur) var(--aui-ease);
+}
+
+.stat-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 3px;
+    background: var(--c);
 }
 
 .stat-card:hover {
-    border-color: var(--aui-line-strong);
-    box-shadow: var(--aui-sh-2);
+    box-shadow: 0 2px 4px rgba(14, 23, 38, .05), 0 14px 30px -16px rgba(14, 23, 38, .28);
 }
 
 .stat-icon {
-    flex: none;
-    width: 44px;
-    height: 44px;
+    grid-area: icon;
+    width: 34px;
+    height: 34px;
     border-radius: var(--aui-r-md);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 20px;
+    font-size: 17px;
+    color: var(--c);
+    background: var(--c-soft);
 }
 
+/* 标签与数值要分别落进 grid 的两个区域，外层包裹让位 */
 .stat-text {
-    min-width: 0;
+    display: contents;
 }
 
-/* rgba(0,0,0,.45) 在白底上只有 3.36:1，达不到正文 4.5:1 的下限（antd 自己
- * 多处用它，但那不是照抄的理由）。.65 是 7.0:1。 */
+/* rgba(0,0,0,.45) 在白底上只有 3.36:1，达不到正文 4.5:1 的下限。 */
 .stat-label {
-    font-size: 12px;
-    line-height: 18px;
+    grid-area: label;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
     color: var(--aui-text-2);
     white-space: nowrap;
 }
 
 /* tabular-nums：这些数值每秒刷新一次，等宽数字才不会让整行左右跳动。 */
 .stat-value {
-    font-size: 24px;
-    line-height: 32px;
+    grid-area: value;
+    margin-top: 10px;
+    font-size: 30px;
+    line-height: 38px;
     font-weight: 600;
+    letter-spacing: -.025em;
     color: var(--aui-text);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .stat-value .unit {
-    font-size: 13px;
-    font-weight: 400;
-    color: var(--aui-text-2);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--aui-text-3);
     margin-left: 5px;
 }
 
-.stat-card.tone-blue .stat-icon   { color: var(--aui-primary); background: var(--aui-primary-soft); }
-.stat-card.tone-cyan .stat-icon   { color: #13c2c2; background: #e6fffb; }
-.stat-card.tone-purple .stat-icon { color: #722ed1; background: #f9f0ff; }
-.stat-card.tone-geek .stat-icon   { color: #2f54eb; background: #f0f5ff; }
-.stat-card.tone-ok .stat-icon     { color: var(--aui-success); background: #F0FDF4; }
-
-/* --aui-danger #B91C1C 在白底上是 6.47:1，比改动前的 #cf1322（5.57:1）更稳。 */
-.stat-card.tone-alert {
-    border-color: #FECACA;
-    background: #FEF2F2;
+.stat-foot {
+    grid-area: foot;
+    margin-top: 10px;
+    min-height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--aui-text-3);
+    font-variant-numeric: tabular-nums;
+    min-width: 0;
 }
 
-.stat-card.tone-alert .stat-icon  { color: var(--aui-danger); background: #FEE2E2; }
+.stat-foot > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 卡片右下角的小徽标（「5 个停用」「待处理」） */
+.stat-tag {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: var(--aui-r-sm);
+    font-size: 12px;
+    font-weight: 500;
+    background: #F1F5F9;
+    color: var(--aui-text-2);
+}
+
+.stat-tag.is-ok     { background: #F0FDF4; color: var(--aui-success); }
+.stat-tag.is-warn   { background: #FFFBEB; color: var(--aui-warning); }
+.stat-tag.is-danger { background: #FEF2F2; color: var(--aui-danger); }
+
+.stat-spark {
+    flex: none;
+    width: 96px;
+    height: 28px;
+}
+
+.stat-card.tone-blue   { --c: var(--aui-id-blue);   --c-soft: #EFF4FF; }
+.stat-card.tone-cyan   { --c: var(--aui-id-teal);   --c-soft: #E6F7F5; }
+.stat-card.tone-purple { --c: var(--aui-id-violet); --c-soft: #F3EEFF; }
+.stat-card.tone-geek   { --c: var(--aui-id-indigo); --c-soft: #EEF0FF; }
+.stat-card.tone-ok     { --c: var(--aui-success);   --c-soft: #F0FDF4; }
+
+/* 异常卡仍是白底：红色只出现在色条、图标与数值上，不整卡染红 */
+.stat-card.tone-alert  { --c: var(--aui-danger);    --c-soft: #FEF2F2; }
 .stat-card.tone-alert .stat-value { color: var(--aui-danger); }
 
 /* tooltip 挂在普通元素上，不加 tabindex 键盘用户永远看不到「哪几条规则
@@ -666,7 +892,7 @@ button:focus-visible,
  * 34px = 16px 行高 × 2 + 两行之间的 2px。 */
 .cell-speed {
     margin-top: 2px;
-    min-height: 34px;
+    min-height: 18px;   /* 速度现在只占一行（上下行并排） */
 }
 
 /* 上边距交给 .cell-speed 自己出，否则它与内部第一行的 margin 会折叠，
@@ -744,9 +970,9 @@ button.status-badge:hover {
  * 改动前额度是三个并排的彩色 a-tag（用量 / 额度 / 无限制），要读数字
  * 才知道用了多少。一条 3px 的条一眼就能扫完整列。 */
 .usage-bar {
-    height: 3px;
-    margin-top: 4px;
-    border-radius: 2px;
+    height: 6px;
+    margin-top: 6px;
+    border-radius: 3px;
     background: var(--aui-line);
     overflow: hidden;
 }
@@ -775,7 +1001,7 @@ button.status-badge:hover {
 
 .toolbar-search {
     display: inline-block;
-    width: 220px;
+    width: 280px;
     max-width: 100%;
 }
 
@@ -801,7 +1027,7 @@ button.status-badge:hover {
 /* 结果计数。过滤之后必须说清「看到的是全部还是一部分」，
  * 否则管理员会把过滤后的空表读成「入站被删光了」。 */
 .toolbar-count {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--aui-text-3);
     white-space: nowrap;
 }
@@ -850,7 +1076,7 @@ button.status-badge:hover {
     /* 内容区左右留白：antd 只在 ≥769px 给 .ant-layout-content 加 margin，
      * 窄屏下内容会直接贴到视口边缘。 */
     .ant-layout-content {
-        padding: 16px 12px;
+        padding: 16px 12px 32px;
         box-sizing: border-box;
     }
 
@@ -867,22 +1093,28 @@ button.status-badge:hover {
         flex: 1 1 auto;
     }
 
-    /* 指标卡单列。改动前 minmax(210px, 1fr) 在 390px 屏上仍是一列，
-     * 但 padding 与图标尺寸偏大，压缩一档。 */
-    .stat-card {
-        padding: 12px 14px;
+    /* 指标卡：窄屏两列，内边距与数值压缩一档 */
+    .stat-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 12px;
     }
 
-    .stat-icon {
-        width: 38px;
-        height: 38px;
-        font-size: 17px;
+    .stat-card {
+        padding: 16px;
     }
 
     .stat-value {
-        font-size: 20px;
-        line-height: 28px;
+        font-size: 24px;
+        line-height: 30px;
+    }
+
+    .stat-spark {
+        display: none;
+    }
+
+    .page-title {
+        font-size: 22px;
+        line-height: 30px;
     }
 
     /* 弹窗在窄屏上接近满宽：antd 1.7.2 的 a-modal 用固定 px 宽度
@@ -914,16 +1146,32 @@ button.status-badge:hover {
  * 是一个浮起的面，里面再画四个带边框和圆角的面，层级读起来是平的，
  * 却多出四圈描边和四份内边距。改成扁平分段——一条细线加一个小标题。 */
 .form-section + .form-section {
-    margin-top: 16px;
-    padding-top: 14px;
-    border-top: 1px solid var(--aui-line);
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid #EEF1F6;
 }
 
+/* 分段标题：左侧一条 3px 竖条 + 深色标题。竖条颜色按分段区分（身份色，不带状态含义） */
+.form-section.tone-amber  .form-section-title::before { background: #D97706; }
+.form-section.tone-indigo .form-section-title::before { background: var(--aui-id-indigo); }
+.form-section.tone-violet .form-section-title::before { background: var(--aui-id-violet); }
+
 .form-section-title {
-    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
     font-size: 13px;
     font-weight: 600;
-    color: var(--aui-text-2);
+    color: var(--aui-text);
+}
+
+.form-section-title::before {
+    content: "";
+    width: 3px;
+    height: 14px;
+    border-radius: 2px;
+    background: var(--aui-primary);
 }
 
 /* 可点击的 chip（访问日志里按来源 IP 过滤那一排）。选中态用主色填充，
@@ -1206,24 +1454,279 @@ button.chip.is-active {
     color: var(--aui-text-2);
 }
 
-/* ── 设置页：左侧二级导航 ────────────────────────────────────────────
- * 改动前是 9 个横向 tab，已经排满一行；再加 2FA / 备份 / 告警 / API 这类
- * 分类一定撑不住。antd 1.7.2 的 a-tabs 自带 tab-position="left"，
- * 9 个 a-tab-pane 一个都不用动，DOM 结构与 Vue 作用域零变化。 */
+/* ── 设置页：左侧分类导航（白色卡片）+ 右侧内容卡片 ─────────────────
+ * 用 antd a-tabs 的 tab-position="left"，各 a-tab-pane 结构不变。
+ * 导航与内容都是白卡，中间留 20px 浅灰缝。 */
 #setting-tabs > .ant-tabs-bar {
-    min-width: 132px;
-    border-right: 1px solid var(--aui-line);
+    width: 232px;
+    margin-right: 20px;
+    padding: 10px;
+    border-right: 0;
+    background: var(--aui-surface);
+    border: 1px solid var(--aui-line-card);
+    border-radius: var(--aui-r-lg);
+    box-shadow: var(--aui-sh-card);
+}
+
+#setting-tabs > .ant-tabs-bar .ant-tabs-ink-bar {
+    display: none !important;
 }
 
 #setting-tabs .ant-tabs-tab {
     margin: 0 0 2px 0 !important;
-    padding: 8px 16px !important;
-    border-radius: var(--aui-r-sm) 0 0 var(--aui-r-sm);
+    padding: 0 12px !important;
+    height: 44px;
+    line-height: 44px;
+    border-radius: var(--aui-r-md);
     text-align: left;
+    color: var(--aui-text-2);
+    transition: background-color var(--aui-dur) var(--aui-ease), color var(--aui-dur) var(--aui-ease);
+}
+
+#setting-tabs .ant-tabs-tab:hover {
+    background: #F4F6FA;
+    color: var(--aui-text);
+}
+
+/* #1D4ED8 在 #EEF3FF 上 6.1:1 */
+#setting-tabs .ant-tabs-tab-active,
+#setting-tabs .ant-tabs-tab-active:hover {
+    background: #EEF3FF;
+    color: #1D4ED8;
+    font-weight: 600;
 }
 
 #setting-tabs .ant-tabs-content {
-    padding-left: 20px;
+    padding-left: 0;
+    border-left: 0 !important;
+}
+
+#setting-tabs .ant-tabs-tabpane-active {
+    padding: 22px 24px 8px;
+    background: var(--aui-surface);
+    border: 1px solid var(--aui-line-card);
+    border-radius: var(--aui-r-lg);
+    box-shadow: var(--aui-sh-card);
+}
+
+.setting-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    width: 100%;
+}
+
+.setting-tab-icon {
+    --c: var(--aui-id-blue);
+    --s: #EFF4FF;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: var(--c);
+    background: var(--s);
+}
+
+.setting-tab-icon .anticon {
+    margin: 0 !important;
+}
+
+.setting-tab-icon.is-large {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 18px;
+}
+
+.setting-tab-icon.tone-blue   { --c: var(--aui-id-blue);   --s: #EFF4FF; }
+.setting-tab-icon.tone-violet { --c: var(--aui-id-violet); --s: #F3EEFF; }
+.setting-tab-icon.tone-teal   { --c: var(--aui-id-teal);   --s: #E6F7F5; }
+.setting-tab-icon.tone-amber  { --c: #B45309;              --s: #FFF5E6; }
+.setting-tab-icon.tone-pink   { --c: var(--aui-id-pink);   --s: #FDF2F8; }
+.setting-tab-icon.tone-cyan   { --c: var(--aui-id-cyan);   --s: #ECFEFF; }
+.setting-tab-icon.tone-slate  { --c: #475569;              --s: #F1F5F9; }
+
+/* 分类里有未保存的修改 */
+.setting-tab-dot {
+    margin-left: auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--aui-warning);
+}
+
+/* 每个分类的头部：图标 + 标题 + 一行说明 */
+.setting-pane-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+
+.setting-pane-title {
+    margin: 0;
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+/* ── 设置行：左标题 + 说明，右控件 ─────────────────────────────────── */
+.setting-list {
+    background: transparent;
+}
+
+.setting-row.ant-list-item {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 380px);
+    align-items: center;
+    gap: 24px;
+    padding: 18px 0;
+    border-bottom: 1px solid #EEF1F6;
+}
+
+.setting-list .ant-list-item:last-child {
+    border-bottom: 0;
+}
+
+.setting-row.is-stacked.ant-list-item {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+}
+
+/* 改过未保存：左侧一条橙色竖条（画在内容卡片的内边距里） */
+.setting-row.is-changed::before {
+    content: "";
+    position: absolute;
+    left: -24px;
+    top: 18px;
+    bottom: 18px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--aui-warning);
+}
+
+.setting-row-main {
+    min-width: 0;
+}
+
+.setting-row-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.setting-row-title .setting-hint {
+    margin-left: 0;
+}
+
+.setting-badge {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 6px;
+    background: #F1F5F9;
+    color: var(--aui-text-2);
+    font-size: 12px;
+    font-weight: 500;
+}
+
+/* 说明常驻但最多两行，完整内容在 ⓘ 里 */
+.setting-row-desc {
+    margin-top: 3px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--aui-text-3);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.setting-row-desc.is-full {
+    display: block;
+}
+
+.setting-row-ctl {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+
+.setting-row.is-stacked .setting-row-ctl {
+    justify-content: stretch;
+}
+
+.setting-row-pair .ant-input {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.setting-row-end.ant-list-item {
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* 两步验证：一张浅蓝紫卡片，图标 + 标题与说明 + 右侧操作 */
+.tfa-card {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 20px;
+    padding: 16px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #F5F8FF, #F7F5FF);
+    border: 1px solid #E3E8FB;
+}
+
+.tfa-icon {
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    color: var(--aui-id-indigo);
+    background: #FFFFFF;
+    box-shadow: 0 1px 3px rgba(14, 23, 38, .08);
+}
+
+.tfa-text {
+    flex: 1 1 280px;
+    min-width: 0;
+}
+
+.tfa-ctl {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tfa-ctl .ant-input {
+    width: 180px;
+}
+
+/* 两步验证的分步表单：与设置行同一套字号 */
+#setting-tabs .ant-form {
+    background: transparent !important;
+    padding: 16px 0 4px !important;
 }
 
 /* 宽屏下导航贴住视口：IP 归属地库、Xray 配置这几页能有好几屏长，滚到下面
@@ -1233,11 +1736,11 @@ button.chip.is-active {
  * 因此成了导航条最近的滚动祖先，粘滞永远发生在一个不会滚动的盒子里。换成
  * overflow:clip——照样裁掉溢出，但不构成滚动容器（不支持 clip 的浏览器退回
  * visible，只是不裁切）。导航条原本 height:100% 撑满整列，粘滞区间为零，
- * 必须改回内容高度；左右之间那条分隔线由内容区的 border-left 画，不受影响。
+ * 必须改回内容高度。
  *
  * 未保存提示条（.save-bar，见下）也贴在同一个滚动容器顶部、z-index 更高，
- * 它出现时导航要让到它下面，否则前两项会被它盖住。66px = 提示条高度 50px
- * （上下 padding 12 + 边框 1 + small 按钮 24）+ 与平时相同的 16px 间距；
+ * 它出现时导航要让到它下面，否则前两项会被它盖住。72px = 提示条高度
+ * （上下 padding 12 + 边框 1 + 按钮 32）+ 与平时相同的 16px 间距；
  * 提示条在宽屏下不会折行，改了它的尺寸要一起改这里。 */
 @media (min-width: 769px) {
     #setting-tabs {
@@ -1252,7 +1755,7 @@ button.chip.is-active {
     }
 
     .save-bar + #setting-tabs > .ant-tabs-bar {
-        top: 66px;
+        top: 72px;
     }
 }
 
@@ -1266,7 +1769,7 @@ button.chip.is-active {
 }
 
 .setting-group-title.is-first {
-    margin-top: 0;
+    margin-top: 18px;
 }
 
 /* 设置项标题旁的 ⓘ：说明文字收进 tooltip（component/setting.html）。
@@ -1298,23 +1801,43 @@ button.chip.is-active {
     line-height: 1.6;
 }
 
-/* 窄屏退回横向：132px 的侧导航在手机上会把右侧内容挤到没法填表。
+/* 窄屏：分类导航退回横向滚动条，设置行上下排。
  * antd 的左置 tab 靠 float 布局，回退时要把这些一并解除。 */
 @media (max-width: 768px) {
     #setting-tabs > .ant-tabs-bar {
-        min-width: 0;
         width: 100%;
         float: none;
-        border-right: 0;
-        border-bottom: 1px solid var(--aui-line);
+        margin: 0 0 12px;
+    }
+
+    #setting-tabs .ant-tabs-nav-scroll,
+    #setting-tabs .ant-tabs-nav {
+        overflow-x: auto;
+    }
+
+    #setting-tabs .ant-tabs-nav > div {
+        display: flex;
     }
 
     #setting-tabs .ant-tabs-tab {
-        border-radius: var(--aui-r-sm) var(--aui-r-sm) 0 0;
+        white-space: nowrap;
     }
 
-    #setting-tabs .ant-tabs-content {
-        padding-left: 0;
+    #setting-tabs .ant-tabs-tabpane-active {
+        padding: 16px 16px 4px;
+    }
+
+    .setting-row.ant-list-item {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 10px;
+    }
+
+    .setting-row-ctl {
+        justify-content: flex-start;
+    }
+
+    .setting-row.is-changed::before {
+        left: -16px;
     }
 }
 
@@ -1338,11 +1861,11 @@ button.chip.is-active {
     flex-wrap: wrap;
     margin-bottom: 16px;
     padding: 12px 16px;
-    border: 1px solid var(--aui-warning);
-    border-radius: var(--aui-r-lg);
+    border: 1px solid #FCE7B2;
+    border-radius: 12px;
     /* 不透明底：它浮在内容之上，半透明会让底下的表单文字透上来 */
     background: #FFFBEB;
-    box-shadow: var(--aui-sh-3);
+    box-shadow: var(--aui-sh-card);
 }
 
 .save-bar-text {
@@ -1376,4 +1899,1713 @@ button.chip.is-active {
 .ip-divergent .anticon {
     margin-left: 4px;
     color: var(--aui-warning);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * 全局组件换皮（antd 1.7.2）
+ *
+ * 白色卡片浮在 --aui-bg 浅冷灰上；表格靠行线与对齐、不用斑马纹；
+ * 控件统一 9-10px 圆角。只改外观，不碰任何组件的行为。
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 内容区留白。用 #content-layout 提高优先级，盖过各页 <style> 里那条
+ * .ant-layout-content { margin: 24px 16px }，不必逐页去改。 */
+/* 内容区按内容撑高、不被压缩：antd 给 .ant-layout-content 写了
+ * flex: auto + min-height: 0，它在可滚动的 #content-layout 里会被压成视口高度，
+ * 卡片溢出到它外面——底部留白（padding）于是落在卡片中间，最后一张卡片贴着
+ * 视口底边、滚不出空档。 */
+#content-layout > .ant-layout-content {
+    flex: 0 0 auto;
+}
+
+@media (min-width: 769px) {
+    #content-layout > .ant-layout-content {
+        margin: 28px 32px 0;
+        padding-bottom: 40px;
+    }
+}
+
+/* ── 表格 ─────────────────────────────────────────────────────────── */
+.ant-table {
+    color: var(--aui-text);
+}
+
+.ant-table-thead > tr > th {
+    background: #F7F9FC;
+    color: var(--aui-text-3);
+    font-size: 12px;
+    font-weight: 500;
+    border-bottom: 0;
+    padding: 11px 14px;
+}
+
+.ant-table-thead > tr > th:first-child { border-radius: 8px 0 0 8px; }
+.ant-table-thead > tr > th:last-child  { border-radius: 0 8px 8px 0; }
+
+.ant-table-tbody > tr > td {
+    border-bottom: 1px solid #EEF1F6;
+    padding: 14px;
+}
+
+.ant-table-tbody > tr:last-child > td {
+    border-bottom: 0;
+}
+
+.ant-table-tbody > tr:hover:not(.ant-table-expanded-row) > td,
+.ant-table-tbody > tr.ant-table-row-hover:not(.ant-table-expanded-row) > td {
+    background: #F9FBFE;
+}
+
+/* 展开行：浅蓝灰底，里面的内容自己再画白卡 */
+.ant-table-expanded-row > td,
+.ant-table-expanded-row:hover > td {
+    background: #F7FAFF;
+}
+
+.ant-table-placeholder {
+    border-bottom: 0;
+    color: var(--aui-text-3);
+}
+
+/* ── 按钮 ─────────────────────────────────────────────────────────── */
+.ant-btn {
+    border-radius: 9px;
+    border-color: #D9E0EA;
+    font-weight: 500;
+    box-shadow: none;
+}
+
+.ant-btn:not(.ant-btn-sm):not(.ant-btn-circle):not(.ant-btn-link) {
+    height: 34px;
+    padding: 0 14px;
+}
+
+.ant-btn-sm {
+    border-radius: 7px;
+}
+
+.ant-btn-primary {
+    border-color: var(--aui-primary);
+    box-shadow: 0 4px 12px -4px rgba(18, 102, 214, .55);
+}
+
+.ant-btn-link {
+    box-shadow: none;
+}
+
+/* ── 分段选择（a-radio-button 组） ───────────────────────────────────
+ * 一条浅灰托盘里放几个无边框按钮，选中的那个是浮起来的白片。 */
+.ant-radio-group-outline,
+.ant-radio-group-solid {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    border-radius: 10px;
+    background: #F1F4F9;
+}
+
+.ant-radio-button-wrapper,
+.ant-radio-button-wrapper:first-child,
+.ant-radio-button-wrapper:last-child {
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--aui-text-2);
+    box-shadow: none;
+    height: 28px;
+    line-height: 28px;
+    padding: 0 12px;
+}
+
+.ant-radio-button-wrapper:not(:first-child)::before {
+    display: none;
+}
+
+.ant-radio-group-small .ant-radio-button-wrapper {
+    height: 26px;
+    line-height: 26px;
+    padding: 0 10px;
+}
+
+.ant-radio-button-wrapper:hover {
+    color: var(--aui-text);
+}
+
+.ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled),
+.ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled):hover,
+.ant-radio-group-solid .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled) {
+    background: #FFFFFF;
+    color: var(--aui-text);
+    font-weight: 600;
+    border: 0;
+    box-shadow: 0 1px 2px rgba(14, 23, 38, .08), 0 1px 6px rgba(14, 23, 38, .06);
+}
+
+.ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled):focus-within {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 1px;
+}
+
+/* ── 输入类控件 ───────────────────────────────────────────────────── */
+.ant-input,
+.ant-input-number,
+.ant-select-selection,
+.ant-calendar-picker-input {
+    border-radius: 9px;
+    border-color: #D9E0EA;
+}
+
+.ant-input:hover,
+.ant-input-number:hover,
+.ant-select-selection:hover {
+    border-color: #B9C5D6;
+}
+
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-number-focused,
+.ant-select-focused .ant-select-selection,
+.ant-select-open .ant-select-selection {
+    border-color: var(--aui-primary);
+    box-shadow: 0 0 0 3px var(--aui-ring);
+}
+
+.ant-input-group-addon {
+    background: #F6F8FB;
+    border-color: #D9E0EA;
+    color: var(--aui-text-2);
+}
+
+.ant-input-group-addon:last-child  { border-radius: 0 9px 9px 0; }
+.ant-input-group-addon:first-child { border-radius: 9px 0 0 9px; }
+
+/* ── 标签页（分流页的三张表） ─────────────────────────────────────── */
+.ant-tabs-bar {
+    border-bottom-color: var(--aui-line);
+}
+
+.ant-tabs-nav .ant-tabs-tab {
+    padding: 12px 2px;
+    margin-right: 28px;
+    color: var(--aui-text-2);
+}
+
+.ant-tabs-nav .ant-tabs-tab-active {
+    color: var(--aui-text);
+    font-weight: 600;
+}
+
+.ant-tabs-ink-bar {
+    height: 2px;
+    border-radius: 2px;
+}
+
+/* ── 弹窗 ─────────────────────────────────────────────────────────── */
+.ant-modal-content {
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(2, 6, 23, .45), 0 2px 6px rgba(2, 6, 23, .10);
+}
+
+.ant-modal-header {
+    border-bottom: 0;
+    padding: 20px 24px 8px;
+}
+
+.ant-modal-title {
+    font-size: 17px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+.ant-modal-close-x {
+    width: 52px;
+    height: 56px;
+    line-height: 56px;
+}
+
+.ant-modal-body {
+    padding: 12px 24px 22px;
+}
+
+/* 底部：灰色操作栏，按钮靠右；可在左侧放一句说明（.modal-foot-note） */
+.ant-modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 12px 24px;
+    background: #F8FAFC;
+    border-top: 1px solid #EEF1F6;
+}
+
+.ant-modal-confirm .ant-modal-body {
+    padding: 24px;
+}
+
+.ant-modal-mask {
+    background-color: rgba(15, 23, 42, .5);
+}
+
+/* ── 开关、标签提示 ───────────────────────────────────────────────── */
+.ant-tooltip-inner {
+    border-radius: 8px;
+    background: #0E1726;
+    padding: 8px 10px;
+}
+
+.ant-tooltip-arrow::before {
+    background: #0E1726;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * 系统状态页（index.html）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 标题下方一行：Xray 状态徽标 + 核心版本 + 系统运行时长 */
+.page-meta {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 22px;
+    font-size: 13px;
+    color: var(--aui-text-2);
+}
+
+.page-meta b {
+    margin-left: 4px;
+    font-weight: 500;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.xray-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: var(--aui-r-pill);
+    font-weight: 500;
+    background: #F1F5F9;
+    color: var(--aui-text-2);
+    border: 1px solid var(--aui-line);
+}
+
+.xray-badge::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--aui-muted);
+}
+
+/* #065F46 在 #DCFCE7 上 7.3:1 */
+.xray-badge.is-ok     { background: #DCFCE7; border-color: #A7F3D0; color: #065F46; }
+.xray-badge.is-ok::before { background: #10B981; }
+.xray-badge.is-danger { background: #FEF2F2; border-color: #FBD5D5; color: var(--aui-danger); }
+.xray-badge.is-danger::before { background: var(--aui-danger); }
+
+/* 卡片标题下的一行小字 */
+.card-sub {
+    margin-top: 2px;
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0;
+    line-height: 18px;
+    color: var(--aui-text-3);
+}
+
+.ant-card-extra {
+    padding: 20px 0 4px;
+}
+
+.num {
+    font-variant-numeric: tabular-nums;
+}
+
+/* 两列行：用量（宽）+ 需要关注（窄）；排行（宽）+ 资源（窄） */
+.dash-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+
+.dash-row-bottom {
+    grid-template-columns: minmax(0, 1.55fr) minmax(360px, 1fr);
+}
+
+/* 同一行的卡片等高（a-card 外层默认不撑满 grid 格子） */
+.dash-row > .ant-card {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.dash-row > .ant-card + .ant-card {
+    margin-top: 0;
+}
+
+.dash-row > .ant-card > .ant-card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── 用量趋势 ─────────────────────────────────────────────────────── */
+.usage-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 36px;
+}
+
+.usage-meta-label {
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.usage-meta-divider {
+    align-self: stretch;
+    width: 1px;
+    background: var(--aui-line);
+}
+
+.usage-meta-label .anticon {
+    color: var(--aui-text-3);
+}
+
+.usage-meta-sub {
+    font-size: 12px;
+    color: var(--aui-text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+.usage-speed {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.usage-speed .stat-spark {
+    width: 72px;
+    height: 24px;
+}
+
+.usage-meta-value {
+    font-size: 22px;
+    line-height: 30px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.chart-legend {
+    list-style: none;
+    margin: 14px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.chart-legend i {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: -1px;
+}
+
+.usage-chart {
+    position: relative;
+    flex: 1;
+    min-height: 260px;
+    margin-top: 10px;
+}
+
+.chart-empty {
+    position: absolute;
+    inset: 0 0 24px 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--aui-text-3);
+    pointer-events: none;
+}
+
+/* ── 需要关注 ─────────────────────────────────────────────────────── */
+.attn-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 10px;
+}
+
+.attn-item {
+    --soft: #F8FAFC;
+    --edge: #E8ECF2;
+    --ink: var(--aui-text-2);
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: var(--soft);
+    border: 1px solid var(--edge);
+}
+
+.attn-item.is-danger  { --soft: #FEF2F2; --edge: #FBD5D5; --ink: var(--aui-danger); }
+.attn-item.is-warn    { --soft: #FFFBEB; --edge: #FCE7B2; --ink: var(--aui-warning); }
+
+.attn-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 17px;
+    background: #FFFFFF;
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(14, 23, 38, .06);
+}
+
+.attn-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.attn-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.attn-who {
+    font-size: 12px;
+    color: var(--aui-text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.attn-count {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+}
+
+.attn-foot {
+    display: inline-block;
+    margin-top: 16px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* ── 入站用量排行 ─────────────────────────────────────────────────── */
+.rank-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.rank-table th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--aui-text-3);
+    padding: 10px 12px;
+    background: #F7F9FC;
+}
+
+.rank-table th:first-child { border-radius: 8px 0 0 8px; }
+.rank-table th:last-child  { border-radius: 0 8px 8px 0; }
+
+.rank-table td {
+    padding: 0 12px;
+    height: 52px;
+    border-bottom: 1px solid #EEF1F6;
+    font-size: 13px;
+    color: var(--aui-text);
+}
+
+.rank-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.rank-table .r {
+    text-align: right;
+}
+
+.rank-table .stat-tag {
+    white-space: nowrap;
+}
+
+.who {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+/* 头像底色是身份色，白字作图形用（首字母），≥ 3:1 */
+.who-avatar {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: #FFFFFF;
+}
+
+.who-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.who-name {
+    font-weight: 500;
+    color: var(--aui-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.who-sub {
+    font-size: 12px;
+    color: var(--aui-text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.rank-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+}
+
+.rank-track {
+    flex: 1;
+    max-width: 120px;
+    height: 8px;
+    border-radius: 4px;
+    background: #EEF2F7;
+    overflow: hidden;
+}
+
+.rank-track i {
+    display: block;
+    height: 100%;
+    border-radius: 4px;
+}
+
+.rank-size {
+    min-width: 72px;
+    font-weight: 600;
+    text-align: right;
+}
+
+.rank-empty {
+    padding: 48px 0;
+    text-align: center;
+    font-size: 13px;
+    color: var(--aui-text-3);
+}
+
+/* ── 网络卡片里的小标签与数值 ─────────────────────────────────────── */
+.fact-label {
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.fact-label .anticon {
+    color: var(--aui-text-3);
+}
+
+.fact-value {
+    margin-top: 2px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+@media (max-width: 1280px) {
+    .dash-row,
+    .dash-row-bottom {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .rank-table th:nth-child(3), .rank-table td:nth-child(3),
+    .rank-table th:nth-child(4), .rank-table td:nth-child(4) {
+        display: none;
+    }
+
+    .rank-track {
+        display: none;
+    }
+}
+
+.rank-card .rank-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+@media (max-width: 768px) {
+    /* 窄屏左上角是打开侧栏的把手（44×44），标题区让出它的位置，不被盖住 */
+    .drawer-handle {
+        top: 12px;
+    }
+
+    .page-heading {
+        padding-left: 48px;
+    }
+
+    /* 卡片头：标题与右侧控件放不下时上下排 */
+    .ant-card-head-wrapper {
+        flex-wrap: wrap;
+    }
+
+    /* antd 的卡片标题是 nowrap + 截断，窄屏下让它独占一行，控件落到下一行 */
+    .ant-card-head-title {
+        flex: 1 1 100%;
+        white-space: normal;
+    }
+
+    .ant-card-extra {
+        float: none;
+        padding: 4px 0 8px;
+        margin-left: 0;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ * 入站列表（inbounds.html）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 工具栏：搜索框是浅灰底的胶囊，过滤器是圆角药丸 */
+.toolbar-search .ant-input {
+    border-color: transparent;
+    background: #F4F6FA;
+}
+
+.toolbar-search .ant-input:hover {
+    border-color: #D9E0EA;
+}
+
+.toolbar-search .ant-input:focus {
+    background: #FFFFFF;
+}
+
+.toolbar .ant-select-selection {
+    border-radius: var(--aui-r-pill);
+}
+
+.toolbar .ant-select-selection-selected-value {
+    color: var(--aui-text-2);
+}
+
+
+/* 一级表格的单元格比 antd 默认高一档，头像与两行文字有呼吸 */
+#app .ant-table:not(.ant-table-small) > .ant-table-content .ant-table-tbody > tr > td {
+    padding-top: 12px;
+    padding-bottom: 12px;
+}
+
+/* 传输方式：传输层灰标签 + 安全层彩标签 */
+.conn-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 3px;
+}
+
+.conn-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 7px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: #F1F5F9;
+    color: var(--aui-text-2);
+}
+
+/* #1D4ED8 在 #EFF4FF 上 6.1:1；#6D28D9 在 #F3EEFF 上 6.9:1 */
+.conn-chip.is-blue   { background: #EFF4FF; color: #1D4ED8; }
+.conn-chip.is-violet { background: #F3EEFF; color: #6D28D9; }
+
+/* 行内操作：图标按钮 */
+.row-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.icon-btn {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--aui-text-3);
+    font-size: 15px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color var(--aui-dur) var(--aui-ease), color var(--aui-dur) var(--aui-ease);
+}
+
+.icon-btn:hover {
+    background: #EEF2F8;
+    color: var(--aui-text);
+}
+
+.icon-btn:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 1px;
+}
+
+/* 展开行：浅蓝灰底里一块白色面板 */
+.ant-table-expanded-row > td {
+    padding: 4px 14px 18px !important; /* antd 用行内 style 给展开格写了 padding */
+}
+
+.expand-panel {
+    padding: 18px 20px;
+    border-radius: 12px;
+    background: #FFFFFF;
+    border: 1px solid #E3EAF5;
+    cursor: default;
+}
+
+.expand-panel .row-section + .row-section {
+    border-top-color: #EEF1F6;
+}
+
+.expand-panel .row-section-title {
+    font-size: 14px;
+    color: var(--aui-text);
+}
+
+.expand-panel .row-section-title .anticon {
+    color: var(--aui-text-3);
+}
+
+/* 展开面板里的来源明细是 small 表格：去掉表头底色，只留一条细线 */
+.expand-panel .ant-table-small {
+    border: 0;
+}
+
+.expand-panel .ant-table-small > .ant-table-content .ant-table-thead > tr > th {
+    background: transparent;
+    border-bottom: 1px solid #EEF1F6;
+    border-radius: 0;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+ * 分流管理（routing.html）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 三个标签页整体放进一块白色面板，标签栏在面板顶部；
+ * 每个标签页里原来那张 a-card 退成透明容器，不再叠一层卡片。 */
+#routing-tabs {
+    background: var(--aui-surface);
+    border: 1px solid var(--aui-line-card);
+    border-radius: var(--aui-r-lg);
+    box-shadow: var(--aui-sh-card);
+    padding: 4px 24px 24px;
+}
+
+#routing-tabs .ant-tabs-bar {
+    margin-bottom: 18px;
+}
+
+#routing-tabs .ant-tabs-tab .cell-muted {
+    display: inline-block;
+    min-width: 22px;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: var(--aui-r-pill);
+    background: #F1F5F9;
+    font-size: 12px;
+    line-height: 20px;
+    text-align: center;
+    color: var(--aui-text-2);
+}
+
+#routing-tabs .ant-tabs-tab-active .cell-muted {
+    background: #EFF4FF;
+    color: #1D4ED8;
+}
+
+#routing-tabs .ant-card {
+    border: 0;
+    box-shadow: none;
+    background: transparent;
+}
+
+#routing-tabs .ant-card-body {
+    padding: 0;
+}
+
+.mono-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--aui-text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.empty-block {
+    padding: 48px 16px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--aui-text-3);
+}
+
+/* ── 域名组卡片 ───────────────────────────────────────────────────── */
+.gcards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+}
+
+.gcard {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-lg);
+    background: var(--aui-surface);
+    min-width: 0;
+    transition: border-color var(--aui-dur) var(--aui-ease), box-shadow var(--aui-dur) var(--aui-ease);
+}
+
+.gcard:hover {
+    border-color: #C9D6EA;
+    box-shadow: 0 8px 22px -14px rgba(14, 23, 38, .3);
+}
+
+.gcard.is-error {
+    border-color: #F5C2C2;
+    background: #FFFBFB;
+}
+
+.gcard-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* 图标底色是身份色，里面的字母作图形用，≥ 3:1 */
+.gcard-icon {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    color: #FFFFFF;
+}
+
+.gcard-title {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.gcard-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--aui-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.gcard-meta {
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.gcard-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-radius: 10px;
+    background: #F7F9FC;
+}
+
+.gcard-stats > div {
+    padding: 8px 12px;
+    min-width: 0;
+}
+
+.gcard-stats > div + div {
+    border-left: 1px solid #EBEFF5;
+}
+
+.gcard-stats b {
+    display: block;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.gcard-stats span {
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.gcard-domains {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-height: 24px;
+}
+
+.gcard-domains code {
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 6px;
+    background: #F1F5F9;
+    color: #334155;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gcard-more {
+    font-size: 12px;
+    color: var(--aui-text-3);
+}
+
+.gcard-warn {
+    font-size: 12px;
+    color: var(--aui-danger);
+}
+
+.gcard-sub {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 10px;
+    border-top: 1px solid #EEF1F6;
+    font-size: 12px;
+    color: var(--aui-text-2);
+    min-height: 34px;
+}
+
+.gcard-sub-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gcard-sub .ant-btn-link {
+    padding: 0;
+    height: auto;
+}
+
+.gcard-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #10B981;
+}
+
+.gcard-sub.is-none .gcard-dot    { background: #CBD5E1; }
+.gcard-sub.is-pending .gcard-dot { background: var(--aui-warning); }
+.gcard-sub.is-error              { color: var(--aui-danger); }
+.gcard-sub.is-error .gcard-dot   { background: var(--aui-danger); }
+
+/* ── 分流规则：表格行做成一张张圆角卡片 ─────────────────────────────
+ * 不换成 div 列表：拖拽排序挂在 a-table 的 custom-row 上。 */
+.rule-table .ant-table-content > .ant-table-body > table {
+    border-collapse: separate;
+    border-spacing: 0 8px;
+    margin-top: -8px;
+}
+
+.rule-table .ant-table-tbody > tr > td {
+    background: #FFFFFF;
+    border-top: 1px solid var(--aui-line);
+    border-bottom: 1px solid var(--aui-line) !important;
+    padding-top: 14px;
+    padding-bottom: 14px;
+}
+
+.rule-table .ant-table-tbody > tr > td:first-child {
+    border-left: 1px solid var(--aui-line);
+    border-radius: 12px 0 0 12px;
+}
+
+.rule-table .ant-table-tbody > tr > td:last-child {
+    border-right: 1px solid var(--aui-line);
+    border-radius: 0 12px 12px 0;
+}
+
+.rule-table .ant-table-tbody > tr:hover > td {
+    background: #FAFCFF;
+    border-color: #C9D6EA !important;
+}
+
+.rule-table.is-block .ant-table-tbody > tr > td {
+    background: #FFFBFB;
+    border-color: #F7D9D9 !important;
+}
+
+/* 规则卡片不显示表头（与视觉稿一致）：每行读成一句「谁 → 哪些域名 → 去哪」 */
+.rule-table .ant-table-thead {
+    display: none;
+}
+
+.rule-lead {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.rule-prio {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    background: #F1F5F9;
+    color: var(--aui-text-2);
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.rule-table td:nth-child(2) {
+    font-weight: 500;
+}
+
+/* 「所有用户」：靛色 chip。#4338CA 在 #EEF2FF 上 7.0:1 */
+.chip.chip-all {
+    background: #EEF2FF;
+    color: #4338CA;
+}
+
+.chip-count {
+    margin-left: 3px;
+    color: var(--aui-text-3);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 去向胶囊：圆点 + 文字。三种去向的文字在各自底色上都 ≥ 4.5:1 */
+.dest-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 11px;
+    border-radius: 9px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.dest-pill::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.dest-pill.is-proxy  { background: #EFF4FF; color: #1D4ED8; }
+.dest-pill.is-direct { background: #ECFDF5; color: #047857; }
+.dest-pill.is-block  { background: #FEF2F2; color: #B91C1C; }
+
+.mono-chip {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 节点连通性：延迟 + 颜色条 + 探测 */
+.probe {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    white-space: nowrap;
+}
+
+.probe-ms {
+    min-width: 54px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--aui-text);
+    font-variant-numeric: tabular-nums;
+}
+
+.probe-ms small {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--aui-text-3);
+}
+
+.probe-ms.is-none    { font-size: 12px; font-weight: 400; color: var(--aui-text-3); }
+.probe-ms.is-fail    { font-size: 13px; color: var(--aui-danger); }
+.probe-ms.is-unknown { font-size: 13px; color: var(--aui-warning); }
+
+.probe-track {
+    width: 64px;
+    height: 5px;
+    border-radius: 3px;
+    background: #EEF2F7;
+    overflow: hidden;
+}
+
+.probe-track i {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+}
+
+.probe-link {
+    font-size: 13px;
+}
+
+/* 流量单元格：已用量粗体 + 右侧上限 + 进度条 */
+.usage-cell {
+    min-width: 0;
+}
+
+.usage-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.usage-top b {
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.usage-top span {
+    color: var(--aui-text-3);
+    white-space: nowrap;
+}
+
+/* 在线单元格：状态点 + 「N 台设备 / 无人在线」 */
+.online-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--aui-text);
+}
+
+.online-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #CBD5E1;
+}
+
+.online-main.is-on .online-dot {
+    background: #10B981;
+    box-shadow: 0 0 0 3px #D1FAE5;
+}
+
+.online-main + .cell-speed {
+    padding-left: 16px;
+}
+
+.expiry-tag {
+    margin-top: 3px;
+}
+
+/* 展开面板的段头：标题在左，控件在右 */
+.row-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+    margin-bottom: 12px;
+}
+
+.row-section-head .row-section-title {
+    margin-bottom: 0;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+}
+
+.row-section-tools {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.row-section-note {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--aui-text-3);
+}
+
+.row-section-figure {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    color: var(--aui-text);
+}
+
+.row-section-figure > span {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0;
+    color: var(--aui-text-3);
+}
+
+.row-section-info {
+    font-size: 13px;
+    color: var(--aui-text-3);
+}
+
+.row-caret {
+    font-size: 11px;
+    color: var(--aui-text-3);
+    transition: transform var(--aui-dur) var(--aui-ease), color var(--aui-dur) var(--aui-ease);
+}
+
+.row-caret.is-open {
+    transform: rotate(90deg);
+    color: var(--aui-primary);
+}
+
+.legend-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 5px;
+    vertical-align: 0;
+}
+
+/* 上下行并排且不换行：这一格每 2 秒刷新，折成两行会让整行随采样上下跳动 */
+.online-speed {
+    display: flex;
+    gap: 0 8px;
+    white-space: nowrap;
+}
+
+/* ── 弹窗头部：彩色图标 + 标题 + 副标题 ─────────────────────────────── */
+.modal-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-right: 28px;   /* 给右上角关闭按钮留位 */
+}
+
+.modal-icon {
+    --c: var(--aui-id-blue);
+    --s: #EFF4FF;
+    flex: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: var(--c);
+    background: var(--s);
+}
+
+.modal-icon.tone-blue   { --c: var(--aui-id-blue);   --s: #EFF4FF; }
+.modal-icon.tone-teal   { --c: var(--aui-id-teal);   --s: #E6F7F5; }
+.modal-icon.tone-violet { --c: var(--aui-id-violet); --s: #F3EEFF; }
+.modal-icon.tone-amber  { --c: #B45309;              --s: #FFF5E6; }
+
+.modal-head-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.modal-head-title {
+    font-size: 17px;
+    line-height: 24px;
+    font-weight: 600;
+    color: var(--aui-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.modal-head-sub {
+    font-size: 12.5px;
+    line-height: 18px;
+    font-weight: 400;
+    color: var(--aui-text-3);
+}
+
+/* 底部左侧的一句说明，按钮仍靠右 */
+.ant-modal-footer .ant-btn + .ant-btn {
+    margin-left: 0;
+}
+
+.modal-foot-note {
+    margin-right: auto;
+    font-size: 12.5px;
+    color: var(--aui-text-3);
+}
+
+/* 分流页三个弹窗是 layout="vertical" 的表单：标签同样是深色中等字重 */
+.ant-modal .ant-form-vertical .ant-form-item-label > label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+}
+
+.ant-modal .ant-form-vertical .ant-form-item {
+    margin-bottom: 16px;
+}
+
+/* 二维码：白底细边框里居中 */
+.qr-frame {
+    padding: 12px;
+    border: 1px solid var(--aui-line);
+    border-radius: 14px;
+    background: #FFFFFF;
+}
+
+.qr-text {
+    margin-top: 12px;
+}
+
+.qr-text.ant-input {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: var(--aui-text-2);
+    background: #F7F9FC;
+}
+
+/* 分流规则弹窗的「动作」：三张选择卡。单选圆点隐藏，选中的卡片换边框与底色；
+ * 键盘焦点画在卡片外圈。 */
+.action-choices.ant-radio-group {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    width: 100%;
+}
+
+.action-choices .ant-radio-wrapper {
+    --c: var(--aui-primary);
+    --s: #EFF4FF;
+    margin: 0;
+    padding: 12px;
+    border: 1.5px solid var(--aui-line);
+    border-radius: 12px;
+    white-space: normal;
+    transition: border-color var(--aui-dur) var(--aui-ease), background-color var(--aui-dur) var(--aui-ease);
+}
+
+.action-choices .ant-radio-wrapper.is-direct { --c: #059669; --s: #ECFDF5; }
+.action-choices .ant-radio-wrapper.is-proxy  { --c: var(--aui-primary); --s: #EFF4FF; }
+.action-choices .ant-radio-wrapper.is-block  { --c: var(--aui-danger); --s: #FEF2F2; }
+
+.action-choices .ant-radio-wrapper:hover {
+    border-color: #C3CEDD;
+}
+
+.action-choices .ant-radio-wrapper-checked,
+.action-choices .ant-radio-wrapper-checked:hover {
+    border-color: var(--c);
+    background: var(--s);
+}
+
+.action-choices .ant-radio {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+}
+
+.action-choices .ant-radio-wrapper:focus-within {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+}
+
+.action-choices .ant-radio-wrapper > span:last-child {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.action-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--aui-text);
+}
+
+.action-name::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c);
+}
+
+.action-desc {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--aui-text-3);
+}
+
+/* ── 系统状态页：顶部四张资源卡 ───────────────────────────────────────
+ * 沿用 .stat-card 的外观，右侧的图标位换成占两行的圆环。 */
+.res-stat {
+    grid-template-areas:
+        "label ring"
+        "value ring"
+        "foot  foot";
+}
+
+.stat-ring {
+    grid-area: ring;
+    width: 58px;
+    height: 58px;
+    align-self: center;
+}
+
+.stat-ring circle:last-of-type {
+    transition: stroke-dasharray var(--aui-dur) var(--aui-ease);
+}
+
+/* 越过 80%：橙色色条（警告语义，正是这里要表达的） */
+.stat-card.tone-warn { --c: var(--aui-warning); --c-soft: #FFFBEB; }
+.stat-card.tone-warn .stat-value { color: var(--aui-warning); }
+
+/* ── 系统状态页：出站节点 ─────────────────────────────────────────── */
+.net-nodes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+}
+
+.net-node {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid #EEF1F6;
+}
+
+.net-node:first-child {
+    border-top: 0;
+}
+
+.net-lat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    white-space: nowrap;
+}
+
+.net-empty {
+    padding: 24px 0;
+    font-size: 13px;
+    color: var(--aui-text-3);
+    flex: 1;
+}
+
+
+/* 入站列表五张指标卡：宽屏一行五张 */
+@media (min-width: 1281px) {
+    .stat-row.stat-row-5 {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+}
+
+/* ── 流量概览：时间范围下拉 ───────────────────────────────────────── */
+.range-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid #D9E0EA;
+    border-radius: 9px;
+    background: #FFFFFF;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--aui-text);
+    cursor: pointer;
+    transition: border-color var(--aui-dur) var(--aui-ease), box-shadow var(--aui-dur) var(--aui-ease);
+}
+
+.range-trigger:hover {
+    border-color: #B9C5D6;
+}
+
+.range-trigger[aria-expanded="true"] {
+    border-color: var(--aui-primary);
+    box-shadow: 0 0 0 3px var(--aui-ring);
+}
+
+.range-trigger:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+}
+
+.range-trigger > .anticon:first-child {
+    color: var(--aui-text-3);
+}
+
+.range-caret {
+    font-size: 11px;
+    color: var(--aui-text-3);
+    transition: transform var(--aui-dur) var(--aui-ease);
+}
+
+.range-caret.is-open {
+    transform: rotate(180deg);
+}
+
+.range-popover .ant-popover-inner {
+    border-radius: 14px;
+    box-shadow: 0 16px 40px -16px rgba(14, 23, 38, .35), 0 2px 6px rgba(14, 23, 38, .08);
+}
+
+.range-popover .ant-popover-inner-content {
+    width: 340px;
+    padding: 10px;
+}
+
+.range-presets {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #EEF1F6;
+}
+
+.range-preset {
+    height: 38px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    font: inherit;
+    font-size: 14px;
+    color: var(--aui-text-2);
+    cursor: pointer;
+    transition: background-color var(--aui-dur) var(--aui-ease), color var(--aui-dur) var(--aui-ease);
+}
+
+.range-preset:hover {
+    background: #F4F6FA;
+    color: var(--aui-text);
+}
+
+/* #1D4ED8 在 #EEF3FF 上 6.1:1 */
+.range-preset[aria-pressed="true"] {
+    background: #EEF3FF;
+    color: #1D4ED8;
+    font-weight: 600;
+}
+
+.range-preset:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: -2px;
+}
+
+.range-custom {
+    padding: 12px 6px 4px;
+}
+
+.range-dates {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.range-date {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--aui-text-2);
+}
+
+.range-date .ant-calendar-picker {
+    width: 100%;
+}
+
+.range-arrow {
+    margin-bottom: 10px;
+    color: var(--aui-text-3);
+}
+
+.range-apply {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
 }

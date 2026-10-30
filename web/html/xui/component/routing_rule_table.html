@@ -2,18 +2,22 @@
      routing.html 里那段注释），列的渲染必须逐字一致——各写一份迟早会分叉，
      而分叉后两段的差异不会有任何东西提醒你。 -->
 {{define "routingRuleTableSlots"}}
-    <template slot="drag" slot-scope="text, rule">
-        <a-tooltip title="拖动调整顺序">
-            <span class="rule-drag-handle" draggable="true"
-                  @dragstart="onRuleDragStart($event, rule)"
-                  @dragend="resetRuleDrag"></span>
-        </a-tooltip>
+    <template slot="drag" slot-scope="text, rule, index">
+        <span class="rule-lead">
+            <a-tooltip title="拖动调整顺序">
+                <span class="rule-drag-handle" draggable="true"
+                      @dragstart="onRuleDragStart($event, rule)"
+                      @dragend="resetRuleDrag"></span>
+            </a-tooltip>
+            <!-- 序号就是匹配顺序（越小越先匹配），由行的先后决定 -->
+            <span class="rule-prio">[[ index + 1 ]]</span>
+        </span>
     </template>
     <template slot="inbound" slot-scope="text, rule">
         <span v-if="rule.broken" class="status-badge status-danger">
             <a-icon type="close-circle"></a-icon>数据损坏
         </span>
-        <span v-else-if="!rule.inboundIds.length" class="chip">所有用户</span>
+        <span v-else-if="!rule.inboundIds.length" class="chip chip-all">所有用户</span>
         <template v-else>
             <!-- 引用到一个不存在的入站是**真状态**（这条规则的这一部分不会
                  生效），所以它是红徽标；正常的用户名只是分类，用无色 chip。 -->
@@ -48,7 +52,7 @@
                 <span v-if="groupMissing(gid)" :key="gid" class="status-badge status-danger">
                     <a-icon type="close-circle"></a-icon>[[ groupName(gid) ]]
                 </span>
-                <span v-else :key="gid" class="chip">[[ groupName(gid) ]]</span>
+                <span v-else :key="gid" class="chip">[[ groupName(gid) ]] <span class="chip-count">[[ groupCount(gid) ]]</span></span>
             </template>
         </template>
     </template>
@@ -57,14 +61,15 @@
              与旁边两个「送到某处」不是同一类事。「直连」改中性——它只是
              「从本机出网」，不是健康信号，改动前那个绿色与全站「绿＝成功」
              的约定对不上。 -->
-        <span v-if="rule.action === 'block'" class="status-badge status-danger">
-            <a-icon type="stop"></a-icon>阻断
-        </span>
-        <span v-else-if="rule.action === 'direct'" class="chip">直连</span>
+        <!-- 去向胶囊（与视觉稿 v3 一致）：封禁红、直连绿、转发到节点蓝，各带一个圆点。
+             直连用绿色是视觉稿定稿时的选择：在这一列里它表示「本机出网」，与「封禁」
+             「走节点」三类去向一眼可分；它不出现在任何健康状态的位置。 -->
+        <span v-if="rule.action === 'block'" class="dest-pill is-block">封禁</span>
+        <span v-else-if="rule.action === 'direct'" class="dest-pill is-direct">直连（本机出网）</span>
         <span v-else-if="nodeMissing(rule.outboundId)" class="status-badge status-danger">
             <a-icon type="close-circle"></a-icon>[[ nodeName(rule.outboundId) ]]
         </span>
-        <span v-else class="chip">[[ nodeName(rule.outboundId) ]]</span>
+        <span v-else class="dest-pill is-proxy">[[ nodeName(rule.outboundId) ]]</span>
     </template>
     <template slot="warn" slot-scope="text, rule">
         <!-- #faad14 在白底上只有 2.0:1、#52c41a 只有 2.3:1，两个图标都接近
@@ -83,7 +88,8 @@
     </template>
     <template slot="action" slot-scope="text, rule">
         <a-dropdown :trigger="['click']">
-            <a @click="e => e.preventDefault()">操作</a>
+            <button type="button" class="icon-btn" @click="e => e.preventDefault()"
+                    :aria-label="'更多操作：' + (rule.remark || '分流规则')"><a-icon type="ellipsis"></a-icon></button>
             <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
                 <a-menu-item key="edit">
                     <a-icon type="edit"></a-icon>编辑
