@@ -1,1 +1,10 @@
-<svg fill="currentColor" fill-rule="evenodd" height="1em" style="flex:none;line-height:1" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><title>Azure</title><path d="M11.49 2H2v9.492h9.492V2h-.002z"></path><path d="M22 2h-9.492v9.492H22V2z"></path><path d="M11.49 12.508H2V22h9.492v-9.492h-.002z"></path><path d="M22 12.508h-9.492V22H22v-9.492z"></path></svg>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256px" height="256px" viewBox="0 0 256 256" version="1.1" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid">
+    <title>Microsoft</title>
+    <g>
+        <polygon fill="#F1511B" points="121.666095 121.666095 0 121.666095 0 0 121.666095 0"></polygon>
+        <polygon fill="#80CC28" points="256 121.666095 134.335356 121.666095 134.335356 0 256 0"></polygon>
+        <polygon fill="#00ADEF" points="121.663194 256.002188 0 256.002188 0 134.336095 121.663194 134.336095"></polygon>
+        <polygon fill="#FBBC09" points="256 256.002188 134.335356 256.002188 134.335356 134.336095 256 134.336095"></polygon>
+    </g>
+</svg>

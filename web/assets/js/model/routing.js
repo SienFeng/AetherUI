@@ -51,7 +51,7 @@ class DomainGroup {
         // 「域名组数据损坏」整条丢弃引用它的规则，effectiveCount 已被后端强制
         // 置 0，这里单独留一个标记方便渲染出与「本来就是空」不同的提示。
         this.broken = json.broken || false;
-        // 服务端按完整域名列表认出的厂商 {slug, title, color}，认不出为 null。
+        // 服务端按完整域名列表认出的厂商 {slug, title}，认不出为 null。
         this.brand = json.brand || null;
     }
 

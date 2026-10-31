@@ -316,3 +316,62 @@ class NodeTone {
         return { color: t.text, background: t.bg };
     }
 }
+
+// 共享风险徽标的文案 / 配色 / 图标。入站列表与系统状态页的入站用量排行共用，
+// 两边各写一份迟早会分叉，而分叉后同一个入站在两页显示两种结论，不会有任何提示。
+// r 是 /aui/inbound/sharing/risk/summary 里某个入站的那一项，没有时按「学习中」：
+// 入站刚建好、或引擎版本变了都会这样，把它显示成「低风险」等于报一个没算过的结论。
+class SharingRisk {
+    static of(r) {
+        return r || { state: 'learning', level: '', score: 0 };
+    }
+
+    static label(r) {
+        r = SharingRisk.of(r);
+        if (r.state === 'unobservable') return '不可评估';
+        if (r.state === 'degraded') return '降级';
+        if (r.state !== 'ready') return '学习中';
+        return '风险 ' + (SharingRisk.LEVEL_TEXT[r.level] || r.level);
+    }
+
+    // 非 ready 一律中性：把「测不了」「还没测够」渲染成绿色或红色都是在报一个没算过的结论。
+    static tone(r) {
+        r = SharingRisk.of(r);
+        if (r.state !== 'ready') return 'status-neutral';
+        return SharingRisk.LEVEL_TONE[r.level] || 'status-neutral';
+    }
+
+    static icon(r) {
+        r = SharingRisk.of(r);
+        if (r.state !== 'ready') return 'question-circle';
+        return SharingRisk.LEVEL_ICON[r.level] || '';
+    }
+}
+
+SharingRisk.LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
+// 风险徽标用 custom.css 的 .status-badge 一套 class，不走 a-tag（见 CLAUDE.md「已知偏差」）。
+SharingRisk.LEVEL_TONE = {
+    low:    'status-ok',
+    watch:  'status-warn',
+    medium: 'status-warn',
+    high:   'status-danger',
+    severe: 'status-danger',
+};
+SharingRisk.LEVEL_ICON = {
+    low:    'check-circle',
+    watch:  'exclamation-circle',
+    medium: 'exclamation-circle',
+    high:   'warning',
+    severe: 'warning',
+};
+
+// 出口国家的显示名：「美国 (US)」；浏览器不支持 Intl.DisplayNames 时只给代码。
+// 分流管理与系统状态两页的出站节点国旗共用。
+function countryName(code) {
+    try {
+        const name = new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code);
+        return name && name !== code ? name + ' (' + code + ')' : code;
+    } catch (e) {
+        return code;
+    }
+}

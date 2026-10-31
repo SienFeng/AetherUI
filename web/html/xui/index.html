@@ -168,10 +168,11 @@
                             <thead>
                                 <tr>
                                     <th>入站</th>
-                                    <th style="width: 18%">状态</th>
-                                    <th class="r" style="width: 9%">在线</th>
+                                    <th style="width: 16%">状态</th>
+                                    <th style="width: 14%">风险</th>
+                                    <th class="r" style="width: 8%">在线</th>
                                     <th class="r" style="width: 10%">占比</th>
-                                    <th class="r" style="width: 30%">用量</th>
+                                    <th class="r" style="width: 26%">用量</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -186,6 +187,15 @@
                                         </div>
                                     </td>
                                     <td><span class="stat-tag" :class="r.statusTone">[[ r.statusText ]]</span></td>
+                                    <!-- 与入站列表的风险列同一套文案与配色（utils.js 的 SharingRisk）。
+                                         这里只读，依据在入站列表里点开看。 -->
+                                    <td>
+                                        <a-tooltip :title="r.riskTip">
+                                            <span class="status-badge" :class="r.riskTone">
+                                                <a-icon v-if="r.riskIcon" :type="r.riskIcon"></a-icon>[[ r.riskLabel ]]
+                                            </span>
+                                        </a-tooltip>
+                                    </td>
                                     <td class="r num">[[ r.online ]]</td>
                                     <td class="r num">[[ r.percent ]]</td>
                                     <td class="r">
@@ -215,7 +225,14 @@
                         </div>
                         <ul v-else class="net-nodes">
                             <li v-for="n in nodes" :key="n.id" class="net-node">
-                                <span class="who-avatar" :style="{ background: n.enable ? nodeColor(n) : '#94A3B8' }"
+                                <!-- 与分流管理页同一套：测到过出口国家就画国旗，否则首字母 -->
+                                <span v-if="n.exitCountry && !n.flagMissing" class="who-avatar is-flag"
+                                      :class="{ 'is-off': !n.enable }"
+                                      :title="'出口：' + countryName(n.exitCountry)" aria-hidden="true">
+                                    <img :src="'{{ .base_path }}assets/flags/' + n.exitCountry.toLowerCase() + '.svg?{{ .cur_ver }}'"
+                                         alt="" @error="n.flagMissing = true">
+                                </span>
+                                <span v-else class="who-avatar" :style="{ background: n.enable ? nodeColor(n) : '#94A3B8' }"
                                       aria-hidden="true">[[ nodeInitials(n) ]]</span>
                                 <span class="who-text">
                                     <span class="who-name" :title="n.remark || n.tag">[[ n.remark || n.tag ]]</span>
@@ -263,14 +280,16 @@
              键盘拿不到、没有焦点环、读屏软件念出来是普通文本。 -->
         <!-- 固定网格：每行 4 个等宽、最多显示 6 行，更多的在框内滚动。版本号长短不一，
              改动前按内容宽度自动换行，每行个数和对齐都不固定，看着乱。
-             当前在跑的核心版本高亮并标「当前」（列表带 v 前缀，status 里不带）。 -->
+             当前在跑的核心版本整格填成主色（列表带 v 前缀，status 里不带）。「当前」二字
+             只留给读屏：放在格子里时「v26.10.29 当前」比一格宽，会挤出边框。 -->
         <div class="version-grid" role="list">
             <a-button v-for="version in versionModal.versions" :key="version" role="listitem"
                       class="version-cell" :class="{ 'is-current': isCurrentXray(version) }"
                       :aria-current="isCurrentXray(version) ? 'true' : null"
+                      :title="isCurrentXray(version) ? '当前正在运行的版本' : null"
                       @click="switchV2rayVersion(version)">
                 <span class="cell-num">[[ version ]]</span>
-                <span v-if="isCurrentXray(version)" class="version-now">当前</span>
+                <span v-if="isCurrentXray(version)" class="sr-only">（当前）</span>
             </a-button>
         </div>
     </a-modal>
@@ -484,7 +503,8 @@
                 try {
                     const resp = await axios.post('/aui/routing/outbound/list');
                     if (resp.data && resp.data.success) {
-                        this.nodes = (resp.data.obj || []).map(n => Object.assign({ probing: false }, n));
+                        // flagMissing 必须先声明：Vue 2 侦测不到后加的属性，国旗加载失败时回落不了
+                        this.nodes = (resp.data.obj || []).map(n => Object.assign({ probing: false, flagMissing: false, exitCountry: '' }, n));
                         this.nodesError = '';
                     } else {
                         this.nodesError = (resp.data && resp.data.msg) || '读取出站节点失败';
@@ -511,6 +531,12 @@
                         const resp = await axios.post('/aui/routing/outbound/probe/' + n.id);
                         if (resp.data && resp.data.success) {
                             n.probe = resp.data.obj;
+                            // 测不出国家时服务端保留上一次的值，这里也不清
+                            const cc = resp.data.obj && resp.data.obj.exitCountry;
+                            if (cc && cc !== n.exitCountry) {
+                                n.exitCountry = cc;
+                                n.flagMissing = false;
+                            }
                         }
                     } catch (e) {
                         // 请求本身失败：保留上一次结果，不伪造成「不通」
@@ -529,6 +555,9 @@
                 } finally {
                     this.nodeProbing = false;
                 }
+            },
+            countryName(code) {
+                return countryName(code);
             },
             nodeInitials(n) {
                 const name = (n.remark || n.tag || '').trim();
@@ -780,6 +809,7 @@
                         statusText = Math.ceil((ib.expiryTime - now) / 86400000) + ' 天后到期'; statusTone = 'is-warn';
                     }
                     const oc = this.onlineCounts[r.inboundId];
+                    const risk = SharingRisk.of(this.riskMap[r.inboundId]);
                     const name = (r.remark || '').replace(/^微信[：:]\s*/, '');
                     return Object.assign({}, r, {
                         // 与图表图例同色；停用与否由状态标签表达，不改头像颜色
@@ -791,6 +821,12 @@
                         percent: total ? (r.total / total * 100).toFixed(1) + '%' : '—',
                         statusText,
                         statusTone,
+                        riskLabel: SharingRisk.label(risk),
+                        riskTone: SharingRisk.tone(risk),
+                        riskIcon: SharingRisk.icon(risk),
+                        riskTip: risk.state === 'ready'
+                            ? '共享风险 ' + risk.score + ' / 100，置信度 ' + risk.confidence + ' / 100。依据在入站列表里点开查看'
+                            : '还没有结论，详情在入站列表里点开查看',
                     });
                 });
             },
