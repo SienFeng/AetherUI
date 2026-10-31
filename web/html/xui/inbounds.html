@@ -435,7 +435,7 @@
                             </template>
 
                             <template slot="traffic" slot-scope="text, dbInbound">
-                                <!-- 已用量粗体、上限靠右；不限量时槽是空的并写明「无流量上限」，
+                                <!-- 已用量粗体、上限靠右；不限量时右侧写「不限量」、槽是空的，
                                      不画一条会被读成「额度是 0」的满槽。上下行拆分放在 title 里。 -->
                                 <div class="usage-cell"
                                      :title="'↑ ' + sizeFormat(dbInbound.up) + ' · ↓ ' + sizeFormat(dbInbound.down)">
@@ -447,7 +447,6 @@
                                         <div class="usage-bar-fill" :class="usageToneOf(dbInbound)"
                                              :style="{ width: usagePercentOf(dbInbound) + '%' }"></div>
                                     </div>
-                                    <div v-if="dbInbound.total <= 0" class="cell-sub">无流量上限</div>
                                 </div>
                             </template>
 
@@ -667,6 +666,8 @@
     }, {
         // slots.title：列头要与单元格包进同一个定宽块，状态点才与「在线」二字对齐
         slots: { title: 'onlineTitle' },
+        // 列头居中要靠这个 class 撑开 antd 的表头包装，见 custom.css 的 .online-col
+        className: 'online-column',
         align: 'left',
         // 「↑ 999.99 KB/s」加上左侧 16px 对齐缩进要 ~105px，115 时贴边
         width: 130,

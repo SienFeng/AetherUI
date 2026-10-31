@@ -3291,6 +3291,15 @@ button.chip.is-active {
     margin: 0 auto;
 }
 
+/* antd 把列头标题包在 inline-block 的 .ant-table-header-column 里，它按内容收缩，
+ * 正好 100px 宽，上面的 margin: 0 auto 没有空间可分，列头就停在格子最左边、与
+ * 居中的单元格错开。只对在线列把这层包装撑满整格，列头才跟单元格一起居中。 */
+.ant-table-thead > tr > th.online-column .ant-table-header-column,
+.ant-table-thead > tr > th.online-column .ant-table-header-column > div {
+    display: block;
+    width: 100%;
+}
+
 /* 展开行归属地：文字 +「存疑」标签固定同一行，放不下时截断文字而不是折行 */
 .loc-cell {
     display: inline-flex;
