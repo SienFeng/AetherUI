@@ -169,7 +169,7 @@ html, body {
     /* 进度条、资源圆环的长度变化与展开箭头的旋转都是位移的一种 */
     .usage-bar-fill,
     .res-bar-fill,
-    .stat-ring circle,
+    .res-meter-fill,
     .row-caret,
     .range-caret {
         transition: none;
@@ -3040,26 +3040,6 @@ button.chip.is-active {
     min-height: 24px;
 }
 
-.gcard-domains code {
-    height: 22px;
-    padding: 0 7px;
-    border-radius: 6px;
-    background: #F1F5F9;
-    color: #334155;
-    font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    display: inline-flex;
-    align-items: center;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.gcard-more {
-    font-size: 12px;
-    color: var(--aui-text-3);
-}
-
 .gcard-warn {
     font-size: 12px;
     color: var(--aui-danger);
@@ -3628,23 +3608,67 @@ button.chip.is-active {
 }
 
 /* ── 系统状态页：顶部四张资源卡 ───────────────────────────────────────
- * 沿用 .stat-card 的外观，右侧的图标位换成占两行的圆环。 */
+ * 沿用 .stat-card 的外观：右上角的图标位换成状态文字，数值下方是一条粗进度条。
+ * 改动前是圆环：占用比例与「离 80% 告警还差多少」都要靠估弧长，横条读起来更直接。
+ * 顶部 3px 色条去掉了——进度条已经承担了身份色，两处同色是重复。 */
 .res-stat {
     grid-template-areas:
-        "label ring"
-        "value ring"
+        "label state"
+        "value value"
+        "meter meter"
         "foot  foot";
 }
 
-.stat-ring {
-    grid-area: ring;
-    width: 58px;
-    height: 58px;
-    align-self: center;
+.res-stat::before {
+    content: none;
 }
 
-.stat-ring circle:last-of-type {
-    transition: stroke-dasharray var(--aui-dur) var(--aui-ease);
+.res-state {
+    grid-area: state;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 20px;
+    white-space: nowrap;
+}
+
+/* 三档颜色都是白底 ≥ 5:1 的语义 token */
+.res-state.is-ok     { color: var(--aui-success); }
+.res-state.is-warn   { color: var(--aui-warning); }
+.res-state.is-danger { color: var(--aui-danger); }
+
+.res-meter {
+    grid-area: meter;
+    position: relative;
+    height: 10px;
+    margin-top: 14px;
+    border-radius: 5px;
+    background: #E8EDF4;
+}
+
+/* min-width：0.5% 这类小值也至少露出一个圆点，不会看起来像「没数据」 */
+.res-meter-fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    min-width: 10px;
+    border-radius: 5px;
+    background: var(--c);
+    transition: width var(--aui-dur) var(--aui-ease);
+}
+
+/* 80% 告警线，与 CurTotal.tone 的第一档阈值一致 */
+.res-meter-mark {
+    position: absolute;
+    left: 80%;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--aui-text-3);
+    opacity: .4;
+}
+
+.res-stat .stat-foot {
+    margin-top: 8px;
 }
 
 /* 越过 80%：橙色色条（警告语义，正是这里要表达的） */
@@ -3686,13 +3710,6 @@ button.chip.is-active {
     flex: 1;
 }
 
-
-/* 入站列表五张指标卡：宽屏一行五张 */
-@media (min-width: 1281px) {
-    .stat-row.stat-row-5 {
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-    }
-}
 
 /* ── 流量概览：时间范围下拉 ───────────────────────────────────────── */
 .range-trigger {

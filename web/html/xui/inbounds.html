@@ -43,7 +43,7 @@
             <a-spin :spinning="spinning" :delay="500" tip="loading">
                 <transition name="list" appear>
                     <!-- 四张卡全部来自本页已有的数据：dbInbounds、onlineCounts、riskMap。 -->
-                    <div class="stat-row stat-row-5">
+                    <div class="stat-row">
                         <div class="stat-card tone-blue">
                             <span class="stat-icon"><a-icon type="team"></a-icon></span>
                             <div class="stat-text">
@@ -76,18 +76,6 @@
                             </div>
                             <div class="stat-foot">
                                 <span>[[ inboundSpeed.up === null ? '暂时读不到连接表' : '↑ ' + sizeFormat(inboundSpeed.up) + '/s' ]]</span>
-                            </div>
-                        </div>
-                        <!-- 24 小时用量：用量历史里所有入站（Top 50）最近 24 小时之和；
-                             底部是累计计数器（重置流量会清零的那个）。 -->
-                        <div class="stat-card tone-geek">
-                            <span class="stat-icon"><a-icon type="line-chart"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">24 小时用量</span>
-                                <div class="stat-value">[[ usage24h === null ? '—' : splitSize(usage24h)[0] ]]<span v-if="usage24h !== null" class="unit">[[ splitSize(usage24h)[1] ]]</span></div>
-                            </div>
-                            <div class="stat-foot">
-                                <span :title="'↑ ' + sizeFormat(total.up) + ' · ↓ ' + sizeFormat(total.down)">累计 [[ sizeFormat(total.up + total.down) ]]</span>
                             </div>
                         </div>
                         <!-- 过期、7 天内到期、共享风险达到「高」以上的入站数。有数才变红。 -->
@@ -823,7 +811,6 @@
             },
             riskMap: {},
             // 最近 24 小时所有入站的用量之和（null = 还没读到 / 读取失败）
-            usage24h: null,
         },
         methods: {
             loading(spinning=true) {
@@ -918,19 +905,6 @@
                 if (!dbInbound.enable) return '#94A3B8';
                 const colors = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777', '#0891B2'];
                 return colors[dbInbound.id % colors.length];
-            },
-            // 24 小时用量：复用系统状态页的总览接口（服务端已按入站求好每个时段），
-            // 取 top 50（controller 的上限）求和。失败时保持「—」，不伪造 0。
-            async loadUsage24h() {
-                try {
-                    const resp = await axios.post('/aui/inbound/traffic/overview', { range: '24h', top: 50 });
-                    if (resp.data && resp.data.success) {
-                        const series = (resp.data.obj && resp.data.obj.series) || [];
-                        this.usage24h = series.reduce((n, s) => n + s.points.reduce((m, v) => m + v, 0), 0);
-                    }
-                } catch (e) {
-                    // 保持上一次的值
-                }
             },
             splitSize(v) {
                 const parts = sizeFormat(v || 0).split(' ');
@@ -1652,9 +1626,6 @@
             // 与展开行同频。两者共用同一份采样快照（sample() 有 500ms 闸门），
             // 所以多开一个轮询不会增加读内核连接表的次数。
             this.onlineCountTimer = setInterval(() => this.loadOnlineCounts(), 2000);
-            // 用量历史是小时桶，几分钟刷新一次足够
-            this.loadUsage24h();
-            this.usageTimer = setInterval(() => this.loadUsage24h(), 5 * 60 * 1000);
             // sharing_modal.html 有自己的 Vue 根实例（照 access_log_modal 的
             // 做法），两棵树之间靠事件通信。
             window.addEventListener('sharing-adopt-regions', (e) => {
@@ -1676,10 +1647,6 @@
             if (this.onlineCountTimer != null) {
                 clearInterval(this.onlineCountTimer);
                 this.onlineCountTimer = null;
-            }
-            if (this.usageTimer != null) {
-                clearInterval(this.usageTimer);
-                this.usageTimer = null;
             }
         },
         computed: {
@@ -1801,17 +1768,6 @@
                 if (risky) parts.push(`${risky} 高风险`);
                 return { total: expired + soon + risky, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
             },
-            total() {
-                let down = 0, up = 0;
-                for (let i = 0; i < this.dbInbounds.length; ++i) {
-                    down += this.dbInbounds[i].down;
-                    up += this.dbInbounds[i].up;
-                }
-                return {
-                    down: down,
-                    up: up,
-                };
-            }
         },
     });
 
