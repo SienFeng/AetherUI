@@ -207,13 +207,6 @@
         gap: 12px;
     }
 
-    .visual-name {
-        font-size: 17px;
-        font-weight: 600;
-        letter-spacing: -.005em;
-        color: var(--txt);
-    }
-
     /* 宽度得跟着视口算：卡片居中后，左侧可用净宽是 (100vw - 卡片) / 2 - 边距。
      * 写死 520px 的话，1440px 屏幕上文案右缘会伸到卡片底下去。 */
     .visual-copy {
@@ -341,34 +334,25 @@
         .panel-brand { display: none; }
     }
 
+    /* 项目 logo（assets/logo.svg）自带圆角渐变底，这里只定尺寸与一层轻投影 */
     .login-mark {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
+        display: block;
         flex: 0 0 auto;
         width: 38px;
         height: 38px;
-        border-radius: 11px;
-        background: linear-gradient(155deg, rgba(18, 102, 214, .14), rgba(18, 102, 214, .05));
-        border: 1px solid rgba(18, 102, 214, .22);
-        box-shadow: 0 4px 12px -4px rgba(18, 102, 214, .3);
-        color: var(--accent);
+        border-radius: 9px;
+        box-shadow: 0 6px 14px -6px rgba(55, 105, 233, .55);
     }
 
-    /* 同上，antd 的 h1 reset 也要盖掉 */
+    /* 同上，antd 的 h1 reset 也要盖掉。卡片顶部只放产品名、居中；
+       浏览器标签页标题仍是「登录」（由 head 模板按 .title 输出）。 */
     .login-title {
-        margin: 0;
+        margin: 0 0 28px;
         font-size: 24px;
         font-weight: 600;
         letter-spacing: -.01em;
         color: var(--txt);
-    }
-
-    .login-sub {
-        margin: 8px 0 28px;
-        font-size: 13.5px;
-        color: var(--txt-faint);
-        line-height: 1.6;
+        text-align: center;
     }
 
     .login-form {
@@ -638,15 +622,8 @@
     <section class="login-visual">
         <div class="visual-top">
             <div class="visual-brand">
-                <span class="login-mark" aria-hidden="true">
-                    <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" stroke-width="2"
-                         stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
-                        <path d="M8.3 14.2h7.4"/>
-                    </svg>
-                </span>
-                <span class="visual-name">AetherUI</span>
+                <!-- 只放 logo，不再跟一行产品名：卡片标题已经写着 AetherUI -->
+                <img class="login-mark" src="{{ .base_path }}assets/logo.svg?{{ .cur_ver }}" alt="AetherUI">
             </div>
         </div>
 
@@ -671,19 +648,11 @@
     <section class="login-panel">
         <div class="login-form-wrap">
             <div class="panel-brand">
-                <span class="login-mark" aria-hidden="true">
-                    <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
-                         stroke="currentColor" stroke-width="2"
-                         stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M4.6 19.4 12 4.6l7.4 14.8"/>
-                        <path d="M8.3 14.2h7.4"/>
-                    </svg>
-                </span>
-                <span class="visual-name">AetherUI</span>
+                <!-- 窄屏版的左上角 logo；紧接着的卡片标题就是产品名，这里 alt 留空免得念两遍 -->
+                <img class="login-mark" src="{{ .base_path }}assets/logo.svg?{{ .cur_ver }}" alt="">
             </div>
 
-            <h1 class="login-title">{{ .title }}</h1>
-            <p class="login-sub">输入管理员账号以进入面板</p>
+            <h1 class="login-title">AetherUI</h1>
 
             <form class="login-form" @submit.prevent="login" novalidate>
                 <div class="field">

@@ -377,12 +377,12 @@
                                     <div class="row-section-head">
                                         <div class="row-section-title">
                                             用量曲线
-                                            <!-- 色块即图例：与柱子同色，图上不再另画图例 -->
+                                            <!-- 色块即图例：与折线同色，图上不再另画图例 -->
                                             <span class="row-section-figure cell-num">
-                                                <span><i class="legend-swatch" style="background: #93C5FD"></i>上行</span> [[ sizeFormat(totalOf(dbInbound.id).up) ]]
+                                                <span><i class="legend-swatch" style="background: #eb6834"></i>上行</span> [[ sizeFormat(totalOf(dbInbound.id).up) ]]
                                             </span>
                                             <span class="row-section-figure cell-num">
-                                                <span><i class="legend-swatch" style="background: #1266D6"></i>下行</span> [[ sizeFormat(totalOf(dbInbound.id).down) ]]
+                                                <span><i class="legend-swatch" style="background: #2a78d6"></i>下行</span> [[ sizeFormat(totalOf(dbInbound.id).down) ]]
                                             </span>
                                             <a-tooltip>
                                                 <template slot="title">
@@ -624,35 +624,9 @@
 <script src="{{ .base_path }}assets/js/util/chart-util.js?{{ .cur_ver }}"></script>
 <script>
 
-    // 等级 → 文案 / 颜色。低风险要的是 Tag 的原生中性样式，靠的是**不传 color**
-    // （undefined），**绝不能写 'default'**：ant-design-vue 1.7.2 的 Tag 预设色只有
-    // pink/red/yellow/orange/cyan/green/blue/purple/geekblue/magenta/volcano/gold/lime，
-    // 'default' 不在其中，于是被当成自定义颜色——getTagClassName 加上 ant-tag-has-color
-    // （该类强制 color:#fff、border-color:transparent），而 getTagStyle 吐出的
-    // background-color:default 是无效 CSS 被浏览器丢弃、背景留在 .ant-tag 默认的 #fafafa。
-    // 白底白字无边框，对比度 1.02:1，整个标签在页面上是隐形的，且不会有任何一层报错。
-    // 传 undefined 才落回原生中性样式：rgba(0,0,0,.65) on #fafafa，约 5.6:1。
-    // v1.23.0 为了修 rgba(0,0,0,.25) 的 1.84:1 才换成 'default'，结果对比度反而更低。
-    const RISK_LEVEL_TEXT = { low: '低', watch: '观察', medium: '中', high: '高', severe: '严重' };
-    // 风险徽标用 custom.css 的 .status-badge 一套 class，不再走 a-tag。
-    // 与之配套的 RISK_LEVEL_COLOR（antd a-tag 的预设色名）已随全站 a-tag
-    // 退役一并删除；那条「'default' 不在预设色里、会被当成自定义颜色而渲染
-    // 成白底白字」的结论移进了 CLAUDE.md 的「已知偏差」，因为它约束的是
-    // 将来任何一处 a-tag :color 的写法，不只是风险等级这一处。
-    const RISK_LEVEL_TONE = {
-        low:    'status-ok',
-        watch:  'status-warn',
-        medium: 'status-warn',
-        high:   'status-danger',
-        severe: 'status-danger',
-    };
-    const RISK_LEVEL_ICON = {
-        low:    'check-circle',
-        watch:  'exclamation-circle',
-        medium: 'exclamation-circle',
-        high:   'warning',
-        severe: 'warning',
-    };
+    // 风险等级的文案 / 配色 / 图标在 utils.js 的 SharingRisk 里，与系统状态页共用。
+    // RISK_LEVEL_TEXT 保留这个名字：sharing_modal.html 的脚本直接引用它。
+    const RISK_LEVEL_TEXT = SharingRisk.LEVEL_TEXT;
 
     // 一级表格的列。
     //
@@ -868,14 +842,10 @@
             // 入站刚建好、或引擎版本变了都会走到这里，把这些显示成「低风险」
             // 等于报一个没算过的结论。
             riskOf(inboundId) {
-                return this.riskMap[inboundId] || { state: 'learning', level: '', score: 0 };
+                return SharingRisk.of(this.riskMap[inboundId]);
             },
             riskLabelOf(inboundId) {
-                const r = this.riskOf(inboundId);
-                if (r.state === 'unobservable') return '不可评估';
-                if (r.state === 'degraded') return '降级';
-                if (r.state !== 'ready') return '学习中';
-                return '风险 ' + (RISK_LEVEL_TEXT[r.level] || r.level);
+                return SharingRisk.label(this.riskOf(inboundId));
             },
             riskTooltipOf(inboundId) {
                 const r = this.riskOf(inboundId);
@@ -991,16 +961,10 @@
                 return '';
             },
             riskToneOf(inboundId) {
-                const r = this.riskOf(inboundId);
-                // 非 ready 一律中性：把「测不了」「还没测够」渲染成绿色或红色
-                // 都是在报一个没算过的结论。
-                if (r.state !== 'ready') return 'status-neutral';
-                return RISK_LEVEL_TONE[r.level] || 'status-neutral';
+                return SharingRisk.tone(this.riskOf(inboundId));
             },
             riskIconOf(inboundId) {
-                const r = this.riskOf(inboundId);
-                if (r.state !== 'ready') return 'question-circle';
-                return RISK_LEVEL_ICON[r.level] || '';
+                return SharingRisk.icon(this.riskOf(inboundId));
             },
             // 到期标签：「62 天后」「5 天后」「已过期」，7 天内橙、过期红、其余灰
             expiryTagOf(dbInbound) {
@@ -1522,14 +1486,17 @@
                         return;
                     }
                     this.destroyTrafficChart(id);
-                    // 上行 / 下行堆叠成柱：每个时段的合计一眼可见，下行（通常是大头）用主色
+                    // 上行 / 下行各一条折线，样式与系统状态页的流量概览一致；不堆叠，
+                    // 纵轴读到的就是各自的用量，合计放在悬停提示里。颜色取系统状态页
+                    // 那套序列色的前两个（下行蓝、上行橙）：改动前上行的浅蓝 #93C5FD
+                    // 画成细线在白底上几乎看不见。
                     const up = data.points.map(p => p.up);
                     const down = data.points.map(p => p.down);
                     const options = styleTrafficAxes(trafficChartOptions(12),
-                        Math.max(0, ...data.points.map(p => p.up + p.down)));
-                    options.scales.x.stacked = true;
-                    options.scales.y.stacked = true;
+                        Math.max(0, ...up, ...down));
                     options.plugins.legend = { display: false };
+                    options.plugins.tooltip.callbacks.footer =
+                        items => '合计 ' + sizeFormat(items.reduce((n, x) => n + x.parsed.y, 0));
                     // 服务端标签：小时「10-30 21:00」、日「2026-10-30」。一天以内的小时刻度只留时刻，
                     // 跨天的小时刻度只留日期，日刻度去掉年份；刻度数跟着图宽走（约 70px 一个）。
                     // tooltip 标题仍是完整标签。
@@ -1540,14 +1507,24 @@
                         const label = this.getLabelForValue(v) || '';
                         return withinDay ? label.slice(-5) : (isDay ? label.slice(5) : label.slice(0, 5));
                     };
+                    const line = (label, values, color) => ({
+                        label: label,
+                        data: values,
+                        borderColor: color,
+                        backgroundColor: color,
+                        fill: false,
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        pointHoverBorderWidth: 2,
+                        pointHoverBorderColor: '#FFFFFF',
+                        tension: 0.3,
+                    });
                     trafficCharts[id] = new Chart(canvas, {
-                        type: 'bar',
+                        type: 'line',
                         data: {
                             labels: data.labels,
-                            datasets: [
-                                { label: '下载', data: down, backgroundColor: '#1266D6', borderRadius: 3, stack: 'traffic', maxBarThickness: 28 },
-                                { label: '上传', data: up, backgroundColor: '#93C5FD', borderRadius: 3, stack: 'traffic', maxBarThickness: 28 },
-                            ],
+                            datasets: [line('下行', down, '#2a78d6'), line('上行', up, '#eb6834')],
                         },
                         options,
                     });
