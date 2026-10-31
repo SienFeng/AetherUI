@@ -656,6 +656,20 @@ button:focus-visible,
     margin: 6px 0;
 }
 
+/* a-radio-group 默认带 ant-radio-group-outline，会命中下方「分段选择」的托盘样式
+ * （inline-flex 横排 + 灰底），把版本列表挤成一行溢出弹层。这里是普通单选列表，逐行竖排。 */
+.version-rollback-list.ant-radio-group {
+    display: block;
+    width: 100%;
+    padding: 0;
+    background: none;
+    border-radius: 0;
+}
+
+.version-rollback-item .ant-radio-wrapper {
+    margin-right: 0;
+}
+
 .version-rollback-item {
     display: flex;
     justify-content: space-between;
@@ -2289,6 +2303,37 @@ button.chip.is-active {
     height: 7px;
     border-radius: 50%;
     background: var(--aui-muted);
+}
+
+/* 系统状态页：标题与状态行同排，状态行靠右；两者高度不同，按中线对齐 */
+.page-header-inline {
+    align-items: center;
+}
+
+.page-header-inline .page-meta {
+    margin-top: 0;
+}
+
+/* 徽标同时是「切换 Xray 版本」的按钮：去掉 button 默认外观，补上可点的反馈 */
+button.xray-badge {
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: filter var(--aui-dur) var(--aui-ease), box-shadow var(--aui-dur) var(--aui-ease);
+}
+
+button.xray-badge:hover {
+    filter: brightness(.96);
+}
+
+button.xray-badge:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 2px;
+}
+
+.xray-badge-action {
+    font-size: 12px;
+    opacity: .75;
 }
 
 /* #065F46 在 #DCFCE7 上 7.3:1 */
