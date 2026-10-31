@@ -103,14 +103,16 @@
                                     实时网速
                                     <a-tooltip title="整台机器所有网卡的总上传 / 下载速度"><a-icon type="question-circle"></a-icon></a-tooltip>
                                 </div>
+                                <!-- 下载与上传同排同字号：两者同等重要，改动前上传缩成下面一行小字 -->
                                 <div class="usage-meta-value usage-speed">
-                                    ↓ [[ sizeFormat(status.netIO.down) ]]/s
+                                    <!-- 箭头按方向着色，≥1 KB/s 时闪动、否则黑色（custom.css 的 .speed-arrow） -->
+                                    <span><i class="speed-arrow is-down" :class="{ 'is-active': status.netIO.down >= 1024 }" aria-hidden="true">↓</i> [[ sizeFormat(status.netIO.down) ]]/s</span>
+                                    <span><i class="speed-arrow is-up" :class="{ 'is-active': status.netIO.up >= 1024 }" aria-hidden="true">↑</i> [[ sizeFormat(status.netIO.up) ]]/s</span>
                                     <svg class="stat-spark" viewBox="0 0 96 28" preserveAspectRatio="none" aria-hidden="true">
                                         <polyline :points="speedSparkPoints" fill="none" stroke="#7C3AED" stroke-width="1.8"
                                                   stroke-linejoin="round" stroke-linecap="round"></polyline>
                                     </svg>
                                 </div>
-                                <div class="usage-meta-sub">↑ [[ sizeFormat(status.netIO.up) ]]/s</div>
                             </div>
                             <div>
                                 <div class="usage-meta-label">
@@ -124,8 +126,10 @@
                                     系统累计流量
                                     <a-tooltip title="系统启动以来所有网卡的总上传 / 下载流量"><a-icon type="question-circle"></a-icon></a-tooltip>
                                 </div>
-                                <div class="usage-meta-value">↓ [[ sizeFormat(status.netTraffic.recv) ]]</div>
-                                <div class="usage-meta-sub">↑ [[ sizeFormat(status.netTraffic.sent) ]]</div>
+                                <div class="usage-meta-value usage-pair">
+                                    <span>↓ [[ sizeFormat(status.netTraffic.recv) ]]</span>
+                                    <span>↑ [[ sizeFormat(status.netTraffic.sent) ]]</span>
+                                </div>
                             </div>
                         </div>
                         <ul class="chart-legend" v-if="overviewLegend.length">

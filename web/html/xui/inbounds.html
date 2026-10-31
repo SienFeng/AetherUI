@@ -72,10 +72,17 @@
                             <span class="stat-icon"><a-icon type="swap"></a-icon></span>
                             <div class="stat-text">
                                 <span class="stat-label">入站实时网速</span>
-                                <div class="stat-value">[[ inboundSpeed.down === null ? '—' : splitSize(inboundSpeed.down)[0] ]]<span v-if="inboundSpeed.down !== null" class="unit">[[ splitSize(inboundSpeed.down)[1] ]]/s ↓</span></div>
+                                <!-- 下载与上传同排同字号：改动前上传缩在底部一行小字里，读起来像次要信息 -->
+                                <div class="stat-value stat-value-pair">
+                                    <template v-if="inboundSpeed.down === null">—</template>
+                                    <template v-else>
+                                        <span><i class="speed-arrow is-down" :class="{ 'is-active': inboundSpeed.down >= 1024 }" aria-hidden="true">↓</i> [[ splitSize(inboundSpeed.down)[0] ]]<span class="unit">[[ splitSize(inboundSpeed.down)[1] ]]/s</span></span>
+                                        <span><i class="speed-arrow is-up" :class="{ 'is-active': inboundSpeed.up >= 1024 }" aria-hidden="true">↑</i> [[ splitSize(inboundSpeed.up)[0] ]]<span class="unit">[[ splitSize(inboundSpeed.up)[1] ]]/s</span></span>
+                                    </template>
+                                </div>
                             </div>
                             <div class="stat-foot">
-                                <span>[[ inboundSpeed.up === null ? '暂时读不到连接表' : '↑ ' + sizeFormat(inboundSpeed.up) + '/s' ]]</span>
+                                <span>[[ inboundSpeed.down === null ? '暂时读不到连接表' : '各入站在线连接的速度之和' ]]</span>
                             </div>
                         </div>
                         <!-- 过期、7 天内到期、共享风险达到「高」以上的入站数。有数才变红。 -->

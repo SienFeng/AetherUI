@@ -14,6 +14,11 @@ function trafficChartOptions(maxTicksLimit) {
         plugins: {
             legend: { position: 'top' },
             tooltip: {
+                // 不用 Chart.js 自带的悬浮框：它画在 canvas 里，超出画布的部分直接被裁掉。
+                // 系统状态页的一屏布局下图只有一百多 px 高，八九个入站的列表下半截会看不见。
+                // 改由 externalChartTooltip 渲染成挂在 body 上的 HTML 框，不受图表与卡片边界限制。
+                enabled: false,
+                external: externalChartTooltip,
                 // 按悬停这一刻的用量降序，而不是 Chart.js 默认的数据集顺序——后者
                 // 是服务端按「整个时间范围的总量」排出来的（Overview 的
                 // `total desc`），与当前时间点无关：总量第一的入站在某个小时
@@ -81,8 +86,79 @@ function styleTrafficAxes(options, maxValue) {
     options.scales.x.border = { color: '#E5E9F0' };
     options.scales.x.ticks.color = tick;
     options.scales.x.ticks.maxRotation = 0;
-    options.plugins.tooltip.backgroundColor = '#0E1726';
-    options.plugins.tooltip.padding = 10;
-    options.plugins.tooltip.cornerRadius = 8;
     return options;
+}
+
+// Chart.js 的 external 悬浮框：内容取自 Chart.js 已经算好的 tooltip 模型（标题、
+// 每行文本、颜色、footer），所以各页对 filter / itemSort / callbacks 的覆盖照常生效。
+// 整页只用一个元素，position: fixed 挂在 body 上；外观在 custom.css 的 .chart-tooltip。
+// 文本一律走 textContent——入站备注是管理员可写的任意字符串，不能拼进 innerHTML。
+function externalChartTooltip(context) {
+    const tooltip = context.tooltip;
+    let el = document.getElementById('chart-tooltip');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'chart-tooltip';
+        el.className = 'chart-tooltip';
+        el.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(el);
+        // 滚轮滚动时鼠标仍停在画布上，Chart.js 不会收到离开事件；固定定位的框会和图错位，直接收起。
+        // 只认包含这张图的滚动容器：页面里还有排行表、节点列表等各自滚动的区域，
+        // 它们的滚动与图的位置无关，一律收起会让框刚出现就消失。
+        window.addEventListener('scroll', e => {
+            const canvas = el._canvas;
+            const t = e.target;
+            if (canvas && (t === document || (t.contains && t.contains(canvas)))) {
+                el.style.opacity = '0';
+            }
+        }, true);
+    }
+    el._canvas = context.chart.canvas;
+    if (tooltip.opacity === 0) {
+        el.style.opacity = '0';
+        return;
+    }
+
+    el.textContent = '';
+    (tooltip.title || []).forEach(t => {
+        const row = document.createElement('div');
+        row.className = 'chart-tooltip-title';
+        row.textContent = t;
+        el.appendChild(row);
+    });
+    (tooltip.body || []).forEach((b, i) => {
+        const row = document.createElement('div');
+        row.className = 'chart-tooltip-row';
+        const swatch = document.createElement('i');
+        const c = tooltip.labelColors[i] || {};
+        swatch.style.background = c.backgroundColor || c.borderColor || '#94A3B8';
+        row.appendChild(swatch);
+        const text = document.createElement('span');
+        text.textContent = b.lines.join(' ');
+        row.appendChild(text);
+        el.appendChild(row);
+    });
+    (tooltip.footer || []).forEach(t => {
+        const row = document.createElement('div');
+        row.className = 'chart-tooltip-footer';
+        row.textContent = t;
+        el.appendChild(row);
+    });
+
+    // 默认放在悬停点右侧、与悬停点垂直居中；右边放不下翻到左侧，上下夹在视口内
+    const rect = context.chart.canvas.getBoundingClientRect();
+    const x = rect.left + tooltip.caretX;
+    const y = rect.top + tooltip.caretY;
+    el.style.opacity = '1';
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const gap = 12;
+    const margin = 8;
+    let left = x + gap;
+    if (left + w > window.innerWidth - margin) {
+        left = Math.max(margin, x - gap - w);
+    }
+    const top = Math.min(Math.max(margin, y - h / 2), window.innerHeight - h - margin);
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
 }

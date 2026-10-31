@@ -800,6 +800,18 @@ button:focus-visible,
     margin-left: 5px;
 }
 
+/* 一张卡里并排两个同级数值（入站实时网速的 ↓ / ↑） */
+.stat-value-pair {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 18px;
+}
+
+/* 同上：每 2 秒刷新的速度值按最宽形态预留宽度，↑ 不随 ↓ 的位数左右跳 */
+.stat-value-pair > span {
+    min-width: 6.4em;
+}
+
 .stat-foot {
     grid-area: foot;
     margin-top: 4px;
@@ -2418,10 +2430,19 @@ button.xray-badge:focus-visible {
     font-variant-numeric: tabular-nums;
 }
 
-.usage-speed {
+.usage-speed,
+.usage-pair {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 16px;
+    white-space: nowrap;
+}
+
+/* 实时网速每 2 秒刷新，位数与单位都在变（2.66 MB/s ↔ 239.39 KB/s）。
+ * 不给定宽，它后面的 TCP/UDP、系统累计流量会跟着左右跳。
+ * 按最宽的形态「↓ 999.99 KB/s」预留，数字本身已是 tabular-nums。 */
+.usage-speed > span {
+    min-width: 6.6em;
 }
 
 .usage-speed .stat-spark {
@@ -3111,9 +3132,12 @@ button.xray-badge:focus-visible {
     white-space: nowrap;
 }
 
+/* 全站按钮样式给 link 按钮也画了 1px 边框；这里曾把内边距清成 0，边框贴着字。
+ * 补回与「重新探测」一致的内边距与高度，flex: none 防止被左侧文字挤窄。 */
 .gcard-sub .ant-btn-link {
-    padding: 0;
-    height: auto;
+    flex: none;
+    height: 26px;
+    padding: 0 10px;
 }
 
 .gcard-dot {
@@ -4420,5 +4444,97 @@ button.xray-badge:focus-visible {
     /* 出站节点 */
     .status-page .net-node {
         padding: 6px 0;
+    }
+}
+
+/* ── 用量图悬浮框（chart-util.js 的 externalChartTooltip） ───────────
+ * 挂在 body 上、固定定位，不会被图表画布或卡片的 overflow 裁掉。
+ * 外观沿用此前 canvas 悬浮框的取值：#0E1726 底、白字、10px 内边距、8px 圆角。 */
+.chart-tooltip {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 1060;
+    pointer-events: none;
+    opacity: 0;
+    max-width: min(360px, calc(100vw - 16px));
+    padding: 10px;
+    border-radius: 8px;
+    background: #0E1726;
+    color: #FFFFFF;
+    font-size: 12px;
+    line-height: 18px;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 8px 24px -8px rgba(14, 23, 38, .45);
+    transition: opacity .12s ease;
+}
+
+.chart-tooltip-title {
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.chart-tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* 备注过长时截断，不把框撑出视口 */
+.chart-tooltip-row span {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chart-tooltip-row i {
+    flex: none;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .6);
+}
+
+.chart-tooltip-footer {
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, .15);
+    font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chart-tooltip {
+        transition: none;
+    }
+}
+
+/* ── 实时网速的方向箭头 ───────────────────────────────────────────────
+ * 下载蓝（主色）、上传洋红（身份色 pink）。刻意不用红色：本面板的红色只表示异常
+ * （已过期、风险高、不通），上传箭头标红会被读成报警。
+ * ≥1 KB/s 才着色并呼吸闪动：服务器网卡几乎永远有几十 B/s 的背景流量，
+ * 按「大于 0」判断箭头会一直闪，失去「此刻正在跑流量」的意义。不到门槛时为正文黑色。
+ * 箭头是表示方向的图形（aria-hidden，数值本身仍可读），白底对比度蓝 5.39:1、洋红 4.4:1。 */
+.speed-arrow {
+    font-style: normal;
+    color: var(--aui-text);
+    transition: color var(--aui-dur) var(--aui-ease);
+}
+
+.speed-arrow.is-down.is-active { color: var(--aui-id-blue); }
+.speed-arrow.is-up.is-active   { color: var(--aui-id-pink); }
+
+.speed-arrow.is-active {
+    animation: aui-speed-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes aui-speed-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .speed-arrow.is-active {
+        animation: none;
     }
 }
