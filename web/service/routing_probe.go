@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -69,6 +70,10 @@ var probeTargets = []string{
 	"https://cp.cloudflare.com/generate_204",
 }
 
+// probeTraceURL 用来看经该节点出网时的出口国家（返回体里的 loc= 一行）。
+// 与上面第二个探测目标是同一个主机，不多引入一个第三方。是变量只为测试。
+var probeTraceURL = "https://cp.cloudflare.com/cdn-cgi/trace"
+
 // probeBinaryPath 是变量而非直接调用，只为让测试能模拟二进制缺失。
 var probeBinaryPath = xray.GetBinaryPath
 
@@ -84,6 +89,9 @@ type ProbeResult struct {
 	LatencyMs int64  `json:"latencyMs"`
 	Error     string `json:"error"`
 	CheckedAt int64  `json:"checkedAt"`
+	// ExitCountry 是这一次测到的出口国家，测不出时为空（节点上保留的是
+	// 上一次测到的值，见 model.OutboundNode.ExitCountry）。
+	ExitCountry string `json:"exitCountry"`
 
 	// tag 不导出，因此不会出现在 JSON 里，只用于挡住 SQLite 的 id 复用：
 	// 删掉 id=N 的节点后新建一个，它还会拿到 id=N，只按 id 索引的缓存会
@@ -254,11 +262,19 @@ func (s *ProbeService) run(node *model.OutboundNode) *ProbeResult {
 	if err != nil {
 		return fail(describeProbeError(err))
 	}
+	// 出口国家是附带信息：测不出不影响「通」的结论，节点上也继续保留上一次的值。
+	country, err := probeExitCountry(addr)
+	if err != nil {
+		logger.Debug("出站节点出口国家测试失败 tag=", node.Tag, " err=", err)
+	} else if err := s.outboundService.SetExitCountry(node.Id, node.Tag, country); err != nil {
+		logger.Warning("记录出站节点出口国家失败 tag=", node.Tag, " err=", err)
+	}
 	return &ProbeResult{
-		Status:    ProbeOK,
-		LatencyMs: latency.Milliseconds(),
-		CheckedAt: now,
-		tag:       node.Tag,
+		Status:      ProbeOK,
+		LatencyMs:   latency.Milliseconds(),
+		CheckedAt:   now,
+		ExitCountry: country,
+		tag:         node.Tag,
 	}
 }
 
@@ -366,6 +382,55 @@ func probeThroughProxy(proxyAddr string) (time.Duration, error) {
 		lastErr = common.NewError("没有可用的探测目标")
 	}
 	return 0, lastErr
+}
+
+// probeExitCountry 经代理请求 Cloudflare trace，取出口国家。
+//
+// 取 Cloudflare 自己判定的 loc，不拿出口 IP 回本机 IP 库查：住宅代理这类
+// 节点的出口 IP 段，本机几个库常常只认得到国家甚至认不出。
+func probeExitCountry(proxyAddr string) (string, error) {
+	proxyURL, err := url.Parse("socks5://" + proxyAddr)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:             http.ProxyURL(proxyURL),
+			DisableKeepAlives: true,
+		},
+		Timeout: probeHTTPTimeout,
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get(probeTraceURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("trace 返回 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", err
+	}
+	return parseTraceCountry(string(body))
+}
+
+// parseTraceCountry 从 trace 返回体里取 loc。XX 是 Cloudflare 认不出，T1 是
+// Tor 出口，都不是国家，不画国旗。
+func parseTraceCountry(body string) (string, error) {
+	for _, line := range strings.Split(body, "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), "loc=")
+		if !ok {
+			continue
+		}
+		if len(v) != 2 || v[0] < 'A' || v[0] > 'Z' || v[1] < 'A' || v[1] > 'Z' || v == "XX" || v == "T1" {
+			return "", fmt.Errorf("无法识别的 loc=%q", v)
+		}
+		return v, nil
+	}
+	return "", common.NewError("trace 返回体里没有 loc")
 }
 
 // describeProbeError 把 Go 的网络错误换成管理员看得懂的一句话。

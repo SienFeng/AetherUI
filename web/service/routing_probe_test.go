@@ -56,9 +56,18 @@ func resetProbeState(t *testing.T) {
 // useProbeTarget 把探测目标指向本地 httptest server，让端到端测试不依赖外网。
 func useProbeTarget(t *testing.T, urls ...string) {
 	t.Helper()
-	old := probeTargets
+	old, oldTrace := probeTargets, probeTraceURL
 	probeTargets = urls
-	t.Cleanup(func() { probeTargets = old })
+	// 出口国家那一跳也不出外网，且单独起一个服务器：与探测目标共用的话，
+	// 统计目标命中次数的用例会把 trace 那一次也数进去。不返回 loc，测不出国家即可。
+	trace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	probeTraceURL = trace.URL
+	t.Cleanup(func() {
+		trace.Close()
+		probeTargets, probeTraceURL = old, oldTrace
+	})
 }
 
 // SQLite 会复用被删除的自增 id：删掉 id=N 的节点后新建一个，它还会拿到 id=N。
@@ -397,5 +406,112 @@ func TestProbeRecoversInflightSlotAfterPanic(t *testing.T) {
 	probeMu.Unlock()
 	if stuck {
 		t.Error("inflight entry survived the panic; the node is now permanently locked")
+	}
+}
+
+// 探测成功时经同一个节点取 trace 的 loc，落到节点上，界面据此画国旗。
+func TestProbeRecordsExitCountry(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	resetProbeState(t)
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	trace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fl=1\nip=203.0.113.9\nloc=US\ntls=TLSv1.3\n"))
+	}))
+	defer trace.Close()
+	useProbeTarget(t, target.URL)
+	probeTraceURL = trace.URL
+
+	node := newProbeNode(t, "a-ui-exit", freedomOutbound())
+	res, err := (&ProbeService{}).Probe(node.Id)
+	if err != nil || res.Status != ProbeOK {
+		t.Fatalf("Probe: res=%+v err=%v", res, err)
+	}
+	if res.ExitCountry != "US" {
+		t.Errorf("result ExitCountry = %q, want US", res.ExitCountry)
+	}
+	got, err := (&OutboundNodeService{}).Get(node.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExitCountry != "US" {
+		t.Errorf("stored ExitCountry = %q, want US", got.ExitCountry)
+	}
+}
+
+func TestParseTraceCountry(t *testing.T) {
+	cases := map[string]string{
+		"ip=1.1.1.1\nloc=SG\n":  "SG",
+		"loc=jp":                "",
+		"loc=XX\n":              "",
+		"loc=T1\n":              "",
+		"loc=USA\n":             "",
+		"ip=1.1.1.1\n":          "",
+		"  loc=DE  \r\nfoo=bar": "DE",
+	}
+	for body, want := range cases {
+		got, err := parseTraceCountry(body)
+		if want == "" {
+			if err == nil {
+				t.Errorf("%q: got %q, want error", body, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("%q: got %q, %v; want %q", body, got, err, want)
+		}
+	}
+}
+
+// 换了落地服务器，旧国旗就是错的；只改备注时要保留。
+func TestUpdateOutboundExitCountry(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	resetProbeState(t)
+	svc := &OutboundNodeService{}
+
+	node := newProbeNode(t, "a-ui-cc", map[string]any{
+		"protocol": "socks",
+		"settings": map[string]any{
+			"servers": []any{map[string]any{"address": "1.2.3.4", "port": 1080}},
+		},
+	})
+	if err := svc.SetExitCountry(node.Id, node.Tag, "JP"); err != nil {
+		t.Fatal(err)
+	}
+
+	renamed := *node
+	renamed.Remark = "改个名"
+	if err := svc.Update(&renamed); err != nil {
+		t.Fatalf("Update remark: %v", err)
+	}
+	if got, _ := svc.Get(node.Id); got.ExitCountry != "JP" {
+		t.Errorf("after remark change ExitCountry = %q, want JP", got.ExitCountry)
+	}
+
+	changed := *node
+	changed.Config = `{"protocol":"socks","settings":{"servers":[{"address":"5.6.7.8","port":1080}]}}`
+	if err := svc.Update(&changed); err != nil {
+		t.Fatalf("Update config: %v", err)
+	}
+	if got, _ := svc.Get(node.Id); got.ExitCountry != "" {
+		t.Errorf("after config change ExitCountry = %q, want empty", got.ExitCountry)
+	}
+}
+
+// id 被新节点复用时，迟到的探测结果不能写到新节点头上。
+func TestSetExitCountryRequiresMatchingTag(t *testing.T) {
+	setupDB(t)
+	svc := &OutboundNodeService{}
+	node := newProbeNode(t, "a-ui-now", freedomOutbound())
+	if err := svc.SetExitCountry(node.Id, "a-ui-gone", "US"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := svc.Get(node.Id); got.ExitCountry != "" {
+		t.Errorf("ExitCountry = %q written through a stale tag", got.ExitCountry)
 	}
 }

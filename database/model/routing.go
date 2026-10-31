@@ -131,6 +131,11 @@ type OutboundNode struct {
 	// Config 是完整的 xray outbound JSON，tag 字段以本表的 Tag 为准。
 	Config string `json:"config" form:"config"`
 	Enable bool   `json:"enable" form:"enable"`
+	// ExitCountry 是最近一次成功探测时经该节点出网看到的出口国家（ISO 3166
+	// 两位大写，取自 Cloudflare trace 的 loc），界面据此画国旗。服务端状态：
+	// 只由探测写入（OutboundNodeService.SetExitCountry），配置一变就清空；
+	// form:"-" 不接受前端提交，也不进导出文件——它描述的是这台机器测到的结果。
+	ExitCountry string `json:"exitCountry" form:"-"`
 }
 
 // RoutingRule 把「哪个入站访问哪个域名组」连到「哪个出站或黑洞」。

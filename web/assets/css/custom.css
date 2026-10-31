@@ -2580,6 +2580,33 @@ button.chip.is-active {
     color: #FFFFFF;
 }
 
+/* 出站节点的出口国旗：方形国旗铺满头像，细边框把白底国旗（日本等）与页面分开 */
+.who-avatar.is-flag {
+    position: relative;
+    overflow: hidden;
+}
+
+/* 边框画在国旗上面一层：画在头像自身上会被铺满的图片盖住 */
+.who-avatar.is-flag::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, .1);
+}
+
+.who-avatar.is-flag img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* 停用的节点与首字母头像一致地退成灰色 */
+.who-avatar.is-flag.is-off img {
+    filter: grayscale(1);
+    opacity: .6;
+}
+
 .who-text {
     display: flex;
     flex-direction: column;
@@ -2946,6 +2973,18 @@ button.chip.is-active {
     color: #FFFFFF;
 }
 
+/* 厂商 logo：两个图标源的 SVG 都是黑色单色，在 <img> 里用滤镜统一成白色 */
+.gcard-icon.is-brand img {
+    width: 20px;
+    height: 20px;
+    filter: brightness(0) invert(1);
+}
+
+.gcard-icon.is-brand.is-light img {
+    filter: brightness(0);
+    opacity: .85;
+}
+
 .gcard-title {
     flex: 1;
     display: flex;
@@ -3246,6 +3285,36 @@ button.chip.is-active {
     white-space: nowrap;
 }
 
+/* 在线列：内容只有约 100px，而表格铺满宽屏时各列按 width 等比放大，这一列
+ * 会多出一大段空白、全堆在右侧，与风险列之间空出一截。把列头和单元格包进同
+ * 一个定宽块并在列内居中，多出的空间平均分到两侧；块内仍左对齐，各行状态点
+ * 与列头文字保持竖直对齐。100px 容得下「↑ 999.99 KB/s」加 16px 缩进。 */
+.online-col {
+    width: 100px;
+    max-width: 100%;
+    margin: 0 auto;
+}
+
+/* 展开行归属地：文字 +「存疑」标签固定同一行，放不下时截断文字而不是折行 */
+.loc-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    vertical-align: middle;
+}
+
+.loc-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.loc-cell .status-badge {
+    flex: none;
+}
+
 /* 在线单元格：状态点 + 「N 台设备 / 无人在线」 */
 .online-main {
     display: flex;
@@ -3409,6 +3478,14 @@ button.chip.is-active {
 /* 底部左侧的一句说明，按钮仍靠右 */
 .ant-modal-footer .ant-btn + .ant-btn {
     margin-left: 0;
+}
+
+/* 用 ok-text / cancel-text 的默认底栏，antd 会把两个按钮再包一层 <div>，
+ * 上面的 gap 只作用在这层 div 上；不给它同样的间距，按钮会贴在一起。 */
+.ant-modal-footer > div {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .modal-foot-note {

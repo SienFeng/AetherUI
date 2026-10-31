@@ -168,11 +168,26 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 		// 配置换了，上一次的探测结果就不再是对当前配置的判断了。留着它，
 		// 一个刚被改错的节点会继续顶着上一次的绿灯。只改备注时不必丢弃。
 		(&ProbeService{}).Forget(old.Id)
+		// 出口国家同理：换了落地服务器，旧国旗就是错的，等下一次探测重新测。
+		old.ExitCountry = ""
+		old.Remark = node.Remark
+		old.Enable = node.Enable
+		return database.GetDB().Save(old).Error
 	}
 	old.Remark = node.Remark
 	old.Enable = node.Enable
-	db := database.GetDB()
-	return db.Save(old).Error
+	// 配置没变时不写 exit_country：从 Get 到 Save 之间可能刚好有一次探测
+	// 写入了新的出口国家，整行写回会把它覆盖成 Get 那一刻的旧值。
+	return database.GetDB().Omit("exit_country").Save(old).Error
+}
+
+// SetExitCountry 记录一次成功探测测到的出口国家。带 tag 条件：探测期间
+// 节点可能被删掉、id 又被新节点复用（SQLite 会复用自增 id），不能把旧节点
+// 的结果写到新节点头上。
+func (s *OutboundNodeService) SetExitCountry(id int, tag string, country string) error {
+	return database.GetDB().Model(&model.OutboundNode{}).
+		Where("id = ? AND tag = ?", id, tag).
+		Update("exit_country", country).Error
 }
 
 func (s *OutboundNodeService) Del(id int) error {
