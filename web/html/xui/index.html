@@ -16,7 +16,7 @@
 <a-layout id="app" v-cloak>
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
-        <a-layout-content>
+        <a-layout-content class="status-page">
             <div class="page-header page-header-inline">
                 <div class="page-heading">
                     <!-- 「实时」只在最近一次 /server/status 成功后 6 秒内显示；轮询断了就
@@ -170,49 +170,52 @@
                             入站用量排行
                             <div class="card-sub">[[ rangeLabel ]]</div>
                         </div>
-                        <table class="rank-table" v-if="rankRows.length">
-                            <thead>
-                                <tr>
-                                    <th>入站</th>
-                                    <th style="width: 16%">状态</th>
-                                    <th style="width: 14%">风险</th>
-                                    <th class="r" style="width: 8%">在线</th>
-                                    <th class="r" style="width: 10%">占比</th>
-                                    <th class="r" style="width: 26%">用量</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr v-for="r in rankRows" :key="r.inboundId">
-                                    <td>
-                                        <div class="who">
-                                            <span class="who-avatar" :style="{ background: r.color, color: r.ink }">[[ r.initial ]]</span>
-                                            <span class="who-text">
-                                                <span class="who-name" :title="r.remark">[[ r.remark || '（无备注）' ]]</span>
-                                                <span class="who-sub">[[ r.sub ]]</span>
-                                            </span>
-                                        </div>
-                                    </td>
-                                    <td><span class="stat-tag" :class="r.statusTone">[[ r.statusText ]]</span></td>
-                                    <!-- 与入站列表的风险列同一套文案与配色（utils.js 的 SharingRisk）。
-                                         这里只读，依据在入站列表里点开看。 -->
-                                    <td>
-                                        <a-tooltip :title="r.riskTip">
-                                            <span class="status-badge" :class="r.riskTone">
-                                                <a-icon v-if="r.riskIcon" :type="r.riskIcon"></a-icon>[[ r.riskLabel ]]
-                                            </span>
-                                        </a-tooltip>
-                                    </td>
-                                    <td class="r num">[[ r.online ]]</td>
-                                    <td class="r num">[[ r.percent ]]</td>
-                                    <td class="r">
-                                        <div class="rank-bar">
-                                            <span class="rank-track"><i :style="{ width: r.share + '%', background: r.color }"></i></span>
-                                            <span class="rank-size num">[[ sizeFormat(r.total) ]]</span>
-                                        </div>
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
+                        <!-- 一屏布局下表格在这一层内部滚动（custom.css 的 .status-page 段） -->
+                        <div class="rank-scroll" v-if="rankRows.length">
+                            <table class="rank-table">
+                                <thead>
+                                    <tr>
+                                        <th>入站</th>
+                                        <th style="width: 16%">状态</th>
+                                        <th style="width: 14%">风险</th>
+                                        <th class="r" style="width: 8%">在线</th>
+                                        <th class="r" style="width: 10%">占比</th>
+                                        <th class="r" style="width: 26%">用量</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="r in rankRows" :key="r.inboundId">
+                                        <td>
+                                            <div class="who">
+                                                <span class="who-avatar" :style="{ background: r.color, color: r.ink }">[[ r.initial ]]</span>
+                                                <span class="who-text">
+                                                    <span class="who-name" :title="r.remark">[[ r.remark || '（无备注）' ]]</span>
+                                                    <span class="who-sub">[[ r.sub ]]</span>
+                                                </span>
+                                            </div>
+                                        </td>
+                                        <td><span class="stat-tag" :class="r.statusTone">[[ r.statusText ]]</span></td>
+                                        <!-- 与入站列表的风险列同一套文案与配色（utils.js 的 SharingRisk）。
+                                             这里只读，依据在入站列表里点开看。 -->
+                                        <td>
+                                            <a-tooltip :title="r.riskTip">
+                                                <span class="status-badge" :class="r.riskTone">
+                                                    <a-icon v-if="r.riskIcon" :type="r.riskIcon"></a-icon>[[ r.riskLabel ]]
+                                                </span>
+                                            </a-tooltip>
+                                        </td>
+                                        <td class="r num">[[ r.online ]]</td>
+                                        <td class="r num">[[ r.percent ]]</td>
+                                        <td class="r">
+                                            <div class="rank-bar">
+                                                <span class="rank-track"><i :style="{ width: r.share + '%', background: r.color }"></i></span>
+                                                <span class="rank-size num">[[ sizeFormat(r.total) ]]</span>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                         <div v-else class="rank-empty">这段时间没有用量</div>
                     </a-card>
 
