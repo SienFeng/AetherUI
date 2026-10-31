@@ -53,19 +53,19 @@
                      「分布在 N 个入站」「峰值时段」「网速折线」都是前端从这些数据派生的。 -->
                 <!-- 顶部是这台机器的四项资源。入站相关的指标（入站数、在线设备、
                      用量）在入站列表页；这一页回答「机器与 Xray 怎么样」。
-                     越过 80% / 90% 时整张卡变橙 / 红（阈值沿用 CurTotal.tone），
-                     百分比数字同时在卡上——颜色不是唯一信息来源。 -->
+                     越过 80% / 90% 时数值与进度条变橙 / 红（阈值沿用 CurTotal.tone），
+                     右上角同时写出「正常 / 偏高 / 紧张」——颜色不是唯一信息来源。
+                     条上的竖线是 80% 告警线，一眼看出离告警还有多远。 -->
                 <div class="stat-row res-row">
                     <div class="stat-card res-stat" v-for="r in resourceBars" :key="r.name" :class="r.cardTone">
-                        <svg class="stat-ring" viewBox="0 0 64 64" aria-hidden="true">
-                            <circle cx="32" cy="32" r="26" fill="none" stroke="#E8EDF4" stroke-width="8"></circle>
-                            <circle cx="32" cy="32" r="26" fill="none" :stroke="r.ringColor" stroke-width="8"
-                                    stroke-linecap="round" transform="rotate(-90 32 32)"
-                                    :stroke-dasharray="r.dash"></circle>
-                        </svg>
+                        <span class="res-state" :class="r.stateTone">[[ r.stateText ]]</span>
                         <div class="stat-text">
                             <span class="stat-label">[[ r.name ]]</span>
                             <div class="stat-value">[[ r.percent ]]<span class="unit">%</span></div>
+                        </div>
+                        <div class="res-meter" aria-hidden="true">
+                            <i class="res-meter-fill" :style="{ width: r.width }"></i>
+                            <b class="res-meter-mark"></b>
                         </div>
                         <div class="stat-foot"><span :title="r.text">[[ r.text ]]</span></div>
                     </div>
@@ -123,7 +123,7 @@
                             </div>
                         </div>
                         <ul class="chart-legend" v-if="overviewLegend.length">
-                            <li v-for="l in overviewLegend" :key="l.name">
+                            <li v-for="(l, i) in overviewLegend" :key="i">
                                 <i :style="{ background: l.color }"></i>[[ l.name ]]
                                 <b class="cell-num">[[ l.total ]]</b><span class="legend-share cell-num">[[ l.share ]]</span>
                             </li>
@@ -373,16 +373,16 @@
 
     // niceByteAxis / shortSize / styleTrafficAxes 在 chart-util.js，入站页的图也用同一套。
 
-    // 用量图与排行共用的入站配色：前 5 名各占一个身份色（与 custom.css 的
-    // --aui-id-* 一致），其余合并成灰色的「其他」。琥珀/绿/红刻意不用，
-    // 它们在全站是警告/成功/危险。
-    // 流量概览的系列色：dataviz 参考调色板的前 5 个槽位（蓝 / 橙 / 浅绿 / 黄 / 品红），
-    // 按固定顺序分给用量前 5 的入站。validate_palette.js 实测：色弱相邻对 ΔE ≥ 9.1、
-    // 正常视力 ≥ 19.6；后三个对白底不足 3:1，所以图例必须写明数值（见 overviewLegend），
-    // 下方排行表即表格视图。改动前那套蓝/青/紫/靛/粉里紫与靛只差 ΔE 7.5，校验不过。
-    const SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4'];
+    // 流量概览的系列色：dataviz 参考调色板的 8 个槽位（蓝 / 橙 / 浅绿 / 黄 / 品红 /
+    // 绿 / 紫 / 红），按固定顺序分给用量前 8 的入站。validate_palette.js 实测：
+    // 色弱相邻对 ΔE ≥ 9.1、正常视力 ≥ 19.6；浅绿/黄/品红对白底不足 3:1，所以图例
+    // 必须写明数值（见 overviewLegend），下方排行表即表格视图。
+    // 每个入站都单独画一条线、单独列图例——不再把第 6 名以后合并成「其他 N 个入站」，
+    // 那样看不出合并进去的是谁、各用了多少。超出 8 种可分辨颜色的入站用中性灰，
+    // 身份靠图例与悬停提示里的名字区分（色板再加色就分不清了）。
+    const SERIES_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
     const SERIES_OTHER = '#94A3B8';
-    const SERIES_SHOWN = SERIES_COLORS.length;
+    const seriesColor = i => SERIES_COLORS[i] || SERIES_OTHER;
 
     // 彩色底上的字用黑还是白：取对比度更高的那个（排行表头像用）
     function inkOn(hex) {
@@ -617,7 +617,8 @@
                 this.loadOverviewChart();
             },
             async loadOverviewChart() {
-                const params = { range: this.overviewRange, top: 12 };
+                // 取 controller 允许的上限（50），让每个有用量的入站都进图
+                const params = { range: this.overviewRange, top: 50 };
                 if (this.overviewRange === 'custom' && this.overviewCustom) {
                     params.start = this.overviewCustom[0];
                     params.end = this.overviewCustom[1];
@@ -632,21 +633,12 @@
                 this.overviewLabels = data.labels || [];
                 this.overviewGranularity = data.granularity || 'hour';
                 // 每个入站一条线：服务端已按整个范围的总量降序排好、逐点补零。
-                // 前 5 名各一层，其余合并成「其他」一层，图例与配色和排行表一致。
-                const shown = this.overviewSeries.slice(0, SERIES_SHOWN);
-                const rest = this.overviewSeries.slice(SERIES_SHOWN);
-                const datasets = shown.map((s, i) => ({
+                // 图例与配色和排行表一致。
+                const datasets = this.overviewSeries.map((s, i) => ({
                     label: s.remark || ('入站 ' + s.inboundId),
                     data: s.points,
-                    color: SERIES_COLORS[i],
+                    color: seriesColor(i),
                 }));
-                if (rest.length) {
-                    datasets.push({
-                        label: `其他 ${rest.length} 个入站`,
-                        data: this.overviewLabels.map((_, i) => rest.reduce((n, s) => n + (s.points[i] || 0), 0)),
-                        color: SERIES_OTHER,
-                    });
-                }
                 // 不堆叠：每个入站一条线，纵轴读到的就是它自己的用量。改动前是堆叠面积，
                 // 每一层画在下一层之上，读到的是累加高度，一个入站占大头时其余几层根本读不出来。
                 const labels = this.overviewLabels;
@@ -781,14 +773,9 @@
                     name, color, total: sizeFormat(total),
                     share: grand ? (total / grand * 100).toFixed(1) + '%' : '—',
                 });
-                const shown = this.overviewSeries.slice(0, SERIES_SHOWN).map((s, i) =>
-                    item(s.remark || ('入站 ' + s.inboundId), SERIES_COLORS[i], sum(s.points)));
-                const rest = this.overviewSeries.slice(SERIES_SHOWN);
-                if (rest.length > 0) {
-                    shown.push(item(`其他 ${rest.length} 个入站`, SERIES_OTHER,
-                        rest.reduce((n, s) => n + sum(s.points), 0)));
-                }
-                return this.overviewTotals.some(v => v > 0) ? shown : [];
+                const items = this.overviewSeries.map((s, i) =>
+                    item(s.remark || ('入站 ' + s.inboundId), seriesColor(i), sum(s.points)));
+                return this.overviewTotals.some(v => v > 0) ? items : [];
             },
             // 排行表：服务端 Top N 与入站列表按 id 对上，补协议、端口、在线数与状态
             rankRows() {
@@ -813,8 +800,8 @@
                     const name = (r.remark || '').replace(/^微信[：:]\s*/, '');
                     return Object.assign({}, r, {
                         // 与图表图例同色；停用与否由状态标签表达，不改头像颜色
-                        color: SERIES_COLORS[idx] || SERIES_OTHER,
-                        ink: inkOn(SERIES_COLORS[idx] || SERIES_OTHER),
+                        color: seriesColor(idx),
+                        ink: inkOn(seriesColor(idx)),
                         initial: (name || '?').slice(0, 1).toUpperCase(),
                         sub: ib ? `${ib.protocol} · 端口 ${ib.port}` : '已删除的入站',
                         online: oc && oc.supported ? oc.count : '—',
@@ -902,8 +889,6 @@
             },
             resourceBars() {
                 const s = this.status;
-                const RING = 2 * Math.PI * 26;
-                const COLORS = { CPU: '#1266D6', '内存': '#7C3AED', Swap: '#0D9488', '硬盘': '#4F46E5' };
                 return [
                     { name: 'CPU', v: s.cpu, text: `负载 ${s.loads[0]} · ${s.loads[1]} · ${s.loads[2]}` },
                     { name: '内存', v: s.mem, text: `${sizeFormat(s.mem.current)} / ${sizeFormat(s.mem.total)}` },
@@ -912,19 +897,18 @@
                 ].map(r => {
                     const p = Math.max(0, Math.min(100, Number(r.v.percent) || 0));
                     // 阈值沿用 CurTotal.tone：80% 起橙、90% 起红
-                    const ringColor = r.v.tone === 'is-danger' ? '#B91C1C'
-                        : r.v.tone === 'is-warn' ? '#B45309' : COLORS[r.name];
+                    const tone = r.v.tone;
                     return {
                         name: r.name,
                         percent: r.v.percent,
                         text: r.text,
-                        // 卡片顶部色条与圆环同色：平时是各自的身份色，越过阈值换成橙 / 红
-                        cardTone: r.v.tone === 'is-danger' ? 'tone-alert'
-                            : r.v.tone === 'is-warn' ? 'tone-warn'
+                        // 进度条与数值同色：平时是各自的身份色，越过阈值换成橙 / 红
+                        cardTone: tone === 'is-danger' ? 'tone-alert'
+                            : tone === 'is-warn' ? 'tone-warn'
                             : { CPU: 'tone-blue', '内存': 'tone-purple', Swap: 'tone-cyan', '硬盘': 'tone-geek' }[r.name],
-                        ringColor,
-                        dash: `${(RING * p / 100).toFixed(1)} ${RING.toFixed(1)}`,
-                        short: (p < 10 ? p.toFixed(1) : Math.round(p)) + '%',
+                        stateText: tone === 'is-danger' ? '紧张' : tone === 'is-warn' ? '偏高' : '正常',
+                        stateTone: tone || 'is-ok',
+                        width: p + '%',
                     };
                 });
             },

@@ -258,19 +258,14 @@
                                             <div><b>[[ group.broken || !group.subscribed ? '—' : group.subscribedCount ]]</b><span>订阅域名</span></div>
                                             <div><b>[[ group.broken ? '—' : (group.cidrCount || 0) ]]</b><span>IP 段</span></div>
                                         </div>
-                                        <div class="gcard-domains">
-                                            <span v-if="group.broken" class="gcard-warn">数据损坏，这条组的规则不会写进配置</span>
-                                            <template v-else>
-                                                <code v-for="d in group.preview" :key="d">[[ d ]]</code>
-                                                <span v-if="group.effectiveCount > group.preview.length" class="gcard-more">
-                                                    等 [[ group.effectiveCount ]] 条
-                                                </span>
-                                                <!-- 纯 IP 组不是「空」：域名和 IP 段都为空才会被跳过 -->
-                                                <span v-if="group.effectiveCount === 0 && !group.cidrCount" class="gcard-warn">
-                                                    空（引用它的规则不会写进配置）
-                                                </span>
-                                                <span v-else-if="group.effectiveCount === 0" class="gcard-more">只有 IP 段</span>
-                                            </template>
+                                        <!-- 卡片上不再预览域名标签：上方三格已给出数量，具体内容在编辑里看。
+                                             只保留会让规则失效的两种警告。
+                                             纯 IP 组不是「空」：域名和 IP 段都为空才会被跳过。 -->
+                                        <div v-if="group.broken" class="gcard-domains">
+                                            <span class="gcard-warn">数据损坏，这条组的规则不会写进配置</span>
+                                        </div>
+                                        <div v-else-if="group.effectiveCount === 0 && !group.cidrCount" class="gcard-domains">
+                                            <span class="gcard-warn">空（引用它的规则不会写进配置）</span>
                                         </div>
                                         <div class="gcard-sub" :class="'is-' + group.subscribeState">
                                             <span class="gcard-dot" aria-hidden="true"></span>
@@ -1509,20 +1504,22 @@
                         deadGroups.map(this.groupName).join('、') + '），这些组不受本规则约束';
                 }
 
+                // 只有【已删除】的入站算失效：引用悬空，规则配置本身有问题。
+                // 【已停用】的入站不算——停用是管理员对用户的操作，规则本身没错，
+                // 用户一启用，下一次生成配置时 buildRule 就会把它带上，不需要
+                // 改规则。把停用算进「未生效规则」会让管理员去改一条好好的规则，
+                // 停用用户的情况改走 ruleNote 说明。
                 if (rule.inboundIds.length) {
-                    const dead = rule.inboundIds.filter(id => {
-                        const i = this.inbounds.find(x => x.id === id);
-                        return !i || !i.enable;
-                    });
-                    // 全部失效必须整条丢弃：留下空的 inboundTag 会让规则从
+                    const deleted = rule.inboundIds.filter(id => !this.inbounds.find(x => x.id === id));
+                    // 全部删除必须整条丢弃：留下空的 inboundTag 会让规则从
                     // 「只覆盖某几个人」放大成「覆盖所有人」，后端 buildRule
                     // 因此跳过整条规则，这里要把这个跳过说出来。
-                    if (dead.length === rule.inboundIds.length) {
-                        return '指定的入站已全部删除或禁用，这条规则不会写进配置';
+                    if (deleted.length === rule.inboundIds.length) {
+                        return '指定的入站已全部删除，这条规则不会写进配置';
                     }
-                    if (dead.length) {
-                        return '有 ' + dead.length + ' 个入站已删除或已禁用（' +
-                            dead.map(this.inboundName).join('、') + '），这些用户不受本规则约束';
+                    if (deleted.length) {
+                        return '有 ' + deleted.length + ' 个入站已删除（' +
+                            deleted.map(this.inboundName).join('、') + '），这些用户不受本规则约束';
                     }
                 }
                 if (rule.action === 'proxy') {
@@ -1545,15 +1542,29 @@
                 }
                 return this.ruleConflict(rule);
             },
-            // ruleNote 是「规则会生效，但有前提」的说明，不算失效、不计入
-            // 「未生效规则」。目前只有一种：socks / http 代理入站没开 sniffing。
+            // ruleNote 是「规则有效，但有需要知道的情况」的说明，不算失效、不计入
+            // 「未生效规则」。两种：引用的入站有停用的；socks / http 代理入站没开 sniffing。
             ruleNote(rule) {
-                if (!rule.enable || this.ruleIssue(rule) || !this.ruleHasDomains(rule)) return '';
-                const soft = this.sniffingOffIds(rule).filter(id => this.isProxyInbound(id));
-                if (!soft.length) return '';
-                return '入站 ' + soft.map(this.inboundName).join('、') +
-                    ' 是 socks / http 代理且未开启 sniffing：客户端把域名交给代理解析（socks5h、HTTP 代理）时本规则照常命中；' +
-                    '客户端先自行解析成 IP 再连代理时不会命中，可在入站设置里打开 sniffing 兜底';
+                if (!rule.enable || this.ruleIssue(rule)) return '';
+                const notes = [];
+                const disabled = rule.inboundIds.filter(id => {
+                    const i = this.inbounds.find(x => x.id === id);
+                    return i && !i.enable;
+                });
+                if (disabled.length) {
+                    notes.push(disabled.length === rule.inboundIds.length
+                        ? '指定的入站当前都已停用，暂时没有用户受本规则约束；入站重新启用后本规则自动对其生效，无需修改规则'
+                        : '入站 ' + disabled.map(this.inboundName).join('、') +
+                            ' 当前已停用；重新启用后本规则自动对其生效，无需修改规则');
+                }
+                const soft = this.ruleHasDomains(rule)
+                    ? this.sniffingOffIds(rule).filter(id => this.isProxyInbound(id)) : [];
+                if (soft.length) {
+                    notes.push('入站 ' + soft.map(this.inboundName).join('、') +
+                        ' 是 socks / http 代理且未开启 sniffing：客户端把域名交给代理解析（socks5h、HTTP 代理）时本规则照常命中；' +
+                        '客户端先自行解析成 IP 再连代理时不会命中，可在入站设置里打开 sniffing 兜底');
+                }
+                return notes.join('。');
             },
 
             clickGroupAction(a, group) {
