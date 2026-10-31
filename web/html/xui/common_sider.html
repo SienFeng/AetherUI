@@ -87,7 +87,7 @@
                             <div class="version-rollback-tip">
                                 选择要回退到的版本（近 [[ panelVersion.releases.length ]] 个版本）
                             </div>
-                            <a-radio-group v-model="rollbackTag" style="width:100%">
+                            <a-radio-group v-model="rollbackTag" class="version-rollback-list">
                                 <div v-for="r in panelVersion.releases" :key="r.tagName"
                                      class="version-rollback-item">
                                     <a-radio :value="r.tagName">[[ r.tagName ]]</a-radio>

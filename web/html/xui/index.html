@@ -17,32 +17,38 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
-            <div class="page-header">
+            <div class="page-header page-header-inline">
                 <div class="page-heading">
                     <!-- 「实时」只在最近一次 /server/status 成功后 6 秒内显示；轮询断了就
                          改成「N 秒前更新」并变灰，不让一个停住的页面冒充实时。 -->
                     <h1 class="page-title">系统状态
                         <span class="page-live" :class="{ 'is-stale': statusStale }">[[ liveText ]]</span>
                     </h1>
-                    <div class="page-meta">
-                        <span class="xray-badge" :class="xrayDotClass">
-                            Xray [[ xrayStateText ]]
-                            <a-tooltip v-if="status.xray.state === State.Error">
-                                <template slot="title">
-                                    <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
-                                </template>
-                                <a-icon type="question-circle" theme="filled"></a-icon>
-                            </a-tooltip>
-                        </span>
-                        <span>核心版本 <b>[[ status.xray.version || '—' ]]</b></span>
-                        <!-- status.uptime 是**系统**启动时长，不是 Xray 进程的 -->
-                        <span>系统已运行 <b>[[ formatSecond(status.uptime) ]]</b></span>
-                    </div>
                 </div>
-                <div class="page-actions">
-                    <!-- 改动前「切换版本」是一个带 @click 的蓝色 a-tag。那不是按钮：
-                         键盘拿不到、没有焦点环、读屏软件念出来是一段普通文本。 -->
-                    <a-button icon="swap" @click="openSelectV2rayVersion">切换 Xray 版本</a-button>
+                <!-- 状态行与标题同排靠右。Xray 状态徽标本身就是「切换 Xray 版本」的入口：
+                     用真 button（键盘可达、有焦点环），带切换图标表明可点，不再单独放一个按钮。
+                     出错时错误信息与操作提示合在同一个 tooltip 里——button 里不能再嵌可交互元素。 -->
+                <div class="page-actions page-meta">
+                    <a-tooltip placement="bottomRight">
+                        <template slot="title">
+                            <template v-if="status.xray.state === State.Error">
+                                <p v-for="line in status.xray.errorMsg.split('\n')">[[ line ]]</p>
+                            </template>
+                            <span>点击切换 Xray 版本</span>
+                        </template>
+                        <button type="button" class="xray-badge" :class="xrayDotClass"
+                                aria-haspopup="dialog"
+                                :aria-label="'Xray ' + xrayStateText + '，点击切换 Xray 版本'"
+                                @click="openSelectV2rayVersion">
+                            Xray [[ xrayStateText ]]
+                            <a-icon v-if="status.xray.state === State.Error"
+                                    type="question-circle" theme="filled"></a-icon>
+                            <a-icon type="swap" class="xray-badge-action"></a-icon>
+                        </button>
+                    </a-tooltip>
+                    <span>核心版本 <b>[[ status.xray.version || '—' ]]</b></span>
+                    <!-- status.uptime 是**系统**启动时长，不是 Xray 进程的 -->
+                    <span>系统已运行 <b>[[ formatSecond(status.uptime) ]]</b></span>
                 </div>
             </div>
             <a-spin :spinning="spinning" :delay="200" :tip="loadingTip">
