@@ -1,5 +1,6 @@
 {{define "menuItems"}}
-<!-- 分组：概览 / 管理 / 其他。sider 与窄屏抽屉共用这一份。 -->
+<!-- 分组：概览 / 管理 / 其他。sider 与窄屏抽屉共用这一份。
+     面板设置是对面板自身的配置，不是日常管理的对象，放在「其他」里、退出登录之上。 -->
 <a-menu-item-group title="概览">
     <a-menu-item key="{{ .base_path }}aui/">
         <a-icon type="dashboard"></a-icon>
@@ -15,12 +16,12 @@
         <a-icon type="fork"></a-icon>
         <span>分流管理</span>
     </a-menu-item>
+</a-menu-item-group>
+<a-menu-item-group title="其他">
     <a-menu-item key="{{ .base_path }}aui/setting">
         <a-icon type="setting"></a-icon>
         <span>面板设置</span>
     </a-menu-item>
-</a-menu-item-group>
-<a-menu-item-group title="其他">
     <a-menu-item key="{{ .base_path }}logout">
         <a-icon type="logout"></a-icon>
         <span>退出登录</span>
