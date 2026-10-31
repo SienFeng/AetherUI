@@ -51,6 +51,8 @@ class DomainGroup {
         // 「域名组数据损坏」整条丢弃引用它的规则，effectiveCount 已被后端强制
         // 置 0，这里单独留一个标记方便渲染出与「本来就是空」不同的提示。
         this.broken = json.broken || false;
+        // 服务端按完整域名列表认出的厂商 {slug, title, color}，认不出为 null。
+        this.brand = json.brand || null;
     }
 
     static fromJson(json = {}) {
@@ -76,7 +78,8 @@ class DomainGroup {
 }
 
 class OutboundNode {
-    constructor(id = 0, tag = "", remark = "", protocol = "", config = "", enable = true, probe = null) {
+    constructor(id = 0, tag = "", remark = "", protocol = "", config = "", enable = true, probe = null,
+                exitCountry = "") {
         this.id = id;
         this.tag = tag;
         this.remark = remark;
@@ -94,11 +97,15 @@ class OutboundNode {
         this.probe = probe;
         // probing 是纯前端状态，标记这一行正在测试中，不来自服务端。
         this.probing = false;
+        // 最近一次成功探测测到的出口国家（ISO 两位大写），没测过为空。
+        this.exitCountry = exitCountry || "";
+        // 纯前端状态：对应的国旗文件加载失败时回落首字母头像。
+        this.flagMissing = false;
     }
 
     static fromJson(json = {}) {
         return new OutboundNode(json.id, json.tag, json.remark, json.protocol,
-            json.config, json.enable, json.probe);
+            json.config, json.enable, json.probe, json.exitCountry);
     }
 }
 

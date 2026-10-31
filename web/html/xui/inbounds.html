@@ -267,14 +267,18 @@
                                         </a-tooltip>
                                     </template>
                                     <template slot="location" slot-scope="text, online">
-                                        <span v-if="online.location">[[ online.location ]]</span>
-                                        <span v-else class="cell-muted">未知</span>
-                                        <a-tooltip v-if="online.locationAlt || online.ispAlt">
-                                            <template slot="title">{{ template "ipDivergenceTip" "online" }}</template>
-                                            <span class="status-badge status-warn" style="margin-left: 4px">
-                                                <a-icon type="exclamation-circle"></a-icon>存疑
-                                            </span>
-                                        </a-tooltip>
+                                        <!-- 「存疑」钉在归属地同一行的末尾：列宽不够时截断归属地（完整值在 title 里），
+                                             不让标签折到下一行——折行与不折行的行混在一起，标签位置忽左忽下。 -->
+                                        <span class="loc-cell">
+                                            <span v-if="online.location" class="loc-text" :title="online.location">[[ online.location ]]</span>
+                                            <span v-else class="loc-text cell-muted">未知</span>
+                                            <a-tooltip v-if="online.locationAlt || online.ispAlt">
+                                                <template slot="title">{{ template "ipDivergenceTip" "online" }}</template>
+                                                <span class="status-badge status-warn">
+                                                    <a-icon type="exclamation-circle"></a-icon>存疑
+                                                </span>
+                                            </a-tooltip>
+                                        </span>
                                     </template>
                                     <!-- 改动前机房来源靠一个紫色 a-tag 区分，而紫色本身
                                          不说明任何事——读的人得先知道「紫＝机房」这条约定。
@@ -447,7 +451,13 @@
                                 </div>
                             </template>
 
+                            <!-- 列头与单元格包同一个定宽块：见 custom.css 的 .online-col -->
+                            <template slot="onlineTitle">
+                                <div class="online-col">在线</div>
+                            </template>
+
                             <template slot="online" slot-scope="text, dbInbound">
+                                <div class="online-col">
                                 <template v-if="onlineCountOf(dbInbound.id).supported">
                                     <div class="online-main cell-num"
                                          :class="onlineCountOf(dbInbound.id).count ? 'is-on' : 'cell-muted'">
@@ -480,6 +490,7 @@
                                         <div class="cell-sub">读不到</div>
                                     </div>
                                 </a-tooltip>
+                                </div>
                             </template>
 
                             <!-- 风险徽标**每个入站都渲染**，包括「低」「学习中」「不可评估」。
@@ -680,7 +691,8 @@
         width: 165,
         scopedSlots: { customRender: 'traffic' },
     }, {
-        title: "在线",
+        // slots.title：列头要与单元格包进同一个定宽块，状态点才与「在线」二字对齐
+        slots: { title: 'onlineTitle' },
         align: 'left',
         // 「↑ 999.99 KB/s」加上左侧 16px 对齐缩进要 ~105px，115 时贴边
         width: 130,
@@ -738,7 +750,8 @@
     }, {
         title: "归属地",
         align: 'center',
-        width: 160,
+        // 「中国 北京市 北京市」再加一个「存疑」标签同行放下
+        width: 190,
         scopedSlots: { customRender: 'location' },
     }, {
         title: "运营商",

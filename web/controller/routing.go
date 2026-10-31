@@ -62,6 +62,11 @@ type domainGroupSummary struct {
 	// SubscribedDomains 单独撑起一个非零值而在列表里显得健康——那样规则表会
 	// 显示规则存活，实际配置里却没有它。
 	Broken bool `json:"broken"`
+
+	// Brand 是卡片左上角的厂商标识，认不出时为 null、界面回落首字母。
+	// 必须在这里按完整列表算：Preview 只有前 5 条，ChatGPT 组的前 5 条
+	// 全是 datadog / arkoselabs 这类第三方依赖。
+	Brand *service.GroupBrand `json:"brand"`
 }
 
 type domainGroupDetail struct {
@@ -290,6 +295,7 @@ func (a *RoutingController) listDomainGroups(c *gin.Context) {
 			// 不跟着 broken 归零：它描述的是「上一次订阅拉到了什么」，
 			// 与这个组当前能不能生效是两回事。
 			SubscribedCidrCount: len(cidrSubscribed),
+			Brand:               service.DetectGroupBrand(group.Remark, merged),
 			SubscribeUrl:        group.SubscribeUrl,
 			LastUpdatedAt:       group.LastUpdatedAt,
 			LastError:           group.LastError,

@@ -224,7 +224,15 @@
                                     <div v-for="group in groups" :key="group.id" class="gcard"
                                          :class="{ 'is-error': group.broken || group.subscribeState === 'error' }">
                                         <div class="gcard-top">
-                                            <span class="gcard-icon" :style="{ background: groupColorOf(group) }"
+                                            <!-- 认出厂商时换成它的 logo（品牌色底 + 单色图形），认不出仍是首字母。
+                                                 图标随面板一起发版（assets/brand-icons），不访问任何外部服务。 -->
+                                            <span v-if="group.brand" class="gcard-icon is-brand"
+                                                  :class="{ 'is-light': brandIsLight(group.brand) }"
+                                                  :style="{ background: group.brand.color }"
+                                                  :title="'识别为 ' + group.brand.title" aria-hidden="true">
+                                                <img :src="'{{ .base_path }}assets/brand-icons/' + group.brand.slug + '.svg?{{ .cur_ver }}'" alt="">
+                                            </span>
+                                            <span v-else class="gcard-icon" :style="{ background: groupColorOf(group) }"
                                                   aria-hidden="true">[[ groupInitials(group) ]]</span>
                                             <span class="gcard-title">
                                                 <span class="gcard-name" :title="group.remark">[[ group.remark || '未命名' ]]</span>
@@ -308,7 +316,15 @@
                                          :locale="{ emptyText: '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }">
                                     <template slot="node" slot-scope="text, node">
                                         <div class="who">
-                                            <span class="who-avatar" :style="{ background: node.enable ? nodeColorOf(node) : '#94A3B8' }"
+                                            <!-- 测到过出口国家就画国旗（最近一次成功探测时 Cloudflare 判定的出口），
+                                                 否则仍是首字母。国旗文件随面板发版（assets/flags）。 -->
+                                            <span v-if="node.exitCountry && !node.flagMissing" class="who-avatar is-flag"
+                                                  :class="{ 'is-off': !node.enable }"
+                                                  :title="'出口：' + countryName(node.exitCountry)" aria-hidden="true">
+                                                <img :src="'{{ .base_path }}assets/flags/' + node.exitCountry.toLowerCase() + '.svg?{{ .cur_ver }}'"
+                                                     alt="" @error="node.flagMissing = true">
+                                            </span>
+                                            <span v-else class="who-avatar" :style="{ background: node.enable ? nodeColorOf(node) : '#94A3B8' }"
                                                   aria-hidden="true">[[ nodeInitials(node) ]]</span>
                                             <span class="who-text">
                                                 <span class="who-name" :title="node.remark">[[ node.remark || node.tag ]]</span>
@@ -664,13 +680,12 @@
             <a-form-item label="域名组">
                 <a-select mode="multiple" class="rule-pick rule-pick-groups" :value="ruleModal.rule.domainGroupIds"
                           placeholder="添加域名组…" option-filter-prop="title"
-                          option-label-prop="label"
+                          option-label-prop="title"
                           :get-popup-container="t => t.parentNode"
                           @change="setRuleGroups">
-                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id" :title="g.remark"
-                                     :label="g.remark + ' · ' + groupCount(g.id)">
+                    <!-- 下拉项与已选标签都只写组名，条数在域名组卡片上看 -->
+                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id" :title="g.remark">
                         [[ g.remark ]]
-                        <span class="rule-pick-note">[[ groupCount(g.id) ]] 条</span>
                     </a-select-option>
                 </a-select>
             </a-form-item>
@@ -698,12 +713,12 @@
                 </div>
             </a-form-item>
             <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
-                <!-- 与视觉稿一致：节点名 · 协议 · 最近一次测得的延迟（没测过就不写） -->
+                <!-- 只写节点名：协议与延迟在「出站节点」页看 -->
                 <!-- outboundId 为 0 表示还没选：交给 placeholder，不让下拉框里显示一个「0」 -->
                 <a-select :value="ruleModal.rule.outboundId || undefined" placeholder="选择出站节点"
                           style="width: 100%;" @change="v => ruleModal.rule.outboundId = v">
                     <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
-                        [[ n.remark ]] · [[ n.protocol ]]<template v-if="n.probe && n.probe.status === 'ok'"> · [[ n.probe.latencyMs ]] ms</template>
+                        [[ n.remark ]]
                     </a-select-option>
                 </a-select>
             </a-form-item>
@@ -1016,12 +1031,29 @@
                 // 拉丁字母取前两个字母大写（Netflix → NE），其它取首字
                 return /^[A-Za-z0-9]/.test(name) ? name.slice(0, 2).toUpperCase() : (name.slice(0, 1) || '#');
             },
+            // 浅色品牌底（Hugging Face 黄、Spotify 绿）上白色图形看不清，改用深色图形
+            brandIsLight(brand) {
+                const m = /^#?([0-9a-f]{6})$/i.exec(brand.color || '');
+                if (!m) return false;
+                const n = parseInt(m[1], 16);
+                const lum = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+                return lum > 0.6;
+            },
             groupColorOf(group) {
                 const colors = ['#1266D6', '#0D9488', '#7C3AED', '#4F46E5', '#DB2777', '#0891B2'];
                 return colors[group.id % colors.length];
             },
             groupRefCount(id) {
                 return this.rules.filter(r => (r.domainGroupIds || []).includes(id)).length;
+            },
+            // 「美国 (US)」；浏览器不支持 Intl.DisplayNames 时只给代码
+            countryName(code) {
+                try {
+                    const name = new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code);
+                    return name && name !== code ? name + ' (' + code + ')' : code;
+                } catch (e) {
+                    return code;
+                }
             },
             nodeInitials(node) {
                 const name = (node.remark || node.tag || '').trim();
@@ -1107,6 +1139,11 @@
                     if (msg.success) {
                         // 链路不通也是一个成功的响应，obj 里带着 status=fail。
                         node.probe = msg.obj;
+                        // 测不出国家时服务端保留上一次的值，这里也不清。
+                        if (msg.obj && msg.obj.exitCountry && msg.obj.exitCountry !== node.exitCountry) {
+                            node.exitCountry = msg.obj.exitCountry;
+                            node.flagMissing = false;
+                        }
                     }
                 } finally {
                     node.probing = false;
