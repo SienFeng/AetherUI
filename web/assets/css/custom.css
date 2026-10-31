@@ -711,8 +711,8 @@ button:focus-visible,
 .stat-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    gap: 20px;
-    margin-bottom: 20px;
+    gap: 16px;
+    margin-bottom: 16px;
 }
 
 .stat-card {
@@ -728,7 +728,8 @@ button:focus-visible,
         "foot  foot";
     align-items: center;
     column-gap: 12px;
-    padding: 20px 22px 18px;
+    /* 紧凑一档：指标卡是表格上方的摘要，不该比表格本身更抢垂直空间 */
+    padding: 12px 18px;
     background: var(--aui-surface);
     border: 1px solid var(--aui-line-card);
     border-radius: var(--aui-r-lg);
@@ -750,13 +751,13 @@ button:focus-visible,
 
 .stat-icon {
     grid-area: icon;
-    width: 34px;
-    height: 34px;
-    border-radius: var(--aui-r-md);
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 17px;
+    font-size: 15px;
     color: var(--c);
     background: var(--c-soft);
 }
@@ -779,9 +780,9 @@ button:focus-visible,
 /* tabular-nums：这些数值每秒刷新一次，等宽数字才不会让整行左右跳动。 */
 .stat-value {
     grid-area: value;
-    margin-top: 10px;
-    font-size: 30px;
-    line-height: 38px;
+    margin-top: 2px;
+    font-size: 22px;
+    line-height: 28px;
     font-weight: 600;
     letter-spacing: -.025em;
     color: var(--aui-text);
@@ -792,7 +793,7 @@ button:focus-visible,
 }
 
 .stat-value .unit {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     letter-spacing: 0;
     color: var(--aui-text-3);
@@ -801,7 +802,7 @@ button:focus-visible,
 
 .stat-foot {
     grid-area: foot;
-    margin-top: 10px;
+    margin-top: 4px;
     min-height: 22px;
     display: flex;
     align-items: center;
@@ -1112,12 +1113,12 @@ button.status-badge:hover {
     }
 
     .stat-card {
-        padding: 16px;
+        padding: 12px 14px;
     }
 
     .stat-value {
-        font-size: 24px;
-        line-height: 30px;
+        font-size: 20px;
+        line-height: 26px;
     }
 
     .stat-spark {
@@ -4254,5 +4255,170 @@ button.xray-badge:focus-visible {
 @media (max-width: 576px) {
     .import-stats {
         grid-template-columns: 1fr;
+    }
+}
+
+/* ── 系统状态页：一屏布局 ─────────────────────────────────────────────
+ * 排布与窄屏完全不变（上：流量概览 + 需要关注；下：入站用量排行 + 出站节点），
+ * 只在宽 ≥1281、高 ≥760 时把卡片压紧并锁在视口内，页面本身不再滚动：
+ * 间距、字号、行高整体收紧；折线图吃掉第一行剩下的高度；排行表、需要关注、
+ * 出站节点放不下时各自在卡片内部滚动（排行表头吸顶）。
+ * 内容区定高 → a-spin 的两层包裹 → 两行 → 卡片 → 卡片正文，每一层都要
+ * min-height: 0，少一层就会被内容撑开、页面重新溢出。
+ * 更矮或更窄的屏幕不进这一段，保持原样、页面正常滚动。 */
+@media (min-width: 1281px) and (min-height: 760px) {
+    #content-layout > .ant-layout-content.status-page {
+        height: calc(100vh - 20px);
+        margin-top: 20px;
+        padding-bottom: 16px;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .status-page > .page-header {
+        flex: none;
+        margin-bottom: 12px;
+    }
+
+    .status-page > .ant-spin-nested-loading,
+    .status-page > .ant-spin-nested-loading > .ant-spin-container {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    /* 资源卡：信息一项不少，只收紧留白与字号 */
+    .status-page .res-row {
+        flex: none;
+        gap: 16px;
+        margin-bottom: 12px;
+    }
+
+    .status-page .res-meter {
+        height: 8px;
+        margin-top: 6px;
+    }
+
+    .status-page .res-stat .stat-foot {
+        margin-top: 4px;
+        font-size: 12px;
+    }
+
+    /* 两行：第一行至少留够折线图可读的高度，其余给排行表；
+     * 排行表放不下时由它让出、在卡内滚动 */
+    .status-page .dash-row {
+        gap: 16px;
+        margin-bottom: 12px;
+        min-height: 360px;
+        flex: 1 1 0;
+    }
+
+    .status-page .dash-row-bottom {
+        flex: 0 1 auto;
+        min-height: 0;
+        margin-bottom: 0;
+    }
+
+    .status-page .dash-row > .ant-card {
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    .status-page .dash-row .ant-card-head {
+        flex: none;
+        min-height: 0;
+        padding: 0 20px;
+    }
+
+    .status-page .dash-row .ant-card-head-title,
+    .status-page .dash-row .ant-card-extra {
+        padding: 14px 0 2px;
+    }
+
+    .status-page .dash-row > .ant-card > .ant-card-body {
+        min-height: 0;
+        padding: 10px 20px 14px;
+    }
+
+    /* 流量概览 */
+    .status-page .usage-meta {
+        gap: 6px 28px;
+    }
+
+    .status-page .usage-meta-value {
+        font-size: 18px;
+        line-height: 24px;
+    }
+
+    .status-page .chart-legend {
+        margin-top: 8px;
+        gap: 4px 16px;
+    }
+
+    .status-page .usage-chart {
+        min-height: 120px;
+        margin-top: 6px;
+    }
+
+    /* 列表区在卡片内部滚动 */
+    .status-page .rank-scroll,
+    .status-page .attn-list,
+    .status-page .net-nodes {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    /* 入站用量排行：行高 52 → 40，表头吸顶 */
+    .status-page .rank-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        padding: 8px 12px;
+    }
+
+    .status-page .rank-table td {
+        height: 40px;
+    }
+
+    .status-page .rank-table .who-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        font-size: 12px;
+    }
+
+    /* 需要关注 */
+    .status-page .attn-list {
+        align-content: start;
+        gap: 8px;
+    }
+
+    .status-page .attn-item {
+        grid-template-columns: 32px minmax(0, 1fr) auto;
+        padding: 7px 12px;
+    }
+
+    .status-page .attn-icon {
+        width: 32px;
+        height: 32px;
+        font-size: 15px;
+    }
+
+    .status-page .attn-count {
+        font-size: 20px;
+    }
+
+    .status-page .attn-foot {
+        flex: none;
+        margin-top: 10px;
+    }
+
+    /* 出站节点 */
+    .status-page .net-node {
+        padding: 6px 0;
     }
 }
