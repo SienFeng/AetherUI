@@ -1,16 +1,21 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/app/router"
 	routercmd "github.com/xtls/xray-core/app/router/command"
 	"github.com/xtls/xray-core/common/geodata"
 
 	"a-ui/database/model"
+	"a-ui/logger"
 	"a-ui/xray"
 )
 
@@ -341,4 +346,397 @@ func hasExample(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// 以下是编排部分：读库、取样、调核心、查访问日志，最后交给上面的纯函数下结论。
+// 全程只读：TestRoute 不发布结果（PublishResult=false），不重启、不写配置、不写库。
+
+// 规模与超时（设计 §3.6、§4.2）。
+const (
+	verifyRPCTimeout         = 3 * time.Second
+	verifyBudget             = 20 * time.Second
+	verifyPerGroupSamples    = 2
+	verifyPerUserSamples     = 6
+	verifyGlobalInboundLimit = 50
+	verifyLogWindowHours     = 24
+	verifyLogGroupLimit      = 5000
+)
+
+// 结果里的固定文案。
+const (
+	labelBlock           = "封禁"
+	labelDirect          = "直连"
+	labelDefaultOutbound = "直连（默认出站）"
+	labelNoMatch         = "默认出站（未命中任何规则）"
+	sampleErrTimeout     = "超时"
+)
+
+// routeFunc 是对核心做一次 TestRoute 的函数，签名同 XrayAPI.TestRoute。
+type routeFunc func(ctx context.Context, inboundTag, domain string, ip net.IP) (tag string, noMatch bool, err error)
+
+// verifyMu 保证同一时刻只有一个验证在跑：管理员连点时不把核心打满。
+// 与包级 lock 无关——lock 只由 RuntimeSnapshot 瞬时持有。
+var verifyMu sync.Mutex
+
+// RoutingVerifyService 对一条分流规则做「核心实时路由 + 访问日志」两路核对。
+// 零值可用：字段为 nil/0 时用真实实现与默认值，测试可注入伪造的 route/runtime。
+type RoutingVerifyService struct {
+	route              routeFunc
+	runtime            func() XrayRuntime
+	now                func() time.Time
+	rpcTimeout, budget time.Duration
+}
+
+// verifyUser 是待验证的一个用户（入站）。
+type verifyUser struct {
+	inbound  *model.Inbound
+	disabled bool
+}
+
+// verifyPlan 是从库里推出的、与核心无关的验证计划。
+type verifyPlan struct {
+	expected   ExpectedOutbound
+	defaultTag string
+	targets    []sampleTarget
+	domains    []string // 所有组合并后的域名条目（访问日志归属判定用）
+	cidrs      []string // 所有组合并后的 IP 条目
+	users      []verifyUser
+	truncated  bool
+	labelOf    func(tag string) string
+}
+
+// Verify 验证一条规则。规则不存在返回 error；其余情况（含规则停用、不会写进配置、
+// 核心不可用）都返回结果，由 Core.State 说明原因。
+func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
+	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
+	res := &RuleVerifyResult{
+		RuleId:    ruleId,
+		CheckedAt: now.UnixMilli(),
+		AccessLog: AccessLogState{WindowHours: verifyLogWindowHours},
+		Users:     []UserVerify{},
+	}
+	if !verifyMu.TryLock() {
+		res.Core = CoreState{State: coreStateBusy, Message: "已有验证在进行，请稍后"}
+		return res, nil
+	}
+	defer verifyMu.Unlock()
+
+	rule, err := (&RoutingRuleService{}).Get(ruleId)
+	if err != nil {
+		return nil, err
+	}
+	if !rule.Enable {
+		res.Core = CoreState{State: coreStateError, Message: "规则已停用，不会写进核心配置"}
+		return res, nil
+	}
+
+	runtime := s.runtime
+	if runtime == nil {
+		runtime = (&XrayService{}).RuntimeSnapshot
+	}
+	rt := runtime()
+
+	plan, reason := s.planRule(rule, rt)
+	if reason != "" {
+		res.Core = CoreState{State: coreStateError, Message: reason}
+		return res, nil
+	}
+	res.Expected = plan.expected
+	res.Truncated = plan.truncated
+
+	res.Core = coreStateOf(rt)
+	route := s.route
+	if route == nil && (res.Core.State == coreStateOK || res.Core.State == coreStatePending) {
+		api := &xray.XrayAPI{}
+		if err := api.Init(rt.APIPort); err != nil {
+			res.Core = CoreState{State: coreStateError, Message: "连接核心控制面失败：" + err.Error()}
+		} else {
+			defer api.Close()
+			route = api.TestRoute
+		}
+	}
+	canRoute := res.Core.State == coreStateOK || res.Core.State == coreStatePending
+
+	logEnabled, err := (&SettingService{}).GetAccessLogEnable()
+	if err != nil {
+		logger.Warning("路由验证：读取访问日志开关失败，按未开启处理：", err)
+		logEnabled = false
+	}
+	res.AccessLog.Enabled = logEnabled
+	var matcher *groupMatcher
+	if logEnabled {
+		if matcher, err = newGroupMatcher(plan.domains, plan.cidrs); err != nil {
+			// 匹配器建不出来就没有日志证据，但不影响核心那一路。
+			logger.Warning("路由验证：构造访问日志匹配器失败，rule id:", rule.Id, "err:", err)
+			matcher = nil
+		}
+	}
+
+	rpcTimeout := s.rpcTimeout
+	if rpcTimeout <= 0 {
+		rpcTimeout = verifyRPCTimeout
+	}
+	budget := s.budget
+	if budget <= 0 {
+		budget = verifyBudget
+	}
+	budgetCtx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	sinceMs := now.Add(-verifyLogWindowHours * time.Hour).UnixMilli()
+	for _, vu := range plan.users {
+		u := UserVerify{InboundId: vu.inbound.Id, Name: inboundName(vu.inbound), Samples: []SampleResult{}}
+		if vu.disabled {
+			// 停用的入站不在核心配置里，buildRule 也会把它剔掉，对它调 TestRoute 没有意义。
+			u.Verdict, u.Reason = verdictUnverifiable, "该用户已停用，规则不会对其生效"
+			res.Users = append(res.Users, u)
+			continue
+		}
+		if canRoute {
+			u.Samples = runSamples(budgetCtx, route, rpcTimeout, vu.inbound.Tag, plan)
+		}
+		if matcher != nil {
+			rows, truncated, err := (&AccessLogService{}).GroupByTargetRoute(vu.inbound.Id, sinceMs, verifyLogGroupLimit)
+			if err != nil {
+				logger.Warning("路由验证：读取访问日志失败，inbound id:", vu.inbound.Id, "err:", err)
+			} else {
+				ev := buildLogEvidence(rows, matcher, plan.expected, plan.defaultTag, plan.labelOf)
+				ev.Truncated = truncated
+				u.Log = &ev
+			}
+		}
+		u.Verdict, u.Reason = combineVerdict(res.Core.State, u.Samples, u.Log)
+		if res.Core.State == coreStateError && u.Verdict == verdictUnverifiable {
+			// combineVerdict 只给笼统原因，这里补上核心那一侧的具体错误。
+			u.Reason = "核心验证出错：" + res.Core.Message
+		}
+		res.Users = append(res.Users, u)
+	}
+	return res, nil
+}
+
+// coreStateOf 把运行时快照映射成核心级状态。pending 仍执行 TestRoute（设计 §3.5）。
+func coreStateOf(rt XrayRuntime) CoreState {
+	switch {
+	case rt.Busy:
+		return CoreState{State: coreStateBusy, Message: "核心正在更新配置，请稍后重新验证"}
+	case !rt.Running:
+		return CoreState{State: coreStateNotRunning, Message: "xray 未运行"}
+	case rt.Pending:
+		return CoreState{State: coreStatePending, Message: "配置已保存，正在等待下发到核心（最多约 10 秒）"}
+	default:
+		return CoreState{State: coreStateOK}
+	}
+}
+
+// runSamples 对一个用户逐个样例调 route。单次 rpcTimeout，整批共用 budgetCtx；
+// 预算用完后剩下的样例不再调用，直接记「超时」。
+func runSamples(budgetCtx context.Context, route routeFunc, rpcTimeout time.Duration, inboundTag string, plan *verifyPlan) []SampleResult {
+	out := make([]SampleResult, 0, len(plan.targets))
+	for _, t := range plan.targets {
+		r := SampleResult{Target: t.Display}
+		if budgetCtx.Err() != nil {
+			r.Error = sampleErrTimeout
+			out = append(out, r)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(budgetCtx, rpcTimeout)
+		tag, noMatch, err := route(ctx, inboundTag, t.Domain, t.IP)
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		if err != nil {
+			if timedOut || errors.Is(err, context.DeadlineExceeded) {
+				r.Error = sampleErrTimeout
+			} else {
+				r.Error = err.Error()
+			}
+			out = append(out, r)
+			continue
+		}
+		r.ActualTag = tag
+		if noMatch {
+			r.ActualLabel = labelNoMatch
+		} else {
+			r.ActualLabel = plan.labelOf(tag)
+		}
+		r.Match, r.HitByRule = judgeSample(plan.expected, tag, noMatch, plan.defaultTag)
+		out = append(out, r)
+	}
+	return out
+}
+
+// planRule 从库里推出验证计划；返回非空 reason 表示规则不会写进核心配置，不发 RPC。
+//
+// 「会不会写进配置」直接交给 buildRule 判断，不另写一份：两份判定迟早漂移，
+// 漂移后这里说「可以验证」的规则核心里其实没有。
+func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime) (*verifyPlan, string) {
+	inbounds, err := (&InboundService{}).GetAllInbounds()
+	if err != nil {
+		return nil, "读取入站失败：" + err.Error()
+	}
+	sort.Slice(inbounds, func(i, j int) bool { return inbounds[i].Id < inbounds[j].Id })
+
+	injector := &RoutingInjector{}
+	// 传空模板只为拿到「实际会写进配置的节点」映射，与生成期同一套过滤。
+	_, usable, _, err := injector.buildOutbounds(nil)
+	if err != nil {
+		return nil, "读取出站节点失败：" + err.Error()
+	}
+
+	// 默认出站 tag 取核心实际持有的配置；核心没在跑时退回当前生成配置，
+	// 两者都是 tagDefaultOutbound 写出的同一个值，只是前者才是核心眼里的。
+	defaultTag := rt.DefaultTag
+	if defaultTag == "" && rule.Action == model.ActionDirect {
+		if cfg, cfgErr := (&XrayService{}).GetXrayConfig(); cfgErr == nil {
+			defaultTag = defaultOutboundTag(cfg)
+		}
+	}
+	if _, _, skip := injector.buildRule(rule, enabledInboundTags(inbounds), usable, defaultTag); skip != nil {
+		return nil, "本规则不会写进核心配置：" + skip.Error()
+	}
+
+	plan := &verifyPlan{defaultTag: defaultTag}
+	groupIds, _ := DecodeDomainGroupIds(rule.DomainGroupIds) // buildRule 已校验过
+	domainLists, cidrLists := ruleGroupConditions(groupIds)
+	for i := range domainLists {
+		plan.targets = append(plan.targets, sampleTargets(domainLists[i], cidrLists[i], verifyPerGroupSamples)...)
+	}
+	plan.targets = dedupeTargets(plan.targets, verifyPerUserSamples)
+	plan.domains = MergeDomains(domainLists...)
+	plan.cidrs = MergeDomains(cidrLists...)
+
+	nodes, err := (&OutboundNodeService{}).GetAll()
+	if err != nil {
+		return nil, "读取出站节点失败：" + err.Error()
+	}
+	// 含停用节点：访问日志里可能还留着它们的 tag。
+	remarkByTag := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		remarkByTag[n.Tag] = nodeLabel(n)
+	}
+	plan.labelOf = func(tag string) string {
+		switch {
+		case tag == model.BlockOutboundTag:
+			return labelBlock
+		case (defaultTag != "" && tag == defaultTag) || model.IsMeterTag(tag):
+			return labelDefaultOutbound
+		}
+		if label, ok := remarkByTag[tag]; ok {
+			return label
+		}
+		return tag
+	}
+
+	switch rule.Action {
+	case model.ActionProxy:
+		node, err := (&OutboundNodeService{}).Get(rule.OutboundId)
+		if err != nil {
+			return nil, "读取出站节点失败：" + err.Error()
+		}
+		plan.expected = ExpectedOutbound{Action: rule.Action, Tag: node.Tag, Label: nodeLabel(node)}
+	case model.ActionBlock:
+		plan.expected = ExpectedOutbound{Action: rule.Action, Tag: model.BlockOutboundTag, Label: labelBlock}
+	case model.ActionDirect:
+		plan.expected = ExpectedOutbound{Action: rule.Action, Tag: defaultTag, Label: labelDirect}
+	}
+
+	inboundIds, _ := DecodeInboundIds(rule.InboundIds) // buildRule 已校验过
+	if len(inboundIds) == 0 {
+		// 全局规则：只验证启用的入站，按 id 升序截到上限。
+		for _, in := range inbounds {
+			if !in.Enable {
+				continue
+			}
+			if len(plan.users) >= verifyGlobalInboundLimit {
+				plan.truncated = true
+				break
+			}
+			plan.users = append(plan.users, verifyUser{inbound: in})
+		}
+		return plan, ""
+	}
+	byId := make(map[int]*model.Inbound, len(inbounds))
+	for _, in := range inbounds {
+		byId[in.Id] = in
+	}
+	for _, id := range inboundIds {
+		in, ok := byId[id]
+		if !ok {
+			// 已删除的入站 buildRule 同样剔掉；没有名字可展示，不列出。
+			continue
+		}
+		plan.users = append(plan.users, verifyUser{inbound: in, disabled: !in.Enable})
+	}
+	return plan, ""
+}
+
+// ruleGroupConditions 按 groupIds 的顺序逐组取合并后的域名与 IP 条目，
+// 与 buildRule 的取法一致：组不存在、数据损坏、两侧都空的组剔除（buildRule 已记过日志）。
+// 返回的两个切片按下标一一对应同一个组。
+func ruleGroupConditions(groupIds []int) (domainLists, cidrLists [][]string) {
+	gs := &DomainGroupService{}
+	for _, gid := range groupIds {
+		group, err := gs.Get(gid)
+		if err != nil {
+			continue
+		}
+		manualDomains, err := DecodeDomains(group.Domains)
+		if err != nil {
+			continue
+		}
+		subscribedDomains, err := DecodeSubscribedDomains(group.SubscribedDomains)
+		if err != nil {
+			continue
+		}
+		manualCidrs, err := DecodeCidrs(group.Cidrs)
+		if err != nil {
+			continue
+		}
+		subscribedCidrs, err := DecodeSubscribedCidrs(group.SubscribedCidrs)
+		if err != nil {
+			continue
+		}
+		domains := MergeDomains(manualDomains, subscribedDomains)
+		cidrs := MergeDomains(manualCidrs, subscribedCidrs)
+		if len(domains) == 0 && len(cidrs) == 0 {
+			continue
+		}
+		domainLists = append(domainLists, domains)
+		cidrLists = append(cidrLists, cidrs)
+	}
+	return domainLists, cidrLists
+}
+
+// dedupeTargets 按展示值去重（多个组可能含同一个域名），并截到 limit 个。
+func dedupeTargets(targets []sampleTarget, limit int) []sampleTarget {
+	out := make([]sampleTarget, 0, len(targets))
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		if len(out) >= limit {
+			break
+		}
+		if seen[t.Display] {
+			continue
+		}
+		seen[t.Display] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+func nodeLabel(n *model.OutboundNode) string {
+	if n.Remark != "" {
+		return n.Remark
+	}
+	return n.Tag
+}
+
+func inboundName(in *model.Inbound) string {
+	if in.Remark != "" {
+		return in.Remark
+	}
+	return in.Tag
 }
