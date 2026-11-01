@@ -42,19 +42,1079 @@
         cursor: grabbing;
     }
 
+    .rule-drag-handle.is-disabled {
+        cursor: not-allowed;
+        opacity: .35;
+    }
+
     /* 被拖起的那一行淡出，让「它正在移动」这件事有实感 */
-    tr.rule-dragging > td {
+    .rv-row.rule-dragging {
         opacity: 0.4;
     }
 
     /* 落点提示画在目标行的上/下边缘，而不是整行高亮——整行高亮说不清
        松手后是插在这一行之前还是之后。 */
-    tr.rule-drop-before > td {
-        border-top: 2px solid var(--aui-primary) !important;
+    .rv-row.rule-drop-before {
+        box-shadow: 0 -3px 0 var(--aui-primary);
     }
 
-    tr.rule-drop-after > td {
-        border-bottom: 2px solid var(--aui-primary) !important;
+    .rv-row.rule-drop-after {
+        box-shadow: 0 3px 0 var(--aui-primary);
+    }
+
+    /* ── 分流规则页签：左列表 + 右编辑区（v4 视觉稿） ── */
+    .rv-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 18px;
+        /* 行高只由左边列表决定，右栏跟它等高、内部滚动（见 .rv-detail）。
+           规则很少时列表很矮，编辑区会挤得没法用，所以给这一行一个下限。 */
+        align-items: stretch;
+        position: relative;
+        min-height: 560px;
+    }
+
+    .rv-card {
+        background: var(--aui-surface);
+        border: 1px solid var(--aui-line-card);
+        border-radius: var(--aui-r-lg);
+        box-shadow: var(--aui-sh-card);
+        padding: 18px;
+        min-width: 0;
+    }
+
+    /* 右栏绝对定位在第二列的网格区域里：不参与行高计算，高度跟左边列表一致，
+       内容多了在内部滚动。纵向弹性布局让保存条在内容不满时落在卡片底边。 */
+    .rv-detail {
+        position: absolute;
+        grid-column: 2;
+        grid-row: 1;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        padding: 17px 21px 21px;
+    }
+
+    .rv-detail > .rv-edit {
+        margin-bottom: 12px;
+    }
+
+    .rv-list-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        flex-wrap: wrap;
+        margin-bottom: 14px;
+    }
+
+    /* 列表头的搜索框：占满按钮左边的剩余宽度 */
+    .rv-search {
+        flex: 1 1 200px;
+        min-width: 0;
+    }
+
+    .rv-search .ant-input {
+        border-radius: 10px;
+        background: #F6F8FC;
+        border-color: #E3E9F4;
+    }
+
+    .rv-search .ant-input:focus {
+        background: #fff;
+    }
+
+    .rv-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+    }
+
+    .rv-fchip {
+        height: 30px;
+        padding: 0 14px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+        background: #F3F6FB;
+        color: var(--aui-text-2);
+        font: inherit;
+        font-weight: 500;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: background var(--aui-dur) var(--aui-ease), border-color var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-fchip:hover {
+        background: #EBF0F8;
+    }
+
+    .rv-fchip-n {
+        min-width: 18px;
+        height: 16px;
+        padding: 0 6px;
+        border-radius: 879px;
+        background: #E3E9F3;
+        font-size: 12px;
+        display: inline-grid;
+        place-items: center;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* 选中：#1D4ED8 在 #EAF1FF 上 5.9:1 */
+    .rv-fchip[aria-pressed="true"] {
+        background: #EAF1FF;
+        border-color: #C9DAFF;
+        color: #1D4ED8;
+        font-weight: 600;
+    }
+
+    .rv-fchip[aria-pressed="true"] .rv-fchip-n {
+        background: var(--aui-primary);
+        color: #fff;
+    }
+
+    .rv-filter-hint {
+        margin: 9px 0 0;
+        font-size: 12px;
+        color: var(--aui-text-3);
+    }
+
+    .link-btn {
+        border: 0;
+        background: none;
+        padding: 0 0 0 6px;
+        font: inherit;
+        color: var(--aui-primary);
+        cursor: pointer;
+    }
+
+    .link-btn:hover {
+        color: var(--aui-primary-hover);
+        text-decoration: underline;
+    }
+
+    .rv-rows {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+    }
+
+    .rv-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 8px 9px 9px 11px;
+        border: 1.5px solid #EDF1F7;
+        border-radius: 12px;
+        background: #fff;
+        transition: border-color var(--aui-dur) var(--aui-ease), background var(--aui-dur) var(--aui-ease),
+                    box-shadow var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-row:hover {
+        border-color: #D8E3F8;
+        box-shadow: 0 8px 20px -16px rgba(31, 64, 140, .35);
+    }
+
+    .rv-row.is-selected {
+        border-color: #5B8DFF;
+        background: linear-gradient(90deg, #F4F8FF, #F8FAFF);
+        box-shadow: 0 0 0 3px rgba(18, 102, 214, .10);
+    }
+
+    /* 选中行的浅蓝底上 text-3 只有 4.47:1，副标题升一档 */
+    .rv-row.is-selected .rv-row-sub {
+        color: var(--aui-text-2);
+    }
+
+    .rv-row.is-off .rv-tile,
+    .rv-row.is-off .rv-row-text {
+        opacity: .55;
+    }
+
+    .rv-row-hit {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 0;
+        border: 0;
+        background: none;
+        font: inherit;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+        border-radius: 9px;
+    }
+
+    .rv-tile {
+        flex: none;
+        width: 37px;
+        height: 37px;
+        border-radius: 11px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background: #fff;
+        border: 1px solid #EEF1F7;
+    }
+
+    .rv-tile img {
+        width: 21px;
+        height: 21px;
+    }
+
+    .rv-tile.is-block {
+        background: #FEF2F2;
+        border-color: #FBD5D5;
+        color: #D9363E;
+        font-size: 20px;
+    }
+
+    .rv-tile.is-text {
+        border: 0;
+    }
+
+    .rv-tile-text {
+        color: #fff;
+        font-weight: 700;
+        font-size: 13px;
+    }
+
+    .rv-tile.is-lg {
+        width: 53px;
+        height: 53px;
+        border-radius: 14px;
+    }
+
+    .rv-tile.is-lg img {
+        width: 30px;
+        height: 30px;
+    }
+
+    .rv-tile.is-lg.is-block {
+        font-size: 27.5px;
+    }
+
+    .rv-tile.is-lg .rv-tile-text {
+        font-size: 18.5px;
+    }
+
+    .rv-tile.is-sm {
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+    }
+
+    .rv-tile.is-sm img {
+        width: 18px;
+        height: 18px;
+    }
+
+    .rv-row-text {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .rv-row-name {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+    }
+
+    .rv-row-title {
+        font-size: 13.5px;
+        font-weight: 700;
+        color: var(--aui-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .rv-row-sub {
+        font-size: 12px;
+        color: var(--aui-text-3);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .rv-row-dest {
+        color: var(--aui-text-2);
+    }
+
+    .rv-arrow {
+        margin: 0 5px;
+    }
+
+    /* 行内小标签：每一档都带文字，绝不只靠颜色 */
+    .rv-tag {
+        flex: none;
+        height: 18px;
+        padding: 0 7px;
+        border-radius: 5px;
+        font-size: 12px;
+        font-weight: 600;
+        display: inline-grid;
+        place-items: center;
+    }
+
+    .rv-tag.is-block { background: #FEF2F2; color: var(--aui-danger); }   /* 5.9:1 */
+    .rv-tag.is-warn  { background: #FFFBEB; color: var(--aui-warning); }  /* 4.8:1 */
+    .rv-tag.is-off   { background: #F1F5F9; color: var(--aui-text-2); }   /* 6.9:1 */
+
+    .rv-upill {
+        flex: none;
+        max-width: 38%;
+        height: 26px;
+        padding: 0 12px;
+        border-radius: 879px;
+        background: #F3F5FA;
+        color: var(--aui-text-2);
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    /* 「所有用户」：靛色，与改版前的 .chip-all 同色（#4338CA 在 #EEF2FF 上 7.0:1） */
+    .rv-upill.is-all {
+        background: #EEF2FF;
+        color: #4338CA;
+    }
+
+    .rv-upill.is-broken {
+        background: #FEF2F2;
+        color: var(--aui-danger);
+    }
+
+    /* 启停开关：自己画而不是 a-switch，好让 role/aria 写得完全受控 */
+    .rv-switch {
+        flex: none;
+        position: relative;
+        width: 39px;
+        height: 22px;
+        border-radius: 879px;
+        border: 0;
+        padding: 0;
+        background: #C3CCDB;
+        cursor: pointer;
+        transition: background var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-switch::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(16, 30, 70, .25);
+        transition: transform var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-switch[aria-checked="true"] {
+        background: var(--aui-primary);
+    }
+
+    .rv-switch[aria-checked="true"]::after {
+        transform: translateX(17px);
+    }
+
+    .rv-switch:disabled {
+        opacity: .6;
+        cursor: progress;
+    }
+
+    .rv-empty {
+        margin: 0;
+        padding: 22px 7px;
+        text-align: center;
+        color: var(--aui-text-3);
+    }
+
+    /* 右栏 */
+    .rv-dhead {
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+    }
+
+    .rv-dtitle {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .rv-dname {
+        margin: 2px 0 0;
+        font-size: 20px;
+        line-height: 1.3;
+        font-weight: 700;
+        color: var(--aui-text);
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        flex-wrap: wrap;
+    }
+
+    .rv-dname-text {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .rv-dsay {
+        margin: 5px 0 0;
+        color: var(--aui-text-2);
+        font-size: 12.5px;
+    }
+
+    .rv-alert {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border-radius: 11px;
+        font-size: 12px;
+        display: flex;
+        gap: 7px;
+        align-items: flex-start;
+    }
+
+    .rv-alert .anticon {
+        margin-top: 3px;
+    }
+
+    .rv-alert.is-warn   { background: #FFFBEB; color: #92400E; }  /* 6.8:1 */
+    .rv-alert.is-info   { background: #EFF6FF; color: #1E40AF; }  /* 8.0:1 */
+    .rv-alert.is-danger { background: #FEF2F2; color: #991B1B; }  /* 7.6:1 */
+
+    .rv-edit {
+        margin-top: 14px;
+        padding: 12px 16px 4px;
+        border-radius: 12px;
+        border: 1px solid #EDF1F8;
+        background: #fff;
+        transition: border-color var(--aui-dur) var(--aui-ease), box-shadow var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-edit.is-dirty {
+        border-color: #C9DAFF;
+        box-shadow: 0 0 0 3px rgba(18, 102, 214, .07);
+    }
+
+    .rv-h3 {
+        margin: 0 0 14px;
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--aui-text);
+        display: flex;
+        align-items: center;
+        gap: 7px;
+    }
+
+    .rv-h3::before {
+        content: "";
+        width: 4px;
+        height: 14px;
+        border-radius: 2px;
+        background: var(--aui-primary);
+    }
+
+    .rv-h3.is-green::before {
+        background: var(--aui-success);
+    }
+
+    .rv-field {
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 11px;
+        margin-bottom: 16px;
+    }
+
+    .rv-label {
+        padding-top: 6px;
+        font-weight: 500;
+        color: var(--aui-text);
+    }
+
+    .rv-control {
+        min-width: 0;
+    }
+
+    .rv-picker {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+    }
+
+    .rv-pick {
+        height: 28px;
+        padding: 0 12px;
+        border-radius: 9px;
+        border: 1px solid #DCE4F3;
+        background: #fff;
+        color: var(--aui-text-2);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: border-color var(--aui-dur) var(--aui-ease), background var(--aui-dur) var(--aui-ease);
+    }
+
+    .rv-pick:hover:not(:disabled) {
+        border-color: #A9C2EE;
+    }
+
+    .rv-pick[aria-pressed="true"] {
+        border: 1.5px solid var(--aui-primary);
+        background: #EAF1FF;
+        color: #1D4ED8;  /* 5.9:1 */
+        font-weight: 600;
+    }
+
+    .rv-pick:disabled {
+        cursor: not-allowed;
+        background: #F6F8FB;
+        color: var(--aui-text-3);
+    }
+
+    .rv-pick.is-all[aria-pressed="true"] {
+        border-color: #4338CA;
+        background: #EEF2FF;
+        color: #4338CA;  /* 7.0:1 */
+    }
+
+    .rv-pick.is-more {
+        border-style: dashed;
+        color: var(--aui-primary);
+    }
+
+    .rv-pick-note {
+        font-size: 12px;
+        font-weight: 400;
+        color: var(--aui-text-3);  /* 白底 4.8:1 */
+    }
+
+    /* 选中态的浅蓝底上 text-3 不够 4.5:1，跟随按钮文字色 */
+    .rv-pick[aria-pressed="true"] .rv-pick-note {
+        color: inherit;
+    }
+
+    .rv-pick-mark {
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        display: inline-grid;
+        place-items: center;
+        color: #fff;
+        font-size: 10px;  /* 装饰性首字，aria-hidden；组名本身在旁边 */
+        font-weight: 700;
+        line-height: 1;
+    }
+
+    .rv-pick-icon {
+        width: 14px;
+        height: 14px;
+    }
+
+    .rv-help {
+        margin-top: 7px;
+        font-size: 12px;
+        line-height: 1.6;
+        color: var(--aui-text-3);
+    }
+
+    .rv-help.is-warn {
+        color: var(--aui-warning);
+    }
+
+    .rv-check {
+        margin-top: 7px;
+    }
+
+    .rv-err {
+        margin-top: 5px;
+        font-size: 12px;
+        color: var(--aui-danger);
+    }
+
+    .rv-seg {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px;
+    }
+
+    .rv-seg button {
+        height: 33px;
+        border: 1px solid #DCE4F3;
+        border-radius: 9px;
+        background: #fff;
+        color: var(--aui-text-2);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+    }
+
+    .rv-seg button[aria-pressed="true"] {
+        border: 1.5px solid var(--aui-primary);
+        background: #EAF1FF;
+        color: #1D4ED8;
+    }
+
+    .rv-nodes {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+        margin-top: 9px;
+    }
+
+    .rv-node,
+    .rv-dest {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+        padding: 6px 11px;
+        border-radius: 11px;
+        border: 1px solid #DCE4F3;
+        background: #fff;
+        font: inherit;
+        text-align: left;
+    }
+
+    .rv-node {
+        cursor: pointer;
+    }
+
+    .rv-node[aria-pressed="true"] {
+        border: 1.5px solid var(--aui-primary);
+        background: #EAF1FF;
+    }
+
+    .rv-node[aria-pressed="true"] .rv-node-sub {
+        color: var(--aui-text-2);  /* text-3 在 #EAF1FF 上只有 4.2:1 */
+    }
+
+    .rv-node-flag {
+        flex: none;
+        width: 25px;
+        height: 25px;
+        border-radius: 50%;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+        box-shadow: 0 0 0 1px rgba(16, 30, 70, .08);
+        color: var(--aui-text-2);
+    }
+
+    .rv-node-flag img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+
+    .rv-node-flag .rv-tile-text {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        place-items: center;
+        font-size: 12px;
+    }
+
+    .rv-node-text {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .rv-node-name {
+        font-weight: 600;
+        font-size: 12px;
+        color: var(--aui-text);
+        overflow-wrap: anywhere;
+    }
+
+    .rv-node-sub {
+        font-size: 12px;
+        color: var(--aui-text-3);
+    }
+
+    /* 流量走向 */
+    .rv-flow {
+        margin-top: 14px;
+        padding: 12px 16px;
+        border-radius: 12px;
+        border: 1px solid #EDF1F8;
+        background: linear-gradient(180deg, #FAFCFF, #F6F9FE);
+    }
+
+    .rv-flow .rv-h3 {
+        margin-bottom: 2px;
+    }
+
+    .rv-hint {
+        margin: 0 0 11px 11px;
+        font-size: 12px;
+        color: var(--aui-text-3);
+    }
+
+    .rv-diagram {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, .9fr) 49px minmax(0, 1fr) 49px minmax(0, 1.1fr);
+        grid-template-rows: auto auto;
+        align-items: center;
+        row-gap: 7px;
+    }
+
+    .rv-wires {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        pointer-events: none;
+    }
+
+    .rv-diagram > :not(svg) {
+        position: relative;
+        z-index: 1;
+    }
+
+    .rv-dcap {
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+        color: var(--aui-text);
+    }
+
+    .rv-dcap.is-l { grid-column: 1; grid-row: 1; }
+    .rv-dcap.is-r { grid-column: 5; grid-row: 1; }
+    .rv-dcol-l    { grid-column: 1; grid-row: 2; min-width: 0; }
+    .rv-dcol-r    { grid-column: 5; grid-row: 2; min-width: 0; }
+
+    .rv-ulist {
+        background: #fff;
+        border: 1px solid #EDF1F8;
+        border-radius: 11px;
+        padding: 4px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+    }
+
+    .rv-urow {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 28px;
+        padding: 0 8px;
+        font-size: 12px;
+        color: var(--aui-text-2);
+        min-width: 0;
+    }
+
+    .rv-uname {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .rv-av {
+        flex: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-size: 12px;
+        font-weight: 700;
+    }
+
+    .rv-dcenter {
+        grid-column: 3;
+        grid-row: 2;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-width: 0;
+        padding: 8px 11px;
+        background: #fff;
+        border: 1px solid #EAF0FA;
+        border-radius: 11px;
+        box-shadow: 0 12px 26px -16px rgba(31, 64, 140, .45);
+    }
+
+    .rv-dcenter-text {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .rv-dcenter-cap {
+        font-size: 12px;
+        color: var(--aui-text-3);
+    }
+
+    .rv-gchips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .rv-gchip {
+        height: 18px;
+        padding: 0 7px;
+        border-radius: 5px;
+        background: #F3F6FB;
+        color: var(--aui-text-2);
+        font-size: 12px;
+        line-height: 18px;
+        white-space: nowrap;
+    }
+
+    /* --aui-text-3 画在 #F3F6FB 上只有 4.4:1，这里沿用 text-2（6.9:1） */
+    .rv-gchip.is-empty {
+        font-style: italic;
+    }
+
+    .rv-dest {
+        border: 1.5px solid #9BE3BC;
+        box-shadow: 0 14px 28px -20px rgba(18, 161, 80, .6);
+    }
+
+    .rv-dest.is-block {
+        border-color: #F7B4B4;
+        background: #FFF7F7;
+        box-shadow: 0 14px 28px -20px rgba(217, 54, 62, .5);
+    }
+
+    .rv-dest.is-block .rv-node-flag {
+        color: #D9363E;
+        font-size: 16.5px;
+        box-shadow: none;
+    }
+
+    .rv-dest.is-direct .rv-node-flag {
+        background: #ECFDF5;
+        color: #047857;
+    }
+
+    .rv-wire-flow {
+        stroke-dasharray: 3 13;
+        animation: rv-dash 1.1s linear infinite;
+    }
+
+    @keyframes rv-dash {
+        to { stroke-dashoffset: -16; }
+    }
+
+    .rv-facts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        margin-top: 12px;
+    }
+
+    .rv-fact {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        height: 26px;
+        padding: 0 12px;
+        border-radius: 879px;
+        background: #F3F6FB;
+        color: var(--aui-text-2);
+        font-size: 12px;
+    }
+
+    .rv-fact b {
+        color: var(--aui-text);
+    }
+
+    /* 保存条：贴在右栏底部，有改动才出现 */
+    .rv-savebar {
+        position: sticky;
+        /* 贴在右栏可视区的底边，右栏内部滚动时一直看得见。-21px = 右栏下内边距 */
+        bottom: -21px;
+        z-index: 3;
+        margin: auto -21px -21px;
+        padding: 10px 21px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        background: rgba(255, 255, 255, .94);
+        border-top: 1px solid var(--aui-line);
+        border-radius: 0 0 var(--aui-r-lg) var(--aui-r-lg);
+        animation: rv-rise .2s ease-out;
+    }
+
+    .rv-savebar-text {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--aui-text-2);
+        font-size: 12px;
+    }
+
+    .rv-savebar-text::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--aui-warning);
+    }
+
+    .rv-savebar.is-shake {
+        animation: rv-shake .35s;
+    }
+
+    @keyframes rv-rise {
+        from { opacity: 0; transform: translateY(8px); }
+    }
+
+    @keyframes rv-shake {
+        25% { transform: translateX(-6px); }
+        50% { transform: translateX(6px); }
+        75% { transform: translateX(-3px); }
+    }
+
+    /* 窄屏：编辑区排到列表下面；再窄则每行的用户胶囊换到第二行 */
+    @media (max-width: 1240px) {
+        .rv-grid {
+            grid-template-columns: minmax(0, 1fr);
+            min-height: 0;
+        }
+
+        .rv-detail {
+            position: static;
+            grid-column: auto;
+            grid-row: auto;
+            overflow: visible;
+        }
+    }
+
+    /* 列表变窄后用户胶囊换到第二行，把整行宽度让给规则名与去向 */
+    @media (max-width: 900px) {
+        .rv-row-hit {
+            flex-wrap: wrap;
+            row-gap: 5px;
+        }
+
+        .rv-row-text {
+            flex: 1 1 calc(100% - 48px);
+        }
+
+        .rv-upill {
+            max-width: calc(100% - 48px);
+            margin-left: 48px;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .rv-card {
+            padding: 12px 11px 11px;
+        }
+
+        .rv-row {
+            padding: 9px;
+            gap: 7px;
+            align-items: flex-start;
+        }
+
+        /* 触摸屏上原生拖放不会触发，手柄在手机上只占地方；序号保留 */
+        .rv-row .rule-drag-handle {
+            display: none;
+        }
+
+        .rv-row .rule-lead {
+            padding-top: 5px;
+        }
+
+        .rv-row .rv-tile {
+            width: 32px;
+            height: 32px;
+            border-radius: 9px;
+        }
+
+        .rv-row .rv-tile img {
+            width: 18px;
+            height: 18px;
+        }
+
+        /* 图标 32px + 按钮内间距 11px */
+        .rv-row-text {
+            flex-basis: calc(100% - 43px);
+        }
+
+        .rv-row-title,
+        .rv-row-sub {
+            white-space: normal;
+        }
+
+        .rv-upill {
+            max-width: calc(100% - 43px);
+            margin-left: 43px;
+        }
+
+        .rv-row .rv-switch {
+            margin-top: 5px;
+        }
+
+        .rv-field {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 5px;
+        }
+
+        .rv-label {
+            padding-top: 0;
+        }
+
+        .rv-nodes,
+        .rv-seg {
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .rv-diagram {
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+
+        .rv-wires {
+            display: none;
+        }
+
+        .rv-savebar {
+            bottom: -11px;
+            margin: auto -11px -11px;
+            padding: 10px 11px;
+        }
     }
 
     /* 段头是表格外的独立元素，不用 a-table 的 title——那是个函数 prop，
@@ -117,69 +1177,6 @@
                 </div>
             </div>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
-                <transition name="list" appear>
-                    <div class="stat-row">
-                        <div class="stat-card tone-blue">
-                            <span class="stat-icon"><a-icon type="folder"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">域名组</span>
-                                <div class="stat-value">[[ groups.length ]]</div>
-                            </div>
-                            <div class="stat-foot"><span>[[ groups.filter(g => g.subscribed).length ]] 个带订阅</span></div>
-                        </div>
-                        <div class="stat-card tone-cyan">
-                            <span class="stat-icon"><a-icon type="cloud-server"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">出站节点</span>
-                                <div class="stat-value">[[ enabledNodeCount ]]<span class="unit">/ [[ nodes.length ]]</span></div>
-                            </div>
-                            <div class="stat-foot"><span>已启用</span></div>
-                        </div>
-                        <div class="stat-card tone-purple">
-                            <span class="stat-icon"><a-icon type="branches"></a-icon></span>
-                            <div class="stat-text">
-                                <span class="stat-label">分流规则</span>
-                                <div class="stat-value">[[ rules.length ]]</div>
-                            </div>
-                            <div class="stat-foot"><span>[[ blockRules.length ]] 条封禁 · [[ routeRules.length ]] 条分流</span></div>
-                        </div>
-                        <!-- tabindex 不是可有可无的：tooltip 挂在普通元素上，没有它键盘
-                             用户永远看不到「哪几条规则没生效」。图标与 aria-label 同理——
-                             只用红色的话，色觉障碍用户看到的和正常值没有区别。 -->
-                        <a-tooltip :title="brokenRules.length ? brokenSummary : null" placement="bottomLeft">
-                            <div class="stat-card" tabindex="0"
-                                 :class="brokenRules.length ? 'tone-alert' : 'tone-ok'"
-                                 :aria-label="brokenRules.length ? brokenRules.length + ' 条规则未生效' : null">
-                                <span class="stat-icon">
-                                    <a-icon :type="brokenRules.length ? 'exclamation-circle' : 'check-circle'" theme="filled"></a-icon>
-                                </span>
-                                <div class="stat-text">
-                                    <span class="stat-label">未生效规则</span>
-                                    <div class="stat-value">[[ brokenRules.length ]]</div>
-                                </div>
-                                <div class="stat-foot">
-                                    <span>[[ brokenRules.length ? '悬停查看原因' : '全部规则都会生效' ]]</span>
-                                    <span v-if="brokenRules.length" class="stat-tag is-danger">待处理</span>
-                                </div>
-                            </div>
-                        </a-tooltip>
-                        <div class="stat-card" :class="subscriptionErrorCount ? 'tone-alert' : 'tone-ok'"
-                             :aria-label="subscriptionErrorCount ? subscriptionErrorCount + ' 个订阅异常' : null">
-                            <span class="stat-icon">
-                                <a-icon :type="subscriptionErrorCount ? 'exclamation-circle' : 'check-circle'" theme="filled"></a-icon>
-                            </span>
-                            <div class="stat-text">
-                                <span class="stat-label">订阅异常</span>
-                                <div class="stat-value">[[ subscriptionErrorCount ]]</div>
-                            </div>
-                            <div class="stat-foot">
-                                <span>[[ subscriptionErrorCount ? '在域名组里查看失败原因' : '订阅都已正常拉取' ]]</span>
-                                <span v-if="subscriptionErrorCount" class="stat-tag is-danger">待处理</span>
-                            </div>
-                        </div>
-                    </div>
-                </transition>
-
                 <transition name="list" appear>
                     <a-tabs id="routing-tabs" default-active-key="1" @change="onRoutingTabChange">
                         <a-tab-pane key="1">
@@ -401,43 +1398,302 @@
                             <span slot="tab">分流规则
                                 <span class="cell-muted">[[ rules.length ]]</span>
                             </span>
-                            <a-card>
-                                <div class="toolbar">
-                                    <a-button type="primary" icon="plus" @click="openRule()">添加分流规则</a-button>
-                                    <a-button icon="download" style="margin-left:8px"
-                                              @click="confirmExport('rules')">导出</a-button>
-                                    <a-button icon="upload" style="margin-left:8px"
-                                              @click="pickImportFile()">导入</a-button>
-                                </div>
-                                <!-- 拆成两张表，不是一张。
-                                     生成期 block 规则整体排在所有分流规则之前
-                                     （routing_inject.go 的 buildRules 返回两个独立
-                                     切片，与 priority 无关）。混在一张表里拖拽，
-                                     「越往上越先匹配」就成了一句静默的假话——管理
-                                     员能把封禁拖到最后一行，而它实际仍然第一个匹
-                                     配，没有任何一层会报错。两张独立的表还天然拒
-                                     绝段间 drop。 -->
-                                <div v-if="blockRules.length" class="rule-section-title is-block">
-                                    封禁规则
-                                    <span class="rule-section-hint">始终优先于下方所有分流规则</span>
-                                </div>
-                                <a-table v-if="blockRules.length" class="rule-table is-block" :columns="ruleColumns"
-                                         :data-source="blockRules" :custom-row="ruleRow"
-                                         :row-key="r => r.id" :loading="spinning" :pagination="false">
-{{template "routingRuleTableSlots" .}}
-                                </a-table>
+                            <!-- 左边是列表（浏览、排序、启停），右边是选中规则的编辑区：
+                                 点哪条就直接在右边改，不再弹窗。改动只作用于草稿，
+                                 底部保存条出现后才会写回。 -->
+                            <div class="rv-grid">
+                                <!-- 不再写「分流规则 N」：上面的页签已经是这个标题，重复一遍只会抢眼 -->
+                                <section class="rv-card rv-list" aria-label="分流规则列表">
+                                    <div class="rv-list-head">
+                                        <!-- 常驻搜索框占满左侧，操作按钮靠右 -->
+                                        <a-input v-model="ruleQuery" allow-clear class="rv-search" aria-label="搜索规则"
+                                                 placeholder="搜索规则名、用户、域名组或节点">
+                                            <a-icon slot="prefix" type="search"></a-icon>
+                                        </a-input>
+                                        <a-button icon="download" @click="confirmExport('rules')">导出</a-button>
+                                        <a-button icon="upload" @click="pickImportFile()">导入</a-button>
+                                        <a-button type="primary" icon="plus" @click="newRule()">添加规则</a-button>
+                                    </div>
+                                    <div class="rv-filters" role="group" aria-label="按状态筛选">
+                                        <button v-for="f in ruleFilterOptions" :key="f.key" type="button" class="rv-fchip"
+                                                :aria-pressed="ruleFilter === f.key ? 'true' : 'false'"
+                                                @click="ruleFilter = f.key">
+                                            [[ f.label ]]<span class="rv-fchip-n">[[ f.count ]]</span>
+                                        </button>
+                                    </div>
+                                    <p v-if="ruleFiltering" class="rv-filter-hint">
+                                        筛选或搜索时不能拖动排序
+                                        <button type="button" class="link-btn" @click="clearRuleFilter">清除筛选</button>
+                                    </p>
+                                    <!-- 拆成两个列表，不是一个。
+                                         生成期 block 规则整体排在所有分流规则之前
+                                         （routing_inject.go 的 buildRules 返回两个独立
+                                         切片，与 priority 无关）。混在一个列表里拖拽，
+                                         「越往上越先匹配」就成了一句静默的假话——管理
+                                         员能把封禁拖到最后一行，而它实际仍然第一个匹
+                                         配，没有任何一层会报错。两个独立的列表还天然拒
+                                         绝段间 drop（onRuleDragOver 按段比较）。
 
-                                <div class="rule-section-title">
-                                    分流规则
-                                    <span class="rule-section-hint">越靠上越先匹配，拖动左侧手柄调整顺序</span>
-                                </div>
-                                <a-table class="rule-table" :columns="ruleColumns" :data-source="routeRules"
-                                         :locale="{ emptyText: '还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。' }"
-                                         :custom-row="ruleRow"
-                                         :row-key="r => r.id" :loading="spinning" :pagination="false">
-{{template "routingRuleTableSlots" .}}
-                                </a-table>
-                            </a-card>
+                                         筛选用 v-show 而不是 v-if：index 必须始终是段内
+                                         真实位置，拖拽的落点提示依赖它。 -->
+                                    <template v-if="blockRules.some(ruleVisible)">
+                                        <div class="rule-section-title is-block">
+                                            封禁规则
+                                            <span class="rule-section-hint">始终优先于下方所有分流规则</span>
+                                        </div>
+                                        <ul class="rv-rows" aria-label="封禁规则">
+                                            <li v-for="(rule, index) in blockRules" :key="rule.id" v-show="ruleVisible(rule)"
+                                                class="rv-row" :class="ruleRowClass(rule, index)"
+                                                @dragover="onRuleDragOver($event, rule)" @drop="onRuleDrop($event, rule)">
+{{template "routingRuleRow" .}}
+                                            </li>
+                                        </ul>
+                                    </template>
+                                    <template v-if="!ruleFiltering || routeRules.some(ruleVisible)">
+                                        <div class="rule-section-title">
+                                            分流规则
+                                            <span class="rule-section-hint">越靠上越先匹配，拖动左侧手柄调整顺序</span>
+                                        </div>
+                                        <ul v-if="routeRules.length" class="rv-rows" aria-label="分流规则">
+                                            <li v-for="(rule, index) in routeRules" :key="rule.id" v-show="ruleVisible(rule)"
+                                                class="rv-row" :class="ruleRowClass(rule, index)"
+                                                @dragover="onRuleDragOver($event, rule)" @drop="onRuleDrop($event, rule)">
+{{template "routingRuleRow" .}}
+                                            </li>
+                                        </ul>
+                                        <p v-else class="rv-empty">还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。</p>
+                                    </template>
+                                    <p v-if="ruleFiltering && !visibleRuleCount" class="rv-empty">没有符合条件的规则</p>
+                                </section>
+
+                                <section class="rv-card rv-detail" ref="ruleDetail" aria-labelledby="rv-detail-title">
+                                    <p v-if="!ruleEditor.active" class="rv-empty" id="rv-detail-title">
+                                        在左侧选择一条规则，或点「添加规则」
+                                    </p>
+                                    <template v-else>
+                                        <div class="rv-dhead">
+                                            <span class="rv-tile is-lg" :class="ruleTileClass(editorPreview)"
+                                                  :style="ruleTileStyle(editorPreview)" aria-hidden="true">
+                                                <img v-if="ruleTileKind(editorPreview) === 'brand'"
+                                                     :src="'{{ .base_path }}assets/brand-icons/' + ruleBrand(editorPreview).slug + '.svg?{{ .cur_ver }}'" alt="">
+                                                <a-icon v-else-if="ruleTileKind(editorPreview) === 'block'" type="stop" theme="filled"></a-icon>
+                                                <span v-else class="rv-tile-text">[[ ruleInitials(editorPreview) ]]</span>
+                                            </span>
+                                            <div class="rv-dtitle">
+                                                <h2 id="rv-detail-title" class="rv-dname">
+                                                    <span class="rv-dname-text">[[ ruleEditor.rule.remark || (ruleEditor.isNew ? '新规则' : '未命名规则') ]]</span>
+                                                    <span v-if="ruleEditor.isNew" class="status-badge status-neutral">尚未保存</span>
+                                                    <span v-else-if="savedRule && !savedRule.enable" class="status-badge status-neutral">已停用</span>
+                                                    <span v-else-if="savedRule && ruleIssue(savedRule)" class="status-badge status-warn">未生效</span>
+                                                    <span v-else class="status-badge status-ok"><a-icon type="check"></a-icon>生效中</span>
+                                                </h2>
+                                                <p class="rv-dsay">[[ ruleSentence(editorPreview) ]]</p>
+                                            </div>
+                                        </div>
+                                        <div v-if="ruleEditor.brokenWarn" class="rv-alert is-danger" role="alert">
+                                            <a-icon type="close-circle"></a-icon>
+                                            <span>[[ ruleEditor.brokenWarn ]]</span>
+                                        </div>
+                                        <div v-if="savedRule && ruleIssue(savedRule)" class="rv-alert is-warn">
+                                            <a-icon type="warning"></a-icon><span>[[ ruleIssue(savedRule) ]]</span>
+                                        </div>
+                                        <div v-else-if="savedRule && ruleNote(savedRule)" class="rv-alert is-info">
+                                            <a-icon type="info-circle"></a-icon><span>[[ ruleNote(savedRule) ]]</span>
+                                        </div>
+
+                                        <section class="rv-flow" aria-labelledby="rv-flow-title">
+                                            <h3 id="rv-flow-title" class="rv-h3 is-green">流量走向</h3>
+                                            <p class="rv-hint">[[ ruleDirty ? '按当前修改预览' : '命中这条规则的请求会这样走' ]]</p>
+                                            <!-- 连线是纯装饰（aria-hidden），信息已经在上面那句话和三列文字里 -->
+                                            <div class="rv-diagram" ref="ruleDiagram">
+                                                <svg class="rv-wires" ref="ruleWires" aria-hidden="true"></svg>
+                                                <div class="rv-dcap is-l">哪些用户</div>
+                                                <div class="rv-dcap is-r">去向</div>
+                                                <div class="rv-dcol-l">
+                                                    <div class="rv-ulist">
+                                                        <div v-for="u in flowUsers" :key="u.key" class="rv-urow">
+                                                            <span class="rv-av" :style="{ background: u.color }" aria-hidden="true">[[ u.av ]]</span>
+                                                            <span class="rv-uname">[[ u.name ]]</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="rv-dcenter">
+                                                    <span class="rv-tile is-sm" :class="ruleTileClass(editorPreview)"
+                                                          :style="ruleTileStyle(editorPreview)" aria-hidden="true">
+                                                        <img v-if="ruleTileKind(editorPreview) === 'brand'"
+                                                             :src="'{{ .base_path }}assets/brand-icons/' + ruleBrand(editorPreview).slug + '.svg?{{ .cur_ver }}'" alt="">
+                                                        <a-icon v-else-if="ruleTileKind(editorPreview) === 'block'" type="stop" theme="filled"></a-icon>
+                                                        <span v-else class="rv-tile-text">[[ ruleInitials(editorPreview) ]]</span>
+                                                    </span>
+                                                    <span class="rv-dcenter-text">
+                                                        <span class="rv-dcenter-cap">访问域名组</span>
+                                                        <span class="rv-gchips">
+                                                            <span v-for="gid in ruleEditor.rule.domainGroupIds" :key="gid" class="rv-gchip">[[ groupName(gid) ]]</span>
+                                                            <span v-if="!ruleEditor.rule.domainGroupIds.length" class="rv-gchip is-empty">未选择</span>
+                                                        </span>
+                                                    </span>
+                                                </div>
+                                                <div class="rv-dcol-r">
+                                                    <div class="rv-dest" :class="'is-' + ruleEditor.rule.action">
+                                                        <span class="rv-node-flag" aria-hidden="true">
+                                                            <a-icon v-if="ruleEditor.rule.action === 'block'" type="stop" theme="filled"></a-icon>
+                                                            <a-icon v-else-if="ruleEditor.rule.action === 'direct'" type="arrow-right"></a-icon>
+                                                            <img v-else-if="editorNode && editorNode.exitCountry && !editorNode.flagMissing"
+                                                                 :src="'{{ .base_path }}assets/flags/' + editorNode.exitCountry.toLowerCase() + '.svg?{{ .cur_ver }}'"
+                                                                 alt="" @error="editorNode.flagMissing = true">
+                                                            <a-icon v-else type="cloud-server"></a-icon>
+                                                        </span>
+                                                        <span class="rv-node-text">
+                                                            <span class="rv-node-name">[[ ruleDestLabel(editorPreview) ]]</span>
+                                                            <span class="rv-node-sub">[[ destSubLabel(editorPreview) ]]</span>
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </section>
+                                        <div v-if="savedRule" class="rv-facts">
+                                            <span class="rv-fact"><a-icon type="ordered-list"></a-icon>匹配顺序 <b>第 [[ ruleOrder(savedRule) ]] 条</b></span>
+                                            <span class="rv-fact"><a-icon type="user-add"></a-icon>新建用户
+                                                <b>[[ !savedRule.inboundIds.length || savedRule.applyToNewInbounds ? '自动加入' : '不自动加入' ]]</b></span>
+                                        </div>
+
+                                        <section class="rv-edit" :class="{ 'is-dirty': ruleDirty }" aria-labelledby="rv-edit-title">
+                                            <h3 id="rv-edit-title" class="rv-h3">规则设置</h3>
+                                            <div class="rv-field">
+                                                <label for="rv-name" class="rv-label">名称</label>
+                                                <div class="rv-control">
+                                                    <a-input id="rv-name" v-model="ruleEditor.rule.remark"
+                                                             placeholder="例如 ChatGPT(特殊)"></a-input>
+                                                </div>
+                                            </div>
+                                            <!-- 「所有用户」是一个显式选项而不是「一个都不选」。inboundIds
+                                                 的空数组就是「对所有入站生效」，若交给「删光选择」来表达，
+                                                 一次手滑就会把只管某几个人的规则静默放大到全体
+                                                 （CLAUDE.md「InboundIds 为空数组」一条）。 -->
+                                            <div class="rv-field">
+                                                <span class="rv-label" id="rv-users-label">用户</span>
+                                                <div class="rv-control">
+                                                    <div class="rv-picker" role="group" aria-labelledby="rv-users-label">
+                                                        <button type="button" class="rv-pick is-all"
+                                                                :aria-pressed="ruleEditor.allUsers ? 'true' : 'false'"
+                                                                :disabled="allUsersDisabled"
+                                                                @click="toggleAllUsers(!ruleEditor.allUsers)">
+                                                            <a-icon type="global"></a-icon>所有用户
+                                                        </button>
+                                                        <template v-if="!ruleEditor.allUsers">
+                                                            <!-- 被别的规则占用的入站置灰并写明是哪条规则：同一个域名组下一个
+                                                                 入站至多被一条规则覆盖（checkConflict），选了也会被后端拒绝。 -->
+                                                            <button v-for="i in editorInbounds" :key="i.id" type="button" class="rv-pick"
+                                                                    :aria-pressed="ruleEditor.rule.inboundIds.includes(i.id) ? 'true' : 'false'"
+                                                                    :disabled="!!inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
+                                                                    :title="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id) ? '该用户在所选域名组下已由规则「' + inboundOccupiedBy(i.id) + '」覆盖，同一域名组下一个用户只能属于一条规则' : null"
+                                                                    @click="toggleRuleInbound(i.id)">
+                                                                [[ i.remark || i.tag ]]
+                                                                <span v-if="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
+                                                                      class="rv-pick-note">已用于「[[ inboundOccupiedBy(i.id) ]]」</span>
+                                                                <span v-if="!i.enable" class="rv-pick-note">已停用</span>
+                                                            </button>
+                                                            <button v-if="hiddenInboundCount" type="button" class="rv-pick is-more"
+                                                                    aria-expanded="false" @click="ruleEditor.usersOpen = true">
+                                                                展开其余 [[ hiddenInboundCount ]] 位
+                                                            </button>
+                                                            <button v-else-if="ruleEditor.usersOpen && inbounds.length > inboundFold"
+                                                                    type="button" class="rv-pick is-more" aria-expanded="true"
+                                                                    @click="ruleEditor.usersOpen = false">收起</button>
+                                                        </template>
+                                                    </div>
+                                                    <div v-if="!ruleEditor.allUsers && !inbounds.length" class="rv-help">还没有任何入站</div>
+                                                    <div v-if="allUsersDisabledReason" class="rv-help is-warn">[[ allUsersDisabledReason ]]</div>
+                                                    <div v-if="ruleEditor.allUsers" class="rv-help">包括以后新建的用户。</div>
+                                                    <div v-else class="rv-check">
+                                                        <a-checkbox :checked="ruleEditor.rule.applyToNewInbounds"
+                                                                    @change="e => ruleEditor.rule.applyToNewInbounds = e.target.checked">
+                                                            以后新增的用户自动应用这条规则
+                                                        </a-checkbox>
+                                                    </div>
+                                                    <div v-if="ruleEditor.tried && !ruleEditor.allUsers && !ruleEditor.rule.inboundIds.length"
+                                                         class="rv-err">至少选择一位用户，或选「所有用户」</div>
+                                                </div>
+                                            </div>
+                                            <div class="rv-field">
+                                                <span class="rv-label" id="rv-groups-label">域名组</span>
+                                                <div class="rv-control">
+                                                    <div class="rv-picker" role="group" aria-labelledby="rv-groups-label">
+                                                        <!-- 只写组名：条数在「域名组」页签里看 -->
+                                                        <button v-for="g in groups" :key="g.id" type="button" class="rv-pick"
+                                                                :aria-pressed="ruleEditor.rule.domainGroupIds.includes(g.id) ? 'true' : 'false'"
+                                                                @click="toggleRuleGroup(g.id)">
+                                                            <img v-if="g.brand" class="rv-pick-icon"
+                                                                 :src="'{{ .base_path }}assets/brand-icons/' + g.brand.slug + '.svg?{{ .cur_ver }}'" alt="">
+                                                            <!-- 识别不出品牌的组（中国域名列表、网盘域名这类）用首字色块，
+                                                                 与左侧列表、「域名组」页签的卡片同一套 -->
+                                                            <span v-else class="rv-pick-mark" :style="{ background: groupColorOf(g) }"
+                                                                  aria-hidden="true">[[ groupInitials(g) ]]</span>
+                                                            [[ g.remark ]]
+                                                        </button>
+                                                    </div>
+                                                    <div v-if="!groups.length" class="rv-help">还没有域名组，先到「域名组」页签添加</div>
+                                                    <div v-if="ruleEditor.tried && !ruleEditor.rule.domainGroupIds.length"
+                                                         class="rv-err">至少选择一个域名组</div>
+                                                </div>
+                                            </div>
+                                            <div class="rv-field">
+                                                <span class="rv-label" id="rv-action-label">去向</span>
+                                                <div class="rv-control">
+                                                    <div class="rv-seg" role="group" aria-labelledby="rv-action-label">
+                                                        <button type="button" :aria-pressed="ruleEditor.rule.action === 'proxy' ? 'true' : 'false'"
+                                                                @click="ruleEditor.rule.action = 'proxy'">
+                                                            <a-icon type="cloud-server"></a-icon>转发到节点
+                                                        </button>
+                                                        <button type="button" :aria-pressed="ruleEditor.rule.action === 'direct' ? 'true' : 'false'"
+                                                                @click="ruleEditor.rule.action = 'direct'">
+                                                            <a-icon type="arrow-right"></a-icon>直连
+                                                        </button>
+                                                        <button type="button" :aria-pressed="ruleEditor.rule.action === 'block' ? 'true' : 'false'"
+                                                                @click="ruleEditor.rule.action = 'block'">
+                                                            <a-icon type="stop"></a-icon>封禁
+                                                        </button>
+                                                    </div>
+                                                    <div v-if="ruleEditor.rule.action === 'proxy'" class="rv-nodes" role="group" aria-label="出站节点">
+                                                        <button v-for="n in nodes" :key="n.id" type="button" class="rv-node"
+                                                                :aria-pressed="ruleEditor.rule.outboundId === n.id ? 'true' : 'false'"
+                                                                @click="ruleEditor.rule.outboundId = n.id">
+                                                            <span class="rv-node-flag" aria-hidden="true">
+                                                                <img v-if="n.exitCountry && !n.flagMissing"
+                                                                     :src="'{{ .base_path }}assets/flags/' + n.exitCountry.toLowerCase() + '.svg?{{ .cur_ver }}'"
+                                                                     alt="" @error="n.flagMissing = true">
+                                                                <span v-else class="rv-tile-text" :style="{ background: nodeColorOf(n) }">[[ nodeInitials(n) ]]</span>
+                                                            </span>
+                                                            <span class="rv-node-text">
+                                                                <span class="rv-node-name">[[ n.remark || n.tag ]]</span>
+                                                                <span class="rv-node-sub">[[ nodeSubLabel(n) ]]</span>
+                                                            </span>
+                                                        </button>
+                                                        <div v-if="!nodes.length" class="rv-help">还没有出站节点，先到「出站节点」页签添加</div>
+                                                    </div>
+                                                    <div v-if="ruleEditor.tried && ruleEditor.rule.action === 'proxy' && !ruleEditor.rule.outboundId"
+                                                         class="rv-err">请选择一个出站节点</div>
+                                                    <!-- rgba(0,0,0,.45) 只有 3.36:1，换成 --aui-text-3 -->
+                                                    <div v-if="ruleEditor.rule.action === 'direct'" class="rv-help">
+                                                        直连即从这台机器本机出网，不经过任何出站节点。它不等于「不写这条规则」：
+                                                        显式的直连规则会先命中，从而挡住后面那些本该把这批目标代理出去的规则。
+                                                    </div>
+                                                    <div v-if="ruleEditor.rule.action === 'block'" class="rv-help">
+                                                        封禁规则保存后排在所有分流规则之前，始终最先匹配。
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </section>
+
+                                        <div v-if="ruleDirty" class="rv-savebar" :class="{ 'is-shake': ruleEditor.shake }"
+                                             role="region" aria-label="未保存的修改">
+                                            <span class="rv-savebar-text">[[ ruleEditor.isNew ? '新规则尚未保存' : '有未保存的修改' ]]</span>
+                                            <a-button @click="discardRuleEdit">[[ ruleEditor.isNew ? '取消' : '撤销修改' ]]</a-button>
+                                            <a-button type="primary" :loading="ruleEditor.saving" @click="saveRule">保存</a-button>
+                                        </div>
+                                    </template>
+                                </section>
+                            </div>
                         </a-tab-pane>
 
                     </a-tabs>
@@ -606,118 +1862,6 @@
         </a-form>
     </a-modal>
 
-    <a-modal v-model="ruleModal.visible"
-             @ok="saveRule" ok-text="保存" cancel-text="取消">
-        <template slot="title">
-        <div class="modal-head">
-            <span class="modal-icon tone-violet" aria-hidden="true"><a-icon type="fork"></a-icon></span>
-            <span class="modal-head-text">
-                <span class="modal-head-title">[[ ruleModal.rule && ruleModal.rule.id ? '编辑分流规则' : '添加分流规则' ]]</span>
-                <span class="modal-head-sub">哪些用户访问哪些域名时，走哪里</span>
-            </span>
-        </div>
-    </template>
-        <a-form layout="vertical">
-            <a-form-item label="备注">
-                <a-input v-model="ruleModal.rule.remark"></a-input>
-            </a-form-item>
-            <!-- 用户与域名组按视觉稿 v3 改成「已选项以标签放在输入框里」的多选。
-                 与稿子的一处刻意差别：稿里写「留空 = 全部用户」，这里仍保留一个显式的
-                 「所有用户」勾选项。inboundIds 的空数组就是「对所有入站生效」，若把它
-                 交给多选框的「删光标签」来表达，一次手滑就会把只管某几个人的规则静默
-                 放大到全体（CLAUDE.md「InboundIds 为空数组」一条）。 -->
-            <a-form-item label="用户（入站）">
-                <a-checkbox :checked="ruleModal.allUsers" :disabled="allUsersDisabled"
-                            @change="e => toggleAllUsers(e.target.checked)">
-                    所有用户（含以后新建的入站）
-                </a-checkbox>
-                <div v-if="allUsersDisabledReason"
-                     style="color: var(--aui-warning); font-size: 12px; margin: 4px 0 0 24px;">
-                    [[ allUsersDisabledReason ]]
-                </div>
-                <template v-if="!ruleModal.allUsers">
-                    <div v-if="!inbounds.length" class="rule-pick-empty">还没有任何入站</div>
-                    <a-select v-else mode="multiple" class="rule-pick" :value="ruleModal.rule.inboundIds"
-                              placeholder="选择入站" option-filter-prop="title" option-label-prop="title" :max-tag-count="12"
-                              :get-popup-container="t => t.parentNode"
-                              @change="setRuleInbounds">
-                        <!-- 被别的规则占用的入站置灰并写明原因：同一个域名组下一个入站至多
-                             被一条规则覆盖（checkConflict），选了也会被后端拒绝。 -->
-                        <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id"
-                                         :title="i.remark || i.tag"
-                                         :disabled="!!inboundOccupiedBy(i.id) && !ruleModal.rule.inboundIds.includes(i.id)">
-                            [[ i.remark || i.tag ]]
-                            <span v-if="inboundOccupiedBy(i.id)" class="rule-pick-note">
-                                已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖
-                            </span>
-                        </a-select-option>
-                    </a-select>
-                </template>
-                <!-- 不用 v-model：勾了「所有用户」时这一项必须显示为勾上且
-                     禁用（空数组本来就含未来新建的入站），而 allUsers 的变化
-                     有两条路径——toggleAllUsers 和 openRule 里的直接赋值，
-                     watch 也只盖得住其中一条。把联动写进 :checked 表达式，
-                     两条路径自动都对。
-
-                     allUsers 为真时提交体里这一项可能仍是 false，无妨：
-                     AttachInbound 对空数组一律跳过，两种取值行为完全一致
-                     （spec §5.2 明确后端不做强制改写）。 -->
-                <div style="margin-top: 8px;">
-                    <a-checkbox :checked="ruleModal.allUsers || ruleModal.rule.applyToNewInbounds"
-                                :disabled="ruleModal.allUsers"
-                                @change="e => ruleModal.rule.applyToNewInbounds = e.target.checked">
-                        以后新增的用户自动应用这条规则
-                    </a-checkbox>
-                </div>
-            </a-form-item>
-            <a-form-item label="域名组">
-                <a-select mode="multiple" class="rule-pick rule-pick-groups" :value="ruleModal.rule.domainGroupIds"
-                          placeholder="添加域名组…" option-filter-prop="title"
-                          option-label-prop="title"
-                          :get-popup-container="t => t.parentNode"
-                          @change="setRuleGroups">
-                    <!-- 下拉项与已选标签都只写组名，条数在域名组卡片上看 -->
-                    <a-select-option v-for="g in groups" :key="g.id" :value="g.id" :title="g.remark">
-                        [[ g.remark ]]
-                    </a-select-option>
-                </a-select>
-            </a-form-item>
-            <a-form-item label="动作">
-                <!-- 三张选择卡（与视觉稿 v3 一致）。仍是 a-radio-group，取值与改动前相同，
-                     键盘方向键照常切换。 -->
-                <a-radio-group v-model="ruleModal.rule.action" class="action-choices">
-                    <a-radio value="direct" class="is-direct">
-                        <span class="action-name">直连</span>
-                        <span class="action-desc">从本机直接出网</span>
-                    </a-radio>
-                    <a-radio value="proxy" class="is-proxy">
-                        <span class="action-name">出站节点</span>
-                        <span class="action-desc">转发到指定落地节点</span>
-                    </a-radio>
-                    <a-radio value="block" class="is-block">
-                        <span class="action-name">封禁</span>
-                        <span class="action-desc">直接丢弃，优先于所有分流</span>
-                    </a-radio>
-                </a-radio-group>
-                <!-- rgba(0,0,0,.45) 只有 3.36:1，换成 --aui-text-3 -->
-                <div style="margin-top: 8px; color: var(--aui-text-3); font-size: 12px; line-height: 1.6">
-                    直连即从这台机器本机出网，不经过任何出站节点。它不等于「不写这条规则」：
-                    显式的直连规则会先命中，从而挡住后面那些本该把这批目标代理出去的规则。
-                </div>
-            </a-form-item>
-            <a-form-item label="出站节点" v-if="ruleModal.rule.action === 'proxy'">
-                <!-- 只写节点名：协议与延迟在「出站节点」页看 -->
-                <!-- outboundId 为 0 表示还没选：交给 placeholder，不让下拉框里显示一个「0」 -->
-                <a-select :value="ruleModal.rule.outboundId || undefined" placeholder="选择出站节点"
-                          style="width: 100%;" @change="v => ruleModal.rule.outboundId = v">
-                    <a-select-option v-for="n in nodes" :key="n.id" :value="n.id">
-                        [[ n.remark ]]
-                    </a-select-option>
-                </a-select>
-            </a-form-item>
-        </a-form>
-    </a-modal>
-
     <input type="file" ref="importFile" accept=".json,application/json"
            style="display:none" @change="onImportFileChosen">
 
@@ -788,21 +1932,6 @@
                 { title: '启用', width: '6%', scopedSlots: { customRender: 'enable' } },
                 { title: '操作', width: '7%', scopedSlots: { customRender: 'action' } },
             ],
-            ruleColumns: [
-                // 优先级不再是一个可编辑的数字：它由行的先后决定，拖手柄改。
-                { title: '', width: 72, scopedSlots: { customRender: 'drag' } },
-                { title: '备注', dataIndex: 'remark', width: '18%' },
-                // rule-flow-cell 在单元格右缘用 ::after 画一个 →，把「哪些用户
-                // → 访问哪批域名 → 去哪」这条链路说出来。不单开一列：三列本来
-                // 就窄，再挤两列箭头会让每列各缩一截。
-                { title: '用户', scopedSlots: { customRender: 'inbound' }, width: '22%',
-                  className: 'rule-flow-cell' },
-                { title: '域名组', scopedSlots: { customRender: 'group' }, width: '26%',
-                  className: 'rule-flow-cell' },
-                { title: '去向', scopedSlots: { customRender: 'target' }, width: '18%' },
-                { title: '状态', width: 52, scopedSlots: { customRender: 'warn' } },
-                { title: '操作', width: 52, scopedSlots: { customRender: 'action' } },
-            ],
             groupModal: {
                 visible: false, id: 0, remark: '', domains: '', cidrs: '', subscribeUrls: [''],
                 subscribedPreview: [], subscribedCount: 0, lastError: '', lastSkipped: 0, lastUpdatedAt: 0,
@@ -810,7 +1939,23 @@
                 subscriptionStates: [],
             },
             nodeModal: { visible: false, id: 0, tag: '', enable: true, remark: '', link: '', config: '', parsed: null },
-            ruleModal: { visible: false, rule: new RoutingRule(), allUsers: true },
+            // 右侧编辑区的草稿。改动只作用于 rule 这份深拷贝，保存才写回。
+            //   base   —— 打开时可编辑字段的快照，判断「有没有改过」用；
+            //   origin —— 打开时服务端整条规则的快照，保存前与服务端现值比对，
+            //             不一致说明别处改过（例如新建入站被 AttachInbound 自动
+            //             加进了 inboundIds），此时绝不能拿旧草稿整体覆盖回去。
+            ruleEditor: {
+                active: false, isNew: false, rule: new RoutingRule(), allUsers: true,
+                base: '', origin: '', tried: false, saving: false, usersOpen: false,
+                brokenWarn: '', shake: false, lastId: 0,
+            },
+            // 用户选项超过这个数时先折叠，已选中的始终露出来
+            inboundFold: 12,
+            ruleFilter: 'all',
+            ruleQuery: '',
+            // 正在提交启停的规则 id，防止连点
+            ruleToggling: 0,
+
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
             drag: { id: 0, section: '', overId: 0 },
@@ -834,31 +1979,83 @@
             routeRules() {
                 return this.rules.filter(r => r.action !== 'block');
             },
-            enabledNodeCount() {
-                return this.nodes.filter(n => n.enable).length;
-            },
             // 「未生效」只统计已启用的规则——禁用的规则是有意关掉的，不算异常。
             brokenRules() {
                 return this.rules.filter(r => this.ruleIssue(r) !== '');
             },
-            brokenSummary() {
-                return this.brokenRules
-                    .map(r => (r.remark || ('#' + r.id)) + '：' + this.ruleIssue(r))
-                    .join('\n');
+            savedRule() {
+                if (!this.ruleEditor.active || this.ruleEditor.isNew) return null;
+                return this.rules.find(r => r.id === this.ruleEditor.rule.id) || null;
             },
-            subscriptionErrorCount() {
-                return this.groups.filter(g => g.lastError).length;
+            ruleDirty() {
+                if (!this.ruleEditor.active) return false;
+                if (this.ruleEditor.isNew) return true;
+                return this.ruleSnapshot(this.ruleEditor.rule, this.ruleEditor.allUsers) !== this.ruleEditor.base;
+            },
+            ruleFiltering() {
+                return this.ruleFilter !== 'all' || this.ruleQuery.trim() !== '';
+            },
+            ruleFilterOptions() {
+                let on = 0, issue = 0, off = 0;
+                for (const r of this.rules) {
+                    if (!r.enable) off++;
+                    else if (this.ruleIssue(r)) issue++;
+                    else on++;
+                }
+                return [
+                    { key: 'all', label: '全部', count: this.rules.length },
+                    { key: 'on', label: '生效中', count: on },
+                    { key: 'issue', label: '未生效', count: issue },
+                    { key: 'off', label: '已停用', count: off },
+                ];
+            },
+            visibleRuleCount() {
+                return this.rules.filter(this.ruleVisible).length;
+            },
+            // 编辑区里实时预览用的规则形态：与提交体同口径（所有用户 = 空数组）
+            editorPreview() {
+                const r = this.ruleEditor.rule;
+                return {
+                    id: r.id, remark: r.remark, action: r.action, outboundId: r.outboundId,
+                    inboundIds: this.ruleEditor.allUsers ? [] : r.inboundIds,
+                    domainGroupIds: r.domainGroupIds, broken: false, groupsBroken: false,
+                };
+            },
+            editorNode() {
+                return this.nodes.find(n => n.id === this.ruleEditor.rule.outboundId) || null;
+            },
+            // 用户多时先列前 inboundFold 位；排在后面但已选中的也必须露出来，
+            // 否则折叠之后看不出它被选了。
+            editorInbounds() {
+                if (this.ruleEditor.usersOpen || this.inbounds.length <= this.inboundFold) return this.inbounds;
+                const picked = this.ruleEditor.rule.inboundIds;
+                return this.inbounds.filter((i, k) => k < this.inboundFold || picked.includes(i.id));
+            },
+            hiddenInboundCount() {
+                return this.inbounds.length - this.editorInbounds.length;
+            },
+            flowUsers() {
+                const ids = this.editorPreview.inboundIds;
+                if (!ids.length) return [{ key: 'all', name: '所有用户', av: '全', color: '#4F7CFF' }];
+                const colors = ['#4F7CFF', '#E07B12', '#12A150', '#7B5CF5', '#D9363E', '#0E8FB0'];
+                const shown = ids.slice(0, 4).map((id, i) => {
+                    const name = this.inboundName(id);
+                    return { key: id, name, av: name.slice(-1) || '#', color: colors[i % colors.length] };
+                });
+                if (ids.length > 4) shown.push({ key: 'more', name: '另外 ' + (ids.length - 4) + ' 位', av: '+', color: '#94A0B8' });
+                return shown;
             },
 
-            // occupiedInbounds 返回当前域名组下、除正在编辑的这条规则之外，
+                        // occupiedInbounds 返回当前域名组下、除正在编辑的这条规则之外，
             // 每个入站已被哪条规则覆盖。key 是入站 id，value 是规则名。
             // key 0 是特殊项：存在「所有用户」规则时用它记录，它占住所有人。
             occupiedInbounds() {
                 const map = {};
-                const gids = this.ruleModal.rule.domainGroupIds;
+                if (!this.ruleEditor.active) return map;
+                const gids = this.ruleEditor.rule.domainGroupIds;
                 if (!gids.length) return map;
                 for (const r of this.rules) {
-                    if (r.id === this.ruleModal.rule.id) continue;
+                    if (r.id === this.ruleEditor.rule.id) continue;
                     // 冲突判定的单位是「域名组 × 用户」的组合：组集合不相交
                     // 就不冲突，同一个域名组可以被多条规则引用。
                     if (!r.domainGroupIds.some(id => gids.includes(id))) continue;
@@ -931,10 +2128,11 @@
             ruleSection(rule) {
                 return rule.action === 'block' ? 'block' : 'route';
             },
-            // custom-row 只把每一行变成 drop 目标。draggable 挂在手柄上而不是
-            // 整行：整行可拖会干扰行内的「操作」下拉和文本选择。
-            ruleRow(rule, index) {
+            // 行本身只是放置目标；可拖的只有手柄（见 routing_rule_table.html）。
+            ruleRowClass(rule, index) {
                 const cls = [];
+                if (this.ruleEditor.active && this.ruleEditor.rule.id === rule.id) cls.push('is-selected');
+                if (!rule.enable) cls.push('is-off');
                 if (this.drag.id === rule.id) cls.push('rule-dragging');
                 if (this.drag.overId === rule.id && this.drag.id && this.drag.id !== rule.id) {
                     // 落点提示画在真正会落进去的那条缝上：splice 的语义是
@@ -943,18 +2141,14 @@
                     const from = list.findIndex(r => r.id === this.drag.id);
                     cls.push(from > -1 && from < index ? 'rule-drop-after' : 'rule-drop-before');
                 }
-                return {
-                    class: cls,
-                    on: {
-                        // 不挂 dragleave：它在 td 之间移动时也会冒泡触发，
-                        // 高亮会跟着闪。dragover 本身就持续更新 overId，
-                        // 拖出表格后由手柄上的 dragend 兜底清掉。
-                        dragover: e => this.onRuleDragOver(e, rule),
-                        drop: e => this.onRuleDrop(e, rule),
-                    },
-                };
+                return cls;
             },
             onRuleDragStart(e, rule) {
+                // 筛选或搜索时有行被隐藏，落在隐藏行之间的语义说不清，干脆不让拖
+                if (this.ruleFiltering) {
+                    e.preventDefault();
+                    return;
+                }
                 this.drag.id = rule.id;
                 this.drag.section = this.ruleSection(rule);
                 this.drag.overId = 0;
@@ -1157,6 +2351,9 @@
             // 没有结果的节点：每次探测都会临时起一个 xray 进程并真实出网，
             // 来回切标签或连续刷新不该每次都把所有节点重测一遍。
             onRoutingTabChange(key) {
+                // 非活动页签仍在 DOM 里但不可见，量出来的尺寸全是 0，
+                // 所以走向图的连线要等切到规则页签之后再画。
+                if (String(key) === '3') this.scheduleRuleWires();
                 if (String(key) === '2') {
                     const fresh = Date.now() - PROBE_FRESH_MS;
                     this.probeList(this.nodes.filter(n =>
@@ -1306,102 +2503,392 @@
                     },
                 });
             },
-            async openRule(rule) {
-                // 打开前先强制刷新：this.rules 只在挂载和历次写操作后更新，
-                // 页面既不轮询也不在获得焦点时刷新。如果管理员在另一个标签页
-                // 刚创建了一个入站，AttachInbound 已经在同一事务里把它加进了
-                // 这条规则的 inboundIds，但当前标签页手里还是旧快照——不刷新
-                // 就直接编辑（哪怕只改了备注）保存，会用这份旧 inboundIds 整体
-                // 覆盖掉数据库里刚被自动纳入的那个入站，它的流量因此静默退回
-                // 默认出站，没有任何一层会报错。这正是「自动应用于新增入站」
-                // 这个功能本身要杜绝的失效场景。
-                await this.loadAll();
-                if (rule) {
-                    // rule 是刷新前那份 this.rules 数组里的引用，loadAll 已经把
-                    // 整个数组换成新对象，不能继续深拷贝这个已经过期的引用，
-                    // 必须按 id 从刷新后的数组里重新取。
-                    rule = this.rules.find(r => r.id === rule.id);
-                    if (!rule) {
-                        // 刷新期间该规则被别的会话删除了，没有东西可编辑。
-                        this.$message.error('该规则已被删除，请刷新后重试');
-                        return;
-                    }
+            // ── 右侧编辑区 ──
+            // 可编辑字段的快照。「所有用户」时 applyToNewInbounds 不参与比较：
+            // 空数组本来就含未来新建的入站，两种取值行为完全一致。
+            ruleSnapshot(rule, allUsers) {
+                return JSON.stringify({
+                    remark: rule.remark || '',
+                    inboundIds: allUsers ? [] : rule.inboundIds.slice().sort((a, b) => a - b),
+                    applyToNewInbounds: allUsers ? true : !!rule.applyToNewInbounds,
+                    domainGroupIds: rule.domainGroupIds.slice().sort((a, b) => a - b),
+                    action: rule.action,
+                    outboundId: rule.action === 'proxy' ? (rule.outboundId || 0) : 0,
+                });
+            },
+            // 不带页面遮罩的刷新：点一行就整页转圈会让人以为卡住了
+            async refreshRulesQuiet() {
+                try {
+                    await this.loadAll();
+                } catch (e) {
+                    // 网络失败时沿用手里的数据；保存前还会再核对一次
                 }
-                this.ruleModal.rule = rule
-                    ? RoutingRule.fromJson(JSON.parse(JSON.stringify(rule)))
-                    : new RoutingRule();
-                if (!rule) {
-                    // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
-                    // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
-                    // 后端零值仍是 false——否则导入的旧文件也会变成 true。
-                    this.ruleModal.rule.applyToNewInbounds = true;
+            },
+            loadEditor(rule) {
+                const r = RoutingRule.fromJson(JSON.parse(JSON.stringify(rule)));
+                let brokenWarn = '';
+                // 数据损坏的规则 inboundIds / domainGroupIds 解出来是空数组，
+                // 看上去和「所有用户」一样。这里绝不能按「所有用户」初始化——
+                // 管理员顺手一存，这条规则就被静默放大到全体。
+                if (r.broken) {
+                    brokenWarn = '这条规则的用户数据已损坏，原来的选择无法读出，请重新选择用户后保存。';
                 }
-                this.ruleModal.allUsers = this.ruleModal.rule.inboundIds.length === 0;
-                this.ruleModal.visible = true;
+                if (r.groupsBroken) {
+                    brokenWarn = (brokenWarn ? brokenWarn + ' ' : '') + '这条规则的域名组数据已损坏，请重新选择域名组后保存。';
+                }
+                this.ruleEditor.rule = r;
+                this.ruleEditor.allUsers = !r.broken && r.inboundIds.length === 0;
+                this.ruleEditor.isNew = false;
+                this.ruleEditor.active = true;
+                this.ruleEditor.tried = false;
+                this.ruleEditor.usersOpen = false;
+                this.ruleEditor.brokenWarn = brokenWarn;
+                this.ruleEditor.base = this.ruleSnapshot(r, this.ruleEditor.allUsers);
+                this.ruleEditor.origin = JSON.stringify(rule);
+                if (this.$refs.ruleDetail && this.ruleEditor.rule.id !== this.ruleEditor.lastId) {
+                    this.$refs.ruleDetail.scrollTop = 0;
+                }
+                this.ruleEditor.lastId = r.id;
+                this.scheduleRuleWires();
+            },
+            // 有未保存的修改时不允许直接切走，避免一次误点丢掉改动
+            guardRuleEdit() {
+                if (!this.ruleDirty) return true;
+                this.$message.warning('先保存或撤销当前修改');
+                this.ruleEditor.shake = false;
+                this.$nextTick(() => {
+                    this.ruleEditor.shake = true;
+                    setTimeout(() => { this.ruleEditor.shake = false; }, 400);
+                });
+                return false;
+            },
+            async selectRule(rule) {
+                if (this.ruleEditor.active && !this.ruleEditor.isNew && this.ruleEditor.rule.id === rule.id) return;
+                if (!this.guardRuleEdit()) return;
+                // 打开前先刷新：this.rules 只在挂载和历次写操作后更新，页面既不
+                // 轮询也不在获得焦点时刷新。另一个标签页刚建的入站可能已经被
+                // AttachInbound 加进了这条规则的 inboundIds，拿旧快照编辑后保存，
+                // 会把它静默覆盖掉，它的流量因此退回默认出站。
+                await this.refreshRulesQuiet();
+                const fresh = this.rules.find(r => r.id === rule.id);
+                if (!fresh) {
+                    this.$message.error('该规则已被删除');
+                    return;
+                }
+                this.loadEditor(fresh);
+                if (matchMedia('(max-width: 1240px)').matches && this.$refs.ruleDetail) {
+                    this.$refs.ruleDetail.scrollIntoView({ block: 'start' });
+                }
+            },
+            async newRule() {
+                if (!this.guardRuleEdit()) return;
+                await this.refreshRulesQuiet();
+                const r = new RoutingRule();
+                // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
+                // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
+                // 后端零值仍是 false——否则导入的旧文件也会变成 true。
+                r.applyToNewInbounds = true;
+                Object.assign(this.ruleEditor, {
+                    rule: r, allUsers: true, isNew: true, active: true, tried: false,
+                    usersOpen: false, brokenWarn: '', base: '', origin: '',
+                });
+                this.scheduleRuleWires();
+                this.$nextTick(() => {
+                    const el = document.getElementById('rv-name');
+                    if (el) el.focus();
+                });
+            },
+            discardRuleEdit() {
+                if (this.ruleEditor.isNew) {
+                    this.ruleEditor.active = false;
+                    this.selectFirstRule();
+                    return;
+                }
+                if (this.savedRule) this.loadEditor(this.savedRule);
+            },
+            selectFirstRule() {
+                const first = this.blockRules.concat(this.routeRules)[0];
+                if (first) this.loadEditor(first);
+                else this.ruleEditor.active = false;
+            },
+            toggleRuleInbound(id) {
+                const ids = this.ruleEditor.rule.inboundIds;
+                this.setRuleInbounds(ids.includes(id) ? ids.filter(x => x !== id) : ids.concat(id));
+            },
+            toggleRuleGroup(id) {
+                const ids = this.ruleEditor.rule.domainGroupIds;
+                this.setRuleGroups(ids.includes(id) ? ids.filter(x => x !== id) : ids.concat(id));
             },
             inboundOccupiedBy(id) {
                 const map = this.occupiedInbounds;
                 return map[0] || map[id] || '';
             },
             toggleAllUsers(checked) {
-                this.ruleModal.allUsers = checked;
-                if (checked) this.ruleModal.rule.inboundIds = [];
+                this.ruleEditor.allUsers = checked;
+                if (checked) this.ruleEditor.rule.inboundIds = [];
             },
             // 多选框给出的是整份新数组。被别的规则占用的入站在下拉里已置灰，
             // 这里再滤一遍兜底；升序提交，和后端 EncodeInboundIds 的存储顺序对齐。
             setRuleInbounds(ids) {
-                const keep = this.ruleModal.rule.inboundIds;
-                this.ruleModal.rule.inboundIds = ids
+                const keep = this.ruleEditor.rule.inboundIds;
+                this.ruleEditor.rule.inboundIds = ids
                     .filter(id => keep.includes(id) || !this.inboundOccupiedBy(id))
                     .sort((a, b) => a - b);
             },
             // 换了域名组，占用集合跟着变：已选但在新集合下不可用的用户必须剔除，
             // 否则会带着一个必被后端拒绝的选择去点保存。
             //
-            // 在 @change 里显式处理而不是 watch：Vue 的 watcher 在 nextTick
-            // 异步触发，openRule 先换 rule 再把 visible 置真，等 watcher 跑起来
-            // visible 已经是 true，守卫拦不住它——打开编辑弹窗会顺手把已勾选的
-            // 项过滤一遍。这里显式赋值再读 computed，时序完全可控。
+            // 在点击处理里显式调用而不是 watch：watcher 在 nextTick 异步触发，
+            // loadEditor 换草稿时它也会跑，打开一条规则就会顺手把已勾选的项
+            // 过滤一遍。这里显式赋值再读 computed，时序完全可控。
             setRuleGroups(ids) {
                 // 升序提交，和后端 EncodeDomainGroupIds 的存储顺序对齐
-                this.ruleModal.rule.domainGroupIds = ids.slice().sort((a, b) => a - b);
+                this.ruleEditor.rule.domainGroupIds = ids.slice().sort((a, b) => a - b);
                 this.reconcileInboundSelection();
             },
             // 按当前域名组集合重算占用，剔除已不可用的用户选择。
             reconcileInboundSelection() {
                 const map = this.occupiedInbounds;
                 if (map[0]) {
-                    this.ruleModal.allUsers = false;
-                    this.ruleModal.rule.inboundIds = [];
+                    this.ruleEditor.allUsers = false;
+                    this.ruleEditor.rule.inboundIds = [];
                     return;
                 }
-                if (this.ruleModal.allUsers && Object.keys(map).length > 0) {
-                    this.ruleModal.allUsers = false;
+                if (this.ruleEditor.allUsers && Object.keys(map).length > 0) {
+                    this.ruleEditor.allUsers = false;
                 }
-                this.ruleModal.rule.inboundIds =
-                    this.ruleModal.rule.inboundIds.filter(id => !map[id]);
+                this.ruleEditor.rule.inboundIds =
+                    this.ruleEditor.rule.inboundIds.filter(id => !map[id]);
             },
             async saveRule() {
-                const r = this.ruleModal.rule;
+                const r = this.ruleEditor.rule;
+                this.ruleEditor.tried = true;
                 if (!r.domainGroupIds.length) {
                     // 空的域名组集合是非法状态而不是「所有域名组」，没有理由
                     // 把它发出去。见 model.RoutingRule 的字段注释。
                     this.$message.error('请至少选择一个域名组');
                     return;
                 }
-                const inboundIds = this.ruleModal.allUsers ? [] : r.inboundIds;
-                if (!this.ruleModal.allUsers && !inboundIds.length) {
+                const inboundIds = this.ruleEditor.allUsers ? [] : r.inboundIds;
+                if (!this.ruleEditor.allUsers && !inboundIds.length) {
                     // 空数组的语义是「所有用户」。静默提交等于把这条规则的作用域
                     // 放大到全体，所以必须在这里拦住，不能让后端去猜用户的意图。
-                    this.$message.error('请至少勾选一个用户，或勾选「所有用户」');
+                    this.$message.error('请至少选择一个用户，或选择「所有用户」');
                     return;
                 }
-                const url = r.id ? 'aui/routing/rule/update/' + r.id : 'aui/routing/rule/add';
-                const msg = await this.post(url, Object.assign({}, r, { inboundIds }));
-                if (msg.success) {
-                    this.ruleModal.visible = false;
-                    await this.loadAll();
+                if (r.action === 'proxy' && !r.outboundId) {
+                    this.$message.error('请选择一个出站节点');
+                    return;
                 }
+                this.ruleEditor.saving = true;
+                try {
+                    if (!this.ruleEditor.isNew) {
+                        // 草稿可能在这里停留了很久。保存前与服务端现值比对，别处改过
+                        // （AttachInbound 自动加入新入站、另一个标签页编辑过）就停下，
+                        // 绝不拿旧草稿整体覆盖。
+                        const res = await axios.post('aui/routing/rule/list');
+                        const server = (res.data.obj || []).map(RoutingRule.fromJson).find(x => x.id === r.id);
+                        if (!server) {
+                            this.$message.error('该规则已被删除');
+                            await this.refreshRulesQuiet();
+                            this.selectFirstRule();
+                            return;
+                        }
+                        if (JSON.stringify(server) !== this.ruleEditor.origin) {
+                            await this.refreshRulesQuiet();
+                            this.loadEditor(this.rules.find(x => x.id === r.id) || server);
+                            this.$message.warning('这条规则刚在别处被修改过（例如新建的用户被自动加入），已载入最新内容，请重新修改后保存');
+                            return;
+                        }
+                    }
+                    const before = this.rules.map(x => x.id);
+                    const url = r.id ? 'aui/routing/rule/update/' + r.id : 'aui/routing/rule/add';
+                    const msg = await HttpUtil.post(url, Object.assign({}, r, { inboundIds }));
+                    if (!msg || !msg.success) return;
+                    await this.refreshRulesQuiet();
+                    const saved = r.id
+                        ? this.rules.find(x => x.id === r.id)
+                        : this.rules.find(x => !before.includes(x.id));
+                    if (saved) this.loadEditor(saved);
+                    else this.selectFirstRule();
+                } finally {
+                    this.ruleEditor.saving = false;
+                }
+            },
+            // 列表上的启停开关。后端没有单独的启停接口，走整条更新——所以必须先
+            // 刷新、拿服务端最新的那份再翻转 enable，不能用手里的旧快照提交。
+            async toggleRuleEnable(rule) {
+                if (this.ruleToggling) return;
+                if (this.ruleEditor.active && this.ruleEditor.rule.id === rule.id && this.ruleDirty) {
+                    this.guardRuleEdit();
+                    return;
+                }
+                this.ruleToggling = rule.id;
+                try {
+                    await this.refreshRulesQuiet();
+                    const fresh = this.rules.find(x => x.id === rule.id);
+                    if (!fresh) {
+                        this.$message.error('该规则已被删除');
+                        return;
+                    }
+                    // 数据损坏的规则 inboundIds 是空数组，原样提交会被当成「所有用户」
+                    if (fresh.broken || fresh.groupsBroken) {
+                        this.$message.error('这条规则的数据已损坏，请先在右侧重新选择后保存');
+                        if (!this.ruleDirty) this.loadEditor(fresh);
+                        return;
+                    }
+                    const msg = await HttpUtil.post('aui/routing/rule/update/' + fresh.id,
+                        Object.assign({}, fresh, { enable: !fresh.enable }));
+                    await this.refreshRulesQuiet();
+                    if (msg && msg.success && this.ruleEditor.active && this.ruleEditor.rule.id === fresh.id && !this.ruleDirty) {
+                        const now = this.rules.find(x => x.id === fresh.id);
+                        if (now) this.loadEditor(now);
+                    }
+                } finally {
+                    this.ruleToggling = 0;
+                }
+            },
+            ruleVisible(rule) {
+                if (this.ruleFilter === 'off' && rule.enable) return false;
+                if (this.ruleFilter === 'on' && (!rule.enable || this.ruleIssue(rule))) return false;
+                if (this.ruleFilter === 'issue' && (!rule.enable || !this.ruleIssue(rule))) return false;
+                const q = this.ruleQuery.trim().toLowerCase();
+                if (!q) return true;
+                const hay = [rule.remark, this.ruleGroupsLabel(rule), this.ruleDestLabel(rule),
+                    ...rule.inboundIds.map(this.inboundName)].join(' ').toLowerCase();
+                return hay.includes(q);
+            },
+            clearRuleFilter() {
+                this.ruleFilter = 'all';
+                this.ruleQuery = '';
+            },
+            // 序号是生成期的真实匹配顺序：封禁段整体在前（routing_inject.go）
+            ruleOrder(rule) {
+                if (rule.action === 'block') return this.blockRules.findIndex(r => r.id === rule.id) + 1;
+                return this.blockRules.length + this.routeRules.findIndex(r => r.id === rule.id) + 1;
+            },
+            ruleBrand(rule) {
+                for (const id of rule.domainGroupIds || []) {
+                    const g = this.groups.find(x => x.id === id);
+                    if (g && g.brand) return g.brand;
+                }
+                return null;
+            },
+            ruleTileKind(rule) {
+                if (rule.action === 'block') return 'block';
+                return this.ruleBrand(rule) ? 'brand' : 'text';
+            },
+            ruleTileClass(rule) {
+                return 'is-' + this.ruleTileKind(rule);
+            },
+            // 没有品牌图标时用首个域名组的首字与配色，与域名组卡片同一套
+            ruleTileStyle(rule) {
+                if (this.ruleTileKind(rule) !== 'text') return null;
+                const g = this.groups.find(x => x.id === (rule.domainGroupIds || [])[0]);
+                return { background: g ? this.groupColorOf(g) : '#64748B' };
+            },
+            ruleInitials(rule) {
+                const g = this.groups.find(x => x.id === (rule.domainGroupIds || [])[0]);
+                if (g) return this.groupInitials(g);
+                const name = (rule.remark || '').trim();
+                return name ? name.slice(0, 1) : '#';
+            },
+            ruleGroupsLabel(rule) {
+                if (!rule.domainGroupIds.length) return '未选择域名组';
+                return rule.domainGroupIds.map(this.groupName).join(' / ');
+            },
+            ruleDestLabel(rule) {
+                if (rule.action === 'block') return '封禁';
+                if (rule.action === 'direct') return '直连（本机出网）';
+                return rule.outboundId ? this.nodeName(rule.outboundId) : '未选择节点';
+            },
+            ruleUsersLabel(rule) {
+                if (rule.broken) return '数据损坏';
+                const ids = rule.inboundIds;
+                if (!ids.length) return '所有用户';
+                if (ids.length <= 2) return ids.map(this.inboundName).join('、');
+                return ids.length + ' 位用户';
+            },
+            ruleSentence(rule) {
+                if (!rule.domainGroupIds.length) return '选择用户、域名组和去向后，这里会用一句话说明这条规则。';
+                const who = rule.inboundIds.length ? this.ruleUsersLabel(rule) : '所有用户';
+                const what = rule.domainGroupIds.map(this.groupName).join('、');
+                const where = rule.action === 'block' ? '直接封禁。'
+                    : rule.action === 'direct' ? '从本机直连出网。'
+                    : rule.outboundId ? '从「' + this.nodeName(rule.outboundId) + '」出站。' : '……（还没选出站节点）';
+                return who + ' 访问「' + what + '」时，' + where;
+            },
+            nodeSubLabel(node) {
+                const parts = [];
+                if (!node.enable) parts.push('已禁用');
+                if (node.exitCountry) parts.push(countryName(node.exitCountry) + ' 出口');
+                if (node.probe && node.probe.status === 'ok' && node.probe.latencyMs) parts.push(node.probe.latencyMs + 'ms');
+                if (!parts.length) parts.push(node.protocol || '');
+                return parts.join(' · ');
+            },
+            destSubLabel(rule) {
+                if (rule.action === 'block') return '直接丢弃连接';
+                if (rule.action === 'direct') return '不经过出站节点';
+                const n = this.nodes.find(x => x.id === rule.outboundId);
+                return n ? this.nodeSubLabel(n) : '';
+            },
+
+            // ── 流量走向连线 ──
+            // 连线按真实元素位置画（平滑曲线 + 流动虚线 + 光点）。纯装饰：信息已在
+            // 标题下那句话和三列文字里。系统开了「减少动态效果」时只留静态线。
+            scheduleRuleWires() {
+                this.$nextTick(() => requestAnimationFrame(() => this.drawRuleWires()));
+            },
+            drawRuleWires() {
+                const d = this.$refs.ruleDiagram, svg = this.$refs.ruleWires;
+                if (!d || !svg) return;
+                if (getComputedStyle(svg).display === 'none' || !d.offsetWidth) {
+                    svg.innerHTML = '';
+                    return;
+                }
+                const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+                const box = d.getBoundingClientRect();
+                const R = el => {
+                    const b = el.getBoundingClientRect();
+                    return { l: b.left - box.left, r: b.right - box.left, y: b.top - box.top + b.height / 2, h: b.height };
+                };
+                const list = d.querySelector('.rv-ulist'), center = d.querySelector('.rv-dcenter'), dest = d.querySelector('.rv-dest');
+                if (!list || !center || !dest) return;
+                const L = R(list), C = R(center), N = R(dest);
+                const rows = Array.from(d.querySelectorAll('.rv-urow')).map(R);
+                const action = this.ruleEditor.rule.action;
+                const col = action === 'block' ? '#D9363E' : '#12A150';
+                const curve = (x1, y1, x2, y2) => {
+                    const k = (x2 - x1) * 0.55;
+                    return 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + k) + ' ' + y1 + ', ' + (x2 - k) + ' ' + y2 + ', ' + x2 + ' ' + y2;
+                };
+                const dots = (path, color, n, dur, delay) => reduce ? '' : Array.from({ length: n }, (_, j) => {
+                    const begin = (delay + j * dur / n).toFixed(2) + 's';
+                    return '<circle r="2.6" fill="' + color + '" opacity="0">' +
+                        '<animateMotion dur="' + dur + 's" begin="' + begin + '" repeatCount="indefinite" path="' + path + '"></animateMotion>' +
+                        '<animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.15;.85;1" dur="' + dur + 's" begin="' + begin + '" repeatCount="indefinite"></animate></circle>';
+                }).join('');
+                let h = '<defs>' +
+                    '<linearGradient id="rv-gl" gradientUnits="userSpaceOnUse" x1="' + L.r + '" x2="' + C.l + '"><stop offset="0" stop-color="#8EC5FF"></stop><stop offset="1" stop-color="#3D7BFF"></stop></linearGradient>' +
+                    '<linearGradient id="rv-gr" gradientUnits="userSpaceOnUse" x1="' + C.r + '" x2="' + N.l + '"><stop offset="0" stop-color="' + (action === 'block' ? '#FF9A9A' : '#3FD6A4') + '"></stop><stop offset="1" stop-color="' + col + '"></stop></linearGradient>' +
+                    '<filter id="rv-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2"></feGaussianBlur></filter>' +
+                    '<marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + col + '"></path></marker></defs>';
+                const n = rows.length, spread = Math.min(8, (C.h - 24) / Math.max(1, n - 1));
+                rows.forEach((u, i) => {
+                    const x1 = L.r + 7, p = curve(x1, u.y, C.l - 2, C.y + (i - (n - 1) / 2) * spread);
+                    h += '<path d="' + p + '" fill="none" stroke="url(#rv-gl)" stroke-width="5" opacity=".18" filter="url(#rv-glow)"></path>' +
+                        '<path d="' + p + '" fill="none" stroke="url(#rv-gl)" stroke-width="1.8" opacity=".55"></path>' +
+                        '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="#3D7BFF" stroke-width="1.8" stroke-linecap="round"></path>' +
+                        '<circle cx="' + x1 + '" cy="' + u.y + '" r="3.5" fill="#fff" stroke="#3D7BFF" stroke-width="1.8"></circle>' +
+                        dots(p, '#3D7BFF', 1, 2.2, i * 0.35);
+                });
+                const p = curve(C.r + 2, C.y, N.l - 4, N.y);
+                h += '<path d="' + p + '" fill="none" stroke="url(#rv-gr)" stroke-width="6" opacity=".2" filter="url(#rv-glow)"></path>' +
+                    '<path d="' + p + '" fill="none" stroke="url(#rv-gr)" stroke-width="2.2" marker-end="url(#rv-arrow)"></path>' +
+                    '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="#fff" stroke-width="1.4" opacity=".85" stroke-linecap="round"></path>' +
+                    dots(p, col, 2, 1.6, 0) +
+                    '<circle cx="' + (C.r + 2) + '" cy="' + C.y + '" r="3.5" fill="#fff" stroke="' + col + '" stroke-width="1.8"></circle>';
+                svg.innerHTML = h;
             },
             delRule(rule) {
                 // 规则没有引用守卫兜底（没有别的东西引用规则），删掉即不可恢复，
@@ -1415,7 +2902,9 @@
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/rule/del/' + rule.id);
-                        if (msg.success) await this.loadAll();
+                        if (!msg.success) return;
+                        await this.loadAll();
+                        if (this.ruleEditor.active && this.ruleEditor.rule.id === rule.id) this.selectFirstRule();
                     },
                 });
             },
@@ -1577,8 +3066,7 @@
                 else if (a.key === 'delete') this.delNode(node);
             },
             clickRuleAction(a, rule) {
-                if (a.key === 'edit') this.openRule(rule);
-                else if (a.key === 'delete') this.delRule(rule);
+                if (a.key === 'delete') this.delRule(rule);
             },
 
             // 出站 tag 不可变，且是分流规则引用它的唯一标识，值得能一键复制。
@@ -1730,6 +3218,19 @@
                 await this.loadAll();
             },
         },
+        watch: {
+            // 草稿一变，走向图的三列尺寸就可能变，连线跟着重画
+            editorPreview: {
+                deep: true,
+                handler() {
+                    this.scheduleRuleWires();
+                },
+            },
+            flowUsers() {
+                this.scheduleRuleWires();
+            },
+
+        },
         async mounted() {
             this.loadSubTime();
             this.spinning = true;
@@ -1738,6 +3239,14 @@
             } finally {
                 this.spinning = false;
             }
+            this.selectFirstRule();
+            window.addEventListener('resize', () => this.scheduleRuleWires());
+            // 整页跳转（侧栏菜单就是 location.href）会丢掉右侧未保存的修改，提醒一次
+            window.addEventListener('beforeunload', e => {
+                if (!this.ruleDirty) return;
+                e.preventDefault();
+                e.returnValue = '';
+            });
         },
     });
 </script>

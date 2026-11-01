@@ -62,7 +62,7 @@
      * index.html 里那些 60px 高的卡片只会更成立。 */
     --aui-r-sm:   6px;    /* chip、tag、小按钮 */
     --aui-r-md:  10px;    /* 输入框、按钮、图标块 */
-    --aui-r-lg:  14px;    /* 卡片、面板、弹窗 */
+    --aui-r-lg:  16px;    /* 卡片、面板、弹窗。v4 视觉稿把卡片整体放圆了一档（14→16） */
     --aui-r-pill: 999px;  /* 仅状态 badge */
 
     /* ── Shadow ────────────────────────────────────────────────────
@@ -71,9 +71,10 @@
     --aui-sh-2: 0 2px 8px rgba(15, 23, 42, .06);
     --aui-sh-3: 0 8px 24px -8px rgba(15, 23, 42, .16);
     /* 卡片与面板在浅灰底上的投影：一层贴边的细影 + 一层向下扩散的柔影 */
-    --aui-sh-card:  0 1px 2px rgba(14, 23, 38, .04), 0 6px 20px -14px rgba(14, 23, 38, .16);
-    --aui-sh-float: 0 1px 2px rgba(14, 23, 38, .05), 0 8px 24px -14px rgba(14, 23, 38, .20);
-    --aui-line-card: #E6EAF0;
+    /* v4 视觉稿：投影带一点蓝调，在渐变底上更柔和；仍然只表达层级 */
+    --aui-sh-card:  0 2px 6px rgba(31, 64, 140, .05), 0 10px 30px -18px rgba(31, 64, 140, .28);
+    --aui-sh-float: 0 2px 6px rgba(31, 64, 140, .06), 0 14px 34px -18px rgba(31, 64, 140, .32);
+    --aui-line-card: #E8EDF7;
 
     /* ── Motion ────────────────────────────────────────────────── */
     --aui-dur:  180ms;
@@ -100,10 +101,23 @@ html, body {
     background-color: var(--aui-bg);
 }
 
+/* v4 视觉稿的页面底：浅冷灰蓝打底，右上淡蓝、左上淡紫、右下淡青三团柔光。
+ * 只是底色，不承载任何信息；所有文字都画在白色卡片上，对比度不受影响
+ * （页面描述直接画在底上：--aui-text-2 在纯色底两端 #F3F6FE / #EEF2FB 上为 7.0 / 6.8:1，叠上柔光最暗处约 #E9EEFA 仍有 6.5:1）。
+ * fixed：页面很长时柔光不随滚动重复平铺，也不会滚走露出纯色。 */
+body {
+    background:
+        radial-gradient(900px 500px at 85% -10%, rgba(160, 190, 255, .40), transparent 60%),
+        radial-gradient(700px 500px at 30% 0%, rgba(205, 190, 255, .30), transparent 60%),
+        radial-gradient(900px 600px at 100% 100%, rgba(170, 235, 225, .26), transparent 60%),
+        linear-gradient(180deg, #F3F6FE 0%, #EEF2FB 100%);
+    background-attachment: fixed;
+}
+
 /* antd 把页面底色画在 .ant-layout 上（antd.min.css: .ant-layout{...background:#f0f2f5}），
  * 只改 html/body 会被它整块盖住，一个像素都看不出来。 */
 .ant-layout {
-    background: var(--aui-bg);
+    background: transparent; /* 透出 body 的渐变底；#content-layout 也是 .ant-layout */
 }
 
 /* 第二段：挂载后整体淡入，内容区再多一点点位移，让它读起来是「浮现」
@@ -164,6 +178,14 @@ html, body {
     .list-enter,
     .list-leave-active {
         transform: none;
+    }
+
+    /* 分流规则页：走向图的流动虚线、保存条的出现与抖动。光点动画在
+     * routing.html 的 drawRuleWires 里按同一个媒体查询直接不画。 */
+    .rv-wire-flow,
+    .rv-savebar,
+    .rv-savebar.is-shake {
+        animation: none;
     }
 
     /* 进度条、资源圆环的长度变化与展开箭头的旋转都是位移的一种 */
@@ -402,8 +424,8 @@ button:focus-visible,
 }
 
 .sider-brand-name {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: 18px;
+    font-weight: 700;
     letter-spacing: -.01em;
     color: var(--aui-text);
     white-space: nowrap;
@@ -418,8 +440,10 @@ button:focus-visible,
  * antd light 菜单的选中项自带主色浅底与右侧 3px 主色竖条（::after），
  * 两者都要盖掉，否则选中态仍是一块蓝。 */
 #sider.ant-layout-sider {
-    background: var(--aui-surface);
-    border-right: 1px solid var(--aui-line);
+    /* v4：半透明白底压在渐变上，比纯白轻一档；文字仍画在 ≥ 92% 白的底上 */
+    background: rgba(255, 255, 255, .72);
+    border-right: 1px solid rgba(255, 255, 255, .9);
+    box-shadow: 1px 0 0 rgba(15, 23, 42, .04);
 }
 
 #sider .ant-menu {
@@ -462,10 +486,9 @@ button:focus-visible,
 
 /* 选中项：浅蓝底 + 主色字 + 左侧 3px 主色条。#1D4ED8 在 #EEF3FF 上 6.1:1 */
 #sider .ant-menu:not(.ant-menu-horizontal) .ant-menu-item-selected {
-    background: #EEF3FF;
+    background: linear-gradient(90deg, #E4EDFF, #EEF3FF); /* #1D4ED8 在两端上为 5.7 / 6.0:1 */
     color: #1D4ED8;
     font-weight: 600;
-    box-shadow: inset 3px 0 0 var(--aui-primary);
 }
 
 #sider .ant-menu-item-selected .anticon {
@@ -1366,34 +1389,6 @@ button.chip.is-active {
     color: var(--aui-text-3);
 }
 
-/* ── 分流规则：把一行读成一条链路 ────────────────────────────────────
- * 一条规则表达的是「哪些用户 → 访问哪批域名 → 去哪」。改动前三列各自是
- * 一堆彩色 a-tag，读的人要自己把它们串起来。加两个箭头把顺序说出来。
- *
- * 箭头用 ::after 画在单元格右缘，不占一列——多一列会让本来就窄的三列
- * 再各缩一截。aria-hidden 由 CSS 生成内容天然满足（生成内容不进无障碍树）。 */
-.rule-flow-cell {
-    position: relative;
-}
-
-.rule-flow-cell::after {
-    content: '→';
-    position: absolute;
-    right: 2px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--aui-line-strong);
-    font-size: 13px;
-    line-height: 1;
-    pointer-events: none;
-}
-
-/* 窄屏下表格已经在横滚，箭头压在滚动边界上反而添乱 */
-@media (max-width: 768px) {
-    .rule-flow-cell::after {
-        display: none;
-    }
-}
 
 /* ── 系统状态页：资源条与指标格 ──────────────────────────────────────
  * 改动前 CPU / 内存 / swap / 硬盘是四个 a-progress type="dashboard" 的大圆环，
@@ -3153,47 +3148,6 @@ button.xray-badge:focus-visible {
 .gcard-sub.is-error              { color: var(--aui-danger); }
 .gcard-sub.is-error .gcard-dot   { background: var(--aui-danger); }
 
-/* ── 分流规则：表格行做成一张张圆角卡片 ─────────────────────────────
- * 不换成 div 列表：拖拽排序挂在 a-table 的 custom-row 上。 */
-.rule-table .ant-table-content > .ant-table-body > table {
-    border-collapse: separate;
-    border-spacing: 0 8px;
-    margin-top: -8px;
-}
-
-.rule-table .ant-table-tbody > tr > td {
-    background: #FFFFFF;
-    border-top: 1px solid var(--aui-line);
-    border-bottom: 1px solid var(--aui-line) !important;
-    padding-top: 14px;
-    padding-bottom: 14px;
-}
-
-.rule-table .ant-table-tbody > tr > td:first-child {
-    border-left: 1px solid var(--aui-line);
-    border-radius: 12px 0 0 12px;
-}
-
-.rule-table .ant-table-tbody > tr > td:last-child {
-    border-right: 1px solid var(--aui-line);
-    border-radius: 0 12px 12px 0;
-}
-
-.rule-table .ant-table-tbody > tr:hover > td {
-    background: #FAFCFF;
-    border-color: #C9D6EA !important;
-}
-
-.rule-table.is-block .ant-table-tbody > tr > td {
-    background: #FFFBFB;
-    border-color: #F7D9D9 !important;
-}
-
-/* 规则卡片不显示表头（与视觉稿一致）：每行读成一句「谁 → 哪些域名 → 去哪」 */
-.rule-table .ant-table-thead {
-    display: none;
-}
-
 .rule-lead {
     display: inline-flex;
     align-items: center;
@@ -3212,10 +3166,6 @@ button.xray-badge:focus-visible {
     align-items: center;
     justify-content: center;
     font-variant-numeric: tabular-nums;
-}
-
-.rule-table td:nth-child(2) {
-    font-weight: 500;
 }
 
 /* 「所有用户」：靛色 chip。#4338CA 在 #EEF2FF 上 7.0:1 */

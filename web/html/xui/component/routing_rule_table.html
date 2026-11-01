@@ -1,102 +1,64 @@
-<!-- 分流规则表的列渲染。封禁段与分流段是两张独立的 a-table（理由见
-     routing.html 里那段注释），列的渲染必须逐字一致——各写一份迟早会分叉，
-     而分叉后两段的差异不会有任何东西提醒你。 -->
-{{define "routingRuleTableSlots"}}
-    <template slot="drag" slot-scope="text, rule, index">
-        <span class="rule-lead">
-            <a-tooltip title="拖动调整顺序">
-                <span class="rule-drag-handle" draggable="true"
-                      @dragstart="onRuleDragStart($event, rule)"
-                      @dragend="resetRuleDrag"></span>
-            </a-tooltip>
-            <!-- 序号就是匹配顺序（越小越先匹配），由行的先后决定 -->
-            <span class="rule-prio">[[ index + 1 ]]</span>
+<!-- 分流规则列表的一行。封禁段与分流段是两个独立的列表（理由见 routing.html
+     里那段注释），行的渲染必须逐字一致——各写一份迟早会分叉，而分叉后两段的
+     差异不会有任何东西提醒你。
+
+     使用处约定：外层 <li v-for="(rule, index) in blockRules|routeRules"> 提供
+     rule 与 index；行本身只是放置目标（dragover/drop 挂在 li 上），可拖的只有
+     左侧手柄——整行可拖会干扰行内的开关、菜单和文本选择。 -->
+{{define "routingRuleRow"}}
+    <span class="rule-lead">
+        <a-tooltip :title="ruleFiltering ? '清除筛选与搜索后才能拖动排序' : '拖动调整顺序'">
+            <span class="rule-drag-handle" :class="{ 'is-disabled': ruleFiltering }"
+                  :draggable="ruleFiltering ? 'false' : 'true'"
+                  @dragstart="onRuleDragStart($event, rule)"
+                  @dragend="resetRuleDrag"></span>
+        </a-tooltip>
+        <!-- 序号就是生成期的真实匹配顺序：封禁段整体在前，分流段接着往下数 -->
+        <span class="rule-prio" title="匹配顺序">[[ String(ruleOrder(rule)).padStart(2, '0') ]]</span>
+    </span>
+    <!-- 点这一块就在右侧打开这条规则；开关与菜单是它的兄弟节点，不嵌在按钮里 -->
+    <button type="button" class="rv-row-hit" :aria-current="ruleEditor.active && ruleEditor.rule.id === rule.id ? 'true' : null"
+            @click="selectRule(rule)">
+        <span class="rv-tile" :class="ruleTileClass(rule)" :style="ruleTileStyle(rule)" aria-hidden="true">
+            <img v-if="ruleTileKind(rule) === 'brand'"
+                 :src="'{{ .base_path }}assets/brand-icons/' + ruleBrand(rule).slug + '.svg?{{ .cur_ver }}'" alt="">
+            <a-icon v-else-if="ruleTileKind(rule) === 'block'" type="stop" theme="filled"></a-icon>
+            <span v-else class="rv-tile-text">[[ ruleInitials(rule) ]]</span>
         </span>
-    </template>
-    <template slot="inbound" slot-scope="text, rule">
-        <span v-if="rule.broken" class="status-badge status-danger">
-            <a-icon type="close-circle"></a-icon>数据损坏
+        <span class="rv-row-text">
+            <span class="rv-row-name">
+                <span class="rv-row-title">[[ rule.remark || '未命名规则' ]]</span>
+                <span v-if="rule.action === 'block'" class="rv-tag is-block">拦截</span>
+                <span v-if="!rule.enable" class="rv-tag is-off">已停用</span>
+                <span v-else-if="ruleIssue(rule)" class="rv-tag is-warn" :title="ruleIssue(rule)">未生效</span>
+            </span>
+            <span class="rv-row-sub">
+                <template v-if="rule.groupsBroken">域名组数据损坏</template>
+                <template v-else>[[ ruleGroupsLabel(rule) ]]</template>
+                <template v-if="rule.action !== 'block'">
+                    <span class="rv-arrow" aria-hidden="true">→</span><span class="rv-row-dest">[[ ruleDestLabel(rule) ]]</span>
+                </template>
+            </span>
         </span>
-        <span v-else-if="!rule.inboundIds.length" class="chip chip-all">所有用户</span>
-        <template v-else>
-            <!-- 引用到一个不存在的入站是**真状态**（这条规则的这一部分不会
-                 生效），所以它是红徽标；正常的用户名只是分类，用无色 chip。 -->
-            <template v-for="id in rule.inboundIds.slice(0, 3)">
-                <span v-if="inboundMissing(id)" :key="id" class="status-badge status-danger">
-                    <a-icon type="close-circle"></a-icon>[[ inboundName(id) ]]
+        <span class="rv-upill" :class="{ 'is-all': !rule.broken && !rule.inboundIds.length, 'is-broken': rule.broken }"
+              :title="rule.inboundIds.length > 2 ? rule.inboundIds.map(inboundName).join('、') : null">
+            <a-icon :type="rule.broken ? 'close-circle' : (rule.inboundIds.length ? 'user' : 'global')"></a-icon>[[ ruleUsersLabel(rule) ]]
+        </span>
+    </button>
+    <button type="button" role="switch" class="rv-switch"
+            :aria-checked="rule.enable ? 'true' : 'false'"
+            :aria-label="'启用规则「' + (rule.remark || ('#' + rule.id)) + '」'"
+            :disabled="ruleToggling === rule.id"
+            @click="toggleRuleEnable(rule)"></button>
+    <a-dropdown :trigger="['click']">
+        <button type="button" class="icon-btn" @click="e => e.preventDefault()"
+                :aria-label="'更多操作：' + (rule.remark || '分流规则')"><a-icon type="more"></a-icon></button>
+        <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
+            <a-menu-item key="delete">
+                <span style="color: var(--aui-danger)">
+                    <a-icon type="delete"></a-icon>删除规则
                 </span>
-                <span v-else :key="id" class="chip">[[ inboundName(id) ]]</span>
-            </template>
-            <a-tooltip v-if="rule.inboundIds.length > 3"
-                       :title="rule.inboundIds.map(inboundName).join('、')">
-                <span class="chip">等 [[ rule.inboundIds.length ]] 人</span>
-            </a-tooltip>
-        </template>
-        <!-- 数据损坏的规则不该同时挂「+新用户」，那会让一条根本不生效的规则
-             看起来还带着自动纳新能力。「所有用户」（inboundIds 为空）永远覆盖
-             未来新建的入站——AttachInbound 对这类规则本来就是跳过不追加，
-             无论 applyToNewInbounds 是什么值都不影响它的实际行为——所以这里
-             不看这一列，直接把徽标显示出来，两条同样是「所有用户」的规则
-             才不会因为这一列的历史取值不同而在列表里显得不一样。 -->
-        <a-tooltip v-if="!rule.broken && (rule.applyToNewInbounds || !rule.inboundIds.length)"
-                   title="以后新建的入站会自动加入这条规则">
-            <span class="chip">+新用户</span>
-        </a-tooltip>
-    </template>
-    <template slot="group" slot-scope="text, rule">
-        <span v-if="rule.groupsBroken" class="status-badge status-danger">
-            <a-icon type="close-circle"></a-icon>域名组数据损坏
-        </span>
-        <template v-else>
-            <template v-for="gid in rule.domainGroupIds">
-                <span v-if="groupMissing(gid)" :key="gid" class="status-badge status-danger">
-                    <a-icon type="close-circle"></a-icon>[[ groupName(gid) ]]
-                </span>
-                <span v-else :key="gid" class="chip">[[ groupName(gid) ]] <span class="chip-count">[[ groupCount(gid) ]]</span></span>
-            </template>
-        </template>
-    </template>
-    <template slot="target" slot-scope="text, rule">
-        <!-- 去向胶囊（视觉稿 v3）：封禁红、直连绿、转发到节点用该节点自己的身份色
-             （与节点表头像同色，utils.js 的 NodeTone），多个节点之间一眼可分。
-             直连用绿色是视觉稿定稿时的选择：在这一列里它表示「本机出网」，
-             它不出现在任何健康状态的位置。 -->
-        <span v-if="rule.action === 'block'" class="dest-pill is-block">封禁</span>
-        <span v-else-if="rule.action === 'direct'" class="dest-pill is-direct">直连（本机出网）</span>
-        <span v-else-if="nodeMissing(rule.outboundId)" class="status-badge status-danger">
-            <a-icon type="close-circle"></a-icon>[[ nodeName(rule.outboundId) ]]
-        </span>
-        <span v-else class="dest-pill is-proxy" :style="nodePillStyle(rule.outboundId)">[[ nodeName(rule.outboundId) ]]</span>
-    </template>
-    <template slot="warn" slot-scope="text, rule">
-        <!-- #faad14 在白底上只有 2.0:1、#52c41a 只有 2.3:1，两个图标都接近
-             看不见。换成语义 token（5.02 / 5.02:1）。图标形状本身也承担含义，
-             不是只靠颜色。 -->
-        <a-tooltip v-if="ruleIssue(rule)" :title="ruleIssue(rule)">
-            <a-icon type="warning" style="color: var(--aui-warning)"
-                    :aria-label="ruleIssue(rule)"></a-icon>
-        </a-tooltip>
-        <a-tooltip v-else-if="ruleNote(rule)" :title="ruleNote(rule)">
-            <a-icon type="check-circle" style="color: var(--aui-success)"
-                    :aria-label="'这条规则会生效。' + ruleNote(rule)"></a-icon>
-        </a-tooltip>
-        <a-icon v-else type="check-circle" style="color: var(--aui-success)"
-                aria-label="这条规则会生效"></a-icon>
-    </template>
-    <template slot="action" slot-scope="text, rule">
-        <a-dropdown :trigger="['click']">
-            <button type="button" class="icon-btn" @click="e => e.preventDefault()"
-                    :aria-label="'更多操作：' + (rule.remark || '分流规则')"><a-icon type="ellipsis"></a-icon></button>
-            <a-menu slot="overlay" @click="a => clickRuleAction(a, rule)">
-                <a-menu-item key="edit">
-                    <a-icon type="edit"></a-icon>编辑
-                </a-menu-item>
-                <a-menu-item key="delete">
-                    <span style="color: var(--aui-danger)">
-                        <a-icon type="delete"></a-icon>删除
-                    </span>
-                </a-menu-item>
-            </a-menu>
-        </a-dropdown>
-    </template>
+            </a-menu-item>
+        </a-menu>
+    </a-dropdown>
 {{end}}

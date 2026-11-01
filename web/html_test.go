@@ -202,24 +202,29 @@ func TestNoSelfClosingAntdComponents(t *testing.T) {
 // 封禁规则拖到最后一行，而它实际仍然第一个匹配。xray 返回 Configuration OK，
 // 面板显示 running，规则表渲染得完全正常，没有任何一层会报错。
 //
-// 两张独立的表同时也是段间拖拽的唯一拦截手段。
+// 两个独立的列表同时也是段间拖拽的唯一拦截手段。
+//
+// v4 改版把 a-table 换成了 <li v-for> 列表（左列表 + 右侧直接编辑），
+// 这条不变量随之改成按列表的循环源来守，强度不变。
 func TestRoutingRulesRenderAsTwoSections(t *testing.T) {
 	tmpl := parseAllTemplates(t)
 	rendered := renderPage(t, tmpl, "routing.html")
 
 	for _, want := range []string{
-		`:data-source="blockRules"`,
-		`:data-source="routeRules"`,
+		`v-for="(rule, index) in blockRules"`,
+		`v-for="(rule, index) in routeRules"`,
 	} {
 		if !strings.Contains(rendered, want) {
-			t.Errorf("规则表少了分段数据源 %s", want)
+			t.Errorf("规则列表少了分段循环 %s", want)
 		}
 	}
-	// 合并回一张表的退化形态。
-	if strings.Contains(rendered, `:data-source="rules"`) {
-		t.Error("规则表回退成了单张表（:data-source=\"rules\"），封禁段不再独立")
+	// 合并回一个列表的退化形态：无论是表格还是列表，都不能直接遍历全部规则。
+	for _, merged := range []string{`:data-source="rules"`, ` in rules"`} {
+		if strings.Contains(rendered, merged) {
+			t.Errorf("规则列表回退成了单个列表（%s），封禁段不再独立", merged)
+		}
 	}
-	// 两张表各一个拖拽手柄 slot——共享的 define 必须在两处都展开，
+	// 两个列表各一个拖拽手柄——共享的 define 必须在两处都展开，
 	// 漏掉一处那一段就静默地拖不动了。
 	if got := strings.Count(rendered, `class="rule-drag-handle"`); got != 2 {
 		t.Errorf("拖拽手柄出现 %d 次, want 2（封禁段与分流段各一）", got)
