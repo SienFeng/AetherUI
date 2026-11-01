@@ -312,6 +312,17 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **规则的域名组引用是数组 `domainGroupRefs`，`domainGroupRef` 保留作单组时的兼容字段。** 导出侧单组时两个都写、多组时只写数组——这样新面板导出的文件放进旧面板，单组规则照常可用，多组规则被旧面板明确拒绝（「domainGroupRef 为空 → 整条跳过」），而不是静默产生一条指向错误组的规则。导入侧优先数组字段，为 nil 时回落单值字段；组认不出的策略与入站对称：部分认不出导入成禁用并点名，一个都认不出整条丢弃（编码结果会落回 `[]`，是上面那条非法值）。
 
+### 流量走向验证（`web/service/routing_verify.go`）
+
+「流量走向」图上的绿/灰/红由 `POST /aui/routing/rule/verify/:id` 给出，服务是 `RoutingVerifyService.Verify`，设计文档在 `docs/superpowers/specs/2026-11-01-routing-flow-verification-design.md`。**验证严格只读**：只调 `XrayAPI.TestRoute`（`xray/api.go`，`PublishResult=false`，端口/网络固定 TCP/443），不重启、不写配置、不写库。
+
+- **`ErrNoClue` = 没有规则命中 → 走默认出站。** 错误经 gRPC 跨进程后只剩 status 消息文本，`errors.Is` 已认不出 sentinel，`isNoClueErr` 比对消息文本是唯一可行的识别方式；`TestRoute` 此时返回 `noMatch=true` 而非 error。
+- **访问日志里「某条连接是否属于本规则」必须复用 xray 自己的匹配器**：域名走 `geodata.ParseDomainRules(…, Domain_Substr)` + `router.NewDomainMatcher`，IP 走 `geodata.ParseIPRules` + `router.NewIPMatcher`（`newGroupMatcher`）。**不许手写匹配**——面板与核心的语义一旦漂移，界面会在错误结论上亮绿灯。
+- **访问日志永远不能单独让用户变成 `verified`**，只能把结论推向 `mismatch` 或给 `verified` 补一个计数（`combineVerdict`）。日志读取失败（开关读不出、匹配器建不出、某用户查询失败）走 `AccessLogState.Error` / `LogEvidence.Error`，与「没有数据」区分开。
+- **核心 pending（运行中的配置 ≠ 现生成的配置）时，所有用户一律 `pending`，哪怕样例不符**：刚保存后核心仍持有旧配置，样例不符是必然的，报 `mismatch` 是误报（明细仍保留）。
+- **锁的边界**：包级 `lock` 只在 `XrayService.RuntimeSnapshot` 里 `TryLock` 到读完快照的那一刻，**绝不跨 RPC、不在持锁时合成配置**（重启/热应用会长时间占着它）；拿不到就返回 `Busy`。另有包级 `verifyMu` 保证同一时刻只有一个验证在跑，并发的请求得到 `busy`。
+- **「这条规则会不会被丢弃」直接调 `injector.buildRule` 判定，没有并行拷贝**，验证与生成因此不会漂移。改 `buildRule` 的跳过条件时无需同步改验证，但**不要**在验证侧另写一份判断。
+
 ### `util/link` 包
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
