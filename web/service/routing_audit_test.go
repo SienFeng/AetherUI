@@ -312,16 +312,17 @@ func TestAuditCacheSummaries(t *testing.T) {
 	f := newVerifyFixture(t)
 	verified := f.addRule(t, model.ActionProxy, []int{f.a.Id})
 	missing := f.addRule(t, model.ActionBlock, []int{f.b.Id})
-	storeVerifyResult(&RuleVerifyResult{RuleId: verified.Id, ApplyGen: 2, CheckedAt: 500, Users: []UserVerify{
+	gen := XrayApplyGeneration()
+	storeVerifyResult(&RuleVerifyResult{RuleId: verified.Id, ApplyGen: gen, CheckedAt: 500, Users: []UserVerify{
 		{Verdict: verdictVerified}, {Verdict: verdictMismatch},
 	}})
-	storeVerifyResult(&RuleVerifyResult{RuleId: 999, ApplyGen: 2, CheckedAt: 500})
+	storeVerifyResult(&RuleVerifyResult{RuleId: 999, ApplyGen: gen, CheckedAt: 500})
 
 	_, rules := (&RoutingAuditService{}).Summaries()
 	if len(rules) != 2 {
 		t.Fatalf("只应列启用规则: %+v", rules)
 	}
-	if got := rules[verified.Id]; got.Verdict != verdictMismatch || got.MismatchUsers != 1 || got.CheckedAt != 500 || got.ApplyGen != 2 {
+	if got := rules[verified.Id]; got.Verdict != verdictMismatch || got.MismatchUsers != 1 || got.CheckedAt != 500 || got.ApplyGen != gen || got.Stale {
 		t.Errorf("verified 规则摘要 = %+v", got)
 	}
 	if got := rules[missing.Id]; got.Verdict != verdictUnverifiable || got.CheckedAt != 0 {
@@ -348,7 +349,8 @@ func TestRuleVerdictOf(t *testing.T) {
 		{"pending 压过 unverifiable", &RuleVerifyResult{Users: users(verdictUnverifiable, verdictPending, verdictVerified)}, verdictPending, 0},
 		{"mismatch 压过一切并计数", &RuleVerifyResult{Users: users(verdictPending, verdictMismatch, verdictMismatch, verdictVerified)}, verdictMismatch, 2},
 		{"认不出的结论不给绿", &RuleVerifyResult{Users: users(verdictVerified, "weird")}, verdictUnverifiable, 0},
-		{"无用户 ok", &RuleVerifyResult{Core: CoreState{State: coreStateOK}, Users: users()}, verdictVerified, 0},
+		// 没有任何用户行就没有证据：核心 ok 也不给绿（spec A1）。
+		{"无用户 ok", &RuleVerifyResult{Core: CoreState{State: coreStateOK}, Users: users()}, verdictUnverifiable, 0},
 		{"无用户 pending", &RuleVerifyResult{Core: CoreState{State: coreStatePending}, Users: users()}, verdictPending, 0},
 		{"无用户 error", &RuleVerifyResult{Core: CoreState{State: coreStateError}, Users: users()}, verdictUnverifiable, 0},
 		{"无用户 busy", &RuleVerifyResult{Core: CoreState{State: coreStateBusy}}, verdictUnverifiable, 0},
@@ -408,5 +410,42 @@ func TestVerifyAllBudgetExhaustedKeepsOldResult(t *testing.T) {
 	}
 	if got, _ := cachedVerifyResult(first.Id); got != old {
 		t.Errorf("手动验证超出预算的结果不应写进缓存: %+v", got)
+	}
+}
+
+// 代次前进后，旧代次的结果不再代表核心现状：标 stale、结论按 pending，绝不给绿。
+func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	gen := XrayApplyGeneration()
+	storeVerifyResult(&RuleVerifyResult{RuleId: rule.Id, ApplyGen: gen, CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+
+	if _, rules := (&RoutingAuditService{}).Summaries(); rules[rule.Id].Verdict != verdictVerified || rules[rule.Id].Stale {
+		t.Fatalf("同代次应为 verified 且不 stale: %+v", rules[rule.Id])
+	}
+
+	xrayApplyGen.Inc()
+	cur, rules := (&RoutingAuditService{}).Summaries()
+	if cur != gen+1 {
+		t.Fatalf("Summaries 代次 = %d，期望 %d", cur, gen+1)
+	}
+	got := rules[rule.Id]
+	if !got.Stale || got.Verdict != verdictPending || got.ApplyGen != gen || got.CheckedAt != 500 {
+		t.Errorf("代次前进后应 stale + pending 且保留旧结果的代次与时间: %+v", got)
+	}
+}
+
+// 没有任何用户行的规则（全局规则但没有启用入站）不给绿。
+func TestSummariesEmptyRuleUnverifiable(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	storeVerifyResult(&RuleVerifyResult{RuleId: rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{}})
+	_, rules := (&RoutingAuditService{}).Summaries()
+	if got := rules[rule.Id]; got.Verdict != verdictUnverifiable || got.Stale {
+		t.Errorf("无用户规则应 unverifiable: %+v", got)
 	}
 }

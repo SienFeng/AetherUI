@@ -68,10 +68,13 @@ func cachedVerifyResult(ruleId int) (*RuleVerifyResult, bool) {
 
 // RuleAuditSummary 是规则列表与侧栏红点用的规则级状态。
 // AnomalyCount/AnomalyLastAt 来自访问日志持续扫描，由后续任务填充，目前恒为 0。
+// Stale 表示缓存结果的代次落后于当前代次（核心之后又换过配置，或本轮预算用完没轮到），
+// 此时 Verdict 一律是 pending：旧结论不代表核心现状，不能给绿。
 type RuleAuditSummary struct {
 	Verdict       string `json:"verdict"`
 	CheckedAt     int64  `json:"checkedAt"`
 	ApplyGen      uint64 `json:"applyGen"`
+	Stale         bool   `json:"stale"`
 	MismatchUsers int    `json:"mismatchUsers"`
 	AnomalyCount  int64  `json:"anomalyCount"`
 	AnomalyLastAt int64  `json:"anomalyLastAt"`
@@ -96,20 +99,16 @@ func verdictRank(v string) int {
 var verdictByRank = [...]string{verdictVerified, verdictUnverifiable, verdictPending, verdictMismatch}
 
 // ruleVerdictOf 把一条结果汇总成规则级结论：取用户里最坏的一档，并数出不符的用户数。
-// 没有用户行时按核心级状态映射：ok → verified、pending → pending，其余 → unverifiable。
+// 没有用户行时没有任何证据：核心 pending → pending，其余（含 ok）→ unverifiable，不给绿。
 func ruleVerdictOf(res *RuleVerifyResult) (verdict string, mismatchUsers int) {
 	if res == nil {
 		return verdictUnverifiable, 0
 	}
 	if len(res.Users) == 0 {
-		switch res.Core.State {
-		case coreStateOK:
-			return verdictVerified, 0
-		case coreStatePending:
+		if res.Core.State == coreStatePending {
 			return verdictPending, 0
-		default:
-			return verdictUnverifiable, 0
 		}
+		return verdictUnverifiable, 0
 	}
 	worst := 0
 	for _, u := range res.Users {
@@ -161,7 +160,8 @@ func (s *RoutingAuditService) RunAudit() (uint64, error) {
 }
 
 // Summaries 返回当前应用代次与每条启用规则的摘要。没有缓存的规则 verdict=unverifiable、
-// CheckedAt=0。读启用规则失败时记日志并返回空表（接口签名不带 error）。
+// CheckedAt=0；缓存代次 ≠ 当前代次的标 Stale、verdict=pending（MismatchUsers 不再沿用旧值）。
+// 读启用规则失败时记日志并返回空表（接口签名不带 error）。
 func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAuditSummary) {
 	applyGen = XrayApplyGeneration()
 	rules = map[int]RuleAuditSummary{}
@@ -176,13 +176,13 @@ func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAu
 			rules[r.Id] = RuleAuditSummary{Verdict: verdictUnverifiable}
 			continue
 		}
-		verdict, mismatch := ruleVerdictOf(res)
-		rules[r.Id] = RuleAuditSummary{
-			Verdict:       verdict,
-			CheckedAt:     res.CheckedAt,
-			ApplyGen:      res.ApplyGen,
-			MismatchUsers: mismatch,
+		sum := RuleAuditSummary{CheckedAt: res.CheckedAt, ApplyGen: res.ApplyGen}
+		if res.ApplyGen != applyGen {
+			sum.Stale, sum.Verdict = true, verdictPending
+		} else {
+			sum.Verdict, sum.MismatchUsers = ruleVerdictOf(res)
 		}
+		rules[r.Id] = sum
 	}
 	return applyGen, rules
 }
