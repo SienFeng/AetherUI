@@ -962,6 +962,10 @@
     .rv-vicon.status-danger  { color: var(--aui-danger); background: transparent; }
     .rv-vicon.status-warn    { color: var(--aui-warning); background: transparent; }
     .rv-vicon.status-neutral { color: var(--aui-text-3); background: transparent; }
+    /* 规则列表行里的审计图标：不随行内文字收缩 */
+    .rv-row-audit {
+        flex: none;
+    }
     .rv-vicon-count {
         font-size: 12px;
         font-weight: 600;
@@ -1251,6 +1255,11 @@
 
         .rv-row .rv-switch {
             margin-top: 5px;
+        }
+
+        /* 与开关同一条中线：开关 22px + 5px，图标命中区 24px + 4px */
+        .rv-row .rv-row-audit {
+            margin-top: 4px;
         }
 
         .rv-field {
@@ -1588,6 +1597,11 @@
                                             [[ f.label ]]<span class="rv-fchip-n">[[ f.count ]]</span>
                                         </button>
                                     </div>
+                                    <!-- 读不出开关 ≠ 没开：不能说成「未开启访问日志」，原样给出错误 -->
+                                    <div v-if="routingAudit.accessLogError" class="rv-alert is-warn">
+                                        <a-icon type="warning"></a-icon>
+                                        <span>读取访问日志开关失败：[[ routingAudit.accessLogError ]]</span>
+                                    </div>
                                     <p v-if="ruleFiltering" class="rv-filter-hint">
                                         筛选或搜索时不能拖动排序
                                         <button type="button" class="link-btn" @click="clearRuleFilter">清除筛选</button>
@@ -1677,6 +1691,11 @@
                                                 </span>
                                                 <a-button size="small" :loading="verify.loading" :disabled="!canVerify"
                                                           @click="runVerify(savedRule.id)">重新验证</a-button>
+                                                <!-- 后台在访问日志里看到过走错的连接才出现；修好之后由管理员清掉这批旧证据 -->
+                                                <a-button v-if="savedRule && savedRuleAnomalyCount > 0" size="small"
+                                                          :loading="anomalyResetting"
+                                                          :title="'近 24 小时有 ' + savedRuleAnomalyCount + ' 次走错的连接；确认已修复后可忽略，此后只统计新的连接'"
+                                                          @click="resetRuleAnomaly(savedRule.id)">忽略此前的异常</a-button>
                                             </div>
                                             <p v-if="ruleDirty" class="rv-hint">按当前修改预览</p>
                                             <!-- 连线是纯装饰（aria-hidden），信息已经在三列文字里 -->
@@ -2183,7 +2202,7 @@
     const PROBE_FRESH_MS = 60 * 1000;
 
     const app = new Vue({
-        mixins: [panelVersionMixin],
+        mixins: [panelVersionMixin, routingAuditMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
@@ -2242,6 +2261,8 @@
             verifyEpoch: 0,
             // 已保存状态被启停改过、但还没来得及验证的规则 id：它的下一次验证按「保存后」处理
             verifyAfterSaveId: 0,
+            // 「忽略此前的异常」请求进行中
+            anomalyResetting: false,
 
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
@@ -2350,6 +2371,21 @@
             verifyShown() {
                 const res = this.verify.result;
                 return !!(this.canVerify && res && res.ruleId === this.savedRule.id && this.verify.ruleId === res.ruleId);
+            },
+            // 规则列表每行的后台审计图标（routingAuditMixin 每 60s 拉一次摘要）。
+            // 还没拿到过摘要时一个都不显示，免得首屏先闪一排灰色「尚未验证」。
+            ruleAuditBadges() {
+                const out = {};
+                if (!this.routingAudit.loadedAt) return out;
+                this.rules.forEach(r => {
+                    if (r.enable) out[r.id] = this.ruleAuditBadge(this.routingAudit.rules[r.id]);
+                });
+                return out;
+            },
+            savedRuleAnomalyCount() {
+                const r = this.savedRule;
+                const sum = r && this.routingAudit.rules[r.id];
+                return (sum && sum.anomalyCount) || 0;
             },
             // 不能验证时的原因（有未保存修改除外，那一档单独显示「保存后验证」）
             verifyBlockedReason() {
@@ -3262,6 +3298,46 @@
                     default: return { cls: 'status-neutral', icon: 'exclamation-circle', text: '无法验证' };
                 }
             },
+            // 规则列表里的审计图标：图标形状与流量走向图一致（verdictMeta），说明写进 title。
+            // 摘要里没有这条规则（刚启用、下一轮审计还没到）按「尚未验证」。
+            ruleAuditBadge(sum) {
+                if (!sum) return { cls: 'status-neutral', icon: 'exclamation-circle', title: '尚未验证' };
+                const m = this.verdictMeta(sum.verdict);
+                const at = this.verifyClock(sum.checkedAt);
+                let title;
+                switch (sum.verdict) {
+                    case 'verified': title = '核心验证 ' + at + ' 通过'; break;
+                    case 'mismatch': title = '与配置不符'; break;
+                    // stale：缓存的结论来自上一份配置，后台下一轮审计会重新验证
+                    case 'pending': title = sum.stale ? '配置已变更，等待后台重新验证' : '等待下发：核心尚未载入当前配置'; break;
+                    default: title = sum.checkedAt ? '无法验证（核心验证 ' + at + '）' : '尚未验证';
+                }
+                if (sum.anomalyCount > 0) {
+                    title += '；近 24h 有 ' + sum.anomalyCount + ' 次走错（最近 ' + this.verifyClock(sum.anomalyLastAt) + '）';
+                }
+                return { cls: m.cls, icon: m.icon, title };
+            },
+            // 「忽略此前的异常」：只清服务端内存里的异常摘要，随后刷新列表摘要并现场重验一次。
+            // 重验沿用 resetVerify + runVerify 的代次机制：在途的旧请求回来后被丢弃并自动补验；
+            // 保存/启停后那次 12 秒重试若还没到点，按「保存后」续上，不因这里被清掉。
+            async resetRuleAnomaly(ruleId) {
+                if (!ruleId || this.anomalyResetting) return;
+                this.anomalyResetting = true;
+                let msg;
+                try {
+                    msg = await HttpUtil.post('aui/routing/rule/anomaly/reset/' + ruleId);
+                } finally {
+                    this.anomalyResetting = false;
+                }
+                if (!msg || !msg.success) return;
+                await this.refreshRoutingAudit();
+                const r = this.savedRule;
+                if (!r || r.id !== ruleId) return;
+                const afterSave = !!this.verify.retryTimer || this.verifyAfterSaveId === ruleId;
+                this.resetVerify(ruleId);
+                if (afterSave) this.verifyAfterSaveId = ruleId;
+                if (this.canVerify) this.runVerify(ruleId, afterSave);
+            },
             // 服务端省略了已删除的入站。结果里找不到的用户一律「无法验证」，绝不留空、更不显示绿色。
             userVerifyById(id) {
                 const res = this.verify.result;
@@ -3372,7 +3448,10 @@
                 if (this.canVerify) this.runVerify(r.id, true);
             },
             // afterSave：保存后的那次验证。核心还没载入新配置（pending）时，12 秒后再验证一次，仅一次。
-            async runVerify(ruleId, afterSave) {
+            // cached：选中规则时用后台审计的缓存秒开（?cached=1）。缓存只在属于当前应用代次、
+            // 规则仍启用时才被采用，否则服务端自己现场验证，所以这里不再补一次现场验证。
+            // 保存后的验证一律现场做——那时要的就是新配置的结论。
+            async runVerify(ruleId, afterSave, cached) {
                 if (!ruleId) return;
                 if (this.verifyAfterSaveId === ruleId) afterSave = true;
                 if (this.verify.loading) {
@@ -3387,7 +3466,7 @@
                 const epoch = this.verifyEpoch;
                 let msg;
                 try {
-                    msg = await HttpUtil.post('aui/routing/rule/verify/' + ruleId);
+                    msg = await HttpUtil.post('aui/routing/rule/verify/' + ruleId + (cached && !afterSave ? '?cached=1' : ''));
                 } finally {
                     this.verify.loading = false;
                 }
@@ -3836,7 +3915,7 @@
             // 只盯规则 id：编辑草稿不会触发验证
             verifyRuleId(id) {
                 this.resetVerify(id);
-                if (this.canVerify) this.runVerify(id);
+                if (this.canVerify) this.runVerify(id, false, true);
             },
             // 停用 / 变成未生效：旧结果作废；重新变得可验证且手里没有结果时补一次
             canVerify(ok) {
