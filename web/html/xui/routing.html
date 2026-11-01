@@ -1118,6 +1118,36 @@
         color: #047857;
     }
 
+    /* 实际去向：配置去向下方，红色虚线边框；文字自带「实际：」前缀，不只靠颜色 */
+    .rv-dcol-r {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+    }
+
+    .rv-dest.is-actual {
+        border: 1.5px dashed var(--aui-danger);
+        background: #FFF7F7;
+        box-shadow: none;
+    }
+
+    .rv-dest.is-actual .rv-node-flag {
+        color: var(--aui-danger);
+        font-size: 16.5px;
+        box-shadow: none;
+    }
+
+    .rv-dest.is-actual .rv-node-sub {
+        color: var(--aui-text-2);
+        overflow-wrap: anywhere;
+    }
+
+    .rv-actual-more {
+        margin: 0;
+        font-size: 12px;
+        color: var(--aui-text-2);
+    }
+
     .rv-wire-flow {
         stroke-dasharray: 3 13;
         animation: rv-dash 1.1s linear infinite;
@@ -1759,6 +1789,18 @@
                                                             <span class="rv-node-sub">[[ destSubLabel(editorPreview) ]]</span>
                                                         </span>
                                                     </div>
+                                                    <!-- 走错的用户实际去了哪：文字写明去向和涉及的用户，红线只是装饰（窄屏下连线隐藏，文字照样够用） -->
+                                                    <div v-for="a in actualDests.list" :key="a.key" class="rv-dest is-actual"
+                                                         :data-akey="a.key" :title="'实际：' + a.label + '（' + a.who + '）'">
+                                                        <span class="rv-node-flag" aria-hidden="true">
+                                                            <a-icon type="close-circle" theme="filled"></a-icon>
+                                                        </span>
+                                                        <span class="rv-node-text">
+                                                            <span class="rv-node-name">实际：[[ a.label ]]</span>
+                                                            <span class="rv-node-sub">[[ a.who ]]</span>
+                                                        </span>
+                                                    </div>
+                                                    <p v-if="actualDests.moreCount > 0" class="rv-actual-more">另有 [[ actualDests.moreCount ]] 个去向</p>
                                                 </div>
                                             </div>
                                             <!-- 验证明细：只渲染展开的行，顺序跟随左侧用户列表 -->
@@ -2457,6 +2499,53 @@
                     if (u.key === 'all' && this.verifyUncheckedCount) return '';
                     return v.total > 0 && v.verified === v.total ? 'verified' : '';
                 });
+            },
+            // 走错用户的实际去向（设计 §5.3）：只看当前规则已加载的结果，核心等待下发时不画（Ruling 1）。
+            // 来源是核心样例里不符的 actualTag 与访问日志 others 的 route，两者并集、按 tag 去重；
+            // 「出口符合但不是本规则命中的」样例（match=true）不算走错。
+            // userKeys 对应 flowUsers 的行：全局规则只有 'all'，折叠的用户归到 'more'。
+            actualDests() {
+                const empty = { list: [], moreCount: 0 };
+                if (!this.verifyShown) return empty;
+                const res = this.verify.result;
+                if (res.core && res.core.state === 'pending') return empty;
+                const ids = this.editorPreview.inboundIds;
+                const rowKeyOf = id => {
+                    if (!ids.length) return 'all';
+                    const i = ids.indexOf(id);
+                    return i >= 0 && i < 4 ? id : 'more';
+                };
+                const byKey = {}, order = [];
+                const add = (tag, label, uv) => {
+                    const key = tag || ('label:' + (label || ''));
+                    let a = byKey[key];
+                    if (!a) {
+                        a = byKey[key] = { key, tag: tag || '', label: '', users: [], userKeys: [], names: [] };
+                        order.push(key);
+                    }
+                    if (!a.label && label) a.label = label;
+                    if (!a.users.includes(uv.inboundId)) a.users.push(uv.inboundId);
+                    const rk = rowKeyOf(uv.inboundId);
+                    if (!a.userKeys.includes(rk)) a.userKeys.push(rk);
+                    if (!a.names.includes(uv.name)) a.names.push(uv.name);
+                };
+                for (const uv of this.verifyScopeUsers) {
+                    if (uv.verdict !== 'mismatch') continue;
+                    for (const s of (uv.samples || [])) {
+                        if (s.error || s.match !== false) continue;
+                        add(s.actualTag, s.actualLabel, uv);
+                    }
+                    for (const o of ((uv.log && uv.log.others) || [])) add(o.route, o.label, uv);
+                }
+                // 涉及用户多的排前；人数相同保持首次出现的顺序
+                const all = order.map(k => byKey[k]).sort((a, b) => b.users.length - a.users.length);
+                const list = all.slice(0, 3).map(a => {
+                    const names = a.names.filter(Boolean);
+                    const shown = names.slice(0, 3).join('、');
+                    const who = names.length > 3 ? shown + ' 等 ' + a.users.length + ' 位' : (shown || a.users.length + ' 位用户');
+                    return { key: a.key, tag: a.tag, label: a.label || '未知出站', userKeys: a.userKeys, who };
+                });
+                return { list, moreCount: all.length - list.length };
             },
 
                         // occupiedInbounds 返回当前域名组下、除正在编辑的这条规则之外，
@@ -3581,6 +3670,22 @@
                     '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="#fff" stroke-width="1.4" opacity=".85" stroke-linecap="round"></path>' +
                     dots(p, col, 2, 1.6, 0) +
                     '<circle cx="' + (C.r + 2) + '" cy="' + C.y + '" r="3.5" fill="#fff" stroke="' + col + '" stroke-width="1.8"></circle>';
+                // 实际去向：从走错的用户行直接连到对应的实际去向节点（红色虚线），配置去向的连线不动
+                const rowIndex = {};
+                this.flowUsers.forEach((u, i) => { rowIndex[u.key] = i; });
+                this.actualDests.list.forEach((a, j) => {
+                    const el = Array.from(d.querySelectorAll('.rv-dest.is-actual')).find(x => x.getAttribute('data-akey') === a.key);
+                    if (!el) return;
+                    const A = R(el);
+                    a.userKeys.forEach(k => {
+                        const u = rows[rowIndex[k]];
+                        if (!u) return;
+                        const x1 = L.r + 2, ap = curve(x1, u.y, A.l - 4, A.y);
+                        h += '<path d="' + ap + '" fill="none" stroke="' + danger + '" stroke-width="1.6" stroke-dasharray="5 4" opacity=".85" stroke-linecap="round"></path>' +
+                            '<circle cx="' + (A.l - 4) + '" cy="' + A.y + '" r="2.6" fill="' + danger + '"></circle>' +
+                            dots(ap, danger, 1, 2.6, j * 0.4);
+                    });
+                });
                 svg.innerHTML = h;
             },
             delRule(rule) {
@@ -3951,6 +4056,10 @@
             },
             // 验证结论一变，连线颜色跟着重画
             wireVerdicts() {
+                this.scheduleRuleWires();
+            },
+            // 实际去向节点增减会改变右列高度，连线跟着重画
+            actualDests() {
                 this.scheduleRuleWires();
             },
 
