@@ -792,21 +792,27 @@ func (a *RoutingController) verifyRule(c *gin.Context) {
 
 // routingAuditResponse 是规则列表与侧栏红点用的审计摘要。
 type routingAuditResponse struct {
-	ApplyGen         uint64                           `json:"applyGen"`
-	AccessLogEnabled bool                             `json:"accessLogEnabled"`
-	Rules            map[int]service.RuleAuditSummary `json:"rules"`
+	ApplyGen         uint64 `json:"applyGen"`
+	AccessLogEnabled bool   `json:"accessLogEnabled"`
+	// AccessLogError 非空表示开关读取失败（此时 AccessLogEnabled 不可信、恒为 false），
+	// 前端不能据此提示「请开启访问日志」，要与「确实没开」区分开。
+	AccessLogError string                           `json:"accessLogError,omitempty"`
+	Rules          map[int]service.RuleAuditSummary `json:"rules"`
 }
 
 // auditRules 只读缓存与内存摘要，不触发验证。
 func (a *RoutingController) auditRules(c *gin.Context) {
 	gen, rules := a.auditService.Summaries()
-	// 读不出开关时按未开启处理并记日志：这只影响前端的提示文案，不该让摘要整体拿不到。
+	// 读不出开关时仍返回规则摘要，但把错误如实带给前端，不伪装成「已关闭」。
+	resp := &routingAuditResponse{ApplyGen: gen, Rules: rules}
 	enabled, err := a.settingService.GetAccessLogEnable()
 	if err != nil {
 		logger.Warning("读取访问日志开关失败:", err)
-		enabled = false
+		resp.AccessLogError = err.Error()
+	} else {
+		resp.AccessLogEnabled = enabled
 	}
-	jsonObj(c, &routingAuditResponse{ApplyGen: gen, AccessLogEnabled: enabled, Rules: rules}, nil)
+	jsonObj(c, resp, nil)
 }
 
 // resetRuleAnomaly 是「忽略此前的异常」，只改内存里的异常状态，不碰库与核心。

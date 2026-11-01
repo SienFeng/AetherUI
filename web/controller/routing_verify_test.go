@@ -77,6 +77,8 @@ func initTestDB(t *testing.T) {
 	if err := database.InitDB(filepath.Join(t.TempDir(), "test.db")); err != nil {
 		t.Fatalf("InitDB: %v", err)
 	}
+	service.ResetAuditResultsForTest()
+	t.Cleanup(service.ResetAuditResultsForTest)
 }
 
 // 直接落库造规则，绕过 RoutingRuleService.Add 的校验（这里只关心接口行为）。
@@ -151,8 +153,9 @@ func TestVerifyCachedIgnoresStaleGeneration(t *testing.T) {
 		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration() + 1,
 	})
 	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
-	if obj, _ := msg["obj"].(map[string]any); obj != nil && obj["checkedAt"] == float64(checkedAt) {
-		t.Errorf("代次不符的缓存被原样返回: %v", msg)
+	obj, _ := msg["obj"].(map[string]any)
+	if msg["success"] != true || obj == nil || obj["checkedAt"] == float64(checkedAt) {
+		t.Errorf("want 现场验证结果（success 且 checkedAt 不同于缓存）, msg = %v", msg)
 	}
 }
 
@@ -173,5 +176,26 @@ func TestVerifyCachedIgnoresDisabledRule(t *testing.T) {
 	core, _ := obj["core"].(map[string]any)
 	if core["state"] != "error" {
 		t.Errorf("want 现场 Verify 的停用结果, core = %v", core)
+	}
+}
+
+// 开关读取失败时仍返回规则摘要，但必须带 accessLogError，不能伪装成「已关闭」。
+func TestRuleAuditReportsAccessLogError(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	if err := database.GetDB().Migrator().DropTable(&model.Setting{}); err != nil {
+		t.Fatalf("drop settings: %v", err)
+	}
+	msg := postRouting(t, "/routing/rule/audit")
+	obj, _ := msg["obj"].(map[string]any)
+	if msg["success"] != true || obj == nil {
+		t.Fatalf("msg = %v", msg)
+	}
+	if e, _ := obj["accessLogError"].(string); e == "" {
+		t.Errorf("want accessLogError, obj = %v", obj)
+	}
+	rules, _ := obj["rules"].(map[string]any)
+	if _, ok := rules[strconv.Itoa(id)]; !ok {
+		t.Errorf("规则摘要丢失: %v", obj)
 	}
 }

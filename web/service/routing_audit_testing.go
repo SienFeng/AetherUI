@@ -6,3 +6,11 @@ package service
 func StoreVerifyResultForTest(res *RuleVerifyResult) {
 	storeVerifyResult(res)
 }
+
+// ResetAuditResultsForTest 清空审计缓存，避免测试间（规则 id 会随新库重复）互相污染。
+// 生产代码不得调用。
+func ResetAuditResultsForTest() {
+	auditMu.Lock()
+	defer auditMu.Unlock()
+	auditResults = map[int]*RuleVerifyResult{}
+}
