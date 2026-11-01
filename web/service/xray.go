@@ -247,3 +247,68 @@ func (s *XrayService) SetToNeedRestart() {
 func (s *XrayService) IsNeedRestartAndSetFalse() bool {
 	return isNeedXrayRestart.CAS(true, false)
 }
+
+// XrayRuntime 是某一刻核心运行状态的只读快照，供路由验证使用。
+type XrayRuntime struct {
+	Running    bool   // 核心进程在运行
+	Busy       bool   // 包级 lock 被占用（重启/热应用进行中），其余字段无效
+	Pending    bool   // 库里合成的配置与核心当前持有的不一致（有改动尚未生效）
+	APIPort    int    // 核心 gRPC 控制面端口
+	DefaultTag string // 核心实际持有的配置里，数组首位出站的 tag
+}
+
+// RuntimeSnapshot 读取核心当前的运行状态，纯只读。
+//
+// lock 只用 TryLock 持有到读完 p 的那一刻：重启与热应用会长时间占着它，
+// 验证请求不能被它们卡住，也不能在持锁时发 RPC 或合成配置（GetXrayConfig
+// 要读库、exec xray）。拿不到锁就如实返回 Busy，由调用方提示稍后重试。
+func (s *XrayService) RuntimeSnapshot() XrayRuntime {
+	if !lock.TryLock() {
+		return XrayRuntime{Busy: true}
+	}
+	process := p
+	var (
+		running bool
+		apiPort int
+		current *xray.Config
+	)
+	if process != nil && process.IsRunning() {
+		running = true
+		apiPort = process.GetAPIPort()
+		current = process.GetConfig()
+	}
+	lock.Unlock()
+
+	if !running {
+		return XrayRuntime{}
+	}
+	rt := XrayRuntime{
+		Running: true,
+		APIPort: apiPort,
+		// 用运行中快照而不是新合成的配置：核心实际持有的是前者。
+		DefaultTag: defaultOutboundTag(current),
+	}
+	fresh, err := s.GetXrayConfig()
+	if err != nil {
+		// 无法判断是否有待生效改动，按无处理，不阻断验证。
+		logger.Warning("路由验证：合成最新 xray 配置失败，无法判断待生效改动：", err)
+		return rt
+	}
+	rt.Pending = current != nil && !current.Equals(fresh)
+	return rt
+}
+
+// defaultOutboundTag 返回配置里数组首位出站的 tag；取不到返回空串。
+// 首位出站是 xray 的默认出站，没有命中任何规则的流量走它。
+func defaultOutboundTag(cfg *xray.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	var outbounds []struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.Unmarshal(cfg.OutboundConfigs, &outbounds); err != nil || len(outbounds) == 0 {
+		return ""
+	}
+	return outbounds[0].Tag
+}
