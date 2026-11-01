@@ -14,6 +14,18 @@ var lock sync.Mutex
 var isNeedXrayRestart atomic.Bool
 var result string
 
+// xrayApplyGen 是「核心加载了新配置」的次数。只在核心确实拿到新配置的两处
+// 递增：tryHotApply 带非空 diff 成功，以及 p.Start() 成功。空 diff 分支只是
+// 同步面板侧快照、核心什么都没变；失败退回重启的路径由 Start 那一处计数，
+// 热应用中途失败不单独计，避免一次生效被记两次。
+// 读取方据此判断「某次观测之后核心是否换过配置」，由 XrayApplyGeneration 暴露。
+var xrayApplyGen atomic.Uint64
+
+// XrayApplyGeneration 返回当前应用代次，可在不持 lock 时调用。
+func XrayApplyGeneration() uint64 {
+	return xrayApplyGen.Load()
+}
+
 type XrayService struct {
 	inboundService  InboundService
 	settingService  SettingService
@@ -145,7 +157,11 @@ func (s *XrayService) RestartXray(isForce bool) error {
 
 	p = xray.NewProcess(xrayConfig)
 	result = ""
-	return p.Start()
+	if err := p.Start(); err != nil {
+		return err
+	}
+	xrayApplyGen.Inc()
+	return nil
 }
 
 // tryHotApply 尝试把运行中的核心调成 newCfg 的样子，成功返回 true。
@@ -226,6 +242,7 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 	}
 
 	process.SetConfig(newCfg)
+	xrayApplyGen.Inc()
 	logger.Info("xray 配置改动已通过控制面下发，无需重启")
 	return true
 }
@@ -255,6 +272,7 @@ type XrayRuntime struct {
 	Pending    bool   // 库里合成的配置与核心当前持有的不一致（有改动尚未生效）
 	APIPort    int    // 核心 gRPC 控制面端口
 	DefaultTag string // 核心实际持有的配置里，数组首位出站的 tag
+	ApplyGen   uint64 // 应用代次，在持锁那一瞬间读取，与上面的 p 状态一致
 }
 
 // RuntimeSnapshot 读取核心当前的运行状态，纯只读。
@@ -267,6 +285,7 @@ func (s *XrayService) RuntimeSnapshot() XrayRuntime {
 		return XrayRuntime{Busy: true}
 	}
 	process := p
+	applyGen := xrayApplyGen.Load()
 	var (
 		running bool
 		apiPort int
@@ -282,11 +301,12 @@ func (s *XrayService) RuntimeSnapshot() XrayRuntime {
 	lock.Unlock()
 
 	if !running {
-		return XrayRuntime{}
+		return XrayRuntime{ApplyGen: applyGen}
 	}
 	rt := XrayRuntime{
-		Running: true,
-		APIPort: apiPort,
+		Running:  true,
+		APIPort:  apiPort,
+		ApplyGen: applyGen,
 		// 用运行中快照而不是新合成的配置：核心实际持有的是前者。
 		DefaultTag: defaultOutboundTag(current),
 	}

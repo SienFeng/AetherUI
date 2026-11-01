@@ -139,3 +139,84 @@ func TestRuntimeSnapshotAgainstRealXray(t *testing.T) {
 		t.Errorf("Pending 状态下 DefaultTag 应仍取运行中配置: %q", got.DefaultTag)
 	}
 }
+
+// 应用代次只在核心真的加载了新配置时递增：整进程启动、非空 diff 的热应用；
+// 配置无变化（含只同步快照的空 diff 分支）不能动它。
+func TestApplyGenerationBumpsOnHotApplyAndStart(t *testing.T) {
+	requireXrayBinary(t)
+	requireXrayAPIPortFree(t)
+	setupDB(t)
+
+	t.Cleanup(func() {
+		lock.Lock()
+		defer lock.Unlock()
+		if p != nil {
+			_ = p.Stop()
+			p = nil
+		}
+		result = ""
+	})
+
+	socksPort := freePort(t)
+	in := &model.Inbound{
+		UserId: 1, Port: socksPort, Protocol: model.Protocol("socks"), Enable: true,
+		Tag:            "inbound-" + strconv.Itoa(socksPort),
+		Listen:         "127.0.0.1",
+		Settings:       `{"auth":"noauth","udp":false}`,
+		StreamSettings: `{"network":"tcp","security":"none"}`,
+		Sniffing:       "{}",
+	}
+	if err := database.GetDB().Save(in).Error; err != nil {
+		t.Fatalf("save inbound: %v", err)
+	}
+	encoded, err := EncodeDomains([]string{"full:localhost"})
+	if err != nil {
+		t.Fatalf("EncodeDomains: %v", err)
+	}
+	group := &model.DomainGroup{Remark: "apply-gen", Domains: encoded}
+	if err := (&DomainGroupService{}).Add(group); err != nil {
+		t.Fatalf("add domain group: %v", err)
+	}
+	rule := &model.RoutingRule{
+		Remark: "apply-gen", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action: model.ActionBlock, Enable: false,
+	}
+	if err := (&RoutingRuleService{}).Add(rule); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	xs := &XrayService{}
+	g0 := XrayApplyGeneration()
+	if err := xs.RestartXray(true); err != nil {
+		t.Fatalf("RestartXray(true): %v", err)
+	}
+	waitForPort(t, socksPort)
+	g1 := XrayApplyGeneration()
+	if g1 <= g0 {
+		t.Fatalf("整进程启动后代次应递增: %d -> %d", g0, g1)
+	}
+
+	if err := database.GetDB().Model(&model.RoutingRule{}).Where("id = ?", rule.Id).
+		Update("enable", true).Error; err != nil {
+		t.Fatalf("enable rule: %v", err)
+	}
+	if err := xs.RestartXray(false); err != nil {
+		t.Fatalf("RestartXray(false) 热应用: %v", err)
+	}
+	g2 := XrayApplyGeneration()
+	if g2 != g1+1 {
+		t.Fatalf("热应用后代次应 +1: %d -> %d", g1, g2)
+	}
+
+	if err := xs.RestartXray(false); err != nil {
+		t.Fatalf("RestartXray(false) 无变化: %v", err)
+	}
+	if g3 := XrayApplyGeneration(); g3 != g2 {
+		t.Fatalf("配置未变时代次不应变化: %d -> %d", g2, g3)
+	}
+
+	if got := xs.RuntimeSnapshot(); got.ApplyGen != XrayApplyGeneration() {
+		t.Errorf("RuntimeSnapshot().ApplyGen = %d，期望 %d", got.ApplyGen, XrayApplyGeneration())
+	}
+}
