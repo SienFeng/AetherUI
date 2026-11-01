@@ -324,6 +324,17 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 - **「这条规则会不会被丢弃」直接调 `injector.buildRule` 判定**，验证与生成在这一点上不会漂移。改 `buildRule` 的跳过条件时无需同步改验证，但**不要**在验证侧另写一份判断。**取样用的条件却是一份镜像**：`groupConditionsOf` 照抄了 `buildRule` 逐组解码手工/订阅两侧、`MergeDomains` 合并、跳过坏组与空组的那段循环（buildRule 只返回生成好的 xray 规则，拿不回逐组的条目）。改 `buildRule` 的逐组取法（新增条目来源、改合并顺序、改跳过条件）时**两处必须一起改**，否则验证会拿核心里根本没有的条目当样例。
 - **关了 sniffing 的入站不计域名样例**（`sniffingBlind`）：`TestRoute` 把 `TargetDomain` 直接交给 `PickRoute`、不经过嗅探，而真实流量里核心拿不到这类入站的域名（见「域名分流依赖 sniffing」）。判据逐条镜像 `routing.html` 的 `sniffingOff` / `isProxyInbound`（socks/http 代理入站除外），两边一起改。这类入站只测 IP 样例，一个都没有就是 `unverifiable`——对全局规则尤其要紧，页面的 `ruleIssue` 不逐个检查全局规则的入站。
 
+**后台审计（`RoutingAuditService`，设计文档 `docs/superpowers/specs/2026-11-01-routing-flow-audit-design.md`）** 让规则列表与侧栏不用逐条手点验证就能看到绿/红：
+
+- **应用代次（`XrayApplyGeneration`）只在两处递增**：热应用成功（diff 非空）与 `p.Start()` 成功之后（`web/service/xray.go`）。它是「核心换过配置」的唯一信号。已知未覆盖：库里改了、还没下发的改动不会涨代次，由 `Summaries` 的运行时 Pending 判定兜住。
+- **两个任务**：`RouteAuditJob`（30s 唤醒；代次变了或距上次成功满 10 分钟才真审计，遇 `ErrVerifyBusy`/`ErrCoreNotReady` 跳过且不推进状态）与 `RouteAnomalyJob`（1 分钟扫小规则；大规则每 10 分钟，或 `LargeScanBacklogged` 时下一轮立刻再扫）。cron 不会跳过仍在跑的上一轮，两者都靠 `TryLock` 防重入。
+- **后台绝不在 `RestartXray` 的 `lock` 内验证，也不与手动验证抢 `verifyMu`**：后台拿不到就让（返回 busy，下一轮重试）。手动验证优先。
+- **结果与异常摘要只在内存**，面板重启后审计约 30 秒、异常约 1 分钟内重建；「忽略此前的异常」的时刻同样只在内存，重启后 24 小时内的已忽略异常会重新出现。忽略同时作用于列表与流量走向图。
+- **摘要永不乱给绿**：缓存代次 ≠ 当前 → `pending`（Stale）；核心 pending/busy → `pending`；核心未运行 → `unverifiable`；有异常一律 `mismatch`。`verify?cached=1` 只在规则启用、核心在跑且不忙不 pending、代次相等时才返回缓存，否则走现场验证。
+- **异常语义 = `buildLogEvidence`**（同样复用 xray 的匹配器），被更高优先级规则遮蔽的域名算下层规则走错。游标用 `(time,id)`（SQLite 会复用 id）；摘要按小时分桶，列表窗口实际为 24~25 小时，而验证的日志证据是精确 24 小时；系统时钟回跳期间写入的行会被游标跳过。
+- **小机器预算（实测）**：规则合并后条目数 ≤ 20000 为小规则（匹配器按代次常驻），超过为大规则（每次扫描时逐条构建、用完释放，不同时持有多个）；每条规则最多展开 50 个用户、每用户 5 个出站。`TestAnomalyScanLargeGroupFootprint`：10 万条域名 + 1 万条日志扫一次大规则，堆峰值增量约 80 MB（81.4 MB 峰值，扫描前 1.7 MB）、耗时约 0.16 秒，断言上限 100 MB，不要放宽。
+- **前端**（`web/assets/js/util/routing-audit.js`）：规则列表与侧栏每 60 秒轮询 `/aui/routing/rule/audit`（只读缓存，页面隐藏时暂停），超过 150 秒没有成功拉取则图标改灰「状态未更新」。流量走向图的「实际去向」节点把默认出站的几种写法折叠成一个，`routing.html` 里的 `DEFAULT_LABEL`/`NO_MATCH_LABEL` 抄自 `routing_verify.go` 的 `labelDefaultOutbound`/`labelNoMatch`，**两处必须一起改**。
+
 ### `util/link` 包
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。

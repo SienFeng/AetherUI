@@ -203,3 +203,99 @@ func TestRouteVerifyAgainstRealXray(t *testing.T) {
 		t.Fatalf("全量验证里 A 访问 localhost 应走 %s: %+v", node.Tag, s0)
 	}
 }
+
+// 用真实 xray 走一遍后台审计：RunAudit 写缓存，Summaries 给出 verified 且代次与当前一致；
+// 热应用改规则后代次 +1，再审计一轮仍是 verified（旧代次的结论不会被沿用）。
+func TestRouteAuditAgainstRealXray(t *testing.T) {
+	requireXrayBinary(t)
+	requireXrayRoutingService(t)
+	requireXrayAPIPortFree(t)
+	setupDB(t)
+	resetAuditCache(t)
+
+	t.Cleanup(func() {
+		lock.Lock()
+		defer lock.Unlock()
+		if p != nil {
+			_ = p.Stop()
+			p = nil
+		}
+		result = ""
+	})
+
+	port := freePort(t)
+	in := &model.Inbound{
+		UserId: 1, Port: port, Protocol: model.Protocol("socks"), Enable: true, Remark: "audit-e2e",
+		Tag:            "inbound-" + strconv.Itoa(port),
+		Listen:         "127.0.0.1",
+		Settings:       `{"auth":"noauth","udp":false}`,
+		StreamSettings: `{"network":"tcp","security":"none"}`,
+		Sniffing:       "{}",
+	}
+	if err := database.GetDB().Save(in).Error; err != nil {
+		t.Fatalf("save inbound: %v", err)
+	}
+	group := newTestGroupWithDomains(t, "audit-localhost", []string{"full:localhost"})
+	rs := &RoutingRuleService{}
+	rule := &model.RoutingRule{
+		Remark: "audit-e2e", InboundIds: mustEncodeIds(t, []int{in.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}),
+		Action:         model.ActionBlock, Enable: true,
+	}
+	if err := rs.Add(rule); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	xs := &XrayService{}
+	if err := xs.RestartXray(true); err != nil {
+		t.Fatalf("RestartXray(true): %v", err)
+	}
+	waitForPort(t, in.Port)
+
+	svc := &RoutingAuditService{}
+	summaryOf := func() RuleAuditSummary {
+		t.Helper()
+		gen, rules := svc.Summaries()
+		sum, ok := rules[rule.Id]
+		if !ok {
+			t.Fatalf("Summaries 缺少规则 %d: %+v", rule.Id, rules)
+		}
+		if gen != XrayApplyGeneration() {
+			t.Fatalf("Summaries 代次 %d ≠ 当前 %d", gen, XrayApplyGeneration())
+		}
+		return sum
+	}
+
+	gen1, err := svc.RunAudit()
+	if err != nil {
+		t.Fatalf("RunAudit: %v", err)
+	}
+	sum := summaryOf()
+	if sum.Verdict != verdictVerified || sum.Stale || sum.ApplyGen != XrayApplyGeneration() || sum.ApplyGen != gen1 {
+		t.Fatalf("block 规则审计后应为 verified 且代次一致（gen=%d）: %+v", gen1, sum)
+	}
+
+	node, err := (&OutboundNodeService{}).AddFromJSON(`{"protocol":"freedom","settings":{}}`, "audit-freedom")
+	if err != nil {
+		t.Fatalf("AddFromJSON: %v", err)
+	}
+	rule.Action = model.ActionProxy
+	rule.OutboundId = node.Id
+	if err := rs.Update(rule); err != nil {
+		t.Fatalf("update rule: %v", err)
+	}
+	if err := xs.RestartXray(false); err != nil {
+		t.Fatalf("RestartXray(false): %v", err)
+	}
+	if XrayApplyGeneration() != gen1+1 {
+		t.Fatalf("热应用后代次应为 %d，实际 %d", gen1+1, XrayApplyGeneration())
+	}
+	gen2, err := svc.RunAudit()
+	if err != nil {
+		t.Fatalf("RunAudit(second): %v", err)
+	}
+	sum = summaryOf()
+	if gen2 != gen1+1 || sum.Verdict != verdictVerified || sum.Stale || sum.ApplyGen != gen2 {
+		t.Fatalf("改规则热应用后应仍 verified 且代次 +1（gen1=%d gen2=%d）: %+v", gen1, gen2, sum)
+	}
+}
