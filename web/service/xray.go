@@ -273,8 +273,10 @@ func (s *XrayService) RuntimeSnapshot() XrayRuntime {
 		current *xray.Config
 	)
 	if process != nil && process.IsRunning() {
-		running = true
 		apiPort = process.GetAPIPort()
+		// 进程在跑但拿不到控制面端口（api 入站缺失或尚未解析）时，调用方没法
+		// 向核心发任何 RPC，等同于不可验证，按未运行处理。
+		running = apiPort > 0
 		current = process.GetConfig()
 	}
 	lock.Unlock()
