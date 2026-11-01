@@ -38,7 +38,6 @@ const (
 	auditLargeRuleEntries = 20000 // 合并后条目数超过它即为大规则
 	anomalyMaxUsers       = 50    // 每条规则最多展开的用户数
 	anomalyMaxRoutes      = 5     // 每个用户最多展开的出站数
-	anomalyBatchRows      = 20000 // 每档每轮最多读的行数，读不完下一轮继续
 	anomalyWindow         = verifyLogWindowHours * time.Hour
 	anomalyBucketMs       = int64(time.Hour / time.Millisecond)
 )
@@ -146,6 +145,9 @@ func (b *anomalyBucket) merge(src *anomalyBucket) {
 	}
 }
 
+// anomalyBatchRows 是每档每轮最多读的行数，读不完下一轮继续。用 var 仅为让测试调小。
+var anomalyBatchRows = 20000
+
 // 包级扫描状态，全部由 anomalyMu 保护；持锁期间只做内存操作，不读库、不建匹配器。
 var (
 	anomalyMu          sync.Mutex
@@ -154,6 +156,8 @@ var (
 	anomalyCursorEpoch uint64                               // 清空时递增，扫描据此丢弃清空前读出的批次
 	anomalyWatermarks  = map[int]logCursor{}                // 每条规则已计到的位置
 	anomalyIgnore      = map[int]int64{}                    // ruleId → 忽略时刻（毫秒）
+	// 最近一次大规则扫描是否读满了一整批（游标可能落后于日志写入）。
+	anomalyLargeBacklogged bool
 )
 
 // anomalyScanMu 串行化同一档的扫描；两档之间可以并行。
@@ -191,6 +195,14 @@ func anomalyIgnoreBefore(ruleId int) int64 {
 	anomalyMu.Lock()
 	defer anomalyMu.Unlock()
 	return anomalyIgnore[ruleId]
+}
+
+// LargeScanBacklogged 报告最近一次大规则扫描是否读满了一整批。读满说明还有未读的行，
+// 调用方应在下一轮直接再扫一次，而不是等满 10 分钟间隔。
+func (s *RoutingAuditService) LargeScanBacklogged() bool {
+	anomalyMu.Lock()
+	defer anomalyMu.Unlock()
+	return anomalyLargeBacklogged
 }
 
 // ResetAnomalies 是「忽略此前的异常」：清空该规则的摘要并记下忽略时刻。
@@ -298,6 +310,7 @@ func clearAnomaliesLocked() {
 	anomalySummaries = map[int]map[int64]*anomalyBucket{}
 	anomalyCursors = [2]logCursor{}
 	anomalyWatermarks = map[int]logCursor{}
+	anomalyLargeBacklogged = false
 	anomalyCursorEpoch++
 }
 
@@ -348,6 +361,9 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 	if len(classRules) == 0 {
 		// 这一档没有规则：游标归零，将来有规则进入这一档时从 now-24h 回填。
 		anomalyCursors[class] = logCursor{}
+		if large {
+			anomalyLargeBacklogged = false
+		}
 		anomalyMu.Unlock()
 		return nil
 	}
@@ -397,6 +413,9 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 		return nil // 读的过程中被清空过（访问日志关闭），这一批作废
 	}
 	anomalyCursors[class] = next
+	if large {
+		anomalyLargeBacklogged = len(rows) >= anomalyBatchRows
+	}
 	for _, p := range classRules {
 		if wm, ok := anomalyWatermarks[p.ruleId]; !ok || wm.less(next) {
 			anomalyWatermarks[p.ruleId] = next

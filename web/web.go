@@ -361,6 +361,10 @@ func (s *Server) startTask() {
 
 	s.cron.AddJob("@every 5s", job.NewAccessLogCollectJob())
 
+	// 路由规则后台审计：代次变化或满 10 分钟才真正验证；异常扫描每分钟一次。
+	s.cron.AddJob("@every 30s", job.NewRouteAuditJob())
+	s.cron.AddJob("@every 1m", job.NewRouteAnomalyJob())
+
 	// 每小时按保留期清理访问日志
 	s.cron.AddJob("@every 1h", job.NewAccessLogCleanupJob())
 

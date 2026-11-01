@@ -20,11 +20,13 @@ func resetAnomalyState(t *testing.T) {
 		anomalyCursorEpoch++
 		anomalyWatermarks = map[int]logCursor{}
 		anomalyIgnore = map[int]int64{}
+		anomalyLargeBacklogged = false
 		anomalyMu.Unlock()
 		anomalyPlanMu.Lock()
 		anomalyPlans = nil
 		anomalyPlanMu.Unlock()
 		auditLargeThreshold = auditLargeRuleEntries
+		anomalyBatchRows = 20000
 	}
 	clear()
 	t.Cleanup(clear)
@@ -453,5 +455,21 @@ func TestAnomalyClassifyUsesMergedCount(t *testing.T) {
 	mustScan(t, f.svc, anomalyNow, true)
 	if n := f.svc.Anomaly(overlap.Id, anomalyNow).Count; n != 1 {
 		t.Errorf("大规则应按真实条目命中 c.com: Count=%d", n)
+	}
+}
+
+func TestLargeScanBacklogged(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+	auditLargeThreshold = 0 // 让这条规则归入大规则一档
+	anomalyBatchRows = 3
+	insertLogs(t, 5, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+
+	mustScan(t, f.svc, anomalyNow, true)
+	if !f.svc.LargeScanBacklogged() {
+		t.Fatal("读满一批（3/3）后应报告积压")
+	}
+	mustScan(t, f.svc, anomalyNow, true) // 剩 2 行，读不满
+	if f.svc.LargeScanBacklogged() {
+		t.Fatal("读不满一批后应清除积压标记")
 	}
 }
