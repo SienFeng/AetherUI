@@ -3865,33 +3865,36 @@ button.xray-badge:focus-visible {
     margin-top: 12px;
 }
 
-/* ── 分流规则弹窗：用户 / 域名组多选（视觉稿 v3：已选项以标签放在输入框里） ── */
+/* ── 分流规则编辑区：用户多选（已选项以标签放在输入框里） ── */
 .rule-pick {
     width: 100%;
     margin-top: 8px;
 }
 
+/* 与「名称」输入框同高（36px），标签上下各留 6px。antd 按 32px 设计：标签带
+ * 3px 上边距、内层 __rendered 撑着一个 line-height 30px 的隐形 ::after，再用
+ * margin-bottom -3px 抵掉（这个负边距不能动）。只加高 min-height 的话，
+ * 多出来的 4px 全堆在标签下面，看起来偏上。
+ * 这里改成：上 1px 边框 + 2px padding + 3px 标签上边距 = 6px；
+ * 总高 1 + 2 + (30 - 3) + 5 + 1 = 36px，标签底到框底也是 6px。 */
 .rule-pick .ant-select-selection--multiple {
     min-height: 36px;
-    padding-bottom: 3px;
+    padding: 2px 0 5px;
     border-radius: 9px;
 }
 
-/* 用户标签：主色浅底（#1D4ED8 on #EFF4FF，6.1:1） */
+/* 用户标签：主色浅底（#1D4ED8 on #EFF4FF，6.1:1），高度沿用 antd 的 24px。 */
 .rule-pick .ant-select-selection__choice {
-    height: 26px;
-    margin-top: 4px;
-    line-height: 24px;
     border: 0;
     border-radius: 7px;
     background: #EFF4FF;
     color: #1D4ED8;
 }
 
-/* 域名组标签：中性灰底，与规则列表里的域名组 chip 一致 */
-.rule-pick-groups .ant-select-selection__choice {
-    background: #F1F5F9;
-    color: #334155;
+/* antd 的行高 22px 是按 1px 边框算的；上面去掉了边框，行高补回 24px 文字才居中。
+ * 选择器要压过 antd 的 `.ant-select-selection--multiple .ant-select-selection__rendered>ul>li`。 */
+.rule-pick .ant-select-selection--multiple .ant-select-selection__rendered > ul > li.ant-select-selection__choice {
+    line-height: 24px;
 }
 
 .rule-pick .ant-select-selection__choice__remove {
