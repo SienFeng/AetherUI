@@ -832,12 +832,37 @@
         background: linear-gradient(180deg, #FAFCFF, #F6F9FE);
     }
 
-    .rv-flow .rv-h3 {
+    /* 标题行：左边标题，右边验证汇总与「重新验证」，窄时整体换行 */
+    .rv-verify-head {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px 10px;
         margin-bottom: 2px;
     }
 
+    .rv-verify-head .rv-h3 {
+        margin: 0;
+    }
+
+    .rv-verify-sum {
+        margin-left: auto;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        min-width: 0;
+        font-size: 12px;
+        line-height: 18px;
+        color: var(--aui-text-2);
+        text-align: right;
+    }
+
+    .rv-verify-sub {
+        overflow-wrap: anywhere;
+    }
+
     /* 没有「按当前修改预览」提示时，标题与走向图之间留出与提示同样的间距 */
-    .rv-flow .rv-h3 + .rv-diagram {
+    .rv-flow .rv-verify-head + .rv-diagram {
         margin-top: 11px;
     }
 
@@ -896,17 +921,91 @@
         display: flex;
         align-items: center;
         gap: 7px;
-        height: 28px;
-        padding: 0 8px;
+        min-height: 28px;
+        padding: 3px 8px;
         font-size: 12px;
         color: var(--aui-text-2);
         min-width: 0;
     }
 
+    /* 用户名与验证徽章：放得下时徽章靠右；放不下时徽章换到用户名下方，用户名不截断 */
+    .rv-verify-ucell {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 3px 7px;
+    }
+
     .rv-uname {
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .rv-verify-detail {
+        margin-top: 11px;
+        padding: 10px 12px;
+        background: #fff;
+        border: 1px solid #EDF1F8;
+        border-radius: 11px;
+        font-size: 12px;
+        color: var(--aui-text-2);
+    }
+
+    .rv-verify-dhead {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 4px 8px;
+        color: var(--aui-text);
+    }
+
+    .rv-verify-line {
+        margin: 6px 0 0;
+        overflow-wrap: anywhere;
+    }
+
+    .rv-verify-user + .rv-verify-user {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid #EDF1F8;
+    }
+
+    .rv-verify-list {
+        margin: 6px 0 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .rv-verify-list > li {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 2px 6px;
+        overflow-wrap: anywhere;
+    }
+
+    .rv-verify-list.is-examples {
+        margin-left: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .rv-verify-target {
+        color: var(--aui-text);
+        font-weight: 500;
+    }
+
+    .rv-verify-note {
+        color: var(--aui-warning);
+    }
+
+    .rv-verify-ok {
+        color: var(--aui-success);
     }
 
     .rv-av {
@@ -1545,7 +1644,16 @@
                                         </div>
 
                                         <section class="rv-flow" aria-labelledby="rv-flow-title">
-                                            <h3 id="rv-flow-title" class="rv-h3 is-green">流量走向</h3>
+                                            <div class="rv-verify-head">
+                                                <h3 id="rv-flow-title" class="rv-h3 is-green">流量走向</h3>
+                                                <!-- 整页唯一的验证播报点：各行徽章不做 live region，只在这里汇总一次 -->
+                                                <span class="rv-verify-sum" role="status" aria-atomic="true">
+                                                    <span>[[ verifySummary.text ]]</span>
+                                                    <span v-if="verifySummary.sub" class="rv-verify-sub">[[ verifySummary.sub ]]</span>
+                                                </span>
+                                                <a-button size="small" :loading="verify.loading" :disabled="!canVerify"
+                                                          @click="runVerify(savedRule.id)">重新验证</a-button>
+                                            </div>
                                             <p v-if="ruleDirty" class="rv-hint">按当前修改预览</p>
                                             <!-- 连线是纯装饰（aria-hidden），信息已经在三列文字里 -->
                                             <div class="rv-diagram" ref="ruleDiagram">
@@ -1556,7 +1664,21 @@
                                                     <div class="rv-ulist">
                                                         <div v-for="u in flowUsers" :key="u.key" class="rv-urow">
                                                             <span class="rv-av" :style="{ background: u.color }" aria-hidden="true">[[ u.av ]]</span>
-                                                            <span class="rv-uname">[[ u.name ]]</span>
+                                                            <span class="rv-verify-ucell">
+                                                                <span class="rv-uname">[[ u.name ]]</span>
+                                                                <button v-if="rowBadges[u.key].expandable" type="button"
+                                                                        class="status-badge" :class="rowBadges[u.key].cls"
+                                                                        :title="rowBadges[u.key].title"
+                                                                        :aria-expanded="verify.expanded[u.key] ? 'true' : 'false'"
+                                                                        :aria-controls="'rv-verify-d-' + u.key"
+                                                                        @click="toggleVerify(u.key)">
+                                                                    <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
+                                                                </button>
+                                                                <span v-else class="status-badge" :class="rowBadges[u.key].cls"
+                                                                      :title="rowBadges[u.key].title">
+                                                                    <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
+                                                                </span>
+                                                            </span>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -1593,6 +1715,79 @@
                                                     </div>
                                                 </div>
                                             </div>
+                                            <!-- 验证明细：只渲染展开的行，顺序跟随左侧用户列表 -->
+                                            <template v-for="u in flowUsers">
+                                                <div v-if="verify.expanded[u.key] && rowBadges[u.key].expandable"
+                                                     :key="'vd-' + u.key" :id="'rv-verify-d-' + u.key" class="rv-verify-detail">
+                                                    <div class="rv-verify-dhead">
+                                                        <b>[[ u.name ]]</b>
+                                                        <span class="status-badge" :class="rowBadges[u.key].cls">
+                                                            <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
+                                                        </span>
+                                                    </div>
+                                                    <p v-if="rowBadges[u.key].reason" class="rv-verify-line">[[ rowBadges[u.key].reason ]]</p>
+                                                    <template v-if="verifyShown">
+                                                        <p v-if="verify.result.accessLog.error" class="rv-verify-line">
+                                                            访问日志读取失败：[[ verify.result.accessLog.error ]]
+                                                        </p>
+                                                        <p v-else-if="!verify.result.accessLog.enabled" class="rv-verify-line">
+                                                            未开启访问日志，无法核对真实连接（可在面板设置中开启）
+                                                        </p>
+                                                        <template v-if="u.key === 'all' || u.key === 'more'">
+                                                            <p v-if="u.key === 'all' && verify.result.truncated" class="rv-verify-line">
+                                                                只验证了前 50 个已启用入站
+                                                            </p>
+                                                            <p v-if="!userVerify(u.key).failed.length" class="rv-verify-line">
+                                                                全部 [[ userVerify(u.key).total ]] 位用户已验证
+                                                            </p>
+                                                        </template>
+                                                        <div v-for="uv in verifyDetailUsers(u.key)" :key="'vu-' + uv.inboundId" class="rv-verify-user">
+                                                            <div v-if="u.key === 'all' || u.key === 'more'" class="rv-verify-dhead">
+                                                                <b>[[ uv.name ]]</b>
+                                                                <span class="status-badge" :class="verdictMeta(uv.verdict).cls">
+                                                                    <a-icon :type="verdictMeta(uv.verdict).icon"></a-icon>[[ verdictMeta(uv.verdict).text ]]
+                                                                </span>
+                                                            </div>
+                                                            <p v-if="(u.key === 'all' || u.key === 'more') && uv.reason" class="rv-verify-line">[[ uv.reason ]]</p>
+                                                            <ul v-if="uv.samples && uv.samples.length" class="rv-verify-list">
+                                                                <li v-for="(s, si) in uv.samples" :key="si">
+                                                                    <a-icon :type="s.error ? 'question-circle' : (s.match ? 'check-circle' : 'close-circle')"
+                                                                            :class="s.error ? '' : (s.match ? 'rv-verify-ok' : 'status-text-danger')"></a-icon>
+                                                                    <span class="rv-verify-target">[[ s.target ]]</span>
+                                                                    <span aria-hidden="true">→</span>
+                                                                    <span class="sr-only">实际出站</span>
+                                                                    <span>[[ s.error ? '查询失败：' + s.error : (s.actualLabel || s.actualTag || '—') ]]</span>
+                                                                    <span v-if="!s.error && !s.match" class="status-text-danger">
+                                                                        （应为 [[ verify.result.expected.label || verify.result.expected.tag ]]）
+                                                                    </span>
+                                                                    <span v-if="!s.error && s.match && !s.hitByRule" class="rv-verify-note">
+                                                                        出口一致，但不是由本规则命中
+                                                                    </span>
+                                                                </li>
+                                                            </ul>
+                                                            <template v-if="uv.log">
+                                                                <p v-if="uv.log.error" class="rv-verify-line">读取该用户的访问日志失败：[[ uv.log.error ]]</p>
+                                                                <template v-else>
+                                                                    <p v-if="uv.log.matched > 0" class="rv-verify-line">近 24 小时符合 [[ uv.log.matched ]] 次</p>
+                                                                    <div v-for="o in (uv.log.others || [])" :key="o.route" class="rv-verify-other">
+                                                                        <p class="rv-verify-line status-text-danger">
+                                                                            近 24 小时有 [[ o.count ]] 次走了 [[ o.label || o.route ]]（最近一次 [[ verifyStamp(o.lastAt) ]]）
+                                                                        </p>
+                                                                        <ul v-if="o.examples && o.examples.length" class="rv-verify-list is-examples">
+                                                                            <li v-for="ex in o.examples" :key="ex">[[ ex ]]</li>
+                                                                        </ul>
+                                                                    </div>
+                                                                    <p v-if="uv.log.rejected > 0" class="rv-verify-line">另有 [[ uv.log.rejected ]] 次连接被拒绝</p>
+                                                                    <p v-if="!uv.log.matched && !(uv.log.others || []).length && !uv.log.rejected" class="rv-verify-line">
+                                                                        近 24 小时没有访问过这些域名
+                                                                    </p>
+                                                                    <p v-if="uv.log.truncated" class="rv-verify-line">访问记录较多，只统计了其中一部分</p>
+                                                                </template>
+                                                            </template>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </template>
                                         </section>
 
                                         <section class="rv-edit" :class="{ 'is-dirty': ruleDirty }" aria-labelledby="rv-edit-title">
@@ -2010,6 +2205,11 @@
             ruleQuery: '',
             // 正在提交启停的规则 id，防止连点
             ruleToggling: 0,
+            // 「流量走向」的真实性验证。ruleId 是当前这份结果（或正在进行的请求）
+            // 所属的规则；切换规则时先清空，迟到的旧响应据此丢弃，不会画到新规则上。
+            verify: { ruleId: 0, loading: false, result: null, error: '', expanded: {}, retryTimer: null },
+            // 保存时恰好有一次验证在进行：那份结果是保存前的，回来后要按「保存后」再验证一次
+            verifyRerun: 0,
 
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
@@ -2105,6 +2305,74 @@
                 });
                 if (ids.length > 4) shown.push({ key: 'more', name: '另外 ' + (ids.length - 4) + ' 位', av: '+', color: '#94A0B8' });
                 return shown;
+            },
+            // 只有已保存、启用、会写进配置且没有未保存修改的规则才去问核心
+            verifyRuleId() {
+                return this.savedRule ? this.savedRule.id : 0;
+            },
+            canVerify() {
+                const r = this.savedRule;
+                return !!(r && r.enable && !this.ruleIssue(r) && !this.ruleDirty);
+            },
+            // 结果属于当前规则、且当前仍可验证时才拿来显示；否则一律不显示（更不会显示绿色）
+            verifyShown() {
+                const res = this.verify.result;
+                return !!(this.canVerify && res && res.ruleId === this.savedRule.id && this.verify.ruleId === res.ruleId);
+            },
+            // 不能验证时的原因（有未保存修改除外，那一档单独显示「保存后验证」）
+            verifyBlockedReason() {
+                const r = this.savedRule;
+                if (!r || this.ruleDirty) return '';
+                if (!r.enable) return '规则已停用，不会写进核心配置';
+                return this.ruleIssue(r);
+            },
+            // 本规则覆盖的全部用户的验证结果：具体用户按所选入站逐个对上，全局规则取服务端返回的全部
+            verifyScopeUsers() {
+                if (!this.verifyShown) return [];
+                const ids = this.editorPreview.inboundIds;
+                if (!ids.length) return this.verify.result.users || [];
+                return ids.map(id => this.userVerifyById(id));
+            },
+            verifySummary() {
+                if (!this.ruleEditor.active) return { text: '', sub: '' };
+                if (this.ruleDirty) return { text: '有未保存的修改，保存后验证', sub: '' };
+                if (this.verifyBlockedReason) return { text: '无法验证', sub: this.verifyBlockedReason };
+                if (this.verify.loading) return { text: '正在验证…', sub: '' };
+                if (this.verify.error) return { text: '验证失败', sub: this.verify.error };
+                if (!this.verifyShown) return { text: '', sub: '' };
+                const res = this.verify.result;
+                const users = this.verifyScopeUsers;
+                const time = this.verifyClock(res.checkedAt);
+                const state = res.core && res.core.state;
+                const coreMsg = (res.core && res.core.message) || '';
+                if (state === 'busy' || state === 'not_running' || state === 'error') {
+                    return { text: '无法验证 · ' + time, sub: coreMsg };
+                }
+                const verified = users.filter(x => x.verdict === 'verified').length;
+                const bad = users.filter(x => x.verdict === 'mismatch').length;
+                let text = '已验证 ' + verified + '/' + users.length + ' · ' + time;
+                if (bad) text += ' · ' + bad + ' 位与配置不符';
+                let sub = coreMsg;
+                if (state === 'pending') {
+                    sub = this.verify.retryTimer ? '核心尚未载入最新配置，稍后自动再验证一次' : (coreMsg || '核心尚未载入最新配置');
+                }
+                return { text, sub };
+            },
+            // 每一行徽章的显示状态，key 与 flowUsers 一一对应
+            rowBadges() {
+                const out = {};
+                for (const u of this.flowUsers) out[u.key] = this.rowBadge(u.key);
+                return out;
+            },
+            // 连线着色用：每行一个 verdict（没有证据时为 ''，画中性灰）
+            wireVerdicts() {
+                return this.flowUsers.map(u => {
+                    if (!this.verifyShown) return '';
+                    const v = this.userVerify(u.key);
+                    if (u.key !== 'all' && u.key !== 'more') return v.verdict;
+                    if (v.failed.some(x => x.verdict === 'mismatch')) return 'mismatch';
+                    return v.total > 0 && v.verified === v.total ? 'verified' : '';
+                });
             },
 
                         // occupiedInbounds 返回当前域名组下、除正在编辑的这条规则之外，
@@ -2805,8 +3073,14 @@
                     const saved = r.id
                         ? this.rules.find(x => x.id === r.id)
                         : this.rules.find(x => !before.includes(x.id));
-                    if (saved) this.loadEditor(saved);
-                    else this.selectFirstRule();
+                    if (saved) {
+                        this.loadEditor(saved);
+                        // 保存后核心多半还没载入新配置，runVerify 会在 pending 时自己约一次重试。
+                        // 这里同步发起：随后触发的切换/可验证 watcher 会被 loading 挡掉，不会重复请求。
+                        // 规则内容变了，旧结论作废
+                        this.resetVerify(saved.id);
+                        if (this.canVerify) this.runVerify(saved.id, true);
+                    } else this.selectFirstRule();
                 } finally {
                     this.ruleEditor.saving = false;
                 }
@@ -2920,6 +3194,156 @@
                 return n ? this.nodeSubLabel(n) : '';
             },
 
+            // ── 流量走向的真实性验证 ──
+            // 判定只认服务端给的 verdict，前端绝不自己重算。
+            verdictMeta(verdict) {
+                switch (verdict) {
+                    case 'verified': return { cls: 'status-ok', icon: 'check-circle', text: '已验证' };
+                    case 'mismatch': return { cls: 'status-danger', icon: 'close-circle', text: '与配置不符' };
+                    case 'pending': return { cls: 'status-warn', icon: 'clock-circle', text: '等待下发' };
+                    default: return { cls: 'status-neutral', icon: 'question-circle', text: '无法验证' };
+                }
+            },
+            // 服务端省略了已删除的入站。结果里找不到的用户一律「无法验证」，绝不留空、更不显示绿色。
+            userVerifyById(id) {
+                const res = this.verify.result;
+                const found = res && (res.users || []).find(x => x.inboundId === id);
+                if (found) return found;
+                const state = res && res.core && res.core.state;
+                // 核心不可用时服务端不逐个列出用户，原因就是核心那一侧的说明
+                const coreDown = state === 'busy' || state === 'not_running' || state === 'error';
+                const reason = coreDown && res.core.message ? res.core.message : '该用户已删除或不在验证范围内';
+                return { inboundId: id, name: this.inboundName(id), verdict: 'unverifiable', reason, samples: [], log: null };
+            },
+            // 按 flowUsers 的 key 取验证结果。'all'（全局规则）与 'more'（折叠的其余用户）返回汇总。
+            userVerify(key) {
+                if (key !== 'all' && key !== 'more') return this.userVerifyById(key);
+                let users;
+                if (key === 'all') {
+                    users = this.verifyScopeUsers;
+                } else {
+                    users = this.editorPreview.inboundIds.slice(4).map(id => this.userVerifyById(id));
+                }
+                return {
+                    verified: users.filter(x => x.verdict === 'verified').length,
+                    total: users.length,
+                    failed: users.filter(x => x.verdict !== 'verified'),
+                };
+            },
+            rowBadge(key) {
+                const neutral = (icon, text, title) => ({
+                    cls: 'status-neutral', icon, text, title, reason: title, expandable: false,
+                });
+                if (this.ruleDirty) return neutral('save', '保存后验证', '有未保存的修改，保存后再验证');
+                if (this.verifyBlockedReason) {
+                    return Object.assign(neutral('question-circle', '无法验证', this.verifyBlockedReason), { expandable: true });
+                }
+                if (this.verify.loading && !this.verifyShown) return neutral('loading', '验证中', '正在向核心查询');
+                if (this.verify.error) {
+                    return Object.assign(neutral('question-circle', '无法验证', '验证请求失败：' + this.verify.error), { expandable: true });
+                }
+                if (!this.verifyShown) return neutral('question-circle', '未验证', '尚未验证');
+                const v = this.userVerify(key);
+                if (key !== 'all' && key !== 'more') {
+                    const m = this.verdictMeta(v.verdict);
+                    const reason = v.verdict === 'verified' ? '' : (v.reason || '');
+                    let title = m.text + (reason ? '：' + reason : '');
+                    if (v.verdict === 'verified' && v.log && v.log.matched > 0) {
+                        title += '，近 24h ' + v.log.matched + ' 次真实连接';
+                    }
+                    return { cls: m.cls, icon: m.icon, text: m.text, title, reason, expandable: true };
+                }
+                // 汇总徽章取最坏的那一档：不符 > 等待下发 > 无法验证 > 已验证
+                const worst = ['mismatch', 'pending', 'unverifiable'].find(x => v.failed.some(f => f.verdict === x))
+                    || (v.total ? 'verified' : 'unverifiable');
+                const m = this.verdictMeta(worst);
+                if (!v.total) {
+                    const res = this.verify.result;
+                    const reason = (res.core && res.core.message) || '没有可验证的用户';
+                    return { cls: m.cls, icon: m.icon, text: m.text, title: reason, reason, expandable: true };
+                }
+                const text = v.verified + '/' + v.total + ' 已验证';
+                const title = v.failed.length ? v.failed.length + ' 位用户未通过验证，点开查看' : '全部已验证';
+                return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true };
+            },
+            // 明细里列出的用户：具体用户只有它自己；汇总行只列出不是「已验证」的
+            verifyDetailUsers(key) {
+                if (!this.verifyShown) return [];
+                const v = this.userVerify(key);
+                if (key !== 'all' && key !== 'more') return [v];
+                return v.failed;
+            },
+            toggleVerify(key) {
+                this.$set(this.verify.expanded, key, !this.verify.expanded[key]);
+            },
+            clearVerifyRetry() {
+                if (this.verify.retryTimer) clearTimeout(this.verify.retryTimer);
+                this.verify.retryTimer = null;
+            },
+            // 切换规则：清空上一条规则的结果、展开状态与待执行的自动重试
+            resetVerify(ruleId) {
+                this.clearVerifyRetry();
+                this.verify.ruleId = ruleId;
+                this.verify.result = null;
+                this.verify.error = '';
+                this.verify.expanded = {};
+            },
+            // afterSave：保存后的那次验证。核心还没载入新配置（pending）时，12 秒后再验证一次，仅一次。
+            async runVerify(ruleId, afterSave) {
+                if (!ruleId) return;
+                if (this.verify.loading) {
+                    if (afterSave) this.verifyRerun = ruleId;
+                    return;
+                }
+                this.clearVerifyRetry();
+                this.verify.ruleId = ruleId;
+                this.verify.loading = true;
+                this.verify.error = '';
+                let msg;
+                try {
+                    msg = await HttpUtil.post('aui/routing/rule/verify/' + ruleId);
+                } finally {
+                    this.verify.loading = false;
+                }
+                const cur = this.savedRule;
+                if (this.verifyRerun) {
+                    const again = this.verifyRerun;
+                    this.verifyRerun = 0;
+                    if (cur && cur.id === again && this.verify.ruleId === again && this.canVerify) {
+                        this.runVerify(again, true);
+                        return;
+                    }
+                }
+                if (!cur || cur.id !== ruleId || this.verify.ruleId !== ruleId) {
+                    // 请求期间切到了别的规则：丢弃这份结果；新规则那次自动验证被
+                    // 上面的 loading 挡掉了，这里补上。
+                    if (cur && this.canVerify && this.verify.ruleId === cur.id && !this.verify.result) {
+                        this.runVerify(cur.id);
+                    }
+                    return;
+                }
+                if (msg && msg.success && msg.obj && msg.obj.ruleId === ruleId) {
+                    this.verify.result = msg.obj;
+                    if (afterSave && msg.obj.core && msg.obj.core.state === 'pending') {
+                        this.verify.retryTimer = setTimeout(() => {
+                            this.verify.retryTimer = null;
+                            if (this.canVerify && this.savedRule && this.savedRule.id === ruleId) this.runVerify(ruleId);
+                        }, 12000);
+                    }
+                } else {
+                    // 失败时不保留旧结果：旧的绿色不能冒充这一次的结论
+                    this.verify.result = null;
+                    this.verify.error = (msg && msg.msg) || '请求失败';
+                }
+            },
+            // 时间一律按面板时区（DateUtil），formatMillis 给出 YYYY-MM-DD HH:mm:ss
+            verifyClock(ms) {
+                return ms ? DateUtil.formatMillis(ms).slice(11, 16) : '';
+            },
+            verifyStamp(ms) {
+                return ms ? DateUtil.formatMillis(ms).slice(5, 16) : '—';
+            },
+
             // ── 流量走向连线 ──
             // 连线按真实元素位置画（平滑曲线 + 流动虚线 + 光点）。纯装饰：信息已在
             // 三列文字里。系统开了「减少动态效果」时只留静态线。
@@ -2944,7 +3368,12 @@
                 const L = R(list), C = R(center), N = R(dest);
                 const rows = Array.from(d.querySelectorAll('.rv-urow')).map(R);
                 const action = this.ruleEditor.rule.action;
-                const col = action === 'block' ? '#D9363E' : '#12A150';
+                // 连线颜色跟随验证结论：已验证用原来的蓝，不符用 --aui-danger，
+                // 其余（没有证据、等待下发、无法验证）一律中性灰——没有证据就不画成「通」的样子。
+                const danger = getComputedStyle(document.documentElement).getPropertyValue('--aui-danger').trim() || '#B91C1C';
+                const verdicts = this.wireVerdicts;
+                const anyMismatch = verdicts.includes('mismatch');
+                const col = anyMismatch ? danger : (action === 'block' ? '#D9363E' : '#12A150');
                 const curve = (x1, y1, x2, y2) => {
                     const k = (x2 - x1) * 0.55;
                     return 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + k) + ' ' + y1 + ', ' + (x2 - k) + ' ' + y2 + ', ' + x2 + ' ' + y2;
@@ -2957,17 +3386,20 @@
                 }).join('');
                 let h = '<defs>' +
                     '<linearGradient id="rv-gl" gradientUnits="userSpaceOnUse" x1="' + L.r + '" x2="' + C.l + '"><stop offset="0" stop-color="#8EC5FF"></stop><stop offset="1" stop-color="#3D7BFF"></stop></linearGradient>' +
-                    '<linearGradient id="rv-gr" gradientUnits="userSpaceOnUse" x1="' + C.r + '" x2="' + N.l + '"><stop offset="0" stop-color="' + (action === 'block' ? '#FF9A9A' : '#3FD6A4') + '"></stop><stop offset="1" stop-color="' + col + '"></stop></linearGradient>' +
+                    '<linearGradient id="rv-gr" gradientUnits="userSpaceOnUse" x1="' + C.r + '" x2="' + N.l + '"><stop offset="0" stop-color="' + (anyMismatch ? danger : (action === 'block' ? '#FF9A9A' : '#3FD6A4')) + '"></stop><stop offset="1" stop-color="' + col + '"></stop></linearGradient>' +
                     '<filter id="rv-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2"></feGaussianBlur></filter>' +
                     '<marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + col + '"></path></marker></defs>';
                 const n = rows.length, spread = Math.min(8, (C.h - 24) / Math.max(1, n - 1));
                 rows.forEach((u, i) => {
                     const x1 = L.r + 7, p = curve(x1, u.y, C.l - 2, C.y + (i - (n - 1) / 2) * spread);
-                    h += '<path d="' + p + '" fill="none" stroke="url(#rv-gl)" stroke-width="5" opacity=".18" filter="url(#rv-glow)"></path>' +
-                        '<path d="' + p + '" fill="none" stroke="url(#rv-gl)" stroke-width="1.8" opacity=".55"></path>' +
-                        '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="#3D7BFF" stroke-width="1.8" stroke-linecap="round"></path>' +
-                        '<circle cx="' + x1 + '" cy="' + u.y + '" r="3.5" fill="#fff" stroke="#3D7BFF" stroke-width="1.8"></circle>' +
-                        dots(p, '#3D7BFF', 1, 2.2, i * 0.35);
+                    const v = verdicts[i];
+                    const solid = v === 'verified' ? '#3D7BFF' : (v === 'mismatch' ? danger : '#94A0B8');
+                    const soft = v === 'verified' ? 'url(#rv-gl)' : solid;
+                    h += '<path d="' + p + '" fill="none" stroke="' + soft + '" stroke-width="5" opacity=".18" filter="url(#rv-glow)"></path>' +
+                        '<path d="' + p + '" fill="none" stroke="' + soft + '" stroke-width="1.8" opacity=".55"></path>' +
+                        '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="' + solid + '" stroke-width="1.8" stroke-linecap="round"></path>' +
+                        '<circle cx="' + x1 + '" cy="' + u.y + '" r="3.5" fill="#fff" stroke="' + solid + '" stroke-width="1.8"></circle>' +
+                        dots(p, solid, 1, 2.2, i * 0.35);
                 });
                 const p = curve(C.r + 2, C.y, N.l - 4, N.y);
                 h += '<path d="' + p + '" fill="none" stroke="url(#rv-gr)" stroke-width="6" opacity=".2" filter="url(#rv-glow)"></path>' +
@@ -3316,7 +3748,31 @@
             flowUsers() {
                 this.scheduleRuleWires();
             },
+            // 只盯规则 id：编辑草稿不会触发验证
+            verifyRuleId(id) {
+                this.resetVerify(id);
+                if (this.canVerify) this.runVerify(id);
+            },
+            // 停用 / 变成未生效：旧结果作废；重新变得可验证且手里没有结果时补一次
+            canVerify(ok) {
+                if (!ok) {
+                    if (!this.ruleDirty) {
+                        this.clearVerifyRetry();
+                        this.verify.result = null;
+                    }
+                    return;
+                }
+                const r = this.savedRule;
+                if (r && this.verify.ruleId === r.id && !this.verify.result && !this.verify.loading) this.runVerify(r.id);
+            },
+            // 验证结论一变，连线颜色跟着重画
+            wireVerdicts() {
+                this.scheduleRuleWires();
+            },
 
+        },
+        beforeDestroy() {
+            this.clearVerifyRetry();
         },
         async mounted() {
             this.loadSubTime();
