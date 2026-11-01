@@ -80,12 +80,16 @@ func newVerifyFixture(t *testing.T) *verifyFixture {
 	return f
 }
 
+const sniffingOn = `{"enabled":true,"destOverride":["http","tls"]}`
+
 func newVerifyInbound(t *testing.T, port int, remark string, enable bool) *model.Inbound {
 	t.Helper()
 	in := &model.Inbound{
 		UserId: 1, Port: port, Protocol: model.VLESS, Enable: true, Remark: remark,
 		Tag:      "inbound-" + strconv.Itoa(port),
-		Settings: vlessSettings(), StreamSettings: plainTCPStream, Sniffing: "{}",
+		// 与新建入站的默认值一致：sniffing 开启且 destOverride 含 http/tls，
+		// 否则 sniffingBlind 会把域名样例全部剔掉。关 sniffing 的场景单独构造。
+		Settings: vlessSettings(), StreamSettings: plainTCPStream, Sniffing: sniffingOn,
 	}
 	if err := database.GetDB().Save(in).Error; err != nil {
 		t.Fatalf("save inbound: %v", err)
@@ -592,5 +596,101 @@ func TestVerifyAccessLogQueryErrorIsReported(t *testing.T) {
 	}
 	if u := findUser(t, res, f.a.Id); u.Verdict != verdictUnverifiable || u.Log == nil || u.Log.Error == "" {
 		t.Errorf("核心未运行 + 日志失败应为 unverifiable 且带日志错误: %+v", u)
+	}
+}
+
+// 全局规则覆盖一个关了 sniffing 的 vmess 入站：核心拿不到它的域名，域名样例在
+// TestRoute 里命中也不算证据，没有 IP 样例时只能 unverifiable，且不发域名 RPC。
+func TestVerifyGlobalRuleSniffingOffInboundIsUnverifiable(t *testing.T) {
+	f := newVerifyFixture(t)
+	off := newVerifyInbound(t, 41003, "嗅探关闭", true)
+	if err := database.GetDB().Model(off).Updates(map[string]any{"protocol": "vmess", "sniffing": "{}"}).Error; err != nil {
+		t.Fatalf("update inbound: %v", err)
+	}
+	rule := f.addRule(t, model.ActionProxy, []int{})
+	fr := &fakeRoute{fn: returnTag(f.node.Tag)}
+	res, err := newVerifyService(fr, okRuntime()).Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	u := findUser(t, res, off.Id)
+	if u.Verdict != verdictUnverifiable || u.Reason != reasonSniffingOff || len(u.Samples) != 0 {
+		t.Fatalf("关 sniffing 的 vmess 入站应 unverifiable: %+v", u)
+	}
+	for _, c := range fr.calls {
+		if strings.HasPrefix(c, off.Tag+"|") {
+			t.Errorf("不应对关 sniffing 的入站发域名样例: %s", c)
+		}
+	}
+	if a := findUser(t, res, f.a.Id); a.Verdict != verdictVerified {
+		t.Errorf("开着 sniffing 的入站不受影响: %+v", a)
+	}
+}
+
+// socks / http 代理入站不需要嗅探就拿得到域名（socks5h、CONNECT），照常验证。
+func TestVerifyGlobalRuleSniffingOffSocksStillVerified(t *testing.T) {
+	f := newVerifyFixture(t)
+	socks := newVerifyInbound(t, 41003, "socks", true)
+	if err := database.GetDB().Model(socks).Updates(map[string]any{
+		"protocol": "socks", "sniffing": "{}", "settings": `{"auth":"noauth","udp":false}`,
+	}).Error; err != nil {
+		t.Fatalf("update inbound: %v", err)
+	}
+	rule := f.addRule(t, model.ActionProxy, []int{})
+	res, err := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime()).Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if u := findUser(t, res, socks.Id); u.Verdict != verdictVerified || len(u.Samples) != 2 {
+		t.Fatalf("关 sniffing 的 socks 入站应照常 verified: %+v", u)
+	}
+}
+
+// 组里同时有域名与 IP 段：关 sniffing 的入站只剔掉域名样例，IP 样例照测并可变绿。
+func TestVerifySniffingOffStillTestsIPSamples(t *testing.T) {
+	f := newVerifyFixture(t)
+	cidrs, err := EncodeCidrs([]string{"1.2.3.0/24"})
+	if err != nil {
+		t.Fatalf("EncodeCidrs: %v", err)
+	}
+	if err := database.GetDB().Model(f.group).Update("cidrs", cidrs).Error; err != nil {
+		t.Fatalf("update group: %v", err)
+	}
+	off := newVerifyInbound(t, 41003, "嗅探关闭", true)
+	if err := database.GetDB().Model(off).Updates(map[string]any{"protocol": "trojan", "sniffing": `{"enabled":true,"destOverride":["quic"]}`}).Error; err != nil {
+		t.Fatalf("update inbound: %v", err)
+	}
+	rule := f.addRule(t, model.ActionProxy, []int{})
+	fr := &fakeRoute{fn: returnTag(f.node.Tag)}
+	res, err := newVerifyService(fr, okRuntime()).Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	u := findUser(t, res, off.Id)
+	if u.Verdict != verdictVerified || len(u.Samples) != 1 || u.Samples[0].Target != "1.2.3.1" || u.Reason != reasonSniffingIPOnly {
+		t.Fatalf("应只测 IP 样例并注明: %+v", u)
+	}
+	// 开着 sniffing 的入站：1 个域名 + 1 个 IP（IP 预留名额）。
+	if a := findUser(t, res, f.a.Id); len(a.Samples) != 2 || a.Samples[0].Target != "chatgpt.com" || a.Samples[1].Target != "1.2.3.1" {
+		t.Errorf("A 的样例 = %+v", a.Samples)
+	}
+}
+
+// 访问日志里被接受却没记出站的行（Route 为空）：标签是「未知出站」而不是空白。
+func TestVerifyLogEmptyRouteLabel(t *testing.T) {
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	setAccessLog(t, true)
+	s := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime())
+	s.groupLogs = func(int, int64, int) ([]TargetRouteCount, bool, error) {
+		return []TargetRouteCount{{Target: "chatgpt.com:443", Route: "", Accepted: true, Count: 2, LastAt: 1}}, false, nil
+	}
+	res, err := s.Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	u := findUser(t, res, f.a.Id)
+	if u.Log == nil || len(u.Log.Others) != 1 || u.Log.Others[0].Label != "未知出站" || u.Log.Others[0].Route != "" {
+		t.Fatalf("空 Route 应标为未知出站: %+v", u.Log)
 	}
 }

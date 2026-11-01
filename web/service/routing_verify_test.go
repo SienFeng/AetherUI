@@ -20,10 +20,16 @@ func TestSampleTargets(t *testing.T) {
 		perGroup       int
 		want           []string
 	}{
-		{"域名优先且总数不超过 perGroup",
+		{"有可用 IP 时预留一个名额给 IP",
 			[]string{"full:chatgpt.com", "domain:openai.com", "keyword:gpt"},
 			[]string{"1.2.3.0/24", "!10.0.0.0/8", "geoip:us"}, 2,
+			[]string{"chatgpt.com", "1.2.3.1"}},
+		{"IP 条目都不可用时域名占满",
+			[]string{"full:chatgpt.com", "domain:openai.com"},
+			[]string{"!10.0.0.0/8", "geoip:us"}, 2,
 			[]string{"chatgpt.com", "openai.com"}},
+		{"perGroup 为 1 时域名优先", []string{"full:a.com"}, []string{"1.2.3.0/24"}, 1, []string{"a.com"}},
+		{"多个 IP 段只取到 perGroup", nil, []string{"1.2.3.0/24", "5.6.7.0/24", "9.9.9.9"}, 2, []string{"1.2.3.1", "5.6.7.1"}},
 		{"域名不足时补 IP", []string{"keyword:gpt"}, []string{"1.2.3.0/24"}, 2, []string{"1.2.3.1"}},
 		{"IPv6 段", nil, []string{"2001:db8::/32"}, 2, []string{"2001:db8::1"}},
 		{"/32 取自身", nil, []string{"9.9.9.9/32"}, 2, []string{"9.9.9.9"}},

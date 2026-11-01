@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -118,13 +119,28 @@ type sampleTarget struct {
 }
 
 // sampleTargets 对一个域名组取样：先域名后 IP，总数不超过 perGroup。
+// 组里有可用的 IP 条目且 perGroup ≥ 2 时给 IP 预留一个名额：否则一个域名够多的组
+// 永远只测到域名那一半，buildRule 为它生成的那条 IP 规则从来没被验证过。
 // 只有 full:/domain: 能还原出确定的域名；keyword/regexp/dotless/geosite/ext 推不出
 // 可靠样例，geoip:/ext:/带 ! 取反的 IP 条目同理，一律跳过而不是猜一个。
 func sampleTargets(domains, cidrs []string, perGroup int) []sampleTarget {
+	ips := []sampleTarget{}
+	for _, c := range cidrs {
+		if len(ips) >= perGroup {
+			break
+		}
+		if ip := firstUsableIP(strings.TrimSpace(c)); ip != nil {
+			ips = append(ips, sampleTarget{IP: ip, Display: ip.String()})
+		}
+	}
+	domainLimit := perGroup
+	if len(ips) > 0 && perGroup >= 2 {
+		domainLimit = perGroup - 1
+	}
 	out := []sampleTarget{}
 	for _, d := range domains {
-		if len(out) >= perGroup {
-			return out
+		if len(out) >= domainLimit {
+			break
 		}
 		var host string
 		switch {
@@ -137,13 +153,11 @@ func sampleTargets(domains, cidrs []string, perGroup int) []sampleTarget {
 			out = append(out, sampleTarget{Domain: host, Display: host})
 		}
 	}
-	for _, c := range cidrs {
+	for _, t := range ips {
 		if len(out) >= perGroup {
 			break
 		}
-		if ip := firstUsableIP(strings.TrimSpace(c)); ip != nil {
-			out = append(out, sampleTarget{IP: ip, Display: ip.String()})
-		}
+		out = append(out, t)
 	}
 	return out
 }
@@ -197,6 +211,49 @@ func routeHead(route string) string {
 		}
 	}
 	return strings.TrimSpace(route)
+}
+
+// sniffingBlind 判断核心在路由阶段是否拿不到这个入站的目标域名：sniffing 关闭
+// （或 destOverride 不含 http/tls、JSON 解析不了），且不是 socks/http 代理入站。
+// 逐条镜像 routing.html 的 sniffingOff 与 isProxyInbound（ruleIssue 用它们给显式
+// 指定的入站报「永远不会命中」）；两边必须一起改，否则页面说「会命中」而这里不给绿，
+// 或反过来。TestRoute 把 TargetDomain 直接交给 PickRoute、不经过嗅探，所以这一层
+// 只能由面板自己补上——否则全局规则会对这类入站亮出没有依据的绿灯。
+func sniffingBlind(in *model.Inbound) bool {
+	if in.Protocol == "socks" || in.Protocol == model.Http {
+		return false
+	}
+	raw := in.Sniffing
+	if raw == "" {
+		raw = "{}"
+	}
+	var sniffing struct {
+		Enabled      bool     `json:"enabled"`
+		DestOverride []string `json:"destOverride"`
+	}
+	if err := json.Unmarshal([]byte(raw), &sniffing); err != nil {
+		return true
+	}
+	if !sniffing.Enabled {
+		return true
+	}
+	for _, d := range sniffing.DestOverride {
+		if d == "http" || d == "tls" {
+			return false
+		}
+	}
+	return true
+}
+
+// ipOnlyTargets 只保留 IP 样例：IP 条件匹配的是连接目标 IP，与嗅探无关。
+func ipOnlyTargets(targets []sampleTarget) []sampleTarget {
+	out := []sampleTarget{}
+	for _, t := range targets {
+		if t.IP != nil {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // combineVerdict 把核心级状态、样例结果与访问日志合并成用户行的最终结论。
@@ -372,6 +429,9 @@ const (
 	labelDirect          = "直连"
 	labelDefaultOutbound = "直连（默认出站）"
 	labelNoMatch         = "默认出站（未命中任何规则）"
+	labelUnknownOutbound = "未知出站"
+	reasonSniffingOff    = "该入站未开启 sniffing（http/tls），核心在路由阶段拿不到域名，域名规则对其不会命中"
+	reasonSniffingIPOnly = "仅验证了 IP 条件：该入站未开启 sniffing（http/tls），域名条件对其不会命中"
 	sampleErrTimeout     = "超时"
 )
 
@@ -514,8 +574,15 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 			res.Users = append(res.Users, u)
 			continue
 		}
+		// 核心拿不到这个入站的域名时，域名样例在 TestRoute 里命中也不代表真实流量会命中，
+		// 不能算作证据；IP 样例照测。
+		targets := plan.targets
+		blind := len(plan.domains) > 0 && sniffingBlind(vu.inbound)
+		if blind {
+			targets = ipOnlyTargets(plan.targets)
+		}
 		if canRoute {
-			u.Samples = runSamples(budgetCtx, route, rpcTimeout, vu.inbound.Tag, plan)
+			u.Samples = runSamples(budgetCtx, route, rpcTimeout, vu.inbound.Tag, targets, plan)
 		}
 		if matcher != nil {
 			rows, truncated, err := groupLogs(vu.inbound.Id, sinceMs, verifyLogGroupLimit)
@@ -534,6 +601,14 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 		if res.Core.State == coreStateError && u.Verdict == verdictUnverifiable {
 			// combineVerdict 只给笼统原因，这里补上核心那一侧的具体错误。
 			u.Reason = "核心验证出错：" + res.Core.Message
+		}
+		if blind && res.Core.State == coreStateOK {
+			switch {
+			case u.Verdict == verdictUnverifiable && len(u.Samples) == 0:
+				u.Reason = reasonSniffingOff
+			case u.Verdict == verdictVerified:
+				u.Reason = reasonSniffingIPOnly
+			}
 		}
 		res.Users = append(res.Users, u)
 	}
@@ -556,9 +631,9 @@ func coreStateOf(rt XrayRuntime) CoreState {
 
 // runSamples 对一个用户逐个样例调 route。单次 rpcTimeout，整批共用 budgetCtx；
 // 预算用完后剩下的样例不再调用，直接记「超时」。
-func runSamples(budgetCtx context.Context, route routeFunc, rpcTimeout time.Duration, inboundTag string, plan *verifyPlan) []SampleResult {
-	out := make([]SampleResult, 0, len(plan.targets))
-	for _, t := range plan.targets {
+func runSamples(budgetCtx context.Context, route routeFunc, rpcTimeout time.Duration, inboundTag string, targets []sampleTarget, plan *verifyPlan) []SampleResult {
+	out := make([]SampleResult, 0, len(targets))
+	for _, t := range targets {
 		r := SampleResult{Target: t.Display}
 		if budgetCtx.Err() != nil {
 			r.Error = sampleErrTimeout
@@ -641,6 +716,10 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 	}
 	plan.labelOf = func(tag string) string {
 		switch {
+		case tag == "":
+			// 访问日志里被接受却没记出站的行（Route 为空）：没有出站可展示，
+			// 给一个明确的文案，不让界面渲染出「走了 （最近一次…）」这种空白。
+			return labelUnknownOutbound
 		case tag == model.BlockOutboundTag:
 			return labelBlock
 		case (defaultTag != "" && tag == defaultTag) || model.IsMeterTag(tag):

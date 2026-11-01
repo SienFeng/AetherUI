@@ -145,4 +145,33 @@ func TestRouteVerifyAgainstRealXray(t *testing.T) {
 	if u := onlyUser(res); u.Verdict != verdictUnverifiable || len(u.Samples) != 0 {
 		t.Fatalf("keyword 规则 A 应 unverifiable 且无样例: %+v", u)
 	}
+
+	// 5. ErrNoClue：新加一条 direct 规则但不下发，核心里没有任何规则命中它的样例。
+	// 真实核心经 gRPC 返回的 ErrNoClue 必须被认成 noMatch（不是 error）：标签是
+	// 「未命中」，HitByRule=false；direct 的期望就是默认出站，所以 Match=true。
+	// 核心此时是 pending，用户行仍是 pending——未下发的规则不能变绿。
+	ncGroup := newTestGroupWithDomains(t, "verify-noclue", []string{"full:verify-noclue.example"})
+	ncRule := &model.RoutingRule{
+		Remark: "verify-e2e-noclue", InboundIds: mustEncodeIds(t, []int{a.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{ncGroup.Id}),
+		Action:         model.ActionDirect, Enable: true,
+	}
+	if err := rs.Add(ncRule); err != nil {
+		t.Fatalf("add noclue rule: %v", err)
+	}
+	res = verify(ncRule.Id)
+	if res.Core.State != coreStatePending {
+		t.Fatalf("未下发的 direct 规则 Core 应为 pending: %+v", res.Core)
+	}
+	u = onlyUser(res)
+	if len(u.Samples) != 1 {
+		t.Fatalf("noclue 规则应有 1 个样例: %+v", u)
+	}
+	s0 := u.Samples[0]
+	if s0.Error != "" || s0.ActualLabel != labelNoMatch || s0.HitByRule || !s0.Match {
+		t.Fatalf("核心未命中任何规则应是 noMatch（标签=%q、HitByRule=false、direct 下 Match=true）: %+v", labelNoMatch, s0)
+	}
+	if u.Verdict != verdictPending {
+		t.Fatalf("核心 pending 时用户行应为 pending: %+v", u)
+	}
 }
