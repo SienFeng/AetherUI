@@ -2,6 +2,7 @@ package job
 
 import (
 	"errors"
+	"sync"
 	"time"
 
 	"a-ui/logger"
@@ -20,6 +21,7 @@ func shouldAudit(curGen, lastGen uint64, lastAt, now time.Time) bool {
 // RouteAuditJob 在后台对全部启用的路由规则跑一轮核心验证并写缓存。
 // 每 30 秒唤醒一次，只有代次变化或满 10 分钟才真正审计；单核 1G 机器上不做更勤的全量验证。
 type RouteAuditJob struct {
+	running sync.Mutex // cron 不会跳过仍在运行的上一轮，用它防止重入
 	lastGen uint64
 	lastAt  time.Time
 
@@ -37,6 +39,12 @@ func NewRouteAuditJob() *RouteAuditJob {
 
 func (j *RouteAuditJob) Run() {
 	defer common.Recover("路由审计任务")
+
+	// 上一轮（如耗时超过调度间隔的全量验证）未结束时直接跳过，避免并发读写下面的状态字段。
+	if !j.running.TryLock() {
+		return
+	}
+	defer j.running.Unlock()
 
 	now := time.Now()
 	if j.now != nil {

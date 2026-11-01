@@ -108,3 +108,49 @@ func TestRouteAnomalyJobBackloggedForcesLargeScan(t *testing.T) {
 		t.Fatalf("积压时应 小+大（各一次），得到 %v", larges)
 	}
 }
+
+func TestRouteAuditJobSkipsConcurrentRun(t *testing.T) {
+	j := NewRouteAuditJob()
+	j.currentGen = func() uint64 { return 1 }
+	entered, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	j.audit = func() (uint64, error) {
+		calls++
+		close(entered)
+		<-release
+		return 1, nil
+	}
+	done := make(chan struct{})
+	go func() { j.Run(); close(done) }()
+	<-entered
+	j.Run() // 第一轮仍在运行：应立即返回且不再调用 audit
+	close(release)
+	<-done
+	if calls != 1 {
+		t.Fatalf("并发的第二次 Run 不应调用 audit，calls=%d", calls)
+	}
+}
+
+func TestRouteAnomalyJobSkipsConcurrentRun(t *testing.T) {
+	j := NewRouteAnomalyJob()
+	j.backlogged = func() bool { return false }
+	entered, release := make(chan struct{}), make(chan struct{})
+	calls := 0
+	j.scan = func(time.Time, bool) error {
+		calls++
+		if calls == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}
+	done := make(chan struct{})
+	go func() { j.Run(); close(done) }()
+	<-entered
+	j.Run() // 第一轮仍在运行：应立即返回且不再调用 scan
+	close(release)
+	<-done
+	if calls != 2 { // 第一轮自身：小 + 大（首次）
+		t.Fatalf("并发的第二次 Run 不应调用 scan，calls=%d", calls)
+	}
+}

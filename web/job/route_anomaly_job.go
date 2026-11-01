@@ -1,6 +1,7 @@
 package job
 
 import (
+	"sync"
 	"time"
 
 	"a-ui/logger"
@@ -20,6 +21,7 @@ func shouldScanLarge(lastLarge, now time.Time) bool {
 // 上一次大规则扫描读满整批（可能落后于日志写入）时，下一轮不等间隔直接再扫；
 // 但每次运行最多扫一次大规则，不会进入紧循环。
 type RouteAnomalyJob struct {
+	running   sync.Mutex // cron 不会跳过仍在运行的上一轮，用它防止重入
 	lastLarge time.Time
 
 	// 以下三个字段供测试注入；nil 时用真实实现。
@@ -36,6 +38,12 @@ func NewRouteAnomalyJob() *RouteAnomalyJob {
 
 func (j *RouteAnomalyJob) Run() {
 	defer common.Recover("路由异常扫描任务")
+
+	// 上一轮（如耗时超过调度间隔的全量验证）未结束时直接跳过，避免并发读写下面的状态字段。
+	if !j.running.TryLock() {
+		return
+	}
+	defer j.running.Unlock()
 
 	now := time.Now()
 	if j.now != nil {
