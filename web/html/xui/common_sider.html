@@ -16,8 +16,7 @@
         <a-icon type="fork"></a-icon>
         <!-- 红点：有启用规则的真实流量与配置不符（routing-audit.js 每 60s 拉一次摘要）。
              点本身读屏读不到，数量另写一份 sr-only 文字。 -->
-        <a-badge :dot="routingAudit.mismatchCount > 0"
-                 :title="routingAudit.mismatchCount > 0 ? routingAudit.mismatchCount + ' 条规则存在走错的流量' : undefined">
+        <a-badge :dot="routingAudit.mismatchCount > 0">
             <span :title="routingAudit.mismatchCount > 0 ? routingAudit.mismatchCount + ' 条规则存在走错的流量' : undefined">分流管理</span>
         </a-badge>
         <span v-if="routingAudit.mismatchCount > 0" class="sr-only">（[[ routingAudit.mismatchCount ]] 条规则存在走错的流量）</span>

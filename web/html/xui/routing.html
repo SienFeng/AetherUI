@@ -2374,11 +2374,17 @@
             },
             // 规则列表每行的后台审计图标（routingAuditMixin 每 60s 拉一次摘要）。
             // 还没拿到过摘要时一个都不显示，免得首屏先闪一排灰色「尚未验证」。
+            // 最近一次成功拉取已经过时（之后的轮询都失败了）：不再沿用旧结论，尤其不能留着旧的绿色，
+            // 一律改成中性的「状态未更新」并写明上次是几点。
             ruleAuditBadges() {
                 const out = {};
                 if (!this.routingAudit.loadedAt) return out;
+                const stale = this.routingAuditStale()
+                    ? { cls: 'status-neutral', icon: 'exclamation-circle',
+                        title: '状态未更新（上次 ' + this.verifyClock(this.routingAudit.loadedAt) + '）' }
+                    : null;
                 this.rules.forEach(r => {
-                    if (r.enable) out[r.id] = this.ruleAuditBadge(this.routingAudit.rules[r.id]);
+                    if (r.enable) out[r.id] = stale || this.ruleAuditBadge(this.routingAudit.rules[r.id]);
                 });
                 return out;
             },
@@ -3167,6 +3173,8 @@
                         // 规则内容变了，旧结论作废
                         this.resetVerify(saved.id);
                         if (this.canVerify) this.runVerify(saved.id, true);
+                        // 列表图标跟着刷新；结论要等核心载入新配置后的下一轮审计
+                        this.refreshRoutingAudit();
                     } else this.selectFirstRule();
                 } finally {
                     this.ruleEditor.saving = false;
@@ -3197,6 +3205,7 @@
                     const msg = await HttpUtil.post('aui/routing/rule/update/' + fresh.id,
                         Object.assign({}, fresh, { enable: !fresh.enable }));
                     await this.refreshRulesQuiet();
+                    if (msg && msg.success) this.refreshRoutingAudit();
                     if (msg && msg.success && this.ruleEditor.active && this.ruleEditor.rule.id === fresh.id) {
                         // 启停改了核心配置，与保存同等对待：无论编辑区有没有未保存修改，旧结论都作废；
                         // 下一次验证（现在，或撤销修改之后）按「保存后」处理，pending 时 12 秒后再验一次。
@@ -3485,6 +3494,8 @@
                 }
                 if (msg && msg.success && msg.obj && msg.obj.ruleId === ruleId) {
                     this.verify.result = msg.obj;
+                    // 现场验证会写进服务端缓存：列表里这一行的图标随之刷新，不与走向图各说各话
+                    this.refreshRoutingAudit();
                     if (afterSave && msg.obj.core && msg.obj.core.state === 'pending') {
                         this.verify.retryTimer = setTimeout(() => {
                             this.verify.retryTimer = null;
@@ -3913,7 +3924,12 @@
                 this.scheduleRuleWires();
             },
             // 只盯规则 id：编辑草稿不会触发验证
+            // 新建规则保存后 id 从 0 变成新 id，这里也会触发；但保存那一步已经同步
+            // resetVerify(新 id) 并发起了「保存后」验证（verify.ruleId 已是新 id）。
+            // 再 reset 一次会抬高代次、把那次验证连同 pending 时的 12 秒重试一起作废，
+            // 换成一次普通验证——核心还没载入时就停在 pending。所以已在处理的 id 不再重置。
             verifyRuleId(id) {
+                if (id && this.verify.ruleId === id) return;
                 this.resetVerify(id);
                 if (this.canVerify) this.runVerify(id, false, true);
             },

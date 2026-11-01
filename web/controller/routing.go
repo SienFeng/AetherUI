@@ -768,10 +768,13 @@ func (a *RoutingController) reorderRules(c *gin.Context) {
 
 // 验证「流量走向」：只读，不改库也不动核心，所以不置重启标志。
 //
-// ?cached=1 时优先用后台审计的缓存，但只在三个条件同时成立时：规则存在、已启用、
-// 缓存代次等于当前应用代次。缓存要到下一轮审计才清理，规则停用或删除后仍可能留着
-// 旧结果；代次落后则说明核心之后换过配置。任一不满足都走现场 Verify
-// （Verify 自己处理停用与不存在的规则）。
+// ?cached=1 时优先用后台审计的缓存，但只在下列条件同时成立时：规则存在、已启用、
+// 核心在运行且没有待生效的改动、缓存代次等于核心此刻的应用代次。缓存要到下一轮审计
+// 才清理，规则停用或删除后仍可能留着旧结果；代次落后说明核心之后换过配置。
+// 「待生效」单独要判：保存后到核心载入新配置之前（最多约 10 秒）代次还没变，
+// 缓存却是旧配置的结论——现场 Verify 此时会如实报 pending，缓存会报一个过期的绿色。
+// 核心没在跑时同理，缓存说的是它停下之前的事。任一不满足都走现场 Verify
+// （Verify 自己处理停用、不存在的规则与核心不可用）。
 func (a *RoutingController) verifyRule(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -779,15 +782,37 @@ func (a *RoutingController) verifyRule(c *gin.Context) {
 		return
 	}
 	if c.Query("cached") == "1" {
-		if rule, getErr := a.ruleService.Get(id); getErr == nil && rule.Enable {
-			if res, ok := a.auditService.Cached(id); ok && res.ApplyGen == service.XrayApplyGeneration() {
-				jsonObj(c, res, nil)
-				return
-			}
+		if res, ok := a.currentCachedVerify(id); ok {
+			jsonObj(c, res, nil)
+			return
 		}
 	}
 	result, err := a.verifyService.Verify(id)
 	jsonObj(c, result, err)
+}
+
+// verifyRuntimeSnapshot 是 cached=1 判定用的核心状态来源。测试里没有真实核心，
+// 替换它来覆盖「运行中 / 待生效 / 忙」几种状态。
+var verifyRuntimeSnapshot = func() service.XrayRuntime {
+	return (&service.XrayService{}).RuntimeSnapshot()
+}
+
+// currentCachedVerify 返回仍能代表核心当前状态的缓存结果，条件见 verifyRule。
+// 先查库与缓存、最后才取快照：快照要合成一次配置，没有缓存时不必付这笔开销。
+func (a *RoutingController) currentCachedVerify(id int) (*service.RuleVerifyResult, bool) {
+	rule, err := a.ruleService.Get(id)
+	if err != nil || !rule.Enable {
+		return nil, false
+	}
+	res, ok := a.auditService.Cached(id)
+	if !ok {
+		return nil, false
+	}
+	rt := verifyRuntimeSnapshot()
+	if !rt.Running || rt.Busy || rt.Pending || res.ApplyGen != rt.ApplyGen {
+		return nil, false
+	}
+	return res, true
 }
 
 // routingAuditResponse 是规则列表与侧栏红点用的审计摘要。

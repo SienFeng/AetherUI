@@ -129,13 +129,24 @@ func TestAnomalyResetOk(t *testing.T) {
 	}
 }
 
-// 缓存代次等于当前代次且规则启用：原样返回缓存（CheckedAt 不变，不重新验证）。
+// stubRuntime 把 cached=1 判定看到的核心状态换成 rt，测试结束后还原。
+func stubRuntime(t *testing.T, rt service.XrayRuntime) {
+	t.Helper()
+	orig := verifyRuntimeSnapshot
+	verifyRuntimeSnapshot = func() service.XrayRuntime { return rt }
+	t.Cleanup(func() { verifyRuntimeSnapshot = orig })
+}
+
+// 核心在跑、没有待生效改动、缓存代次等于当前代次且规则启用：原样返回缓存
+// （CheckedAt 不变，不重新验证）。
 func TestVerifyCachedReturnsCache(t *testing.T) {
 	initTestDB(t)
 	id := seedRule(t, true)
+	gen := service.XrayApplyGeneration()
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: gen})
 	const checkedAt = int64(1234567890123)
 	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
-		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration(),
+		RuleId: id, CheckedAt: checkedAt, ApplyGen: gen,
 	})
 	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
 	obj, _ := msg["obj"].(map[string]any)
@@ -144,10 +155,43 @@ func TestVerifyCachedReturnsCache(t *testing.T) {
 	}
 }
 
+// 保存后到核心载入新配置之前，代次还没变、缓存是旧配置的结论：不能返回它，
+// 必须现场验证（现场会如实报 pending）。核心没在跑、或正忙于重启/热应用时同理。
+func TestVerifyCachedIgnoresCacheUnlessCoreCurrent(t *testing.T) {
+	cases := []struct {
+		name string
+		rt   func(gen uint64) service.XrayRuntime
+	}{
+		{"pending", func(gen uint64) service.XrayRuntime {
+			return service.XrayRuntime{Running: true, Pending: true, ApplyGen: gen}
+		}},
+		{"not running", func(gen uint64) service.XrayRuntime { return service.XrayRuntime{ApplyGen: gen} }},
+		{"busy", func(uint64) service.XrayRuntime { return service.XrayRuntime{Busy: true} }},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initTestDB(t)
+			id := seedRule(t, true)
+			gen := service.XrayApplyGeneration()
+			stubRuntime(t, tc.rt(gen))
+			checkedAt := int64(1234567890200 + i)
+			service.StoreVerifyResultForTest(&service.RuleVerifyResult{
+				RuleId: id, CheckedAt: checkedAt, ApplyGen: gen,
+			})
+			msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+			obj, _ := msg["obj"].(map[string]any)
+			if msg["success"] != true || obj == nil || obj["checkedAt"] == float64(checkedAt) {
+				t.Errorf("want 现场验证结果（success 且 checkedAt 不同于缓存）, msg = %v", msg)
+			}
+		})
+	}
+}
+
 // 缓存代次落后于当前代次：不能返回旧结果，必须现场验证。
 func TestVerifyCachedIgnoresStaleGeneration(t *testing.T) {
 	initTestDB(t)
 	id := seedRule(t, true)
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: service.XrayApplyGeneration()})
 	const checkedAt = int64(1234567890124)
 	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
 		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration() + 1,
@@ -164,6 +208,7 @@ func TestVerifyCachedIgnoresStaleGeneration(t *testing.T) {
 func TestVerifyCachedIgnoresDisabledRule(t *testing.T) {
 	initTestDB(t)
 	id := seedRule(t, false)
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: service.XrayApplyGeneration()})
 	const checkedAt = int64(1234567890125)
 	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
 		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration(),
