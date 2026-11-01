@@ -14,7 +14,8 @@
 
 - 不新增数据库表、不改 xray 配置生成；验证与扫描全程只读（`PublishResult=false`、不重启、不写库）。
 - 不得在 `RestartXray` 持有包级 `lock` 期间调验证；`lock` 只在 `RuntimeSnapshot` 里 `TryLock` 一瞬间。
-- 审计任务 `@every 30s`；兜底周期 10 分钟；扫描任务 `@every 1m`；每轮最多读 20000 行；异常窗口 24 小时、按小时分桶；`VerifyAll` 整轮预算 60s，单次 RPC 3s。
+- 审计任务 `@every 30s`；兜底周期 10 分钟；扫描任务 `@every 1m`；每轮每档最多读 20000 行；异常窗口 24 小时、按小时分桶；`VerifyAll` 整轮预算 60s，单次 RPC 3s。
+- 小机器约束：规则合并后条目数（所有引用组的手工+订阅域名与 IP 段）≤ 20000 为小规则（匹配器按代次常驻、每分钟扫描），> 20000 为大规则（每 10 分钟扫描、匹配器临时构建用完即释放）；两档独立 `(time,id)` 游标。异常摘要每规则最多 50 个用户、每用户最多 5 个出站，超出部分只计入规则总数与 lastAt。
 - 核心未运行 / busy / 连不上控制面 → 本轮不落结果（不得让一次重启在列表上闪红/灰）。
 - 用户手动验证占着 `verifyMu` 时后台本轮跳过；手动验证结果写回同一缓存，代次新的覆盖旧的，同代次 `checkedAt` 新的覆盖旧的。
 - 异常判定语义 = 现有 `buildLogEvidence`：行入站在规则覆盖范围内、目标被规则域名组匹配器命中、`routeHead(Route)` 不符合期望出站；只看 `Accepted=true`。不按规则顺序重算。
@@ -104,7 +105,8 @@
   - `func (s *AccessLogService) ReadAfter(afterTime, afterId int64, limit int) ([]model.AccessLog, error)`：条件与排序见 Global Constraints
   - `type UserAnomaly struct { Count int64 \`json:"count"\`; LastAt int64 \`json:"lastAt"\`; Routes map[string]int64 \`json:"routes"\` }`
   - `type RuleAnomaly struct { Count int64 \`json:"count"\`; LastAt int64 \`json:"lastAt"\`; ByUser map[int]*UserAnomaly \`json:"byUser"\` }`
-  - `func (s *RoutingAuditService) ScanAccessLog(now time.Time) error`：访问日志关闭 → 清空摘要与游标并返回；首次（游标为零）从 `now-24h` 起；每轮最多 20000 行；按小时分桶（key = `time/3600000`）累加，丢弃早于 `now-24h` 所在小时的桶；规则计划（入站集合、匹配器、期望出站）按代次缓存，代次变化或启用规则集合变化时重建；停用/删除的规则从摘要移除。
+  - `const auditLargeRuleEntries = 20000`、`const anomalyMaxUsers = 50`、`const anomalyMaxRoutes = 5`
+  - `func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error`：`large=false` 只处理小规则（匹配器按代次缓存），`large=true` 只处理大规则（匹配器本次临时构建、结束即释放、不进缓存）；两档各有游标。访问日志关闭 → 清空摘要与游标并返回；首次（游标为零）从 `now-24h` 起；每轮最多 20000 行；按小时分桶（key = `time/3600000`）累加，丢弃早于 `now-24h` 所在小时的桶；规则计划（入站集合、匹配器、期望出站）按代次缓存，代次变化或启用规则集合变化时重建；停用/删除的规则从摘要移除。
   - `func (s *RoutingAuditService) Anomaly(ruleId int, now time.Time) RuleAnomaly`
   - `func (s *RoutingAuditService) ResetAnomalies(ruleId int, now time.Time)`：清空该规则摘要，并记录忽略时刻 `ignoreBefore[ruleId] = now.UnixMilli()`
   - `func anomalyIgnoreBefore(ruleId int) int64`；`Verify`/`verifyOne` 的日志查询起点改为 `max(now-24h, anomalyIgnoreBefore(ruleId))`
@@ -119,7 +121,9 @@
   - `TestAnomalyDisabledAccessLogClears`：关闭访问日志 → 扫描后摘要为空。
   - `TestResetAnomaliesAlsoHidesFromVerify`：有 3 次走错后 `ResetAnomalies`；`Summaries` 该规则 `AnomalyCount==0`；`Verify(rule)` 的该用户 `Log.Others` 为空（旧连接早于忽略时刻）；之后新增 1 条走错 → 两处都重新出现。
   - `TestSummariesMergeAnomaly`：核心验证 verified + 有异常 → `Verdict=="mismatch"`。
-- [ ] **Step 2: 运行** `go test ./web/service/ -run 'TestAnomaly|TestResetAnomalies|TestSummaries' -v`。期望结果：FAIL（未定义）。
+  - `TestAnomalyLargeRuleOnlyInLargeScan`：把门槛常量通过测试钩子调到 2（加包级 `var auditLargeThreshold = auditLargeRuleEntries` 供测试改写），组有 3 条 → 只有 `ScanAccessLog(now, true)` 计入；`ScanAccessLog(now, false)` 不计入；大规则扫描后匹配器缓存中不存在该规则。
+  - `TestAnomalyCaps`：60 个入站各 1 次走错 → `len(ByUser)==50` 且 `Count==60`；一个用户走错到 7 个不同出站 → `len(Routes)==5`，`Count` 含全部 7 次。
+- [ ] **Step 2: 运行** `go test ./web/service/ -run 'TestAnomaly|TestResetAnomalies|TestSummaries' -v`。（`TestAnomalyScan*` 等既有用例调用时传 `large=false`）期望结果：FAIL（未定义）。
 - [ ] **Step 3: 实现。** 摘要、游标、忽略时刻都放包级、互斥保护的内存结构；扫描不持有 `verifyMu`。
 - [ ] **Step 4: 运行同上 + `go test ./web/service/`**。期望结果：PASS。
 - [ ] **Step 5: Commit** `feat(service): continuous access-log anomaly scan`
@@ -136,10 +140,10 @@
 - Produces:
   - `func NewRouteAuditJob() *RouteAuditJob`，字段 `lastGen uint64`、`lastAt time.Time`、`now func() time.Time`（测试注入）
   - `func shouldAudit(curGen, lastGen uint64, lastAt, now time.Time) bool`：代次不同，或 `now.Sub(lastAt) >= 10*time.Minute`
-  - `func NewRouteAnomalyJob() *RouteAnomalyJob`
+  - `func NewRouteAnomalyJob() *RouteAnomalyJob`：每次运行先 `ScanAccessLog(now, false)`；距上次大规则扫描 ≥ 10 分钟（首次立即）再 `ScanAccessLog(now, true)`；纯函数 `func shouldScanLarge(lastLarge, now time.Time) bool` 供测试
   - 审计：`ErrVerifyBusy`/`ErrCoreNotReady` → 不更新 `lastGen/lastAt`（下一轮重试），只 `logger.Debug`；其他错误 `logger.Warning`；成功 → 更新 `lastGen` 为 `VerifyAll` 返回的代次、`lastAt=now`。
 
-- [ ] **Step 1: 写失败测试。** `TestShouldAudit`（表驱动：同代次 9 分钟 false、同代次 10 分钟 true、代次变化 true、首次 lastAt 零值 true）；`TestRouteAuditJobSkipsWhenNotReady`：注入一个返回 `ErrCoreNotReady` 的审计函数（在 job 上加 `audit func() (uint64, error)` 字段，nil 用真实实现），运行后 `lastGen`/`lastAt` 不变；返回成功时更新。
+- [ ] **Step 1: 写失败测试。** `TestShouldScanLarge`（零值 true、9 分钟 false、10 分钟 true）；`TestShouldAudit`（表驱动：同代次 9 分钟 false、同代次 10 分钟 true、代次变化 true、首次 lastAt 零值 true）；`TestRouteAuditJobSkipsWhenNotReady`：注入一个返回 `ErrCoreNotReady` 的审计函数（在 job 上加 `audit func() (uint64, error)` 字段，nil 用真实实现），运行后 `lastGen`/`lastAt` 不变；返回成功时更新。
 - [ ] **Step 2: 运行** `go test ./web/job/ -run 'TestShouldAudit|TestRouteAuditJob' -v`。期望结果：FAIL。
 - [ ] **Step 3: 实现两个 job 并在 `web.go` 注册**：`s.cron.AddJob("@every 30s", job.NewRouteAuditJob())`、`s.cron.AddJob("@every 1m", job.NewRouteAnomalyJob())`；两个 `Run` 首行 `defer common.Recover(...)`。
 - [ ] **Step 4: 运行同上 + `go test ./web/...`**。期望结果：PASS。
@@ -213,6 +217,7 @@
 
 - [ ] **Step 1: 写端到端测试** `TestRouteAuditAgainstRealXray`：真实 xray（前置同既有 e2e，必须 RUN），建 socks 入站 + `full:localhost` 组 + block 规则；`RestartXray(true)`；`(&RoutingAuditService{}).RunAudit()` 后 `Summaries()` 该规则 `Verdict=="verified"`、`ApplyGen==XrayApplyGeneration()`；把规则改成 proxy 指向 freedom 节点、`RestartXray(false)` 后再 `RunAudit()` → 仍 verified 且代次 +1。
 - [ ] **Step 2: 运行** `go test ./web/service/ -run TestRouteAuditAgainstRealXray -v`。期望结果：PASS（不是 SKIP）。
-- [ ] **Step 3: 更新 CLAUDE.md**：代次信号只在热应用成功与 `p.Start()` 成功两处递增；后台审计不得在 `lock` 内调用、不得与手动验证抢 `verifyMu`；结果与异常摘要只在内存（重启后约 30s/1min 内重建）；异常语义 = `buildLogEvidence`，被遮蔽域名算下层规则走错；游标用 `(time,id)` 防 id 复用；忽略异常同时作用于列表与流量走向图。
+- [ ] **Step 2b: 资源实测** `TestAnomalyScanLargeGroupFootprint`（放 `web/service/routing_anomaly_bench_test.go`，`testing.Short()` 时跳过）：构造一个 100000 条 `domain:` 的组和一条引用它的规则、10000 条访问日志，跑一次 `ScanAccessLog(now, true)`，用 `runtime.ReadMemStats` 记录前后 `HeapAlloc` 峰值差与耗时并 `t.Logf` 输出；断言峰值增量 < 100 MB（若不满足，报告 DONE_WITH_CONCERNS 并附实测值，不要放宽断言）。运行 `go test ./web/service/ -run TestAnomalyScanLargeGroupFootprint -v` 并把输出贴进报告。
+- [ ] **Step 3: 更新 CLAUDE.md**：小规则/大规则两档与 20000 门槛、异常上限 50/5、实测数值；代次信号只在热应用成功与 `p.Start()` 成功两处递增；后台审计不得在 `lock` 内调用、不得与手动验证抢 `verifyMu`；结果与异常摘要只在内存（重启后约 30s/1min 内重建）；异常语义 = `buildLogEvidence`，被遮蔽域名算下层规则走错；游标用 `(time,id)` 防 id 复用；忽略异常同时作用于列表与流量走向图。
 - [ ] **Step 4: 运行** `make verify`。期望结果：vet、test、build 全部通过。
 - [ ] **Step 5: Commit** `test/docs: routing audit e2e and invariants`
