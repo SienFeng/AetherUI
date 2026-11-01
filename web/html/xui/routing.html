@@ -2516,8 +2516,18 @@
                     return i >= 0 && i < 4 ? id : 'more';
                 };
                 const byKey = {}, order = [];
-                const add = (tag, label, uv) => {
-                    const key = tag || ('label:' + (label || ''));
+                // 去重键：默认出站是同一个真实出口，但后端给它好几种写法——未命中样例 actualTag 为空、
+                // 标签 labelNoMatch「默认出站（未命中任何规则）」；日志里默认 tag 与每个 a-ui-meter-* tag
+                // 都由 labelOf 标成 labelDefaultOutbound「直连（默认出站）」（web/service/routing_verify.go）。
+                // 前端拿不到默认 tag，于是按这几个特征统一折叠成键 'default'；
+                // 其余按 tag 去重（tag 为空时退回按标签），「未知出站」保持各自独立。
+                const DEFAULT_LABEL = '直连（默认出站）', NO_MATCH_LABEL = '默认出站（未命中任何规则）';
+                const add = (rawTag, rawLabel, uv) => {
+                    let tag = rawTag || '', label = rawLabel || '';
+                    if (!tag || tag.startsWith('a-ui-meter-') || label === DEFAULT_LABEL || label === NO_MATCH_LABEL) {
+                        if (tag || label !== '未知出站') { tag = ''; label = DEFAULT_LABEL; }
+                    }
+                    const key = label === DEFAULT_LABEL && !tag ? 'default' : (tag || ('label:' + label));
                     let a = byKey[key];
                     if (!a) {
                         a = byKey[key] = { key, tag: tag || '', label: '', users: [], userKeys: [], names: [] };
