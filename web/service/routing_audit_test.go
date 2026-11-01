@@ -437,6 +437,53 @@ func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
 	}
 }
 
+// 保存后到核心载入新配置之前代次不变，同代次缓存是旧配置的结论：核心 Pending（或正忙于
+// 重启/热应用）时本会是 verified 的摘要改标 stale + pending；访问日志异常带来的不符、
+// 核心那一路的不符原样保留。核心未运行时不改。快照整轮只取一次。
+func TestSummariesPendingCoreNeverGreen(t *testing.T) {
+	cases := []struct {
+		name      string
+		rt        XrayRuntime
+		wantGreen bool
+	}{
+		{"pending", XrayRuntime{Running: true, Pending: true}, false},
+		{"busy", XrayRuntime{Busy: true}, false},
+		{"current", XrayRuntime{Running: true}, true},
+		{"not running", XrayRuntime{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAuditCache(t)
+			f := newVerifyFixture(t)
+			green := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+			red := f.addRule(t, model.ActionBlock, []int{f.b.Id})
+			gen := XrayApplyGeneration()
+			storeVerifyResult(&RuleVerifyResult{RuleId: green.Id, ApplyGen: gen, CheckedAt: 500,
+				Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+			storeVerifyResult(&RuleVerifyResult{RuleId: red.Id, ApplyGen: gen, CheckedAt: 500,
+				Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictMismatch}}})
+			calls := 0
+			svc := &RoutingAuditService{runtime: func() XrayRuntime { calls++; return tc.rt }}
+
+			_, rules := svc.Summaries()
+			got := rules[green.Id]
+			if tc.wantGreen {
+				if got.Verdict != verdictVerified || got.Stale {
+					t.Errorf("核心为当前配置或未运行时应保留 verified: %+v", got)
+				}
+			} else if got.Verdict != verdictPending || !got.Stale || got.CheckedAt != 500 {
+				t.Errorf("待生效时不得给绿，应 stale + pending 并保留时间: %+v", got)
+			}
+			if r := rules[red.Id]; r.Verdict != verdictMismatch || r.MismatchUsers != 1 {
+				t.Errorf("核心那一路的不符应原样保留: %+v", r)
+			}
+			if calls != 1 {
+				t.Errorf("快照调用次数 = %d，期望整轮一次", calls)
+			}
+		})
+	}
+}
+
 // 没有任何用户行的规则（全局规则但没有启用入站）不给绿。
 func TestSummariesEmptyRuleUnverifiable(t *testing.T) {
 	resetAuditCache(t)

@@ -130,6 +130,15 @@ func ruleVerdictOf(res *RuleVerifyResult) (verdict string, mismatchUsers int) {
 type RoutingAuditService struct {
 	verify *RoutingVerifyService
 	now    func() time.Time
+	// runtime 是 Summaries 判断「有没有待生效改动」用的核心状态来源；nil 时取真实快照。
+	runtime func() XrayRuntime
+}
+
+func (s *RoutingAuditService) runtimeSnapshot() XrayRuntime {
+	if s.runtime != nil {
+		return s.runtime()
+	}
+	return (&XrayService{}).RuntimeSnapshot()
 }
 
 func (s *RoutingAuditService) nowTime() time.Time {
@@ -178,9 +187,23 @@ func (s *RoutingAuditService) RunAudit() (uint64, error) {
 // 流量的证据，与代次无关——规则改过之后，改之前的走错仍在 24 小时窗口内，列表照样
 // 显示不符并给出最近一次的时刻（设计 §4.4），管理员确认修复后用「忽略此前的异常」清掉。
 // Stale/MismatchUsers 仍只描述核心验证那一路，只有 Verdict 被异常覆盖。
+//
+// 待生效窗口：保存后到核心载入新配置之前（最多约 10 秒）代次还没变，同代次的缓存
+// 却是旧配置的结论。此时（快照 Pending，或 Busy——重启/热应用正占着锁、配置正在换）
+// 本会是 verified 的摘要一律改标 Stale + pending，不给绿；不符与无法验证原样保留。
+// 核心未运行时不改：缓存是停下之前的结论，由下一轮审计与前端的过时判断处理。
+// 快照要合成一次配置：整轮最多取一次，且只在确有 verified 摘要时才取。
 func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAuditSummary) {
 	applyGen = XrayApplyGeneration()
 	now := s.nowTime()
+	var rt XrayRuntime
+	rtLoaded := false
+	coreChanging := func() bool {
+		if !rtLoaded {
+			rt, rtLoaded = s.runtimeSnapshot(), true
+		}
+		return rt.Busy || rt.Pending
+	}
 	rules = map[int]RuleAuditSummary{}
 	enabled, err := (&RoutingRuleService{}).GetEnabled()
 	if err != nil {
@@ -195,6 +218,9 @@ func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAu
 				sum.Stale, sum.Verdict = true, verdictPending
 			} else {
 				sum.Verdict, sum.MismatchUsers = ruleVerdictOf(res)
+				if sum.Verdict == verdictVerified && coreChanging() {
+					sum.Stale, sum.Verdict = true, verdictPending
+				}
 			}
 		}
 		sum.AnomalyCount, sum.AnomalyLastAt = anomalyTotals(r.Id, now)

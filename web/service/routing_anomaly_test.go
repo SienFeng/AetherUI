@@ -278,6 +278,21 @@ func TestSummariesMergeAnomaly(t *testing.T) {
 	}
 }
 
+// 核心待生效时 verified 会改标 pending，但访问日志异常带来的不符不受影响：
+// 那是真实流量的证据，与配置是否已下发无关。
+func TestSummariesPendingKeepsAnomalyMismatch(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+	f.svc.runtime = func() XrayRuntime { return XrayRuntime{Running: true, Pending: true} }
+	storeVerifyResult(&RuleVerifyResult{RuleId: f.rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+	insertLogs(t, 2, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+	mustScan(t, f.svc, anomalyNow, false)
+	_, rules := f.svc.Summaries()
+	if got := rules[f.rule.Id]; got.Verdict != verdictMismatch || got.AnomalyCount != 2 {
+		t.Errorf("待生效时异常仍应为 mismatch: %+v", got)
+	}
+}
+
 func TestAnomalyLargeRuleOnlyInLargeScan(t *testing.T) {
 	f := newAnomalyFixture(t, []string{"domain:openai.com", "domain:chatgpt.com", "full:x.ai"}, nil)
 	auditLargeThreshold = 2
