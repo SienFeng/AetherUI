@@ -406,6 +406,20 @@ func (s *AccessLogService) GroupByTargetRoute(inboundId int, sinceMs int64, limi
 	return rows, truncated, nil
 }
 
+// ReadAfter 按 (time, id) 升序读出游标之后的至多 limit 行，供异常扫描增量读取。
+// 条件不单用 id：SQLite 会复用自增 id，日志被清理到 0 行后新行 id 会回到 1，
+// 单看 id 会把它们全部漏掉。访问日志库未初始化时返回空。
+func (s *AccessLogService) ReadAfter(afterTime, afterId int64, limit int) ([]model.AccessLog, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return nil, nil
+	}
+	rows := make([]model.AccessLog, 0)
+	err := db.Where("time > ? OR (time = ? AND id > ?)", afterTime, afterTime, afterId).
+		Order("time, id").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
 func (s *AccessLogService) Cleanup(retentionDays int, now time.Time) (int64, error) {
 	db := database.GetAccessLogDB()
 	if db == nil || retentionDays <= 0 {

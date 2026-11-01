@@ -2,6 +2,7 @@ package service
 
 import (
 	"sync"
+	"time"
 
 	"a-ui/logger"
 )
@@ -67,7 +68,8 @@ func cachedVerifyResult(ruleId int) (*RuleVerifyResult, bool) {
 }
 
 // RuleAuditSummary 是规则列表与侧栏红点用的规则级状态。
-// AnomalyCount/AnomalyLastAt 来自访问日志持续扫描，由后续任务填充，目前恒为 0。
+// AnomalyCount/AnomalyLastAt 来自访问日志持续扫描（routing_anomaly.go），是最近 24 小时
+// 走错的真实连接数与最近一次的时刻；有异常时 Verdict 一律是 mismatch。
 // Stale 表示缓存结果的代次落后于当前代次（核心之后又换过配置，或本轮预算用完没轮到），
 // 此时 Verdict 一律是 pending：旧结论不代表核心现状，不能给绿。
 type RuleAuditSummary struct {
@@ -122,10 +124,19 @@ func ruleVerdictOf(res *RuleVerifyResult) (verdict string, mismatchUsers int) {
 	return verdictByRank[worst], mismatchUsers
 }
 
-// RoutingAuditService 是后台审计的入口：跑一轮全量验证写缓存，以及读出规则级摘要。
-// 零值可用；verify 为 nil 时用默认的 RoutingVerifyService，测试可注入伪造的。
+// RoutingAuditService 是后台审计的入口：跑一轮全量验证写缓存、扫描访问日志异常，
+// 以及读出规则级摘要。零值可用；verify 为 nil 时用默认的 RoutingVerifyService，
+// now 为 nil 时用 time.Now，测试可注入。
 type RoutingAuditService struct {
 	verify *RoutingVerifyService
+	now    func() time.Time
+}
+
+func (s *RoutingAuditService) nowTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *RoutingAuditService) verifier() *RoutingVerifyService {
@@ -162,8 +173,14 @@ func (s *RoutingAuditService) RunAudit() (uint64, error) {
 // Summaries 返回当前应用代次与每条启用规则的摘要。没有缓存的规则 verdict=unverifiable、
 // CheckedAt=0；缓存代次 ≠ 当前代次的标 Stale、verdict=pending（MismatchUsers 不再沿用旧值）。
 // 读启用规则失败时记日志并返回空表（接口签名不带 error）。
+//
+// 并入访问日志异常：有异常即 mismatch，不论核心结果是否 stale、有没有缓存。异常是真实
+// 流量的证据，与代次无关——规则改过之后，改之前的走错仍在 24 小时窗口内，列表照样
+// 显示不符并给出最近一次的时刻（设计 §4.4），管理员确认修复后用「忽略此前的异常」清掉。
+// Stale/MismatchUsers 仍只描述核心验证那一路，只有 Verdict 被异常覆盖。
 func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAuditSummary) {
 	applyGen = XrayApplyGeneration()
+	now := s.nowTime()
 	rules = map[int]RuleAuditSummary{}
 	enabled, err := (&RoutingRuleService{}).GetEnabled()
 	if err != nil {
@@ -171,16 +188,18 @@ func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAu
 		return applyGen, rules
 	}
 	for _, r := range enabled {
-		res, ok := cachedVerifyResult(r.Id)
-		if !ok {
-			rules[r.Id] = RuleAuditSummary{Verdict: verdictUnverifiable}
-			continue
+		sum := RuleAuditSummary{Verdict: verdictUnverifiable}
+		if res, ok := cachedVerifyResult(r.Id); ok {
+			sum.CheckedAt, sum.ApplyGen = res.CheckedAt, res.ApplyGen
+			if res.ApplyGen != applyGen {
+				sum.Stale, sum.Verdict = true, verdictPending
+			} else {
+				sum.Verdict, sum.MismatchUsers = ruleVerdictOf(res)
+			}
 		}
-		sum := RuleAuditSummary{CheckedAt: res.CheckedAt, ApplyGen: res.ApplyGen}
-		if res.ApplyGen != applyGen {
-			sum.Stale, sum.Verdict = true, verdictPending
-		} else {
-			sum.Verdict, sum.MismatchUsers = ruleVerdictOf(res)
+		sum.AnomalyCount, sum.AnomalyLastAt = anomalyTotals(r.Id, now)
+		if sum.AnomalyCount > 0 {
+			sum.Verdict = verdictMismatch
 		}
 		rules[r.Id] = sum
 	}

@@ -636,7 +636,13 @@ type verifyShared struct {
 
 	groups   map[int]*groupConditions
 	matchers map[string]*matcherEntry
-	logRows  map[int]*logRowsEntry
+	logRows  map[logRowsKey]*logRowsEntry
+}
+
+// logRowsKey 是入站日志分组的缓存键：窗口起点随规则的忽略时刻而不同，必须进键。
+type logRowsKey struct {
+	inboundId int
+	sinceMs   int64
 }
 
 // groupConditions 是一个域名组合并后的条目及其样例；skip 表示 buildRule 会剔掉这个组。
@@ -694,7 +700,7 @@ func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, err
 		groupLogs:   s.groupLogs,
 		groups:      map[int]*groupConditions{},
 		matchers:    map[string]*matcherEntry{},
-		logRows:     map[int]*logRowsEntry{},
+		logRows:     map[logRowsKey]*logRowsEntry{},
 		rpcTimeout:  s.rpcTimeout,
 	}
 	for _, n := range nodeList {
@@ -781,14 +787,15 @@ func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
 	return e
 }
 
-// rows 返回一个入站在日志窗口内的分组统计；与规则无关，一轮内每个入站只查一次。
+// rows 返回一个入站自 sinceMs 起的分组统计；与规则无关，一轮内每个（入站, 起点）只查一次。
 func (sh *verifyShared) rows(inboundId int, sinceMs int64) *logRowsEntry {
-	if e, ok := sh.logRows[inboundId]; ok {
+	key := logRowsKey{inboundId: inboundId, sinceMs: sinceMs}
+	if e, ok := sh.logRows[key]; ok {
 		return e
 	}
 	rows, truncated, err := sh.groupLogs(inboundId, sinceMs, verifyLogGroupLimit)
 	e := &logRowsEntry{rows: rows, truncated: truncated, err: err}
-	sh.logRows[inboundId] = e
+	sh.logRows[key] = e
 	return e
 }
 
@@ -821,7 +828,8 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 		}
 	}
 
-	sinceMs := now.Add(-verifyLogWindowHours * time.Hour).UnixMilli()
+	// 窗口起点尊重「忽略此前的异常」：与列表上的异常摘要同口径，两处不会一边清零一边仍报不符。
+	sinceMs := max(now.Add(-verifyLogWindowHours*time.Hour).UnixMilli(), anomalyIgnoreBefore(rule.Id))
 	for _, vu := range plan.users {
 		u := UserVerify{InboundId: vu.inbound.Id, Name: inboundName(vu.inbound), Samples: []SampleResult{}}
 		if vu.disabled {
