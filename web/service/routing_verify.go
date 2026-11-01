@@ -3,9 +3,15 @@ package service
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
+	"github.com/xtls/xray-core/app/router"
+	routercmd "github.com/xtls/xray-core/app/router/command"
+	"github.com/xtls/xray-core/common/geodata"
+
 	"a-ui/database/model"
+	"a-ui/xray"
 )
 
 // 路由验证的纯函数部分：样例选取、期望比对、结论合并。不碰数据库与核心，
@@ -231,4 +237,108 @@ func combineVerdict(coreState string, samples []SampleResult, log *LogEvidence) 
 		return verdictVerified, fmt.Sprintf("近 24h %d 次真实连接", log.Matched)
 	}
 	return verdictVerified, ""
+}
+
+// logOtherMaxExamples 是每个「其他出站」分组保留的示例连接数。
+const logOtherMaxExamples = 5
+
+// groupMatcher 用 xray 自己的匹配器判断一个访问日志目标是否属于某个域名组。
+// 归属判定不手写：写法（domain:/full:/keyword:/regexp:/geosite:…）与 geoip 的语义
+// 只有交给 xray 才会和核心实际路由一致。
+type groupMatcher struct {
+	domain *router.DomainMatcher
+	ip     *router.IPMatcher
+}
+
+// newGroupMatcher 构造匹配器；某一侧条目为空时不构造那一侧（其匹配恒为否）。
+func newGroupMatcher(domains, cidrs []string) (*groupMatcher, error) {
+	xray.EnsureAssetLocation()
+	m := &groupMatcher{}
+	if len(domains) > 0 {
+		// 默认类型 Domain_Substr 与 infra/conf 解析 routing 规则时一致（裸串按子串）。
+		rules, err := geodata.ParseDomainRules(domains, geodata.Domain_Substr)
+		if err != nil {
+			return nil, fmt.Errorf("解析域名条件: %w", err)
+		}
+		if m.domain, err = router.NewDomainMatcher(rules); err != nil {
+			return nil, fmt.Errorf("构造域名匹配器: %w", err)
+		}
+	}
+	if len(cidrs) > 0 {
+		rules, err := geodata.ParseIPRules(cidrs)
+		if err != nil {
+			return nil, fmt.Errorf("解析 IP 条件: %w", err)
+		}
+		if m.ip, err = router.NewIPMatcher(rules, router.MatcherAsType_Target); err != nil {
+			return nil, fmt.Errorf("构造 IP 匹配器: %w", err)
+		}
+	}
+	return m, nil
+}
+
+// Match 判断访问日志里的目标（host:port 或 [v6]:port）是否属于该组。
+func (m *groupMatcher) Match(target string) bool {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		host = target
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		if m.ip == nil {
+			return false
+		}
+		// IPMatcher 只有 Apply(routing.Context)，借 command 包的适配器塞入目标 IP。
+		ctx := routercmd.AsRoutingContext(&routercmd.RoutingContext{TargetIPs: [][]byte{ip}})
+		return m.ip.Apply(ctx)
+	}
+	return m.domain != nil && m.domain.ApplyDomain(host)
+}
+
+// buildLogEvidence 把日志分组折算成证据：只统计属于本组的行；被拒绝的计入 Rejected，
+// 其余按 routeHead 与期望出站比对，符合计入 Matched，不符的按出站分组进 Others。
+func buildLogEvidence(rows []TargetRouteCount, m *groupMatcher, exp ExpectedOutbound, defaultTag string, labelOf func(tag string) string) LogEvidence {
+	ev := LogEvidence{Others: []LogOther{}}
+	byRoute := map[string]*LogOther{}
+	var order []string
+	for _, r := range rows {
+		if !m.Match(r.Target) {
+			continue
+		}
+		if !r.Accepted {
+			ev.Rejected += r.Count
+			continue
+		}
+		head := routeHead(r.Route)
+		if match, _ := judgeSample(exp, head, false, defaultTag); match {
+			ev.Matched += r.Count
+			continue
+		}
+		o := byRoute[head]
+		if o == nil {
+			o = &LogOther{Route: head, Label: labelOf(head), Examples: []string{}}
+			byRoute[head] = o
+			order = append(order, head)
+		}
+		o.Count += r.Count
+		if r.LastAt > o.LastAt {
+			o.LastAt = r.LastAt
+		}
+		if len(o.Examples) < logOtherMaxExamples && !hasExample(o.Examples, r.Target) {
+			o.Examples = append(o.Examples, r.Target)
+		}
+	}
+	for _, k := range order {
+		ev.Others = append(ev.Others, *byRoute[k])
+	}
+	sort.SliceStable(ev.Others, func(i, j int) bool { return ev.Others[i].Count > ev.Others[j].Count })
+	return ev
+}
+
+func hasExample(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

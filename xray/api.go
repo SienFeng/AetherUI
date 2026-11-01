@@ -247,3 +247,9 @@ func ensureXrayAssetLocation() {
 	}
 	_ = os.Setenv("XRAY_LOCATION_ASSET", abs)
 }
+
+// EnsureAssetLocation 供包外（路由验证的域名/IP 匹配器）在加载 geosite:/ext: 条目前
+// 把 xray 资源目录指到 bin/。
+func EnsureAssetLocation() {
+	ensureXrayAssetLocation()
+}
