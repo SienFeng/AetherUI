@@ -1728,7 +1728,7 @@
                                                     <p v-if="rowBadges[u.key].reason" class="rv-verify-line">[[ rowBadges[u.key].reason ]]</p>
                                                     <template v-if="verifyShown">
                                                         <p v-if="verify.result.accessLog.error" class="rv-verify-line">
-                                                            访问日志读取失败：[[ verify.result.accessLog.error ]]
+                                                            [[ verify.result.accessLog.error ]]
                                                         </p>
                                                         <p v-else-if="!verify.result.accessLog.enabled" class="rv-verify-line">
                                                             未开启访问日志，无法核对真实连接（可在面板设置中开启）
@@ -1766,7 +1766,7 @@
                                                                 </li>
                                                             </ul>
                                                             <template v-if="uv.log">
-                                                                <p v-if="uv.log.error" class="rv-verify-line">读取该用户的访问日志失败：[[ uv.log.error ]]</p>
+                                                                <p v-if="uv.log.error" class="rv-verify-line">[[ uv.log.error ]]</p>
                                                                 <template v-else>
                                                                     <p v-if="uv.log.matched > 0" class="rv-verify-line">近 24 小时符合 [[ uv.log.matched ]] 次</p>
                                                                     <div v-for="o in (uv.log.others || [])" :key="o.route" class="rv-verify-other">
@@ -2210,6 +2210,9 @@
             verify: { ruleId: 0, loading: false, result: null, error: '', expanded: {}, retryTimer: null },
             // 保存时恰好有一次验证在进行：那份结果是保存前的，回来后要按「保存后」再验证一次
             verifyRerun: 0,
+            // 已保存状态的代次：保存、切换规则、规则变得不可验证（停用 / 未生效）时 +1。
+            // 请求发出时记下代次，回来时代次变了就丢弃——结果只能来自规则当前这份已保存状态。
+            verifyEpoch: 0,
 
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
@@ -3112,7 +3115,12 @@
                     await this.refreshRulesQuiet();
                     if (msg && msg.success && this.ruleEditor.active && this.ruleEditor.rule.id === fresh.id && !this.ruleDirty) {
                         const now = this.rules.find(x => x.id === fresh.id);
-                        if (now) this.loadEditor(now);
+                        if (now) {
+                            this.loadEditor(now);
+                            // 启停改了核心配置，与保存同等对待：作废旧结论，pending 时 12 秒后再验一次
+                            this.resetVerify(now.id);
+                            if (this.canVerify) this.runVerify(now.id, true);
+                        }
                     }
                 } finally {
                     this.ruleToggling = 0;
@@ -3282,6 +3290,7 @@
             },
             // 切换规则：清空上一条规则的结果、展开状态与待执行的自动重试
             resetVerify(ruleId) {
+                this.verifyEpoch++;
                 this.clearVerifyRetry();
                 this.verify.ruleId = ruleId;
                 this.verify.result = null;
@@ -3299,6 +3308,7 @@
                 this.verify.ruleId = ruleId;
                 this.verify.loading = true;
                 this.verify.error = '';
+                const epoch = this.verifyEpoch;
                 let msg;
                 try {
                     msg = await HttpUtil.post('aui/routing/rule/verify/' + ruleId);
@@ -3306,19 +3316,15 @@
                     this.verify.loading = false;
                 }
                 const cur = this.savedRule;
-                if (this.verifyRerun) {
-                    const again = this.verifyRerun;
-                    this.verifyRerun = 0;
-                    if (cur && cur.id === again && this.verify.ruleId === again && this.canVerify) {
-                        this.runVerify(again, true);
-                        return;
-                    }
-                }
-                if (!cur || cur.id !== ruleId || this.verify.ruleId !== ruleId) {
-                    // 请求期间切到了别的规则：丢弃这份结果；新规则那次自动验证被
-                    // 上面的 loading 挡掉了，这里补上。
+                const again = this.verifyRerun;
+                this.verifyRerun = 0;
+                if (epoch !== this.verifyEpoch || !this.canVerify
+                    || !cur || cur.id !== ruleId || this.verify.ruleId !== ruleId) {
+                    // 请求期间规则的已保存状态变了（保存、启停、切到别的规则），或者现在
+                    // 不可验证：这份结果不属于当前状态，丢弃。那次被 loading 挡掉的验证在这里补上；
+                    // 挡掉的若是保存/启用后的那次，保留它的 12 秒重试。
                     if (cur && this.canVerify && this.verify.ruleId === cur.id && !this.verify.result) {
-                        this.runVerify(cur.id);
+                        this.runVerify(cur.id, again === cur.id);
                     }
                     return;
                 }
@@ -3757,6 +3763,8 @@
             canVerify(ok) {
                 if (!ok) {
                     if (!this.ruleDirty) {
+                        // 已保存状态变了：作废手里的结果，正在进行的请求回来后也会被丢弃
+                        this.verifyEpoch++;
                         this.clearVerifyRetry();
                         this.verify.result = null;
                     }
