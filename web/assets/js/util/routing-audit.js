@@ -7,8 +7,10 @@
 // 很便宜；这里也绝不能顺手去调 verify。页面隐藏（document.hidden）时跳过
 // 这一轮，重新可见时若距上次超过一个周期就立即补一次。
 const ROUTING_AUDIT_INTERVAL_MS = 60 * 1000;
-// 最近一次成功拉取早于这么久，摘要就不再代表现状（两个半周期：允许偶尔失败一轮）。
-const ROUTING_AUDIT_STALE_MS = 150 * 1000;
+// 最近一次成功拉取早于这么久，摘要就不再代表现状（两个周期：允许偶尔失败一轮，
+// 连续两轮失败——约 2 分钟没刷新——即改灰）。判定在每轮拉取发起/失败时更新，
+// 所以阈值必须 ≤ 两个周期，取 150 秒的话要到第三轮（约 3 分钟）才会触发。
+const ROUTING_AUDIT_STALE_MS = 120 * 1000;
 
 const routingAuditMixin = {
     data() {
@@ -72,7 +74,7 @@ const routingAuditMixin = {
         routingAuditStale() {
             const a = this.routingAudit;
             if (!a.loadedAt) return false;
-            return Math.max(a.lastAttemptAt, a.failedAt) - a.loadedAt > ROUTING_AUDIT_STALE_MS;
+            return Math.max(a.lastAttemptAt, a.failedAt) - a.loadedAt >= ROUTING_AUDIT_STALE_MS;
         },
         routingAuditTick() {
             if (document.hidden) return;

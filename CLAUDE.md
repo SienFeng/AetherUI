@@ -94,6 +94,7 @@ go mod tidy && go vet ./...
 - `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。**停用原因要分开记**：`DisableInvalidInbounds` 拆成两条 UPDATE，超流量那条额外写 `disabled_by_traffic = true`，到期那条不写；顺序不能反，两者同时成立时先执行的到期那条已经把 `enable` 置 false，超流量那条的 `enable = true` 条件不再匹配，于是「过期」这个更强的停用理由胜出，该入站不会在下一个重置周期自己活过来。
 - `TrafficResetJob`（1h）— 见「流量自动重置」一节。
 - `MeterPoolJob`（1h）— 重算计量池（每个入站当前正在被计量的 Top-K 注册域名），只在池真的变了时才置重启标志。刻意不做延迟首次触发：池已经在库里，面板重启后生成期照常读得到。
+- `RouteAuditJob`（30s）与 `RouteAnomalyJob`（1m）— 分流规则的后台审计与访问日志异常扫描，见「域名分流管理 → 流量走向验证」的后台审计一段。
 - `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（settings 表的 `subscriptionUpdateTime`，在分流管理页单独读写：`/aui/routing/subscription-time[/update]` → `SettingService.Get/SetSubscriptionUpdateTime`；**刻意不在 `entity.AllSetting` 里**，否则开着没刷新的设置页整份保存时会把分流页刚改的值写回旧值，`TestUpdateAllSettingLeavesSubscriptionUpdateTimeAlone` 守着），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
 另有两个在 controller 里注册的任务：`ServerController` 每 2 秒刷新系统状态（前端 3 分钟无请求即停刷）、`InboundController` 的重启消费任务。
@@ -327,13 +328,15 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 **后台审计（`RoutingAuditService`，设计文档 `docs/superpowers/specs/2026-11-01-routing-flow-audit-design.md`）** 让规则列表与侧栏不用逐条手点验证就能看到绿/红：
 
 - **应用代次（`XrayApplyGeneration`）只在两处递增**：热应用成功（diff 非空）与 `p.Start()` 成功之后（`web/service/xray.go`）。它是「核心换过配置」的唯一信号。已知未覆盖：库里改了、还没下发的改动不会涨代次，由 `Summaries` 的运行时 Pending 判定兜住。
-- **两个任务**：`RouteAuditJob`（30s 唤醒；代次变了或距上次成功满 10 分钟才真审计，遇 `ErrVerifyBusy`/`ErrCoreNotReady` 跳过且不推进状态）与 `RouteAnomalyJob`（1 分钟扫小规则；大规则每 10 分钟，或 `LargeScanBacklogged` 时下一轮立刻再扫）。cron 不会跳过仍在跑的上一轮，两者都靠 `TryLock` 防重入。
+- **两个任务**：`RouteAuditJob`（30s 唤醒；代次变了或距上次成功满 10 分钟才真审计，遇 `ErrVerifyBusy`/`ErrCoreNotReady`/`ErrVerifyTruncated` 跳过且不推进状态——被 60 秒整轮预算截断的一轮已跑完的结果照常写入，但不算成功，下一轮让没有当前代次结果的规则排在前面先跑）与 `RouteAnomalyJob`（1 分钟扫小规则；大规则每 10 分钟，或 `LargeScanBacklogged` 时下一轮立刻再扫）。cron 不会跳过仍在跑的上一轮，两者都靠 `TryLock` 防重入。
 - **后台绝不在 `RestartXray` 的 `lock` 内验证，也不与手动验证抢 `verifyMu`**：后台拿不到就让（返回 busy，下一轮重试）。手动验证优先。
-- **结果与异常摘要只在内存**，面板重启后审计约 30 秒、异常约 1 分钟内重建；「忽略此前的异常」的时刻同样只在内存，重启后 24 小时内的已忽略异常会重新出现。忽略同时作用于列表与流量走向图。
-- **摘要永不乱给绿**：缓存代次 ≠ 当前 → `pending`（Stale）；核心 pending/busy → `pending`；核心未运行 → `unverifiable`；有异常一律 `mismatch`。`verify?cached=1` 只在规则启用、核心在跑且不忙不 pending、代次相等时才返回缓存，否则走现场验证。
+- **核心未就绪不落结果**：`grpc.NewClient` 是惰性的，核心刚拉起、控制面端口还没监听时 `Init` 照样成功。`prepareShared` 因此先 `XrayAPI.WaitReady`（主动连一次，连不上记核心 error），`VerifyAll` 另外盯着本轮任一 RPC 是否报 `codes.Unavailable`（中途退出）；两者都返回 `ErrCoreNotReady`、缓存不动。没有这两道，重启后第一轮会把一份全灰的结果当成功存下。
+- **结果与异常摘要只在内存**，面板重启后审计约 30 秒重建（核心还没就绪的那几轮报 `ErrCoreNotReady`，每 30 秒重试一次直到连上）；异常的首轮回填从 `now-24h` 起、每分钟最多读 20000 行访问日志，日志量大的机器要多轮才追平，期间列表上的异常偏少、偏旧；「忽略此前的异常」的时刻同样只在内存，重启后 24 小时内的已忽略异常会重新出现。忽略同时作用于列表与流量走向图。
+- **摘要永不乱给绿**：缓存代次 ≠ 当前 → `pending`（Stale）；核心 pending/busy → `pending`；核心未运行 → `unverifiable`；有异常一律 `mismatch`。`Summaries` 开头读代次、之后才取快照，快照代次与开头不同（中途热应用）同样按 `pending`。`verify?cached=1` 只在规则启用、核心在跑且不忙不 pending、代次相等、且该规则访问日志异常的最近一次不晚于缓存的 `CheckedAt` 时才返回缓存，否则走现场验证（否则列表这一行是红的、打开图却是绿的）。
+- **`Summaries` 的待生效判定有 5 秒记忆**（`pendingMemo`，`web/service/xray.go`）：规则列表/侧栏每个开着的页面每 60 秒轮询一次，每次都 `GetXrayConfig` 在小机器上不划算。记忆按（应用代次、`xrayChangeSeq`、核心持有的配置对象）取键，`SetToNeedRestart` 与 `RestartXray` 入口都递增 `xrayChangeSeq`，库里的改动一要求下发记忆就失效。**不能改用 `isNeedXrayRestart` 判「没有待生效」**：它被 10 秒的消费任务清掉之后，若重启/热应用失败核心仍持有旧配置，就是一次误给绿。剩下的窗口只有「改了库却不要求下发」的写入（本身就不会生效），最多晚 5 秒显示待生效。`Busy`/`Running` 每次现读，不进记忆；手动验证与 `cached=1` 不用记忆。
 - **异常语义 = `buildLogEvidence`**（同样复用 xray 的匹配器），被更高优先级规则遮蔽的域名算下层规则走错。游标用 `(time,id)`（SQLite 会复用 id）；摘要按小时分桶，列表窗口实际为 24~25 小时，而验证的日志证据是精确 24 小时；系统时钟回跳期间写入的行会被游标跳过。
-- **小机器预算（实测）**：规则合并后条目数 ≤ 20000 为小规则（匹配器按代次常驻），超过为大规则（每次扫描时逐条构建、用完释放，不同时持有多个）；每条规则最多展开 50 个用户、每用户 5 个出站。`TestAnomalyScanLargeGroupFootprint`：10 万条域名 + 1 万条日志扫一次大规则，堆峰值增量约 80 MB（81.4 MB 峰值，扫描前 1.7 MB）、耗时约 0.16 秒，断言上限 100 MB，不要放宽。
-- **前端**（`web/assets/js/util/routing-audit.js`）：规则列表与侧栏每 60 秒轮询 `/aui/routing/rule/audit`（只读缓存，页面隐藏时暂停），超过 150 秒没有成功拉取则图标改灰「状态未更新」。流量走向图的「实际去向」节点把默认出站的几种写法折叠成一个，`routing.html` 里的 `DEFAULT_LABEL`/`NO_MATCH_LABEL` 抄自 `routing_verify.go` 的 `labelDefaultOutbound`/`labelNoMatch`，**两处必须一起改**。
+- **小机器预算（实测）**：规则合并后条目数 ≤ 20000 为小规则（匹配器按代次常驻），超过为大规则（每次扫描时逐条构建、用完释放，不同时持有多个）；每条规则最多展开 50 个用户、每用户 5 个出站。`TestAnomalyScanLargeGroupFootprint`：10 万条域名 + 1 万条日志扫一次大规则，堆峰值增量约 80 MB（81.4 MB 峰值，扫描前 1.7 MB）、耗时约 0.16 秒，断言上限 100 MB，不要放宽。**后台全量验证（`VerifyAll`）同一口径**：大规则的组条目与匹配器在该规则判定完即释放（`releaseLarge`），匹配器缓存是单槽（只留最近一个组序列，规则按组序列排序以便复用），一轮内同一时刻至多一个匹配器存活——按组序列各缓存一个的话，几条大规则一轮就要几百 MB。`TestVerifyAllLargeRulesFootprint`：两条各 10 万条域名的规则 + 2000 条日志跑一轮，堆峰值增量约 74 MB（75.7 MB 峰值，验证前 1.7 MB）、耗时约 0.3 秒，断言上限 100 MB，不要放宽。
+- **前端**（`web/assets/js/util/routing-audit.js`）：规则列表与侧栏每 60 秒轮询 `/aui/routing/rule/audit`（只读缓存，页面隐藏时暂停），最近一次成功拉取距最近一次尝试/失败 ≥ 120 秒（即连续两轮失败，约 2 分钟没刷新）则图标改灰「状态未更新」——阈值必须 ≤ 两个轮询周期，否则要到第三轮才会改灰。保存后的现场验证返回 `pending` 或 `busy`（后台审计正占着 `verifyMu`）时，12 秒后自动再验一次，仅一次。流量走向图的「实际去向」节点把默认出站的几种写法折叠成一个，`routing.html` 里的 `DEFAULT_LABEL`/`NO_MATCH_LABEL` 抄自 `routing_verify.go` 的 `labelDefaultOutbound`/`labelNoMatch`，**两处必须一起改**。
 
 ### `util/link` 包
 

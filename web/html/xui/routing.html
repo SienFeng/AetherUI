@@ -2468,7 +2468,8 @@
                 const state = res.core && res.core.state;
                 const coreMsg = (res.core && res.core.message) || '';
                 if (state === 'busy' || state === 'not_running' || state === 'error') {
-                    return { text: '无法验证 · ' + time, sub: coreMsg };
+                    const busySub = state === 'busy' && this.verify.retryTimer ? '验证正忙，稍后自动再验证一次' : coreMsg;
+                    return { text: '无法验证 · ' + time, sub: busySub };
                 }
                 const verified = users.filter(x => x.verdict === 'verified').length;
                 const bad = users.filter(x => x.verdict === 'mismatch').length;
@@ -3557,7 +3558,8 @@
                 this.resetVerify(r.id);
                 if (this.canVerify) this.runVerify(r.id, true);
             },
-            // afterSave：保存后的那次验证。核心还没载入新配置（pending）时，12 秒后再验证一次，仅一次。
+            // afterSave：保存后的那次验证。核心还没载入新配置（pending）或验证正忙（busy，
+            // 多半是后台审计占着）时，12 秒后再验证一次，仅一次。
             // cached：选中规则时用后台审计的缓存秒开（?cached=1）。缓存只在属于当前应用代次、
             // 规则仍启用时才被采用，否则服务端自己现场验证，所以这里不再补一次现场验证。
             // 保存后的验证一律现场做——那时要的就是新配置的结论。
@@ -3597,7 +3599,9 @@
                     this.verify.result = msg.obj;
                     // 现场验证会写进服务端缓存：列表里这一行的图标随之刷新，不与走向图各说各话
                     this.refreshRoutingAudit();
-                    if (afterSave && msg.obj.core && msg.obj.core.state === 'pending') {
+                    // busy：后台审计或另一个页面正占着验证，与 pending 一样等 12 秒再验一次，仅一次
+                    const coreState = msg.obj.core && msg.obj.core.state;
+                    if (afterSave && (coreState === 'pending' || coreState === 'busy')) {
                         this.verify.retryTimer = setTimeout(() => {
                             this.verify.retryTimer = null;
                             if (this.canVerify && this.savedRule && this.savedRule.id === ruleId) this.runVerify(ruleId);
