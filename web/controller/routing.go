@@ -198,6 +198,7 @@ type RoutingController struct {
 	portableService    service.RoutingPortableService
 	probeService       service.ProbeService
 	settingService     service.SettingService
+	verifyService      service.RoutingVerifyService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -231,6 +232,7 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	rl.POST("/update/:id", a.updateRule)
 	rl.POST("/del/:id", a.delRule)
 	rl.POST("/reorder", a.reorderRules)
+	rl.POST("/verify/:id", a.verifyRule)
 
 	g.POST("/export", a.exportRouting)
 	g.POST("/import", a.importRouting)
@@ -758,6 +760,17 @@ func (a *RoutingController) reorderRules(c *gin.Context) {
 		// 规则数组顺序变了就是配置变了，必须重新下发。
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// 验证「流量走向」：只读，不改库也不动核心，所以不置重启标志。
+func (a *RoutingController) verifyRule(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "验证分流规则", err)
+		return
+	}
+	result, err := a.verifyService.Verify(id)
+	jsonObj(c, result, err)
 }
 
 func (a *RoutingController) delRule(c *gin.Context) {
