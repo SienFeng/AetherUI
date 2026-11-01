@@ -108,7 +108,7 @@ html, body {
 body {
     background:
         radial-gradient(900px 500px at 85% -10%, rgba(160, 190, 255, .40), transparent 60%),
-        radial-gradient(700px 500px at 30% 0%, rgba(205, 190, 255, .30), transparent 60%),
+        radial-gradient(700px 500px at 30% 0%, rgba(175, 200, 255, .30), transparent 60%),
         radial-gradient(900px 600px at 100% 100%, rgba(170, 235, 225, .26), transparent 60%),
         linear-gradient(180deg, #F3F6FE 0%, #EEF2FB 100%);
     background-attachment: fixed;
@@ -440,10 +440,10 @@ button:focus-visible,
  * antd light 菜单的选中项自带主色浅底与右侧 3px 主色竖条（::after），
  * 两者都要盖掉，否则选中态仍是一块蓝。 */
 #sider.ant-layout-sider {
-    /* v4：半透明白底压在渐变上，比纯白轻一档；文字仍画在 ≥ 92% 白的底上 */
-    background: rgba(255, 255, 255, .72);
-    border-right: 1px solid rgba(255, 255, 255, .9);
-    box-shadow: 1px 0 0 rgba(15, 23, 42, .04);
+    /* 侧栏透明，与内容区同铺 body 的渐变底，只留一条细分隔线。
+     * 底色不再是白，分组标题因此加深一档（见 #sider .ant-menu-item-group-title）。 */
+    background: transparent;
+    border-right: 1px solid rgba(15, 23, 42, .06);
 }
 
 #sider .ant-menu {
@@ -502,6 +502,12 @@ button:focus-visible,
     font-size: 12px;
     line-height: 18px;
     color: #6B7690;
+}
+
+/* 侧栏透明后底色最深处约 #D2E0FE（顶部淡蓝光晕），#6B7690 在那里只有 3.4:1；
+ * #566079 在白底 5.8:1、最深处 4.7:1。抽屉仍是白底，保留上面的 #6B7690。 */
+#sider .ant-menu-item-group-title {
+    color: #566079;
 }
 
 #sider .ant-menu-item::after {
