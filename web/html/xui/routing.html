@@ -935,8 +935,37 @@
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        justify-content: space-between;
-        gap: 3px 7px;
+        gap: 2px 4px;
+    }
+
+    /* 用户名后的验证图标。命中区至少 24×24（WCAG 2.2 目标尺寸），图标本身 15px。
+       颜色取语义色，白底上都 ≥4.8:1，满足非文本元素 3:1。 */
+    .rv-vicon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        min-width: 24px;
+        min-height: 24px;
+        padding: 0 4px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        font-size: 15px;
+        line-height: 1;
+        cursor: default;
+    }
+    button.rv-vicon { cursor: pointer; }
+    button.rv-vicon:hover { background: var(--aui-bg-2, #F1F5F9); }
+    /* 复用 status-* 语义类名，但不要它们的底色：行内只留图标本身 */
+    .rv-vicon.status-ok      { color: var(--aui-success); background: transparent; }
+    .rv-vicon.status-danger  { color: var(--aui-danger); background: transparent; }
+    .rv-vicon.status-warn    { color: var(--aui-warning); background: transparent; }
+    .rv-vicon.status-neutral { color: var(--aui-text-3); background: transparent; }
+    .rv-vicon-count {
+        font-size: 12px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
     }
 
     .rv-uname {
@@ -1661,17 +1690,21 @@
                                                             <span class="rv-av" :style="{ background: u.color }" aria-hidden="true">[[ u.av ]]</span>
                                                             <span class="rv-verify-ucell">
                                                                 <span class="rv-uname">[[ u.name ]]</span>
+                                                                <!-- 行内只放图标（✓ / × / ! / 时钟），文字说明进 title 与 aria-label：
+                                                                     形状本身区分状态，不只靠颜色；读屏照样读得到完整说明。
+                                                                     汇总行（所有用户 / 另外 N 位）额外带「已验证数/总数」。 -->
                                                                 <button v-if="rowBadges[u.key].expandable" type="button"
-                                                                        class="status-badge" :class="rowBadges[u.key].cls"
+                                                                        class="rv-vicon" :class="rowBadges[u.key].cls"
                                                                         :title="rowBadges[u.key].title"
+                                                                        :aria-label="rowBadges[u.key].title + '，点击查看明细'"
                                                                         :aria-expanded="verify.expanded[u.key] ? 'true' : 'false'"
                                                                         :aria-controls="'rv-verify-d-' + u.key"
                                                                         @click="toggleVerify(u.key)">
-                                                                    <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
+                                                                    <a-icon :type="rowBadges[u.key].icon" :theme="rowBadges[u.key].icon === 'loading' ? 'outlined' : 'filled'" aria-hidden="true"></a-icon><span v-if="rowBadges[u.key].count" class="rv-vicon-count">[[ rowBadges[u.key].count ]]</span>
                                                                 </button>
-                                                                <span v-else class="status-badge" :class="rowBadges[u.key].cls"
-                                                                      :title="rowBadges[u.key].title">
-                                                                    <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
+                                                                <span v-else class="rv-vicon" :class="rowBadges[u.key].cls"
+                                                                      role="img" :title="rowBadges[u.key].title" :aria-label="rowBadges[u.key].title">
+                                                                    <a-icon :type="rowBadges[u.key].icon" :theme="rowBadges[u.key].icon === 'loading' ? 'outlined' : 'filled'" aria-hidden="true"></a-icon>
                                                                 </span>
                                                             </span>
                                                         </div>
@@ -3226,7 +3259,7 @@
                     case 'verified': return { cls: 'status-ok', icon: 'check-circle', text: '已验证' };
                     case 'mismatch': return { cls: 'status-danger', icon: 'close-circle', text: '与配置不符' };
                     case 'pending': return { cls: 'status-warn', icon: 'clock-circle', text: '等待下发' };
-                    default: return { cls: 'status-neutral', icon: 'question-circle', text: '无法验证' };
+                    default: return { cls: 'status-neutral', icon: 'exclamation-circle', text: '无法验证' };
                 }
             },
             // 服务端省略了已删除的入站。结果里找不到的用户一律「无法验证」，绝不留空、更不显示绿色。
@@ -3261,13 +3294,13 @@
                 });
                 if (this.ruleDirty) return neutral('save', '保存后验证', '有未保存的修改，保存后再验证');
                 if (this.verifyBlockedReason) {
-                    return Object.assign(neutral('question-circle', '无法验证', this.verifyBlockedReason), { expandable: true });
+                    return Object.assign(neutral('exclamation-circle', '无法验证', this.verifyBlockedReason), { expandable: true });
                 }
                 if (this.verify.loading && !this.verifyShown) return neutral('loading', '验证中', '正在向核心查询');
                 if (this.verify.error) {
-                    return Object.assign(neutral('question-circle', '无法验证', '验证请求失败：' + this.verify.error), { expandable: true });
+                    return Object.assign(neutral('exclamation-circle', '无法验证', '验证请求失败：' + this.verify.error), { expandable: true });
                 }
-                if (!this.verifyShown) return neutral('question-circle', '未验证', '尚未验证');
+                if (!this.verifyShown) return neutral('exclamation-circle', '未验证', '尚未验证');
                 const v = this.userVerify(key);
                 if (key !== 'all' && key !== 'more') {
                     const m = this.verdictMeta(v.verdict);
@@ -3297,7 +3330,7 @@
                     title = (v.failed.length ? v.failed.length + ' 位用户未通过验证；' : '')
                         + '只验证了前 ' + v.total + ' 个已启用入站，另有 ' + unchecked + ' 位未验证';
                 }
-                return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true };
+                return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true, count: v.verified + '/' + v.total };
             },
             // 明细里列出的用户：具体用户只有它自己；汇总行只列出不是「已验证」的
             verifyDetailUsers(key) {
@@ -3440,7 +3473,7 @@
                     '<marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + col + '"></path></marker></defs>';
                 const n = rows.length, spread = Math.min(8, (C.h - 24) / Math.max(1, n - 1));
                 rows.forEach((u, i) => {
-                    const x1 = L.r + 7, p = curve(x1, u.y, C.l - 2, C.y + (i - (n - 1) / 2) * spread);
+                    const x1 = L.r + 2, p =curve(x1, u.y, C.l - 2, C.y + (i - (n - 1) / 2) * spread);
                     const v = verdicts[i];
                     const solid = v === 'verified' ? '#3D7BFF' : (v === 'mismatch' ? danger : '#94A0B8');
                     const soft = v === 'verified' ? 'url(#rv-gl)' : solid;
