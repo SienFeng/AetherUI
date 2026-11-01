@@ -3496,9 +3496,11 @@
             async refreshGroup(group) {
                 // 失败也要重新加载：DB 里已经写了 lastError，不刷新的话这一行
                 // 会继续显示刷新前的绿色「N 小时前」，看不出刚刚这次失败了。
-                const msg = await this.post('aui/routing/domain-group/refresh/' + group.id);
+                // 重新验证同样不看 success：多地址订阅部分失败时，成功的那几个地址已经写进
+                // 合并结果、接口却返回失败，核心里的条件照样变了。
+                await this.post('aui/routing/domain-group/refresh/' + group.id);
                 await this.loadAll();
-                if (msg && msg.success) this.reverifyIfAffected({ groupId: group.id });
+                this.reverifyIfAffected({ groupId: group.id });
             },
             groupMissing(id) {
                 return !this.groups.find(x => x.id === id);
