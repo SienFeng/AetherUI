@@ -64,9 +64,14 @@ func (j *RouteAuditJob) Run() {
 	usedGen, err := run()
 	if err != nil {
 		// 核心未就绪或验证正忙属于正常现象：不推进 lastGen/lastAt，下一轮重试。
-		if errors.Is(err, service.ErrVerifyBusy) || errors.Is(err, service.ErrCoreNotReady) {
+		// 预算用完（ErrVerifyTruncated）：已跑完的结果已写入，但这一轮不完整，同样不推进，
+		// 下一轮把没轮到的规则补上（VerifyAll 让它们排在前面）。
+		switch {
+		case errors.Is(err, service.ErrVerifyBusy) || errors.Is(err, service.ErrCoreNotReady):
 			logger.Debug("路由审计跳过：", err)
-		} else {
+		case errors.Is(err, service.ErrVerifyTruncated):
+			logger.Warning("路由审计本轮未完成，下一轮继续：", err)
+		default:
 			logger.Warning("路由审计失败：", err)
 		}
 		return

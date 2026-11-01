@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"a-ui/database"
 	"a-ui/database/model"
 	"a-ui/util/json_util"
@@ -385,8 +388,8 @@ func TestVerifyAllBudgetExhaustedKeepsOldResult(t *testing.T) {
 	s.budget = 30 * time.Millisecond
 
 	all, _, err := s.VerifyAll()
-	if err != nil {
-		t.Fatalf("VerifyAll: %v", err)
+	if !errors.Is(err, ErrVerifyTruncated) {
+		t.Fatalf("预算用完应返回 ErrVerifyTruncated，实际 %v", err)
 	}
 	if len(all) != 0 {
 		t.Fatalf("预算用完时被截断与没轮到的规则都不应有结果: %+v", all)
@@ -395,8 +398,9 @@ func TestVerifyAllBudgetExhaustedKeepsOldResult(t *testing.T) {
 		t.Errorf("预算用完后不应再调 route，实际 %d 次", fr.count())
 	}
 
-	if _, err := (&RoutingAuditService{verify: s}).RunAudit(); err != nil {
-		t.Fatalf("RunAudit: %v", err)
+	// 被截断的一轮不算成功：RunAudit 把错误交给任务，任务据此不推进 lastGen/lastAt。
+	if _, err := (&RoutingAuditService{verify: s}).RunAudit(); !errors.Is(err, ErrVerifyTruncated) {
+		t.Fatalf("RunAudit 应返回 ErrVerifyTruncated，实际 %v", err)
 	}
 	if got, ok := cachedVerifyResult(first.Id); !ok || got != old {
 		t.Errorf("本轮没有新结果的规则应保留旧结果: %+v", got)
@@ -414,7 +418,8 @@ func TestVerifyAllBudgetExhaustedKeepsOldResult(t *testing.T) {
 }
 
 // runningCore 是「核心在跑、持有当前配置」的快照，供只关心别的条件的 Summaries 测试注入。
-func runningCore() XrayRuntime { return XrayRuntime{Running: true} }
+// 代次取此刻的真实代次：快照代次与 Summaries 开头读到的不同会被当成「中途换过配置」。
+func runningCore() XrayRuntime { return XrayRuntime{Running: true, ApplyGen: XrayApplyGeneration()} }
 
 // 代次前进后，旧代次的结果不再代表核心现状：标 stale、结论按 pending，绝不给绿。
 func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
@@ -467,7 +472,11 @@ func TestSummariesPendingCoreNeverGreen(t *testing.T) {
 			storeVerifyResult(&RuleVerifyResult{RuleId: red.Id, ApplyGen: gen, CheckedAt: 500,
 				Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictMismatch}}})
 			calls := 0
-			svc := &RoutingAuditService{runtime: func() XrayRuntime { calls++; return tc.rt }}
+			rt := tc.rt
+			if !rt.Busy { // 真实快照 Busy 时代次为零值，其余情形带着当前代次
+				rt.ApplyGen = gen
+			}
+			svc := &RoutingAuditService{runtime: func() XrayRuntime { calls++; return rt }}
 
 			_, rules := svc.Summaries()
 			got := rules[green.Id]
@@ -498,5 +507,178 @@ func TestSummariesEmptyRuleUnverifiable(t *testing.T) {
 	_, rules := (&RoutingAuditService{}).Summaries()
 	if got := rules[rule.Id]; got.Verdict != verdictUnverifiable || got.Stale {
 		t.Errorf("无用户规则应 unverifiable: %+v", got)
+	}
+}
+
+// 核心刚拉起、控制面端口还没人听：grpc.NewClient 惰性连接让 Init 照样成功，
+// 必须在发样例之前就识别出来报 ErrCoreNotReady，不能把一轮全灰的结果当成功写进缓存。
+func TestVerifyAllCoreNotReadyClosedPort(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	old := &RuleVerifyResult{RuleId: rule.Id, CheckedAt: 1, ApplyGen: 3, Users: []UserVerify{}}
+	storeVerifyResult(old)
+
+	// 先监听再关闭，拿到一个合法但没人监听的端口。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	s := &RoutingVerifyService{runtime: func() XrayRuntime {
+		return XrayRuntime{Running: true, APIPort: port, DefaultTag: model.DefaultOutboundTag, ApplyGen: 9}
+	}}
+	start := time.Now()
+	res, gen, err := s.VerifyAll()
+	if !errors.Is(err, ErrCoreNotReady) || res != nil || gen != 0 {
+		t.Fatalf("VerifyAll = %v, %d, %v，期望 nil, 0, ErrCoreNotReady", res, gen, err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("连接被拒应很快识别，耗时 %v", d)
+	}
+	if _, err := (&RoutingAuditService{verify: s}).RunAudit(); !errors.Is(err, ErrCoreNotReady) {
+		t.Fatalf("RunAudit err = %v，期望 ErrCoreNotReady", err)
+	}
+	if got, _ := cachedVerifyResult(rule.Id); got != old {
+		t.Errorf("核心未就绪时缓存不应改动: %+v", got)
+	}
+
+	// 手动验证同样走这条判定：如实报核心错误、不写缓存。
+	one, err := s.Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if one.Core.State != coreStateError {
+		t.Errorf("Core = %+v，期望 error", one.Core)
+	}
+	if got, _ := cachedVerifyResult(rule.Id); got != old {
+		t.Errorf("连不上核心的手动验证不应写缓存: %+v", got)
+	}
+}
+
+// 连接就绪后核心中途退出：任一 RPC 报 Unavailable，整轮不出结果。
+func TestVerifyAllUnavailableMidRound(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	fr := &fakeRoute{fn: func(context.Context, string, string, net.IP) (string, bool, error) {
+		return "", false, status.Error(codes.Unavailable, "connection refused")
+	}}
+	res, _, err := newVerifyService(fr, okRuntime()).VerifyAll()
+	if !errors.Is(err, ErrCoreNotReady) || res != nil {
+		t.Fatalf("VerifyAll = %v, %v，期望 nil, ErrCoreNotReady", res, err)
+	}
+}
+
+// 预算截断的一轮：已跑完的规则结果写入缓存，但 RunAudit 报 ErrVerifyTruncated；
+// 下一轮没有当前代次结果的规则排在前面，不会每轮卡在同一处。
+func TestVerifyAllTruncatedStoresPartialAndReorders(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	fast := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	slow := f.addRule(t, model.ActionBlock, []int{f.b.Id})
+	fr := &fakeRoute{fn: func(ctx context.Context, inboundTag, _ string, _ net.IP) (string, bool, error) {
+		if inboundTag == f.b.Tag {
+			<-ctx.Done()
+			return "", false, ctx.Err()
+		}
+		return f.node.Tag, false, nil
+	}}
+	rt := okRuntime()
+	rt.ApplyGen = 21
+	s := newVerifyService(fr, rt)
+	s.rpcTimeout = time.Second
+	s.budget = 200 * time.Millisecond
+
+	gen, err := (&RoutingAuditService{verify: s}).RunAudit()
+	if !errors.Is(err, ErrVerifyTruncated) || gen != 21 {
+		t.Fatalf("RunAudit = %d, %v，期望 21, ErrVerifyTruncated", gen, err)
+	}
+	if got, ok := cachedVerifyResult(fast.Id); !ok || got.ApplyGen != 21 {
+		t.Fatalf("跑完的规则应写入缓存: %+v", got)
+	}
+	if _, ok := cachedVerifyResult(slow.Id); ok {
+		t.Fatal("被截断的规则不应有结果")
+	}
+
+	rules := []*model.RoutingRule{fast, slow}
+	orderRulesForRound(rules, 21)
+	if rules[0].Id != slow.Id {
+		t.Errorf("下一轮应先跑没有当前代次结果的规则，顺序 = [%d %d]", rules[0].Id, rules[1].Id)
+	}
+}
+
+// 代次在 Summaries 开头读取与取快照之间前进（中途热应用）：同代次缓存是换之前的结论，
+// 不能给绿。
+func TestSummariesSnapshotGenerationAdvanced(t *testing.T) {
+	resetAuditCache(t)
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	gen := XrayApplyGeneration()
+	storeVerifyResult(&RuleVerifyResult{RuleId: rule.Id, ApplyGen: gen, CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+	svc := &RoutingAuditService{runtime: func() XrayRuntime {
+		return XrayRuntime{Running: true, ApplyGen: gen + 1}
+	}}
+	_, rules := svc.Summaries()
+	if got := rules[rule.Id]; got.Verdict != verdictPending || !got.Stale {
+		t.Errorf("快照代次已前进时应 stale + pending: %+v", got)
+	}
+}
+
+// 待生效判定的记忆：同键 ttl 内复用；过期、代次/改动序号/配置对象变化都现算；
+// 判定出错不记。
+func TestSummariesPendingMemo(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	m := &pendingMemo{ttl: 5 * time.Second, now: func() time.Time { return now }}
+	calls, result := 0, true
+	compute := func() (bool, bool) { calls++; return result, true }
+	cfg := &xray.Config{}
+	key := pendingKey{applyGen: 1, changeSeq: 1, current: cfg}
+
+	if !m.get(key, compute) || calls != 1 {
+		t.Fatalf("首次应现算，calls=%d", calls)
+	}
+	result = false
+	now = now.Add(4 * time.Second)
+	if !m.get(key, compute) || calls != 1 {
+		t.Fatalf("ttl 内同键应复用，calls=%d", calls)
+	}
+	for name, k := range map[string]pendingKey{
+		"代次":   {applyGen: 2, changeSeq: 1, current: cfg},
+		"改动序号": {applyGen: 1, changeSeq: 2, current: cfg},
+		"配置对象": {applyGen: 1, changeSeq: 1, current: &xray.Config{}},
+	} {
+		before := calls
+		m.get(k, compute)
+		if calls != before+1 {
+			t.Errorf("%s变化应现算", name)
+		}
+		m.get(key, compute) // 换回原键同样现算，记忆只有一份
+	}
+	before := calls
+	now = now.Add(6 * time.Second)
+	m.get(key, compute)
+	if calls != before+1 {
+		t.Error("过期应现算")
+	}
+	// 出错的判定不进记忆：下一次仍现算。
+	failing := func() (bool, bool) { calls++; return false, false }
+	k2 := pendingKey{applyGen: 9}
+	m.get(k2, failing)
+	before = calls
+	m.get(k2, compute)
+	if calls != before+1 {
+		t.Error("出错的判定不应被记住")
+	}
+
+	// 要求下发改动的两个入口都会让记忆失效。
+	seq := xrayChangeSeq.Load()
+	(&XrayService{}).SetToNeedRestart()
+	(&XrayService{}).IsNeedRestartAndSetFalse()
+	if xrayChangeSeq.Load() != seq+1 {
+		t.Errorf("SetToNeedRestart 应递增改动序号: %d -> %d", seq, xrayChangeSeq.Load())
 	}
 }

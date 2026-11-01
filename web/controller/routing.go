@@ -773,7 +773,9 @@ func (a *RoutingController) reorderRules(c *gin.Context) {
 // 才清理，规则停用或删除后仍可能留着旧结果；代次落后说明核心之后换过配置。
 // 「待生效」单独要判：保存后到核心载入新配置之前（最多约 10 秒）代次还没变，
 // 缓存却是旧配置的结论——现场 Verify 此时会如实报 pending，缓存会报一个过期的绿色。
-// 核心没在跑时同理，缓存说的是它停下之前的事。任一不满足都走现场 Verify
+// 核心没在跑时同理，缓存说的是它停下之前的事。访问日志异常的最近一次晚于缓存的
+// 验证时刻时也不用缓存：那份结论没见过这条走错的连接，图上会是绿的而列表这一行是红的。
+// 任一不满足都走现场 Verify
 // （Verify 自己处理停用、不存在的规则与核心不可用）。
 func (a *RoutingController) verifyRule(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
@@ -806,6 +808,9 @@ func (a *RoutingController) currentCachedVerify(id int) (*service.RuleVerifyResu
 	}
 	res, ok := a.auditService.Cached(id)
 	if !ok {
+		return nil, false
+	}
+	if a.auditService.Anomaly(id, time.Now()).LastAt > res.CheckedAt {
 		return nil, false
 	}
 	rt := verifyRuntimeSnapshot()
@@ -844,6 +849,11 @@ func (a *RoutingController) auditRules(c *gin.Context) {
 func (a *RoutingController) resetRuleAnomaly(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
+		jsonMsg(c, "忽略此前的异常", err)
+		return
+	}
+	// 规则不存在时不记忽略时刻：SQLite 会复用 id，留下的时刻会作用到下一条新建的规则上。
+	if _, err := a.ruleService.Get(id); err != nil {
 		jsonMsg(c, "忽略此前的异常", err)
 		return
 	}

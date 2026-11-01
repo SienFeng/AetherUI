@@ -154,3 +154,23 @@ func TestRouteAnomalyJobSkipsConcurrentRun(t *testing.T) {
 		t.Fatalf("并发的第二次 Run 不应调用 scan，calls=%d", calls)
 	}
 }
+
+// 被 60 秒预算截断的一轮不算成功：不推进 lastGen/lastAt，下一次唤醒就重试。
+func TestRouteAuditJobTruncatedDoesNotAdvance(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	j := NewRouteAuditJob()
+	j.now = func() time.Time { return now }
+	j.lastGen, j.lastAt = 1, now.Add(-time.Hour)
+	j.currentGen = func() uint64 { return 2 }
+	calls := 0
+	j.audit = func() (uint64, error) { calls++; return 2, service.ErrVerifyTruncated }
+	j.Run()
+	if j.lastGen != 1 || !j.lastAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("截断后 lastGen/lastAt 被推进: %d %v", j.lastGen, j.lastAt)
+	}
+	now = now.Add(30 * time.Second)
+	j.Run()
+	if calls != 2 {
+		t.Errorf("截断后下一次唤醒应重试，calls=%d", calls)
+	}
+}

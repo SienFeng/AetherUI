@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -63,6 +64,30 @@ func (x *XrayAPI) Init(apiPort int) error {
 	x.HandlerServiceClient = &hsClient
 	x.RoutingServiceClient = &rsClient
 	return nil
+}
+
+// WaitReady 主动建立连接并等到它就绪，ctx 到期或连接失败（如端口上没人监听）返回 error。
+//
+// grpc.NewClient 是惰性的：Init 成功不代表核心在听，核心刚拉起还没监听控制面端口时，
+// Init 照样成功、之后每次 RPC 才报 Unavailable。调用方要区分「核心未就绪」与
+// 「核心对某个目标给出了结论」时，先调它。
+func (x *XrayAPI) WaitReady(ctx context.Context) error {
+	if x.conn == nil {
+		return common.NewError("xray api is not initialized")
+	}
+	x.conn.Connect()
+	for {
+		state := x.conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return nil
+		case connectivity.TransientFailure, connectivity.Shutdown:
+			return common.NewError("xray 控制面连接失败:", state.String())
+		}
+		if !x.conn.WaitForStateChange(ctx, state) {
+			return common.NewError("等待 xray 控制面就绪超时:", ctx.Err())
+		}
+	}
 }
 
 // Close 释放连接。可重复调用，也可以在 Init 失败后调用——热应用的每条

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -138,7 +139,8 @@ func (s *RoutingAuditService) runtimeSnapshot() XrayRuntime {
 	if s.runtime != nil {
 		return s.runtime()
 	}
-	return (&XrayService{}).RuntimeSnapshot()
+	// 待生效判定走 5 秒记忆：每个开着的页面每 60 秒轮询一次，不必每次都合成配置。
+	return (&XrayService{}).runtimeSnapshot(summaryPendingMemo)
 }
 
 func (s *RoutingAuditService) nowTime() time.Time {
@@ -157,11 +159,14 @@ func (s *RoutingAuditService) verifier() *RoutingVerifyService {
 
 // RunAudit 跑一轮全量验证并写缓存，返回本轮使用的应用代次。
 // 错误原样返回；ErrVerifyBusy / ErrCoreNotReady 时缓存一个字节都不动。
+// ErrVerifyTruncated（预算用完）时已跑完的规则照常写入，但仍返回该错误：
+// 这一轮不完整，调用方不能把它记成一次成功的审计。
 func (s *RoutingAuditService) RunAudit() (uint64, error) {
 	results, gen, err := s.verifier().VerifyAll()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrVerifyTruncated) {
 		return 0, err
 	}
+	partial := err
 	rules, err := (&RoutingRuleService{}).GetEnabled()
 	if err != nil {
 		// 结果本身有效，照常写入；只是这一轮没法判断哪些规则已删除/停用，留到下一轮清理。
@@ -169,14 +174,14 @@ func (s *RoutingAuditService) RunAudit() (uint64, error) {
 		for _, res := range results {
 			storeVerifyResult(res)
 		}
-		return gen, nil
+		return gen, partial
 	}
 	ids := make([]int, 0, len(rules))
 	for _, r := range rules {
 		ids = append(ids, r.Id)
 	}
 	replaceAuditResults(results, ids)
-	return gen, nil
+	return gen, partial
 }
 
 // Summaries 返回当前应用代次与每条启用规则的摘要。没有缓存的规则 verdict=unverifiable、
@@ -202,12 +207,14 @@ func (s *RoutingAuditService) Summaries() (applyGen uint64, rules map[int]RuleAu
 	rtLoaded := false
 	// notCurrent 返回同代次缓存里的 verified 此刻应降成的结论；空串表示仍可给绿。
 	// Busy 时快照的 Running 恒为 false，必须先判 Busy，否则会误报成「未运行」。
+	// 快照的代次 ≠ 开头读到的 applyGen：两次读取之间核心换过配置（热应用/重启），
+	// 与 applyGen 相等的缓存是换之前的结论，同样按 pending。
 	notCurrent := func() string {
 		if !rtLoaded {
 			rt, rtLoaded = s.runtimeSnapshot(), true
 		}
 		switch {
-		case rt.Busy || rt.Pending:
+		case rt.Busy || rt.Pending || rt.ApplyGen != applyGen:
 			return verdictPending
 		case !rt.Running:
 			return verdictUnverifiable

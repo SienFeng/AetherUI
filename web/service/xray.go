@@ -5,6 +5,8 @@ import (
 	"errors"
 	"go.uber.org/atomic"
 	"sync"
+	"time"
+
 	"a-ui/logger"
 	"a-ui/xray"
 )
@@ -20,6 +22,13 @@ var result string
 // 热应用中途失败不单独计，避免一次生效被记两次。
 // 读取方据此判断「某次观测之后核心是否换过配置」，由 XrayApplyGeneration 暴露。
 var xrayApplyGen atomic.Uint64
+
+// xrayChangeSeq 是「有人要求把库里的改动下发到核心」的次数：SetToNeedRestart 与
+// RestartXray 入口各递增一次。它只用于让 Summaries 的待生效判定记忆（pendingMemo）
+// 在改动发生的那一刻立即失效，不是给别处判断「有没有待生效」用的——
+// isNeedXrayRestart 会被 10 秒的消费任务清掉，清掉之后重启失败的话核心仍持有旧配置，
+// 拿它当「没有待生效」会误给绿；只增不减的计数没有这个问题。
+var xrayChangeSeq atomic.Uint64
 
 // XrayApplyGeneration 返回当前应用代次，可在不持 lock 时调用。
 func XrayApplyGeneration() uint64 {
@@ -128,6 +137,7 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, error) {
 }
 
 func (s *XrayService) RestartXray(isForce bool) error {
+	xrayChangeSeq.Inc()
 	lock.Lock()
 	defer lock.Unlock()
 	logger.Debug("restart xray, force:", isForce)
@@ -258,6 +268,7 @@ func (s *XrayService) StopXray() error {
 }
 
 func (s *XrayService) SetToNeedRestart() {
+	xrayChangeSeq.Inc()
 	isNeedXrayRestart.Store(true)
 }
 
@@ -281,6 +292,14 @@ type XrayRuntime struct {
 // 验证请求不能被它们卡住，也不能在持锁时发 RPC 或合成配置（GetXrayConfig
 // 要读库、exec xray）。拿不到锁就如实返回 Busy，由调用方提示稍后重试。
 func (s *XrayService) RuntimeSnapshot() XrayRuntime {
+	return s.runtimeSnapshot(nil)
+}
+
+// runtimeSnapshot 是 RuntimeSnapshot 的实现；memo 非 nil 时待生效判定（要合成一次配置）
+// 走记忆，其余字段（Busy/Running/端口/代次）每次现读。
+func (s *XrayService) runtimeSnapshot(memo *pendingMemo) XrayRuntime {
+	// 先于读 p 取改动序号：判定期间若有新改动，记忆里存的是旧序号，下一次查询必然失效。
+	changeSeq := xrayChangeSeq.Load()
 	if !lock.TryLock() {
 		return XrayRuntime{Busy: true}
 	}
@@ -310,15 +329,72 @@ func (s *XrayService) RuntimeSnapshot() XrayRuntime {
 		// 用运行中快照而不是新合成的配置：核心实际持有的是前者。
 		DefaultTag: defaultOutboundTag(current),
 	}
-	fresh, err := s.GetXrayConfig()
-	if err != nil {
-		// 无法判断是否有待生效改动，按无处理，不阻断验证。
-		logger.Warning("路由验证：合成最新 xray 配置失败，无法判断待生效改动：", err)
-		return rt
+	compute := func() (bool, bool) {
+		fresh, err := s.GetXrayConfig()
+		if err != nil {
+			// 无法判断是否有待生效改动，按无处理，不阻断验证；这种结论不进记忆。
+			logger.Warning("路由验证：合成最新 xray 配置失败，无法判断待生效改动：", err)
+			return false, false
+		}
+		return current != nil && !current.Equals(fresh), true
 	}
-	rt.Pending = current != nil && !current.Equals(fresh)
+	if memo == nil {
+		rt.Pending, _ = compute()
+	} else {
+		rt.Pending = memo.get(pendingKey{applyGen: applyGen, changeSeq: changeSeq, current: current}, compute)
+	}
 	return rt
 }
+
+// pendingKey 是待生效判定记忆的键。三项任一变化都说明核心或库可能换了样子：
+// 代次（核心载入了新配置）、改动序号（有人要求下发改动）、核心持有的配置对象
+// （SetConfig 会换成新对象，含空 diff 的同步）。
+type pendingKey struct {
+	applyGen, changeSeq uint64
+	current             *xray.Config
+}
+
+// pendingMemo 记住最近一次待生效判定，在 ttl 内且键不变时复用，省掉一次 GetXrayConfig
+// （读库 + 合成整份配置）。只给规则列表/侧栏的 60 秒轮询用：开着几个标签页时，每一轮
+// 每个页面都合成一次配置在小机器上不划算。
+//
+// 为什么不会误给绿：库里的改动只有经 SetToNeedRestart 或 RestartXray 才会下发，两者都先
+// 递增 xrayChangeSeq，键随之失效，下一次查询现算；核心换配置会涨代次或换配置对象，同样
+// 失效。剩下的只有「改了库却不要求下发」这种本身就不会生效的写入，它最多晚 ttl 才显示
+// 待生效。判定出错的结论不记。
+type pendingMemo struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	now     func() time.Time // nil 时用 time.Now，测试可注入
+	valid   bool
+	key     pendingKey
+	at      time.Time
+	pending bool
+}
+
+// get 返回键 key 的待生效判定：记忆有效则直接用，否则调 compute（返回判定与是否可记）。
+// compute 在持 mu 时执行：并发的轮询排队等同一次合成，而不是各合成一次。mu 与包级 lock 无关。
+func (m *pendingMemo) get(key pendingKey, compute func() (pending, ok bool)) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now
+	if m.now != nil {
+		now = m.now
+	}
+	t := now()
+	if m.valid && m.key == key && t.Sub(m.at) < m.ttl && !t.Before(m.at) {
+		return m.pending
+	}
+	pending, ok := compute()
+	m.valid = ok
+	if ok {
+		m.key, m.at, m.pending = key, t, pending
+	}
+	return pending
+}
+
+// summaryPendingMemo 是 Summaries 用的待生效判定记忆，5 秒内同键复用。
+var summaryPendingMemo = &pendingMemo{ttl: 5 * time.Second}
 
 // defaultOutboundTag 返回配置里数组首位出站的 tag；取不到返回空串。
 // 首位出站是 xray 的默认出站，没有命中任何规则的流量走它。

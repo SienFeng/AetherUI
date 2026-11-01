@@ -15,6 +15,8 @@ import (
 	"github.com/xtls/xray-core/app/router"
 	routercmd "github.com/xtls/xray-core/app/router/command"
 	"github.com/xtls/xray-core/common/geodata"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"a-ui/database/model"
 	"a-ui/logger"
@@ -443,9 +445,12 @@ const (
 type routeFunc func(ctx context.Context, inboundTag, domain string, ip net.IP) (tag string, noMatch bool, err error)
 
 // VerifyAll 的两种「本轮不出结果」：调用方据此跳过本轮、不动缓存，下一轮重试。
+// ErrVerifyTruncated 不同：整轮预算用完，已跑完的规则结果照常返回（有效），但这一轮
+// 不算完整，调用方不能把它当作一次成功的审计（下一轮要重试剩下的规则）。
 var (
-	ErrVerifyBusy   = errors.New("已有验证在进行")
-	ErrCoreNotReady = errors.New("xray 核心未就绪")
+	ErrVerifyBusy      = errors.New("已有验证在进行")
+	ErrCoreNotReady    = errors.New("xray 核心未就绪")
+	ErrVerifyTruncated = errors.New("整轮预算用完，部分规则本轮没有新结果")
 )
 
 // verifyMu 保证同一时刻只有一个验证在跑：管理员连点时不把核心打满。
@@ -485,6 +490,10 @@ type verifyPlan struct {
 	truncated  bool
 	labelOf    func(tag string) string
 	groupKey   string // 实际参与的组 id 序列，访问日志匹配器按它在一轮内复用
+	groupIds   []int  // 实际参与的组 id，与 groupKey 同序
+	// large：合并后条目数超过 auditLargeThreshold（与异常扫描的大小规则同一口径）。
+	// 大规则的组条目与匹配器不在一轮内常驻，用完即释放（见 verifyOne）。
+	large bool
 }
 
 // Verify 验证一条规则。规则不存在返回 error；其余情况（含规则停用、不会写进配置、
@@ -532,11 +541,16 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 
 // VerifyAll 对所有启用规则跑一轮验证，返回各规则结果与本轮使用的应用代次。
 // 只读、与 Verify 互斥：拿不到 verifyMu（用户正在手动验证）或核心忙返回 ErrVerifyBusy；
-// 核心未运行或控制面连不上返回 ErrCoreNotReady。出错时不返回任何结果，调用方据此不动缓存。
+// 核心未运行、控制面连不上、或本轮有 RPC 报 Unavailable（核心刚拉起还没监听，或中途
+// 退出）返回 ErrCoreNotReady。这些错误下不返回任何结果，调用方据此不动缓存。
 //
-// 整轮共用一个预算与一个 API 连接；入站、出站映射、节点、访问日志开关、每个域名组的
+// 整轮共用一个预算与一个 API 连接；入站、出站映射、节点、访问日志开关、小规则的域名组
 // 条目与样例在一轮内只算一次。预算用完时，没跑完的规则不进结果（保留旧结果，
-// 不用一份全是「超时」的结论顶掉它）。
+// 不用一份全是「超时」的结论顶掉它），已跑完的照常返回，同时返回 ErrVerifyTruncated。
+//
+// 规则的处理顺序：缓存里还没有当前代次结果的排前面（上一轮被预算截掉的规则下一轮先跑，
+// 不会每轮都卡在同一处）；其余按引用的域名组排，同组序列的规则相邻，单槽匹配器缓存
+// 因此能复用，一轮内同一时刻至多一个匹配器存活。
 func (s *RoutingVerifyService) VerifyAll() (map[int]*RuleVerifyResult, uint64, error) {
 	if !verifyMu.TryLock() {
 		return nil, 0, ErrVerifyBusy
@@ -564,20 +578,59 @@ func (s *RoutingVerifyService) VerifyAll() (map[int]*RuleVerifyResult, uint64, e
 		return nil, 0, fmt.Errorf("%w：%s", ErrCoreNotReady, sh.core.Message)
 	}
 
+	// grpc 连接即使就绪，核心也可能在本轮中途退出：任何一次 RPC 报 Unavailable，
+	// 本轮的灰色结论就不是「核心对规则的判断」，而是「核心不在」，整轮不出结果。
+	unavailable := false
+	if inner := sh.route; inner != nil {
+		sh.route = func(ctx context.Context, inboundTag, domain string, ip net.IP) (string, bool, error) {
+			tag, noMatch, err := inner(ctx, inboundTag, domain, ip)
+			if err != nil && status.Code(err) == codes.Unavailable {
+				unavailable = true
+			}
+			return tag, noMatch, err
+		}
+	}
+
+	orderRulesForRound(rules, rt.ApplyGen)
 	now := s.nowTime()
 	budgetCtx, cancel := context.WithTimeout(context.Background(), s.budgetOr(verifyAllBudget))
 	defer cancel()
 	out := make(map[int]*RuleVerifyResult, len(rules))
+	truncated := false
 	for i, rule := range rules {
 		res := s.verifyOne(budgetCtx, sh, rule, now)
+		if unavailable {
+			return nil, 0, fmt.Errorf("%w：核心控制面不可用", ErrCoreNotReady)
+		}
 		if budgetCtx.Err() != nil {
 			// 这条规则跑到一半预算就用完了，剩下的样例被记成「超时」，不是有效结论。
 			logger.Warning("路由全量验证：整轮预算用完，", len(rules)-i, "条规则本轮没有新结果")
+			truncated = true
 			break
 		}
 		out[rule.Id] = res
 	}
+	if truncated {
+		return out, rt.ApplyGen, ErrVerifyTruncated
+	}
 	return out, rt.ApplyGen, nil
+}
+
+// orderRulesForRound 排定一轮全量验证的处理顺序（原地、稳定），理由见 VerifyAll。
+// 组序列直接用库里的 DomainGroupIds 原文排：同一组集合编码后逐字节相同（升序去重存储）。
+func orderRulesForRound(rules []*model.RoutingRule, applyGen uint64) {
+	current := make(map[int]bool, len(rules))
+	for _, r := range rules {
+		if res, ok := cachedVerifyResult(r.Id); ok && res.ApplyGen == applyGen {
+			current[r.Id] = true
+		}
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		if ci, cj := current[rules[i].Id], current[rules[j].Id]; ci != cj {
+			return !ci
+		}
+		return rules[i].DomainGroupIds < rules[j].DomainGroupIds
+	})
 }
 
 func (s *RoutingVerifyService) nowTime() time.Time {
@@ -634,9 +687,13 @@ type verifyShared struct {
 	logErr     string
 	groupLogs  func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
 
-	groups   map[int]*groupConditions
-	matchers map[string]*matcherEntry
-	logRows  map[logRowsKey]*logRowsEntry
+	groups map[int]*groupConditions
+	// 单槽匹配器缓存：只留最近一个组序列的匹配器。一个 2 万条的匹配器就要十几 MB，
+	// 按组序列各留一个的话，规则一多一轮内的常驻内存就会线性涨上去（1 核 1G 的机器扛不住）；
+	// VerifyAll 把同组序列的规则排在一起，单槽就够复用。
+	matcherKey string
+	matcherEnt *matcherEntry
+	logRows    map[logRowsKey]*logRowsEntry
 }
 
 // logRowsKey 是入站日志分组的缓存键：窗口起点随规则的忽略时刻而不同，必须进键。
@@ -699,7 +756,6 @@ func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, err
 		xrayConfig:  s.xrayConfig,
 		groupLogs:   s.groupLogs,
 		groups:      map[int]*groupConditions{},
-		matchers:    map[string]*matcherEntry{},
 		logRows:     map[logRowsKey]*logRowsEntry{},
 		rpcTimeout:  s.rpcTimeout,
 	}
@@ -736,8 +792,17 @@ func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, err
 			if err := api.Init(rt.APIPort); err != nil {
 				sh.core = CoreState{State: coreStateError, Message: "连接核心控制面失败：" + err.Error()}
 			} else {
-				sh.route = api.TestRoute
 				sh.closeAPI = api.Close
+				// NewClient 是惰性的，Init 成功不代表核心在听：主动连一次，连不上就是未就绪，
+				// 不让后面每个样例都报一遍 Unavailable、拼出一份全灰的「结论」。
+				waitCtx, cancel := context.WithTimeout(context.Background(), sh.rpcTimeout)
+				err := api.WaitReady(waitCtx)
+				cancel()
+				if err != nil {
+					sh.core = CoreState{State: coreStateError, Message: "连接核心控制面失败：" + err.Error()}
+				} else {
+					sh.route = api.TestRoute
+				}
 			}
 		}
 		sh.ready = sh.core.State != coreStateError
@@ -774,17 +839,30 @@ func (sh *verifyShared) group(gid int) *groupConditions {
 	return g
 }
 
-// matcher 返回一条规则的访问日志匹配器，按规则实际引用的组序列缓存。
+// matcher 返回一条规则的访问日志匹配器，按规则实际引用的组序列放进单槽缓存。
 // 刻意不按组各建一个再取「任一命中」：取反条目（!geoip:cn）在合并列表里是对并集取反，
 // 拆成逐组再 OR 就成了对各组分别取反，语义与核心里那条合并后的规则不一致。
 func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
-	if e, ok := sh.matchers[plan.groupKey]; ok {
-		return e
+	if sh.matcherEnt != nil && sh.matcherKey == plan.groupKey {
+		return sh.matcherEnt
 	}
+	// 先放掉旧的再构建：构建期间旧匹配器已不可达，内存峰值只算一个。
+	sh.matcherKey, sh.matcherEnt = "", nil
 	m, err := newGroupMatcher(plan.domains, plan.cidrs)
 	e := &matcherEntry{m: m, err: err}
-	sh.matchers[plan.groupKey] = e
+	sh.matcherKey, sh.matcherEnt = plan.groupKey, e
 	return e
+}
+
+// releaseLarge 在一条大规则判定完之后放掉它占着的大块内存：单槽里的匹配器与它引用的
+// 各组条目。之后若还有规则用到这些组，按需重读（读库的开销远小于常驻几十 MB）。
+func (sh *verifyShared) releaseLarge(plan *verifyPlan) {
+	if sh.matcherKey == plan.groupKey {
+		sh.matcherKey, sh.matcherEnt = "", nil
+	}
+	for _, gid := range plan.groupIds {
+		delete(sh.groups, gid)
+	}
 }
 
 // rows 返回一个入站自 sinceMs 起的分组统计；与规则无关，一轮内每个（入站, 起点）只查一次。
@@ -809,6 +887,9 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 	if reason != "" {
 		res.Core = CoreState{State: coreStateError, Message: reason}
 		return res
+	}
+	if plan.large {
+		defer sh.releaseLarge(plan)
 	}
 	res.Expected = plan.expected
 	res.Truncated = plan.truncated
@@ -957,11 +1038,13 @@ func (s *RoutingVerifyService) planRule(sh *verifyShared, rule *model.RoutingRul
 		cidrLists = append(cidrLists, g.cidrs)
 		plan.targets = append(plan.targets, g.targets...)
 		used = append(used, strconv.Itoa(gid))
+		plan.groupIds = append(plan.groupIds, gid)
 	}
 	plan.targets = dedupeTargets(plan.targets, verifyPerUserSamples)
 	plan.domains = MergeDomains(domainLists...)
 	plan.cidrs = MergeDomains(cidrLists...)
 	plan.groupKey = strings.Join(used, ",")
+	plan.large = len(plan.domains)+len(plan.cidrs) > auditLargeThreshold
 
 	plan.labelOf = func(tag string) string {
 		switch {
@@ -984,6 +1067,9 @@ func (s *RoutingVerifyService) planRule(sh *verifyShared, rule *model.RoutingRul
 	case model.ActionProxy:
 		node, ok := sh.nodes[rule.OutboundId]
 		if !ok {
+			if plan.large {
+				sh.releaseLarge(plan) // 大规则的组条目已读进 sh.groups，不能留到整轮结束
+			}
 			return nil, "读取出站节点失败：节点不存在"
 		}
 		plan.expected = ExpectedOutbound{Action: rule.Action, Tag: node.Tag, Label: nodeLabel(node)}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -78,7 +79,9 @@ func initTestDB(t *testing.T) {
 		t.Fatalf("InitDB: %v", err)
 	}
 	service.ResetAuditResultsForTest()
+	service.ResetAnomaliesForTest()
 	t.Cleanup(service.ResetAuditResultsForTest)
+	t.Cleanup(service.ResetAnomaliesForTest)
 }
 
 // 直接落库造规则，绕过 RoutingRuleService.Add 的校验（这里只关心接口行为）。
@@ -123,9 +126,20 @@ func TestAnomalyResetRejectsBadId(t *testing.T) {
 }
 
 func TestAnomalyResetOk(t *testing.T) {
-	msg := postRouting(t, "/routing/rule/anomaly/reset/7")
+	initTestDB(t)
+	id := seedRule(t, true)
+	msg := postRouting(t, "/routing/rule/anomaly/reset/"+strconv.Itoa(id))
 	if msg["success"] != true {
 		t.Errorf("success = %v, want true, msg = %v", msg["success"], msg)
+	}
+}
+
+// 规则不存在时必须报错且不记忽略时刻：SQLite 会复用 id，留下的时刻会作用到下一条新规则。
+func TestAnomalyResetRejectsMissingRule(t *testing.T) {
+	initTestDB(t)
+	msg := postRouting(t, "/routing/rule/anomaly/reset/99999")
+	if msg["success"] != false {
+		t.Errorf("success = %v, want false, msg = %v", msg["success"], msg)
 	}
 }
 
@@ -245,5 +259,31 @@ func TestRuleAuditReportsAccessLogError(t *testing.T) {
 	rules, _ := obj["rules"].(map[string]any)
 	if _, ok := rules[strconv.Itoa(id)]; !ok {
 		t.Errorf("规则摘要丢失: %v", obj)
+	}
+}
+
+// 访问日志异常的最近一次晚于缓存的验证时刻：缓存没见过这条走错的连接，图上会是绿的而
+// 列表这一行是红的。必须走现场验证。
+func TestVerifyCachedIgnoresCacheOlderThanAnomaly(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	gen := service.XrayApplyGeneration()
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: gen})
+	checkedAt := time.Now().Add(-10 * time.Minute).UnixMilli()
+	service.StoreVerifyResultForTest(&service.RuleVerifyResult{RuleId: id, CheckedAt: checkedAt, ApplyGen: gen})
+
+	// 异常早于缓存：缓存仍可用。
+	service.SeedAnomalyForTest(id, 1, checkedAt-1000)
+	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	if obj, _ := msg["obj"].(map[string]any); obj == nil || obj["checkedAt"] != float64(checkedAt) {
+		t.Fatalf("异常早于缓存时应返回缓存, msg = %v", msg)
+	}
+
+	// 异常晚于缓存：不得返回缓存。
+	service.SeedAnomalyForTest(id, 1, checkedAt+1000)
+	msg = postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	obj, _ := msg["obj"].(map[string]any)
+	if obj == nil || obj["checkedAt"] == float64(checkedAt) {
+		t.Errorf("异常晚于缓存时应现场验证, msg = %v", msg)
 	}
 }
