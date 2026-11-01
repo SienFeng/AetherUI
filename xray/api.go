@@ -4,15 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
 	routerService "github.com/xtls/xray-core/app/router/command"
+	xcommon "github.com/xtls/xray-core/common"
+	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
 
@@ -171,6 +176,57 @@ func (x *XrayAPI) ApplyRoutingConfig(routing []byte) error {
 		Config:       serial.ToTypedMessage(built),
 	})
 	return err
+}
+
+// TestRoute 向运行中的核心询问：来自 inboundTag 的、目标为 domain 或 ip 的
+// 一条 TCP/443 连接，会被路由到哪个出站。
+//
+// domain 与 ip 二选一，非空/非 nil 的那个生效（都给时 domain 优先）。
+// 只读：PublishResult=false，不会往路由统计里发布事件。端口与网络固定为
+// TCP/443，因为分流规则几乎不以端口区分，这里要的是「规则表怎么走」。
+//
+// 核心没有任何规则命中（ErrNoClue）时返回 ("", true, nil)，调用方应按
+// 「走默认出站」处理；其余错误原样返回。超时由调用方的 ctx 控制。
+func (x *XrayAPI) TestRoute(ctx context.Context, inboundTag, domain string, ip net.IP) (tag string, noMatch bool, err error) {
+	if x.RoutingServiceClient == nil {
+		return "", false, common.NewError("xray RoutingServiceClient is not initialized")
+	}
+	rc := &routerService.RoutingContext{
+		InboundTag: inboundTag,
+		Network:    xnet.Network_TCP,
+		TargetPort: 443,
+	}
+	if domain != "" {
+		rc.TargetDomain = domain
+	} else if ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		rc.TargetIPs = [][]byte{ip}
+	}
+	resp, err := (*x.RoutingServiceClient).TestRoute(ctx, &routerService.TestRouteRequest{
+		RoutingContext: rc,
+		FieldSelectors: []string{"outbound"},
+		PublishResult:  false,
+	})
+	if err != nil {
+		if isNoClueErr(err) {
+			return "", true, nil
+		}
+		return "", false, err
+	}
+	return resp.GetOutboundTag(), false, nil
+}
+
+// isNoClueErr 判断 err 是不是核心的 common.ErrNoClue（没有规则可判断）。
+//
+// 错误经 gRPC 跨进程后只剩 status 里的消息文本，errors.Is 已经认不出原始
+// 的 sentinel，比对消息文本是唯一可行的识别方式。
+func isNoClueErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(status.Convert(err).Message(), xcommon.ErrNoClue.Error())
 }
 
 // ensureXrayAssetLocation 把 xray 的资源目录指到面板的 bin/。
