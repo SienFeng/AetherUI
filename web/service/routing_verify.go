@@ -64,9 +64,11 @@ type CoreState struct {
 }
 
 // AccessLogState 描述访问日志证据是否可用。
+// Error 非空表示读取失败（开关读不出、匹配器建不出），与「没有数据」区分开。
 type AccessLogState struct {
-	Enabled     bool `json:"enabled"`
-	WindowHours int  `json:"windowHours"`
+	Enabled     bool   `json:"enabled"`
+	WindowHours int    `json:"windowHours"`
+	Error       string `json:"error,omitempty"`
 }
 
 // UserVerify 是图上一个用户（入站）的验证结果。
@@ -90,11 +92,13 @@ type SampleResult struct {
 }
 
 // LogEvidence 是访问日志里属于本规则的真实连接统计。
+// Error 非空表示该用户的日志查询失败，其余字段此时无意义（不是「没有连接」）。
 type LogEvidence struct {
 	Matched   int64      `json:"matched"`
 	Rejected  int64      `json:"rejected"`
 	Truncated bool       `json:"truncated"`
 	Others    []LogOther `json:"others"`
+	Error     string     `json:"error,omitempty"`
 }
 
 // LogOther 是走了非期望出站的连接分组。
@@ -385,6 +389,10 @@ type RoutingVerifyService struct {
 	runtime            func() XrayRuntime
 	now                func() time.Time
 	rpcTimeout, budget time.Duration
+
+	// 访问日志两处读取的注入点，nil 时用真实实现；测试用它制造读取失败。
+	accessLogEnabled func() (bool, error)
+	groupLogs        func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
 }
 
 // verifyUser 是待验证的一个用户（入站）。
@@ -460,9 +468,19 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 	}
 	canRoute := res.Core.State == coreStateOK || res.Core.State == coreStatePending
 
-	logEnabled, err := (&SettingService{}).GetAccessLogEnable()
+	accessLogEnabled := s.accessLogEnabled
+	if accessLogEnabled == nil {
+		accessLogEnabled = (&SettingService{}).GetAccessLogEnable
+	}
+	groupLogs := s.groupLogs
+	if groupLogs == nil {
+		groupLogs = (&AccessLogService{}).GroupByTargetRoute
+	}
+	// 读取失败一律写进 Error，不伪装成「未开启」或「没有连接」。
+	logEnabled, err := accessLogEnabled()
 	if err != nil {
-		logger.Warning("路由验证：读取访问日志开关失败，按未开启处理：", err)
+		logger.Warning("路由验证：读取访问日志开关失败：", err)
+		res.AccessLog.Error = "读取访问日志开关失败：" + err.Error()
 		logEnabled = false
 	}
 	res.AccessLog.Enabled = logEnabled
@@ -471,6 +489,7 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 		if matcher, err = newGroupMatcher(plan.domains, plan.cidrs); err != nil {
 			// 匹配器建不出来就没有日志证据，但不影响核心那一路。
 			logger.Warning("路由验证：构造访问日志匹配器失败，rule id:", rule.Id, "err:", err)
+			res.AccessLog.Error = "无法判断访问日志里哪些连接属于本规则：" + err.Error()
 			matcher = nil
 		}
 	}
@@ -499,9 +518,12 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 			u.Samples = runSamples(budgetCtx, route, rpcTimeout, vu.inbound.Tag, plan)
 		}
 		if matcher != nil {
-			rows, truncated, err := (&AccessLogService{}).GroupByTargetRoute(vu.inbound.Id, sinceMs, verifyLogGroupLimit)
+			rows, truncated, err := groupLogs(vu.inbound.Id, sinceMs, verifyLogGroupLimit)
 			if err != nil {
+				// 只带 Error 的证据：Others 为空、Matched 为 0，combineVerdict 既不会因它
+				// 判 mismatch，也不会把它当作真实连接数。
 				logger.Warning("路由验证：读取访问日志失败，inbound id:", vu.inbound.Id, "err:", err)
+				u.Log = &LogEvidence{Others: []LogOther{}, Error: "读取访问日志失败：" + err.Error()}
 			} else {
 				ev := buildLogEvidence(rows, matcher, plan.expected, plan.defaultTag, plan.labelOf)
 				ev.Truncated = truncated

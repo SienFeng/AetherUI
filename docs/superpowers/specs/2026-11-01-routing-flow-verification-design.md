@@ -202,7 +202,7 @@
   "checkedAt": 1793520000000,
   "expected": { "tag": "a-ui-us-home", "label": "美区家宽（IProyal）", "action": "proxy" },
   "core": { "state": "ok|pending|not_running|busy|error", "message": "" },
-  "accessLog": { "enabled": true, "windowHours": 24 },
+  "accessLog": { "enabled": true, "windowHours": 24, "error": "" },   // error 可省略；非空 = 读取失败，不是「没有数据」
   "truncated": false,
   "users": [
     {
@@ -214,7 +214,7 @@
           "match": true, "hitByRule": true, "error": "" }
       ],
       "log": {
-        "matched": 128, "rejected": 0, "truncated": false,
+        "matched": 128, "rejected": 0, "truncated": false, "error": "",   // error 可省略；非空 = 该用户日志查询失败
         "others": [ { "route": "a-ui-default", "label": "直连", "count": 3, "lastAt": 1793519000000,
                       "examples": ["api.openai.com:443"] } ]
       }

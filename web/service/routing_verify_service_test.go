@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -366,6 +368,9 @@ func TestVerifyTimeoutIsUnverifiable(t *testing.T) {
 	if u.Verdict != verdictUnverifiable {
 		t.Fatalf("应为 unverifiable: %+v", u)
 	}
+	if len(u.Samples) != 2 {
+		t.Fatalf("应有 2 个样例: %+v", u.Samples)
+	}
 	for _, smp := range u.Samples {
 		if smp.Error != "超时" {
 			t.Errorf("Sample.Error = %q，期望「超时」", smp.Error)
@@ -530,5 +535,62 @@ func TestVerifyCoreConnectFailureCarriesMessage(t *testing.T) {
 	u := findUser(t, res, f.a.Id)
 	if u.Verdict != verdictUnverifiable || u.Reason != "核心验证出错："+res.Core.Message {
 		t.Errorf("用户行应带具体原因: %+v", u)
+	}
+}
+
+// 开关读不出时要报出来，不能伪装成「未开启」；核心那一路照常给结论。
+func TestVerifyAccessLogSettingErrorIsReported(t *testing.T) {
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	s := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime())
+	s.accessLogEnabled = func() (bool, error) { return false, errors.New("database is locked") }
+	res, err := s.Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.AccessLog.Enabled || !strings.Contains(res.AccessLog.Error, "database is locked") {
+		t.Errorf("AccessLog = %+v", res.AccessLog)
+	}
+	u := findUser(t, res, f.a.Id)
+	if u.Log != nil || u.Verdict != verdictVerified {
+		t.Errorf("开关读取失败不应影响核心结论: %+v", u)
+	}
+}
+
+// 单个用户的日志查询失败：带 Error 的非 nil 证据，既不让用户变红也不让它凭日志变绿。
+func TestVerifyAccessLogQueryErrorIsReported(t *testing.T) {
+	f := newVerifyFixture(t)
+	rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+	setAccessLog(t, true)
+	queryErr := func(int, int64, int) ([]TargetRouteCount, bool, error) {
+		return nil, false, errors.New("disk I/O error")
+	}
+
+	s := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime())
+	s.groupLogs = queryErr
+	res, err := s.Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !res.AccessLog.Enabled || res.AccessLog.Error != "" {
+		t.Errorf("AccessLog = %+v", res.AccessLog)
+	}
+	u := findUser(t, res, f.a.Id)
+	if u.Log == nil || !strings.Contains(u.Log.Error, "disk I/O error") {
+		t.Fatalf("Log 应带查询错误: %+v", u.Log)
+	}
+	if u.Verdict != verdictVerified {
+		t.Errorf("日志查询失败不应单独让用户变成 %s: %+v", u.Verdict, u)
+	}
+
+	// 核心未运行时，日志查询失败也不能产生 verified 或 mismatch。
+	s = newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, XrayRuntime{})
+	s.groupLogs = queryErr
+	res, err = s.Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if u := findUser(t, res, f.a.Id); u.Verdict != verdictUnverifiable || u.Log == nil || u.Log.Error == "" {
+		t.Errorf("核心未运行 + 日志失败应为 unverifiable 且带日志错误: %+v", u)
 	}
 }
