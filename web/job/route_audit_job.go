@@ -13,6 +13,12 @@ import (
 // routeAuditInterval 是同一应用代次下重新审计的最长间隔。
 const routeAuditInterval = 10 * time.Minute
 
+// routeAuditMaxTruncated 是连续被预算截断的轮数上限：截断的一轮不推进状态、下一次唤醒
+// 就重试（VerifyAll 让上一轮没轮到的规则排前面），但规则多到每轮都跑不完、或 RPC 一直超时
+// 时，无限重试就是在 1 核机器上一轮接一轮地满负荷跑。到上限后按成功推进，回到
+// 「代次变化或满 10 分钟」的节奏；没拿到新结果的规则在摘要里仍是 stale/未验证，不会给绿。
+const routeAuditMaxTruncated = 3
+
 // shouldAudit：应用代次变了（核心换过配置），或距上次成功审计已满 10 分钟。
 func shouldAudit(curGen, lastGen uint64, lastAt, now time.Time) bool {
 	return curGen != lastGen || now.Sub(lastAt) >= routeAuditInterval
@@ -24,6 +30,8 @@ type RouteAuditJob struct {
 	running sync.Mutex // cron 不会跳过仍在运行的上一轮，用它防止重入
 	lastGen uint64
 	lastAt  time.Time
+	// truncated 是连续被预算截断的轮数，成功或推进后清零。
+	truncated int
 
 	// 以下三个字段供测试注入；nil 时用真实实现。
 	now        func() time.Time
@@ -70,11 +78,19 @@ func (j *RouteAuditJob) Run() {
 		case errors.Is(err, service.ErrVerifyBusy) || errors.Is(err, service.ErrCoreNotReady):
 			logger.Debug("路由审计跳过：", err)
 		case errors.Is(err, service.ErrVerifyTruncated):
+			j.truncated++
+			if j.truncated >= routeAuditMaxTruncated {
+				logger.Warning("路由审计连续", j.truncated, "轮被预算截断，部分规则本周期没有新结果，按完成推进：", err)
+				j.truncated = 0
+				j.lastGen, j.lastAt = usedGen, now
+				return
+			}
 			logger.Warning("路由审计本轮未完成，下一轮继续：", err)
 		default:
 			logger.Warning("路由审计失败：", err)
 		}
 		return
 	}
+	j.truncated = 0
 	j.lastGen, j.lastAt = usedGen, now
 }

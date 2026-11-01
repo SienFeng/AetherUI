@@ -155,7 +155,8 @@ func TestRouteAnomalyJobSkipsConcurrentRun(t *testing.T) {
 	}
 }
 
-// 被 60 秒预算截断的一轮不算成功：不推进 lastGen/lastAt，下一次唤醒就重试。
+// 被 60 秒预算截断的一轮不算成功：不推进 lastGen/lastAt，下一次唤醒就重试；
+// 连续截断到上限（第 3 轮）后按完成推进，不在小机器上一轮接一轮地满负荷跑。
 func TestRouteAuditJobTruncatedDoesNotAdvance(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	j := NewRouteAuditJob()
@@ -170,7 +171,27 @@ func TestRouteAuditJobTruncatedDoesNotAdvance(t *testing.T) {
 	}
 	now = now.Add(30 * time.Second)
 	j.Run()
-	if calls != 2 {
-		t.Errorf("截断后下一次唤醒应重试，calls=%d", calls)
+	if calls != 2 || j.lastGen != 1 {
+		t.Fatalf("截断后下一次唤醒应重试且仍不推进，calls=%d lastGen=%d", calls, j.lastGen)
+	}
+	now = now.Add(30 * time.Second)
+	j.Run()
+	if calls != 3 || j.lastGen != 2 || !j.lastAt.Equal(now) {
+		t.Fatalf("连续第 3 次截断应按完成推进，calls=%d lastGen=%d lastAt=%v", calls, j.lastGen, j.lastAt)
+	}
+	now = now.Add(30 * time.Second)
+	j.Run()
+	if calls != 3 {
+		t.Errorf("推进后同代次不满 10 分钟不应再跑，calls=%d", calls)
+	}
+	// 成功一轮清零计数：之后的截断重新从第 1 次算。
+	j.currentGen = func() uint64 { return 3 }
+	j.audit = func() (uint64, error) { calls++; return 3, nil }
+	j.Run()
+	j.currentGen = func() uint64 { return 4 }
+	j.audit = func() (uint64, error) { calls++; return 4, service.ErrVerifyTruncated }
+	j.Run()
+	if j.lastGen != 3 {
+		t.Errorf("成功之后的第 1 次截断不应推进，lastGen=%d", j.lastGen)
 	}
 }
