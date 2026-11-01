@@ -455,7 +455,7 @@
     .rv-dhead {
         display: flex;
         gap: 14px;
-        align-items: flex-start;
+        align-items: center;
     }
 
     .rv-dtitle {
@@ -464,7 +464,7 @@
     }
 
     .rv-dname {
-        margin: 2px 0 0;
+        margin: 0;
         font-size: 20px;
         line-height: 1.3;
         font-weight: 700;
@@ -478,12 +478,6 @@
     .rv-dname-text {
         min-width: 0;
         overflow-wrap: anywhere;
-    }
-
-    .rv-dsay {
-        margin: 5px 0 0;
-        color: var(--aui-text-2);
-        font-size: 12.5px;
     }
 
     .rv-alert {
@@ -579,43 +573,8 @@
         transition: border-color var(--aui-dur) var(--aui-ease), background var(--aui-dur) var(--aui-ease);
     }
 
-    .rv-pick:hover:not(:disabled) {
+    .rv-pick:hover {
         border-color: #A9C2EE;
-    }
-
-    .rv-pick[aria-pressed="true"] {
-        border: 1.5px solid var(--aui-primary);
-        background: #EAF1FF;
-        color: #1D4ED8;  /* 5.9:1 */
-        font-weight: 600;
-    }
-
-    .rv-pick:disabled {
-        cursor: not-allowed;
-        background: #F6F8FB;
-        color: var(--aui-text-3);
-    }
-
-    .rv-pick.is-all[aria-pressed="true"] {
-        border-color: #4338CA;
-        background: #EEF2FF;
-        color: #4338CA;  /* 7.0:1 */
-    }
-
-    .rv-pick.is-more {
-        border-style: dashed;
-        color: var(--aui-primary);
-    }
-
-    .rv-pick-note {
-        font-size: 12px;
-        font-weight: 400;
-        color: var(--aui-text-3);  /* 白底 4.8:1 */
-    }
-
-    /* 选中态的浅蓝底上 text-3 不够 4.5:1，跟随按钮文字色 */
-    .rv-pick[aria-pressed="true"] .rv-pick-note {
-        color: inherit;
     }
 
     .rv-pick-mark {
@@ -635,6 +594,101 @@
         height: 14px;
     }
 
+    /* 已选的域名组：主色描边 + 浅蓝底，右侧带移除按钮 */
+    .rv-gtag {
+        height: 28px;
+        padding: 0 4px 0 10px;
+        border-radius: 9px;
+        border: 1.5px solid var(--aui-primary);
+        background: #EAF1FF;
+        color: #1D4ED8;  /* 5.9:1 */
+        font-size: 12px;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .rv-gtag.is-missing {
+        border-color: var(--aui-danger);
+        background: #FEF2F2;
+        color: #B91C1C;  /* 6.0:1 */
+    }
+
+    .rv-gtag-x {
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        font-size: 10px;
+        cursor: pointer;
+        display: inline-grid;
+        place-items: center;
+    }
+
+    .rv-gtag-x:hover {
+        background: rgba(29, 78, 216, .12);
+    }
+
+    .rv-pick.is-add {
+        border-style: dashed;
+        color: var(--aui-primary);
+    }
+
+    .rv-gadd-search {
+        width: 100%;
+        height: 30px;
+        margin-bottom: 6px;
+        padding: 0 10px;
+        border: 1px solid #DCE4F3;
+        border-radius: 8px;
+        font: inherit;
+        font-size: 12px;
+    }
+
+    .rv-gadd-list {
+        min-width: 200px;
+        max-height: 280px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        overflow-y: auto;
+    }
+
+    .rv-gadd-item {
+        width: 100%;
+        height: 32px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--aui-text);
+        font: inherit;
+        font-size: 13px;
+        text-align: left;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .rv-gadd-item:hover {
+        background: var(--aui-surface-soft);
+    }
+
+    .rv-gadd-empty {
+        padding: 6px 10px;
+        font-size: 12px;
+        color: var(--aui-text-3);
+    }
+
+    .rv-gadd-pop .ant-popover-inner-content {
+        padding: 6px;
+    }
+
     .rv-help {
         margin-top: 7px;
         font-size: 12px;
@@ -646,8 +700,16 @@
         color: var(--aui-warning);
     }
 
-    .rv-check {
-        margin-top: 7px;
+    /* 「所有用户」与「以后新增的用户自动应用」同一行；窄了就换行 */
+    .rv-checks {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 24px;
+    }
+
+    .rv-checks .ant-checkbox-wrapper {
+        margin-left: 0;
     }
 
     .rv-err {
@@ -772,6 +834,11 @@
 
     .rv-flow .rv-h3 {
         margin-bottom: 2px;
+    }
+
+    /* 没有「按当前修改预览」提示时，标题与走向图之间留出与提示同样的间距 */
+    .rv-flow .rv-h3 + .rv-diagram {
+        margin-top: 11px;
     }
 
     .rv-hint {
@@ -931,29 +998,6 @@
 
     @keyframes rv-dash {
         to { stroke-dashoffset: -16; }
-    }
-
-    .rv-facts {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
-        margin-top: 12px;
-    }
-
-    .rv-fact {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        height: 26px;
-        padding: 0 12px;
-        border-radius: 879px;
-        background: #F3F6FB;
-        color: var(--aui-text-2);
-        font-size: 12px;
-    }
-
-    .rv-fact b {
-        color: var(--aui-text);
     }
 
     /* 保存条：贴在右栏底部，有改动才出现 */
@@ -1487,7 +1531,6 @@
                                                     <span v-else-if="savedRule && ruleIssue(savedRule)" class="status-badge status-warn">未生效</span>
                                                     <span v-else class="status-badge status-ok"><a-icon type="check"></a-icon>生效中</span>
                                                 </h2>
-                                                <p class="rv-dsay">[[ ruleSentence(editorPreview) ]]</p>
                                             </div>
                                         </div>
                                         <div v-if="ruleEditor.brokenWarn" class="rv-alert is-danger" role="alert">
@@ -1503,8 +1546,8 @@
 
                                         <section class="rv-flow" aria-labelledby="rv-flow-title">
                                             <h3 id="rv-flow-title" class="rv-h3 is-green">流量走向</h3>
-                                            <p class="rv-hint">[[ ruleDirty ? '按当前修改预览' : '命中这条规则的请求会这样走' ]]</p>
-                                            <!-- 连线是纯装饰（aria-hidden），信息已经在上面那句话和三列文字里 -->
+                                            <p v-if="ruleDirty" class="rv-hint">按当前修改预览</p>
+                                            <!-- 连线是纯装饰（aria-hidden），信息已经在三列文字里 -->
                                             <div class="rv-diagram" ref="ruleDiagram">
                                                 <svg class="rv-wires" ref="ruleWires" aria-hidden="true"></svg>
                                                 <div class="rv-dcap is-l">哪些用户</div>
@@ -1551,11 +1594,6 @@
                                                 </div>
                                             </div>
                                         </section>
-                                        <div v-if="savedRule" class="rv-facts">
-                                            <span class="rv-fact"><a-icon type="ordered-list"></a-icon>匹配顺序 <b>第 [[ ruleOrder(savedRule) ]] 条</b></span>
-                                            <span class="rv-fact"><a-icon type="user-add"></a-icon>新建用户
-                                                <b>[[ !savedRule.inboundIds.length || savedRule.applyToNewInbounds ? '自动加入' : '不自动加入' ]]</b></span>
-                                        </div>
 
                                         <section class="rv-edit" :class="{ 'is-dirty': ruleDirty }" aria-labelledby="rv-edit-title">
                                             <h3 id="rv-edit-title" class="rv-h3">规则设置</h3>
@@ -1573,64 +1611,82 @@
                                             <div class="rv-field">
                                                 <span class="rv-label" id="rv-users-label">用户</span>
                                                 <div class="rv-control">
-                                                    <div class="rv-picker" role="group" aria-labelledby="rv-users-label">
-                                                        <button type="button" class="rv-pick is-all"
-                                                                :aria-pressed="ruleEditor.allUsers ? 'true' : 'false'"
-                                                                :disabled="allUsersDisabled"
-                                                                @click="toggleAllUsers(!ruleEditor.allUsers)">
-                                                            <a-icon type="global"></a-icon>所有用户
-                                                        </button>
-                                                        <template v-if="!ruleEditor.allUsers">
-                                                            <!-- 被别的规则占用的入站置灰并写明是哪条规则：同一个域名组下一个
-                                                                 入站至多被一条规则覆盖（checkConflict），选了也会被后端拒绝。 -->
-                                                            <button v-for="i in editorInbounds" :key="i.id" type="button" class="rv-pick"
-                                                                    :aria-pressed="ruleEditor.rule.inboundIds.includes(i.id) ? 'true' : 'false'"
-                                                                    :disabled="!!inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
-                                                                    :title="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id) ? '该用户在所选域名组下已由规则「' + inboundOccupiedBy(i.id) + '」覆盖，同一域名组下一个用户只能属于一条规则' : null"
-                                                                    @click="toggleRuleInbound(i.id)">
-                                                                [[ i.remark || i.tag ]]
-                                                                <span v-if="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
-                                                                      class="rv-pick-note">已用于「[[ inboundOccupiedBy(i.id) ]]」</span>
-                                                                <span v-if="!i.enable" class="rv-pick-note">已停用</span>
-                                                            </button>
-                                                            <button v-if="hiddenInboundCount" type="button" class="rv-pick is-more"
-                                                                    aria-expanded="false" @click="ruleEditor.usersOpen = true">
-                                                                展开其余 [[ hiddenInboundCount ]] 位
-                                                            </button>
-                                                            <button v-else-if="ruleEditor.usersOpen && inbounds.length > inboundFold"
-                                                                    type="button" class="rv-pick is-more" aria-expanded="true"
-                                                                    @click="ruleEditor.usersOpen = false">收起</button>
-                                                        </template>
-                                                    </div>
-                                                    <div v-if="!ruleEditor.allUsers && !inbounds.length" class="rv-help">还没有任何入站</div>
-                                                    <div v-if="allUsersDisabledReason" class="rv-help is-warn">[[ allUsersDisabledReason ]]</div>
-                                                    <div v-if="ruleEditor.allUsers" class="rv-help">包括以后新建的用户。</div>
-                                                    <div v-else class="rv-check">
+                                                    <!-- 「所有用户」只是全选：勾上后下拉框照常显示且全部选中，可以再点掉一两个；
+                                                         「以后新增的用户」是独立的一项，由管理员自己决定。两项都满足时才提交
+                                                         空数组（后端的「所有用户」），见 editorSubmitIds。 -->
+                                                    <div class="rv-checks">
+                                                        <a-checkbox :checked="editorAllPicked" :disabled="allUsersDisabled"
+                                                                    @change="e => toggleAllUsers(e.target.checked)">
+                                                            所有用户
+                                                        </a-checkbox>
                                                         <a-checkbox :checked="ruleEditor.rule.applyToNewInbounds"
                                                                     @change="e => ruleEditor.rule.applyToNewInbounds = e.target.checked">
                                                             以后新增的用户自动应用这条规则
                                                         </a-checkbox>
                                                     </div>
-                                                    <div v-if="ruleEditor.tried && !ruleEditor.allUsers && !ruleEditor.rule.inboundIds.length"
+                                                    <div v-if="!inbounds.length" class="rule-pick-empty">还没有任何入站</div>
+                                                    <a-select v-else mode="multiple" class="rule-pick" :value="ruleEditor.rule.inboundIds"
+                                                              aria-labelledby="rv-users-label"
+                                                              placeholder="选择用户" option-filter-prop="title" option-label-prop="title" :max-tag-count="12"
+                                                              :get-popup-container="t => t.parentNode"
+                                                              @change="setRuleInbounds">
+                                                        <!-- 被别的规则占用的入站置灰并写明原因：同一个域名组下一个入站至多
+                                                             被一条规则覆盖（checkConflict），选了也会被后端拒绝。 -->
+                                                        <a-select-option v-for="i in inbounds" :key="i.id" :value="i.id"
+                                                                         :title="i.remark || i.tag"
+                                                                         :disabled="!!inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)">
+                                                            [[ i.remark || i.tag ]]
+                                                            <span v-if="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
+                                                                  class="rule-pick-note">已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖</span>
+                                                            <span v-if="!i.enable" class="rule-pick-note">已停用</span>
+                                                        </a-select-option>
+                                                    </a-select>
+                                                    <div v-if="allUsersDisabledReason" class="rv-help is-warn">[[ allUsersDisabledReason ]]</div>
+                                                    <div v-if="ruleEditor.tried && !editorIsGlobal && !ruleEditor.rule.inboundIds.length"
                                                          class="rv-err">至少选择一位用户，或选「所有用户」</div>
                                                 </div>
                                             </div>
                                             <div class="rv-field">
                                                 <span class="rv-label" id="rv-groups-label">域名组</span>
                                                 <div class="rv-control">
+                                                    <!-- 只列已选的组，其余收进「＋ 添加」里：全部平铺时看不出这条规则到底用了哪个。
+                                                         只写组名，条数在「域名组」页签里看。 -->
                                                     <div class="rv-picker" role="group" aria-labelledby="rv-groups-label">
-                                                        <!-- 只写组名：条数在「域名组」页签里看 -->
-                                                        <button v-for="g in groups" :key="g.id" type="button" class="rv-pick"
-                                                                :aria-pressed="ruleEditor.rule.domainGroupIds.includes(g.id) ? 'true' : 'false'"
-                                                                @click="toggleRuleGroup(g.id)">
+                                                        <span v-for="g in editorGroups" :key="g.id" class="rv-gtag" :class="{ 'is-missing': g.missing }">
                                                             <img v-if="g.brand" class="rv-pick-icon"
                                                                  :src="'{{ .base_path }}assets/brand-icons/' + g.brand.slug + '.svg?{{ .cur_ver }}'" alt="">
                                                             <!-- 识别不出品牌的组（中国域名列表、网盘域名这类）用首字色块，
                                                                  与左侧列表、「域名组」页签的卡片同一套 -->
-                                                            <span v-else class="rv-pick-mark" :style="{ background: groupColorOf(g) }"
-                                                                  aria-hidden="true">[[ groupInitials(g) ]]</span>
+                                                            <span v-else class="rv-pick-mark" :style="{ background: g.missing ? '#94A3B8' : groupColorOf(g) }"
+                                                                  aria-hidden="true">[[ g.missing ? '?' : groupInitials(g) ]]</span>
                                                             [[ g.remark ]]
-                                                        </button>
+                                                            <button type="button" class="rv-gtag-x" :aria-label="'移除域名组「' + g.remark + '」'"
+                                                                    @click="removeRuleGroup(g.id)"><a-icon type="close"></a-icon></button>
+                                                        </span>
+                                                        <a-popover v-if="addableGroupCount" v-model="groupAdd.open" trigger="click" placement="bottomLeft"
+                                                                   overlay-class-name="rv-gadd-pop" @visibleChange="onGroupAddVisible">
+                                                            <template slot="content">
+                                                                <input v-if="addableGroupCount > 8" ref="groupAddSearch" v-model="groupAdd.q" type="search"
+                                                                       class="rv-gadd-search" placeholder="搜索域名组" aria-label="搜索域名组">
+                                                                <ul class="rv-gadd-list" role="listbox" aria-label="可添加的域名组">
+                                                                    <li v-for="g in addableGroups" :key="g.id" role="none">
+                                                                        <button type="button" role="option" aria-selected="false" class="rv-gadd-item"
+                                                                                @click="addRuleGroup(g.id)">
+                                                                            <img v-if="g.brand" class="rv-pick-icon"
+                                                                                 :src="'{{ .base_path }}assets/brand-icons/' + g.brand.slug + '.svg?{{ .cur_ver }}'" alt="">
+                                                                            <span v-else class="rv-pick-mark" :style="{ background: groupColorOf(g) }"
+                                                                                  aria-hidden="true">[[ groupInitials(g) ]]</span>
+                                                                            [[ g.remark ]]
+                                                                        </button>
+                                                                    </li>
+                                                                    <li v-if="!addableGroups.length" class="rv-gadd-empty" role="none">没有匹配的域名组</li>
+                                                                </ul>
+                                                            </template>
+                                                            <button type="button" ref="groupAddBtn" class="rv-pick is-add" aria-haspopup="listbox"
+                                                                    :aria-expanded="groupAdd.open ? 'true' : 'false'">
+                                                                <a-icon type="plus"></a-icon>[[ editorGroups.length ? '添加' : '添加域名组' ]]
+                                                            </button>
+                                                        </a-popover>
                                                     </div>
                                                     <div v-if="!groups.length" class="rv-help">还没有域名组，先到「域名组」页签添加</div>
                                                     <div v-if="ruleEditor.tried && !ruleEditor.rule.domainGroupIds.length"
@@ -1675,8 +1731,7 @@
                                                          class="rv-err">请选择一个出站节点</div>
                                                     <!-- rgba(0,0,0,.45) 只有 3.36:1，换成 --aui-text-3 -->
                                                     <div v-if="ruleEditor.rule.action === 'direct'" class="rv-help">
-                                                        直连即从这台机器本机出网，不经过任何出站节点。它不等于「不写这条规则」：
-                                                        显式的直连规则会先命中，从而挡住后面那些本该把这批目标代理出去的规则。
+                                                        直连即从这台机器本机出网，不经过任何出站节点。
                                                     </div>
                                                     <div v-if="ruleEditor.rule.action === 'block'" class="rv-help">
                                                         封禁规则保存后排在所有分流规则之前，始终最先匹配。
@@ -1945,12 +2000,12 @@
             //             不一致说明别处改过（例如新建入站被 AttachInbound 自动
             //             加进了 inboundIds），此时绝不能拿旧草稿整体覆盖回去。
             ruleEditor: {
-                active: false, isNew: false, rule: new RoutingRule(), allUsers: true,
-                base: '', origin: '', tried: false, saving: false, usersOpen: false,
+                active: false, isNew: false, rule: new RoutingRule(),
+                base: '', origin: '', tried: false, saving: false,
                 brokenWarn: '', shake: false, lastId: 0,
             },
-            // 用户选项超过这个数时先折叠，已选中的始终露出来
-            inboundFold: 12,
+            // 域名组「＋ 添加」弹层
+            groupAdd: { open: false, q: '' },
             ruleFilter: 'all',
             ruleQuery: '',
             // 正在提交启停的规则 id，防止连点
@@ -1990,7 +2045,7 @@
             ruleDirty() {
                 if (!this.ruleEditor.active) return false;
                 if (this.ruleEditor.isNew) return true;
-                return this.ruleSnapshot(this.ruleEditor.rule, this.ruleEditor.allUsers) !== this.ruleEditor.base;
+                return this.ruleSnapshot(this.ruleEditor.rule) !== this.ruleEditor.base;
             },
             ruleFiltering() {
                 return this.ruleFilter !== 'all' || this.ruleQuery.trim() !== '';
@@ -2017,22 +2072,28 @@
                 const r = this.ruleEditor.rule;
                 return {
                     id: r.id, remark: r.remark, action: r.action, outboundId: r.outboundId,
-                    inboundIds: this.ruleEditor.allUsers ? [] : r.inboundIds,
+                    inboundIds: this.editorSubmitIds || [],
                     domainGroupIds: r.domainGroupIds, broken: false, groupsBroken: false,
                 };
             },
+            // 已选的域名组，按 id 升序（与提交顺序一致）。被删掉的组照样列出来，
+            // 让管理员看得见并能移除，而不是在界面上悄悄消失。
+            editorGroups() {
+                return this.ruleEditor.rule.domainGroupIds.map(id => this.groups.find(g => g.id === id)
+                    || { id, remark: '已删除的域名组 #' + id, brand: null, missing: true });
+            },
+            addableGroupCount() {
+                const picked = this.ruleEditor.rule.domainGroupIds;
+                return this.groups.filter(g => !picked.includes(g.id)).length;
+            },
+            addableGroups() {
+                const picked = this.ruleEditor.rule.domainGroupIds;
+                const q = this.groupAdd.q.trim().toLowerCase();
+                return this.groups.filter(g => !picked.includes(g.id)
+                    && (!q || (g.remark || '').toLowerCase().includes(q)));
+            },
             editorNode() {
                 return this.nodes.find(n => n.id === this.ruleEditor.rule.outboundId) || null;
-            },
-            // 用户多时先列前 inboundFold 位；排在后面但已选中的也必须露出来，
-            // 否则折叠之后看不出它被选了。
-            editorInbounds() {
-                if (this.ruleEditor.usersOpen || this.inbounds.length <= this.inboundFold) return this.inbounds;
-                const picked = this.ruleEditor.rule.inboundIds;
-                return this.inbounds.filter((i, k) => k < this.inboundFold || picked.includes(i.id));
-            },
-            hiddenInboundCount() {
-                return this.inbounds.length - this.editorInbounds.length;
             },
             flowUsers() {
                 const ids = this.editorPreview.inboundIds;
@@ -2072,6 +2133,22 @@
             },
             allUsersDisabled() {
                 return Object.keys(this.occupiedInbounds).length > 0;
+            },
+            // 「所有用户」勾选框的状态由选择推出来，不单独存：全部入站都在选择里即为勾上。
+            // 数据损坏的规则选择是空的，没有入站时 every 会恒为真——那时绝不能当成全选。
+            editorAllPicked() {
+                const r = this.ruleEditor.rule;
+                if (r.broken && !r.inboundIds.length) return false;
+                return this.inbounds.every(i => r.inboundIds.includes(i.id));
+            },
+            // 提交给后端的 inboundIds。全选且勾了「以后新增的用户自动应用」才提交 []：
+            // 空数组在后端就是「所有用户（含以后新建的）」，两者行为完全一致。
+            // 全选但不要以后新建的用户，就逐个列出当前这些人。
+            editorIsGlobal() {
+                return this.editorAllPicked && !!this.ruleEditor.rule.applyToNewInbounds;
+            },
+            editorSubmitIds() {
+                return this.editorIsGlobal ? [] : this.ruleEditor.rule.inboundIds;
             },
             allUsersDisabledReason() {
                 const map = this.occupiedInbounds;
@@ -2504,13 +2581,14 @@
                 });
             },
             // ── 右侧编辑区 ──
-            // 可编辑字段的快照。「所有用户」时 applyToNewInbounds 不参与比较：
-            // 空数组本来就含未来新建的入站，两种取值行为完全一致。
-            ruleSnapshot(rule, allUsers) {
+            // 可编辑字段的快照，按提交口径比较（全选 + 自动加入 = 空数组）。
+            ruleSnapshot(rule) {
+                const global = this.editorIsGlobal;
                 return JSON.stringify({
                     remark: rule.remark || '',
-                    inboundIds: allUsers ? [] : rule.inboundIds.slice().sort((a, b) => a - b),
-                    applyToNewInbounds: allUsers ? true : !!rule.applyToNewInbounds,
+                    global,
+                    inboundIds: this.editorSubmitIds.slice().sort((a, b) => a - b),
+                    applyToNewInbounds: global || !!rule.applyToNewInbounds,
                     domainGroupIds: rule.domainGroupIds.slice().sort((a, b) => a - b),
                     action: rule.action,
                     outboundId: rule.action === 'proxy' ? (rule.outboundId || 0) : 0,
@@ -2536,14 +2614,18 @@
                 if (r.groupsBroken) {
                     brokenWarn = (brokenWarn ? brokenWarn + ' ' : '') + '这条规则的域名组数据已损坏，请重新选择域名组后保存。';
                 }
+                // 后端的「所有用户」是空数组：编辑区里展开成全部入站都选中，
+                // 并勾上「以后新增的用户自动应用」（空数组本来就含以后新建的）。
+                if (!r.broken && !r.inboundIds.length) {
+                    r.inboundIds = this.inbounds.map(i => i.id).sort((a, b) => a - b);
+                    r.applyToNewInbounds = true;
+                }
                 this.ruleEditor.rule = r;
-                this.ruleEditor.allUsers = !r.broken && r.inboundIds.length === 0;
                 this.ruleEditor.isNew = false;
                 this.ruleEditor.active = true;
                 this.ruleEditor.tried = false;
-                this.ruleEditor.usersOpen = false;
                 this.ruleEditor.brokenWarn = brokenWarn;
-                this.ruleEditor.base = this.ruleSnapshot(r, this.ruleEditor.allUsers);
+                this.ruleEditor.base = this.ruleSnapshot(r);
                 this.ruleEditor.origin = JSON.stringify(rule);
                 if (this.$refs.ruleDetail && this.ruleEditor.rule.id !== this.ruleEditor.lastId) {
                     this.$refs.ruleDetail.scrollTop = 0;
@@ -2588,9 +2670,10 @@
                 // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
                 // 后端零值仍是 false——否则导入的旧文件也会变成 true。
                 r.applyToNewInbounds = true;
+                r.inboundIds = this.inbounds.map(i => i.id).sort((a, b) => a - b);
                 Object.assign(this.ruleEditor, {
-                    rule: r, allUsers: true, isNew: true, active: true, tried: false,
-                    usersOpen: false, brokenWarn: '', base: '', origin: '',
+                    rule: r, isNew: true, active: true, tried: false,
+                    brokenWarn: '', base: '', origin: '',
                 });
                 this.scheduleRuleWires();
                 this.$nextTick(() => {
@@ -2611,21 +2694,38 @@
                 if (first) this.loadEditor(first);
                 else this.ruleEditor.active = false;
             },
-            toggleRuleInbound(id) {
-                const ids = this.ruleEditor.rule.inboundIds;
-                this.setRuleInbounds(ids.includes(id) ? ids.filter(x => x !== id) : ids.concat(id));
+            addRuleGroup(id) {
+                this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.concat(id));
+                this.groupAdd.open = false;
+                this.groupAdd.q = '';
+                // 弹层关掉后焦点回到「＋ 添加」，键盘可以接着加下一个
+                this.$nextTick(() => {
+                    const b = this.$refs.groupAddBtn;
+                    if (b) b.focus();
+                });
             },
-            toggleRuleGroup(id) {
-                const ids = this.ruleEditor.rule.domainGroupIds;
-                this.setRuleGroups(ids.includes(id) ? ids.filter(x => x !== id) : ids.concat(id));
+            removeRuleGroup(id) {
+                this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.filter(x => x !== id));
+            },
+            onGroupAddVisible(open) {
+                if (!open) {
+                    this.groupAdd.q = '';
+                    return;
+                }
+                this.$nextTick(() => {
+                    const el = this.$refs.groupAddSearch;
+                    if (el) el.focus();
+                });
             },
             inboundOccupiedBy(id) {
                 const map = this.occupiedInbounds;
                 return map[0] || map[id] || '';
             },
+            // 勾上 = 选中全部入站，取消 = 清空选择；不碰「以后新增的用户自动应用」。
             toggleAllUsers(checked) {
-                this.ruleEditor.allUsers = checked;
-                if (checked) this.ruleEditor.rule.inboundIds = [];
+                this.ruleEditor.rule.inboundIds = checked
+                    ? this.inbounds.map(i => i.id).filter(id => !this.inboundOccupiedBy(id)).sort((a, b) => a - b)
+                    : [];
             },
             // 多选框给出的是整份新数组。被别的规则占用的入站在下拉里已置灰，
             // 这里再滤一遍兜底；升序提交，和后端 EncodeInboundIds 的存储顺序对齐。
@@ -2650,12 +2750,8 @@
             reconcileInboundSelection() {
                 const map = this.occupiedInbounds;
                 if (map[0]) {
-                    this.ruleEditor.allUsers = false;
                     this.ruleEditor.rule.inboundIds = [];
                     return;
-                }
-                if (this.ruleEditor.allUsers && Object.keys(map).length > 0) {
-                    this.ruleEditor.allUsers = false;
                 }
                 this.ruleEditor.rule.inboundIds =
                     this.ruleEditor.rule.inboundIds.filter(id => !map[id]);
@@ -2669,8 +2765,8 @@
                     this.$message.error('请至少选择一个域名组');
                     return;
                 }
-                const inboundIds = this.ruleEditor.allUsers ? [] : r.inboundIds;
-                if (!this.ruleEditor.allUsers && !inboundIds.length) {
+                const inboundIds = this.editorSubmitIds;
+                if (!this.editorIsGlobal && !inboundIds.length) {
                     // 空数组的语义是「所有用户」。静默提交等于把这条规则的作用域
                     // 放大到全体，所以必须在这里拦住，不能让后端去猜用户的意图。
                     this.$message.error('请至少选择一个用户，或选择「所有用户」');
@@ -2809,15 +2905,6 @@
                 if (ids.length <= 2) return ids.map(this.inboundName).join('、');
                 return ids.length + ' 位用户';
             },
-            ruleSentence(rule) {
-                if (!rule.domainGroupIds.length) return '选择用户、域名组和去向后，这里会用一句话说明这条规则。';
-                const who = rule.inboundIds.length ? this.ruleUsersLabel(rule) : '所有用户';
-                const what = rule.domainGroupIds.map(this.groupName).join('、');
-                const where = rule.action === 'block' ? '直接封禁。'
-                    : rule.action === 'direct' ? '从本机直连出网。'
-                    : rule.outboundId ? '从「' + this.nodeName(rule.outboundId) + '」出站。' : '……（还没选出站节点）';
-                return who + ' 访问「' + what + '」时，' + where;
-            },
             nodeSubLabel(node) {
                 const parts = [];
                 if (!node.enable) parts.push('已禁用');
@@ -2835,7 +2922,7 @@
 
             // ── 流量走向连线 ──
             // 连线按真实元素位置画（平滑曲线 + 流动虚线 + 光点）。纯装饰：信息已在
-            // 标题下那句话和三列文字里。系统开了「减少动态效果」时只留静态线。
+            // 三列文字里。系统开了「减少动态效果」时只留静态线。
             scheduleRuleWires() {
                 this.$nextTick(() => requestAnimationFrame(() => this.drawRuleWires()));
             },
