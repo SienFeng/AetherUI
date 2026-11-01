@@ -1729,10 +1729,10 @@
                                                         </p>
                                                         <template v-if="u.key === 'all' || u.key === 'more'">
                                                             <p v-if="u.key === 'all' && verify.result.truncated" class="rv-verify-line">
-                                                                只验证了前 50 个已启用入站
+                                                                只验证了前 [[ userVerify(u.key).total ]] 个已启用入站，另有 [[ verifyUncheckedCount ]] 位未验证
                                                             </p>
                                                             <p v-if="!userVerify(u.key).failed.length" class="rv-verify-line">
-                                                                全部 [[ userVerify(u.key).total ]] 位用户已验证
+                                                                [[ u.key === 'all' && verify.result.truncated ? '已验证的' : '全部' ]] [[ userVerify(u.key).total ]] 位用户[[ u.key === 'all' && verify.result.truncated ? '都通过了验证' : '已验证' ]]
                                                             </p>
                                                         </template>
                                                         <div v-for="uv in verifyDetailUsers(u.key)" :key="'vu-' + uv.inboundId" class="rv-verify-user">
@@ -2332,6 +2332,12 @@
                 if (!ids.length) return this.verify.result.users || [];
                 return ids.map(id => this.userVerifyById(id));
             },
+            // 全局规则只验证了前 50 个启用入站时，没验证到的人数。截断时至少 1 位。
+            verifyUncheckedCount() {
+                if (!this.verifyShown || !this.verify.result.truncated || this.editorPreview.inboundIds.length) return 0;
+                const enabled = this.inbounds.filter(i => i.enable).length;
+                return Math.max(1, enabled - (this.verify.result.users || []).length);
+            },
             verifySummary() {
                 if (!this.ruleEditor.active) return { text: '', sub: '' };
                 if (this.ruleDirty) return { text: '有未保存的修改，保存后验证', sub: '' };
@@ -2351,6 +2357,8 @@
                 const bad = users.filter(x => x.verdict === 'mismatch').length;
                 let text = '已验证 ' + verified + '/' + users.length + ' · ' + time;
                 if (bad) text += ' · ' + bad + ' 位与配置不符';
+                // 截断时绝不能读成「全部已验证」：明确报出还有多少人没验证
+                if (this.verifyUncheckedCount) text += ' · 另有 ' + this.verifyUncheckedCount + ' 位未验证';
                 let sub = coreMsg;
                 if (state === 'pending') {
                     sub = this.verify.retryTimer ? '核心尚未载入最新配置，稍后自动再验证一次' : (coreMsg || '核心尚未载入最新配置');
@@ -2370,6 +2378,8 @@
                     const v = this.userVerify(u.key);
                     if (u.key !== 'all' && u.key !== 'more') return v.verdict;
                     if (v.failed.some(x => x.verdict === 'mismatch')) return 'mismatch';
+                    // 全局规则被截断：没验证到的那部分没有证据，连线保持中性灰
+                    if (u.key === 'all' && this.verifyUncheckedCount) return '';
                     return v.total > 0 && v.verified === v.total ? 'verified' : '';
                 });
             },
@@ -2777,10 +2787,12 @@
                 const url = this.groupModal.id
                     ? 'aui/routing/domain-group/update/' + this.groupModal.id
                     : 'aui/routing/domain-group/add';
+                const groupId = this.groupModal.id;
                 const msg = await this.post(url, data);
                 if (msg.success) {
                     this.groupModal.visible = false;
                     await this.loadAll();
+                    if (groupId) this.reverifyIfAffected({ groupId });
                 }
             },
             delGroup(group) {
@@ -2793,7 +2805,10 @@
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/domain-group/del/' + group.id);
-                        if (msg.success) await this.loadAll();
+                        if (msg.success) {
+                            await this.loadAll();
+                            this.reverifyIfAffected({ groupId: group.id });
+                        }
                     },
                 });
             },
@@ -2825,13 +2840,17 @@
                 if (msg.success) {
                     this.nodeModal.visible = false;
                     await this.loadAll();
+                    if (n.id) this.reverifyIfAffected({ nodeId: n.id });
                 }
             },
             async toggleNode(node) {
                 const msg = await this.post('aui/routing/outbound/update/' + node.id, {
                     remark: node.remark, enable: !node.enable, config: '',
                 });
-                if (msg.success) await this.loadAll();
+                if (msg.success) {
+                    await this.loadAll();
+                    this.reverifyIfAffected({ nodeId: node.id });
+                }
             },
             delNode(node) {
                 this.$confirm({
@@ -3259,8 +3278,11 @@
                     }
                     return { cls: m.cls, icon: m.icon, text: m.text, title, reason, expandable: true };
                 }
-                // 汇总徽章取最坏的那一档：不符 > 等待下发 > 无法验证 > 已验证
+                // 汇总徽章取最坏的那一档：不符 > 等待下发 > 无法验证 > 已验证。
+                // 全局规则被截断时，没验证到的那部分算「无法验证」，汇总因此不会是绿色。
+                const unchecked = key === 'all' ? this.verifyUncheckedCount : 0;
                 const worst = ['mismatch', 'pending', 'unverifiable'].find(x => v.failed.some(f => f.verdict === x))
+                    || (unchecked ? 'unverifiable' : '')
                     || (v.total ? 'verified' : 'unverifiable');
                 const m = this.verdictMeta(worst);
                 if (!v.total) {
@@ -3268,8 +3290,13 @@
                     const reason = (res.core && res.core.message) || '没有可验证的用户';
                     return { cls: m.cls, icon: m.icon, text: m.text, title: reason, reason, expandable: true };
                 }
-                const text = v.verified + '/' + v.total + ' 已验证';
-                const title = v.failed.length ? v.failed.length + ' 位用户未通过验证，点开查看' : '全部已验证';
+                let text = v.verified + '/' + v.total + ' 已验证';
+                let title = v.failed.length ? v.failed.length + ' 位用户未通过验证，点开查看' : '全部已验证';
+                if (unchecked) {
+                    text += ' · 另有 ' + unchecked + ' 位未验证';
+                    title = (v.failed.length ? v.failed.length + ' 位用户未通过验证；' : '')
+                        + '只验证了前 ' + v.total + ' 个已启用入站，另有 ' + unchecked + ' 位未验证';
+                }
                 return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true };
             },
             // 明细里列出的用户：具体用户只有它自己；汇总行只列出不是「已验证」的
@@ -3295,6 +3322,21 @@
                 this.verify.result = null;
                 this.verify.error = '';
                 this.verify.expanded = {};
+            },
+            // 域名组（保存 / 删除 / 立即更新订阅）或出站节点（编辑 / 启停）改了之后，
+            // 当前显示的规则若引用了它，核心里这条规则的条件或出口已经变了，而规则自己的
+            // 已保存状态没变，verifyRuleId / canVerify 两个 watcher 都不会触发——手里那份
+            // 绿色就成了旧配置的结论。这里按「保存后」重新验证：走同一个 verifyEpoch 作废
+            // 旧结果与在途请求，核心尚未载入时 pending 并在 12 秒后自动再验证一次。
+            // 必须在 loadAll 之后调用：canVerify 要按新的节点 / 域名组状态判断。
+            reverifyIfAffected({ groupId, nodeId }) {
+                const r = this.savedRule;
+                if (!r) return;
+                const hit = (groupId && r.domainGroupIds.includes(groupId))
+                    || (nodeId && r.action === 'proxy' && r.outboundId === nodeId);
+                if (!hit) return;
+                this.resetVerify(r.id);
+                if (this.canVerify) this.runVerify(r.id, true);
             },
             // afterSave：保存后的那次验证。核心还没载入新配置（pending）时，12 秒后再验证一次，仅一次。
             async runVerify(ruleId, afterSave) {
@@ -3454,8 +3496,9 @@
             async refreshGroup(group) {
                 // 失败也要重新加载：DB 里已经写了 lastError，不刷新的话这一行
                 // 会继续显示刷新前的绿色「N 小时前」，看不出刚刚这次失败了。
-                await this.post('aui/routing/domain-group/refresh/' + group.id);
+                const msg = await this.post('aui/routing/domain-group/refresh/' + group.id);
                 await this.loadAll();
+                if (msg && msg.success) this.reverifyIfAffected({ groupId: group.id });
             },
             groupMissing(id) {
                 return !this.groups.find(x => x.id === id);
