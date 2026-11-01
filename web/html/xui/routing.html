@@ -2213,6 +2213,8 @@
             // 已保存状态的代次：保存、切换规则、规则变得不可验证（停用 / 未生效）时 +1。
             // 请求发出时记下代次，回来时代次变了就丢弃——结果只能来自规则当前这份已保存状态。
             verifyEpoch: 0,
+            // 已保存状态被启停改过、但还没来得及验证的规则 id：它的下一次验证按「保存后」处理
+            verifyAfterSaveId: 0,
 
             // 拖拽排序的瞬时状态。section 用来拒绝段间拖拽：封禁与分流在生成期
             // 是两个独立分组，跨段拖动等于改动作，那必须走编辑表单。
@@ -3113,13 +3115,15 @@
                     const msg = await HttpUtil.post('aui/routing/rule/update/' + fresh.id,
                         Object.assign({}, fresh, { enable: !fresh.enable }));
                     await this.refreshRulesQuiet();
-                    if (msg && msg.success && this.ruleEditor.active && this.ruleEditor.rule.id === fresh.id && !this.ruleDirty) {
-                        const now = this.rules.find(x => x.id === fresh.id);
-                        if (now) {
-                            this.loadEditor(now);
-                            // 启停改了核心配置，与保存同等对待：作废旧结论，pending 时 12 秒后再验一次
-                            this.resetVerify(now.id);
-                            if (this.canVerify) this.runVerify(now.id, true);
+                    if (msg && msg.success && this.ruleEditor.active && this.ruleEditor.rule.id === fresh.id) {
+                        // 启停改了核心配置，与保存同等对待：无论编辑区有没有未保存修改，旧结论都作废；
+                        // 下一次验证（现在，或撤销修改之后）按「保存后」处理，pending 时 12 秒后再验一次。
+                        this.resetVerify(fresh.id);
+                        this.verifyAfterSaveId = fresh.id;
+                        if (!this.ruleDirty) {
+                            const now = this.rules.find(x => x.id === fresh.id);
+                            if (now) this.loadEditor(now);
+                            if (this.canVerify) this.runVerify(fresh.id, true);
                         }
                     }
                 } finally {
@@ -3291,6 +3295,7 @@
             // 切换规则：清空上一条规则的结果、展开状态与待执行的自动重试
             resetVerify(ruleId) {
                 this.verifyEpoch++;
+                this.verifyAfterSaveId = 0;
                 this.clearVerifyRetry();
                 this.verify.ruleId = ruleId;
                 this.verify.result = null;
@@ -3300,11 +3305,13 @@
             // afterSave：保存后的那次验证。核心还没载入新配置（pending）时，12 秒后再验证一次，仅一次。
             async runVerify(ruleId, afterSave) {
                 if (!ruleId) return;
+                if (this.verifyAfterSaveId === ruleId) afterSave = true;
                 if (this.verify.loading) {
                     if (afterSave) this.verifyRerun = ruleId;
                     return;
                 }
                 this.clearVerifyRetry();
+                this.verifyAfterSaveId = 0;
                 this.verify.ruleId = ruleId;
                 this.verify.loading = true;
                 this.verify.error = '';
