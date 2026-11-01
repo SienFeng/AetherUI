@@ -48,10 +48,12 @@ func newAnomalyFixture(t *testing.T, domains []string, inboundsOf func(a, b *mod
 	resetAnomalyState(t)
 	setupAccessLogDB(t)
 	setAccessLog(t, true)
+	// svc 的 runtime 视核心为在跑且持有当前配置：这些测试只关心异常，
+	// 不让「核心未运行」把 verified 降级。
 	f := &anomalyFixture{
 		a:   newVerifyInbound(t, 42001, "用户A", true),
 		b:   newVerifyInbound(t, 42002, "用户B", true),
-		svc: &RoutingAuditService{now: func() time.Time { return anomalyNow }},
+		svc: &RoutingAuditService{now: func() time.Time { return anomalyNow }, runtime: runningCore},
 	}
 	f.node = &model.OutboundNode{
 		Tag: "a-ui-us", Remark: "美国节点", Protocol: "socks", Enable: true,
@@ -280,16 +282,21 @@ func TestSummariesMergeAnomaly(t *testing.T) {
 
 // 核心待生效时 verified 会改标 pending，但访问日志异常带来的不符不受影响：
 // 那是真实流量的证据，与配置是否已下发无关。
+// 核心未运行时同样如此。
 func TestSummariesPendingKeepsAnomalyMismatch(t *testing.T) {
-	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
-	f.svc.runtime = func() XrayRuntime { return XrayRuntime{Running: true, Pending: true} }
-	storeVerifyResult(&RuleVerifyResult{RuleId: f.rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
-		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
-	insertLogs(t, 2, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
-	mustScan(t, f.svc, anomalyNow, false)
-	_, rules := f.svc.Summaries()
-	if got := rules[f.rule.Id]; got.Verdict != verdictMismatch || got.AnomalyCount != 2 {
-		t.Errorf("待生效时异常仍应为 mismatch: %+v", got)
+	for name, rt := range map[string]XrayRuntime{"pending": {Running: true, Pending: true}, "not running": {}} {
+		t.Run(name, func(t *testing.T) {
+			f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+			f.svc.runtime = func() XrayRuntime { return rt }
+			storeVerifyResult(&RuleVerifyResult{RuleId: f.rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
+				Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+			insertLogs(t, 2, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+			mustScan(t, f.svc, anomalyNow, false)
+			_, rules := f.svc.Summaries()
+			if got := rules[f.rule.Id]; got.Verdict != verdictMismatch || got.AnomalyCount != 2 {
+				t.Errorf("runtime %+v：异常仍应为 mismatch: %+v", rt, got)
+			}
+		})
 	}
 }
 

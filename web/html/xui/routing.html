@@ -3319,7 +3319,9 @@
                     case 'mismatch': title = '与配置不符'; break;
                     // stale：缓存的结论来自上一份配置，后台下一轮审计会重新验证
                     case 'pending': title = sum.stale ? '配置已变更，等待后台重新验证' : '等待下发：核心尚未载入当前配置'; break;
-                    default: title = sum.checkedAt ? '无法验证（核心验证 ' + at + '）' : '尚未验证';
+                    // stale + 无法验证：服务端发现核心已不在运行，缓存的结论不再代表现状
+                    default: title = !sum.checkedAt ? '尚未验证'
+                        : (sum.stale ? '无法验证：核心未在运行（上次验证 ' + at + '）' : '无法验证（核心验证 ' + at + '）');
                 }
                 if (sum.anomalyCount > 0) {
                     title += '；近 24h 有 ' + sum.anomalyCount + ' 次走错（最近 ' + this.verifyClock(sum.anomalyLastAt) + '）';

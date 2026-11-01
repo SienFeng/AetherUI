@@ -413,6 +413,9 @@ func TestVerifyAllBudgetExhaustedKeepsOldResult(t *testing.T) {
 	}
 }
 
+// runningCore 是「核心在跑、持有当前配置」的快照，供只关心别的条件的 Summaries 测试注入。
+func runningCore() XrayRuntime { return XrayRuntime{Running: true} }
+
 // 代次前进后，旧代次的结果不再代表核心现状：标 stale、结论按 pending，绝不给绿。
 func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
 	resetAuditCache(t)
@@ -422,12 +425,13 @@ func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
 	storeVerifyResult(&RuleVerifyResult{RuleId: rule.Id, ApplyGen: gen, CheckedAt: 500,
 		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
 
-	if _, rules := (&RoutingAuditService{}).Summaries(); rules[rule.Id].Verdict != verdictVerified || rules[rule.Id].Stale {
+	svc := &RoutingAuditService{runtime: runningCore}
+	if _, rules := svc.Summaries(); rules[rule.Id].Verdict != verdictVerified || rules[rule.Id].Stale {
 		t.Fatalf("同代次应为 verified 且不 stale: %+v", rules[rule.Id])
 	}
 
 	xrayApplyGen.Inc()
-	cur, rules := (&RoutingAuditService{}).Summaries()
+	cur, rules := svc.Summaries()
 	if cur != gen+1 {
 		t.Fatalf("Summaries 代次 = %d，期望 %d", cur, gen+1)
 	}
@@ -438,18 +442,18 @@ func TestSummariesStaleWhenGenerationAdvanced(t *testing.T) {
 }
 
 // 保存后到核心载入新配置之前代次不变，同代次缓存是旧配置的结论：核心 Pending（或正忙于
-// 重启/热应用）时本会是 verified 的摘要改标 stale + pending；访问日志异常带来的不符、
-// 核心那一路的不符原样保留。核心未运行时不改。快照整轮只取一次。
+// 重启/热应用）时本会是 verified 的摘要改标 stale + pending；核心未运行时改标
+// stale + unverifiable。核心那一路的不符原样保留。快照整轮只取一次。
 func TestSummariesPendingCoreNeverGreen(t *testing.T) {
 	cases := []struct {
-		name      string
-		rt        XrayRuntime
-		wantGreen bool
+		name string
+		rt   XrayRuntime
+		want string // 绿规则此刻的结论
 	}{
-		{"pending", XrayRuntime{Running: true, Pending: true}, false},
-		{"busy", XrayRuntime{Busy: true}, false},
-		{"current", XrayRuntime{Running: true}, true},
-		{"not running", XrayRuntime{}, true},
+		{"pending", XrayRuntime{Running: true, Pending: true}, verdictPending},
+		{"busy", XrayRuntime{Busy: true}, verdictPending},
+		{"current", XrayRuntime{Running: true}, verdictVerified},
+		{"not running", XrayRuntime{}, verdictUnverifiable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,12 +471,12 @@ func TestSummariesPendingCoreNeverGreen(t *testing.T) {
 
 			_, rules := svc.Summaries()
 			got := rules[green.Id]
-			if tc.wantGreen {
+			if tc.want == verdictVerified {
 				if got.Verdict != verdictVerified || got.Stale {
-					t.Errorf("核心为当前配置或未运行时应保留 verified: %+v", got)
+					t.Errorf("核心持有当前配置时应保留 verified: %+v", got)
 				}
-			} else if got.Verdict != verdictPending || !got.Stale || got.CheckedAt != 500 {
-				t.Errorf("待生效时不得给绿，应 stale + pending 并保留时间: %+v", got)
+			} else if got.Verdict != tc.want || !got.Stale || got.CheckedAt != 500 {
+				t.Errorf("不得给绿，应 stale + %s 并保留时间: %+v", tc.want, got)
 			}
 			if r := rules[red.Id]; r.Verdict != verdictMismatch || r.MismatchUsers != 1 {
 				t.Errorf("核心那一路的不符应原样保留: %+v", r)

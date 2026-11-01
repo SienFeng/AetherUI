@@ -166,7 +166,10 @@ func TestVerifyCachedIgnoresCacheUnlessCoreCurrent(t *testing.T) {
 			return service.XrayRuntime{Running: true, Pending: true, ApplyGen: gen}
 		}},
 		{"not running", func(gen uint64) service.XrayRuntime { return service.XrayRuntime{ApplyGen: gen} }},
-		{"busy", func(uint64) service.XrayRuntime { return service.XrayRuntime{Busy: true} }},
+		// Running 置真：只让 Busy 这一个条件不成立（真实快照 Busy 时 Running 恒为 false）
+		{"busy", func(gen uint64) service.XrayRuntime {
+			return service.XrayRuntime{Running: true, Busy: true, ApplyGen: gen}
+		}},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
