@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -199,6 +200,7 @@ type RoutingController struct {
 	probeService       service.ProbeService
 	settingService     service.SettingService
 	verifyService      service.RoutingVerifyService
+	auditService       service.RoutingAuditService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -233,6 +235,8 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	rl.POST("/del/:id", a.delRule)
 	rl.POST("/reorder", a.reorderRules)
 	rl.POST("/verify/:id", a.verifyRule)
+	rl.POST("/audit", a.auditRules)
+	rl.POST("/anomaly/reset/:id", a.resetRuleAnomaly)
 
 	g.POST("/export", a.exportRouting)
 	g.POST("/import", a.importRouting)
@@ -763,14 +767,57 @@ func (a *RoutingController) reorderRules(c *gin.Context) {
 }
 
 // 验证「流量走向」：只读，不改库也不动核心，所以不置重启标志。
+//
+// ?cached=1 时优先用后台审计的缓存，但只在三个条件同时成立时：规则存在、已启用、
+// 缓存代次等于当前应用代次。缓存要到下一轮审计才清理，规则停用或删除后仍可能留着
+// 旧结果；代次落后则说明核心之后换过配置。任一不满足都走现场 Verify
+// （Verify 自己处理停用与不存在的规则）。
 func (a *RoutingController) verifyRule(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		jsonMsg(c, "验证分流规则", err)
 		return
 	}
+	if c.Query("cached") == "1" {
+		if rule, getErr := a.ruleService.Get(id); getErr == nil && rule.Enable {
+			if res, ok := a.auditService.Cached(id); ok && res.ApplyGen == service.XrayApplyGeneration() {
+				jsonObj(c, res, nil)
+				return
+			}
+		}
+	}
 	result, err := a.verifyService.Verify(id)
 	jsonObj(c, result, err)
+}
+
+// routingAuditResponse 是规则列表与侧栏红点用的审计摘要。
+type routingAuditResponse struct {
+	ApplyGen         uint64                           `json:"applyGen"`
+	AccessLogEnabled bool                             `json:"accessLogEnabled"`
+	Rules            map[int]service.RuleAuditSummary `json:"rules"`
+}
+
+// auditRules 只读缓存与内存摘要，不触发验证。
+func (a *RoutingController) auditRules(c *gin.Context) {
+	gen, rules := a.auditService.Summaries()
+	// 读不出开关时按未开启处理并记日志：这只影响前端的提示文案，不该让摘要整体拿不到。
+	enabled, err := a.settingService.GetAccessLogEnable()
+	if err != nil {
+		logger.Warning("读取访问日志开关失败:", err)
+		enabled = false
+	}
+	jsonObj(c, &routingAuditResponse{ApplyGen: gen, AccessLogEnabled: enabled, Rules: rules}, nil)
+}
+
+// resetRuleAnomaly 是「忽略此前的异常」，只改内存里的异常状态，不碰库与核心。
+func (a *RoutingController) resetRuleAnomaly(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "忽略此前的异常", err)
+		return
+	}
+	a.auditService.ResetAnomalies(id, time.Now())
+	jsonMsg(c, "忽略此前的异常", nil)
 }
 
 func (a *RoutingController) delRule(c *gin.Context) {
