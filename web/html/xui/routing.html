@@ -1041,11 +1041,6 @@
         gap: 4px;
     }
 
-    .rv-dcenter-cap {
-        font-size: 12px;
-        color: var(--aui-text-3);
-    }
-
     .rv-gchips {
         display: flex;
         flex-wrap: wrap;
@@ -1691,7 +1686,6 @@
                                                         <span v-else class="rv-tile-text">[[ ruleInitials(editorPreview) ]]</span>
                                                     </span>
                                                     <span class="rv-dcenter-text">
-                                                        <span class="rv-dcenter-cap">访问域名组</span>
                                                         <span class="rv-gchips">
                                                             <span v-for="gid in ruleEditor.rule.domainGroupIds" :key="gid" class="rv-gchip">[[ groupName(gid) ]]</span>
                                                             <span v-if="!ruleEditor.rule.domainGroupIds.length" class="rv-gchip is-empty">未选择</span>
