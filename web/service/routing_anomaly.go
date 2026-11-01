@@ -25,6 +25,13 @@ import (
 // 按代次常驻缓存，每分钟扫描；大规则的匹配器每次扫描时临时构建、用完即释放，
 // 由每 10 分钟的任务扫描。两档各有独立的 (time,id) 游标。
 //
+// 窗口边界：摘要按小时分桶，丢弃的是早于 now-24h 所在小时的桶，所以列表上的窗口实际是
+// 24~25 小时；流量走向图的日志证据从精确的 now-24h 起算。两边在窗口边缘最多差出一小时
+// 的连接，这是分桶换来的内存上界，不去对齐。
+//
+// 游标按 (time, id) 前进：系统时钟向回跳时，回跳后写入的行 time 比游标小，会被跳过
+// 直到时钟追过游标——这段时间的走错不会进摘要（流量走向图按需查询不受影响）。
+//
 // 锁：扫描不取 verifyMu（不与核心验证互斥），也不碰包级 lock（不取运行时快照）。
 
 const (
@@ -364,63 +371,19 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 		return fmt.Errorf("读取访问日志失败：%w", err)
 	}
 
-	matchers := map[int]*groupMatcher{}
+	sc := &anomalyScan{
+		rows:       rows,
+		cutoff:     anomalyCutoffKey(now),
+		watermarks: watermarks,
+		ignore:     ignore,
+		deltas:     map[int]map[int64]*anomalyBucket{},
+	}
 	if large {
-		// 大规则的匹配器只活在这一轮：同组序列的规则共用一个，函数返回即释放。
-		byKey := map[string]*groupMatcher{}
-		for _, p := range classRules {
-			m, ok := byKey[p.groupKey]
-			if !ok {
-				m = buildLargeMatcher(p)
-				byKey[p.groupKey] = m
-			}
-			if m != nil {
-				matchers[p.ruleId] = m
-			}
-		}
+		sc.scanLarge(classRules)
 	} else {
-		for _, p := range classRules {
-			matchers[p.ruleId] = p.matcher
-		}
+		sc.accumulate(classRules, func(p *anomalyRulePlan) *groupMatcher { return p.matcher })
 	}
-
-	cutoff := anomalyCutoffKey(now)
-	deltas := map[int]map[int64]*anomalyBucket{}
-	for i := range rows {
-		r := &rows[i]
-		if !r.Accepted || r.Time/anomalyBucketMs < cutoff {
-			continue
-		}
-		pos := logCursor{Time: r.Time, Id: r.Id}
-		head := routeHead(r.Route)
-		for _, p := range classRules {
-			m := matchers[p.ruleId]
-			if m == nil || !p.coverage[r.InboundId] || r.Time < ignore[p.ruleId] {
-				continue
-			}
-			if wm, ok := watermarks[p.ruleId]; ok && !wm.less(pos) {
-				continue // 规则换档前在另一档已计过
-			}
-			if match, _ := judgeSample(p.expected, head, false, p.defaultTag); match {
-				continue
-			}
-			if !m.Match(r.Target) {
-				continue
-			}
-			byKey := deltas[p.ruleId]
-			if byKey == nil {
-				byKey = map[int64]*anomalyBucket{}
-				deltas[p.ruleId] = byKey
-			}
-			key := r.Time / anomalyBucketMs
-			b := byKey[key]
-			if b == nil {
-				b = newAnomalyBucket()
-				byKey[key] = b
-			}
-			b.add(r.InboundId, head, 1, r.Time)
-		}
-	}
+	deltas := sc.deltas
 
 	next := cursor
 	if len(rows) > 0 {
@@ -457,6 +420,108 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 		}
 	}
 	return nil
+}
+
+// anomalyScan 是一轮扫描在锁外的工作区：已读出的行、扫描开始时的水位与忽略时刻快照，
+// 以及本轮累出的增量（合并进摘要时再持锁）。
+type anomalyScan struct {
+	rows       []model.AccessLog
+	cutoff     int64
+	watermarks map[int]logCursor
+	ignore     map[int]int64
+	deltas     map[int]map[int64]*anomalyBucket
+}
+
+// candidate 判断一行是否可能是规则 p 的异常：除「目标属于规则域名组」以外的全部条件。
+// 先做这些廉价判断，匹配器只对剩下的行调用；大规则据此决定这一轮要不要构建匹配器。
+func (sc *anomalyScan) candidate(p *anomalyRulePlan, r *model.AccessLog, head string) bool {
+	if !r.Accepted || r.Time/anomalyBucketMs < sc.cutoff {
+		return false
+	}
+	if !p.coverage[r.InboundId] || r.Time < sc.ignore[p.ruleId] {
+		return false
+	}
+	if wm, ok := sc.watermarks[p.ruleId]; ok && !wm.less(logCursor{Time: r.Time, Id: r.Id}) {
+		return false // 规则换档前在另一档已计过
+	}
+	match, _ := judgeSample(p.expected, head, false, p.defaultTag)
+	return !match
+}
+
+// accumulate 用给定的匹配器把行累加进 rules 的增量。匹配器为 nil 的规则跳过。
+func (sc *anomalyScan) accumulate(rules []*anomalyRulePlan, matcherOf func(*anomalyRulePlan) *groupMatcher) {
+	for i := range sc.rows {
+		r := &sc.rows[i]
+		head := routeHead(r.Route)
+		for _, p := range rules {
+			m := matcherOf(p)
+			if m == nil || !sc.candidate(p, r, head) || !m.Match(r.Target) {
+				continue
+			}
+			byKey := sc.deltas[p.ruleId]
+			if byKey == nil {
+				byKey = map[int64]*anomalyBucket{}
+				sc.deltas[p.ruleId] = byKey
+			}
+			key := r.Time / anomalyBucketMs
+			b := byKey[key]
+			if b == nil {
+				b = newAnomalyBucket()
+				byKey[key] = b
+			}
+			b.add(r.InboundId, head, 1, r.Time)
+		}
+	}
+}
+
+// anomalyLargeTrace 只给测试观察大规则匹配器的生命周期（"build"/"release" + 组序列），
+// 生产环境为 nil。
+var anomalyLargeTrace func(event, groupKey string)
+
+// scanLarge 按组序列逐个处理大规则：构建一个匹配器、走完共用它的规则、释放，再建下一个，
+// 任一时刻至多一个大匹配器存活（设计 §4.3 按一次构建估算内存）。本轮没有任何候选行的
+// 组序列不构建。
+func (sc *anomalyScan) scanLarge(rules []*anomalyRulePlan) {
+	var keys []string
+	byKey := map[string][]*anomalyRulePlan{}
+	for _, p := range rules {
+		if _, ok := byKey[p.groupKey]; !ok {
+			keys = append(keys, p.groupKey)
+		}
+		byKey[p.groupKey] = append(byKey[p.groupKey], p)
+	}
+	for _, key := range keys {
+		sc.scanLargeKey(key, byKey[key])
+	}
+}
+
+func (sc *anomalyScan) scanLargeKey(key string, rules []*anomalyRulePlan) {
+	if !sc.anyCandidate(rules) {
+		return
+	}
+	if anomalyLargeTrace != nil {
+		anomalyLargeTrace("build", key)
+		defer anomalyLargeTrace("release", key)
+	}
+	m := buildLargeMatcher(rules[0])
+	if m == nil {
+		return
+	}
+	sc.accumulate(rules, func(*anomalyRulePlan) *groupMatcher { return m })
+	// m 随函数返回不再被引用，下一个组序列构建前即可回收。
+}
+
+func (sc *anomalyScan) anyCandidate(rules []*anomalyRulePlan) bool {
+	for i := range sc.rows {
+		r := &sc.rows[i]
+		head := routeHead(r.Route)
+		for _, p := range rules {
+			if sc.candidate(p, r, head) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pruneAnomaliesLocked 丢弃过期桶、停用/删除规则的摘要与水位、已删除规则的忽略时刻。
@@ -557,6 +622,17 @@ func (s *RoutingAuditService) buildAnomalyPlans(enabled []*model.RoutingRule) (*
 	}
 	defer sh.close()
 
+	large, smallGroups := classifyAnomalyRules(enabled)
+	// 只有小规则需要完整条目（建常驻匹配器）。其余组在 planRule 的组缓存里预置一个
+	// 不带条目的占位，planRule 就不会把大组的十几万条连同样例读进来并在整个重建期间持有；
+	// 大规则只用到它的期望出站与组序列，条目在扫描时临时读。占位的 skip 与真实取法一致
+	// （classifyAnomalyRules 只为 groupConditionsOf 返回 ok 的组给出条目数）。
+	for gid, ok := range smallGroups {
+		if !ok {
+			sh.groups[gid] = &groupConditions{}
+		}
+	}
+
 	set := &anomalyPlanSet{matchers: map[string]*groupMatcher{}, enabledIds: make(map[int]bool, len(enabled))}
 	for _, rule := range enabled {
 		set.enabledIds[rule.Id] = true
@@ -570,7 +646,7 @@ func (s *RoutingAuditService) buildAnomalyPlans(enabled []*model.RoutingRule) (*
 			defaultTag: plan.defaultTag,
 			coverage:   map[int]bool{},
 			groupKey:   plan.groupKey,
-			large:      len(plan.domains)+len(plan.cidrs) > auditLargeThreshold,
+			large:      large[rule.Id],
 		}
 		for _, part := range strings.Split(plan.groupKey, ",") {
 			if gid, err := strconv.Atoi(part); err == nil {
@@ -608,4 +684,73 @@ func (s *RoutingAuditService) buildAnomalyPlans(enabled []*model.RoutingRule) (*
 		set.rules = append(set.rules, p)
 	}
 	return set, nil
+}
+
+// classifyAnomalyRules 按「规则引用的全部组合并后的条目数（手工 + 订阅，域名 + IP 段）」
+// 把规则分成大小两档，结果与对 planRule 的合并结果取 len(domains)+len(cidrs) 完全一致，
+// 但不同时持有所有组的条目：逐组读一次只记条目数、列表随即释放。合并是有序去重，
+// 合并后的条目数介于「最大的单组」与「各组之和」之间，只有落在两者之间跨过门槛的规则
+// 才需要真的合并一次（同样用完即释放）。
+//
+// 返回 large（ruleId → 是否大规则）与 groups（可用组 id → 是否被某条小规则引用）。
+func classifyAnomalyRules(enabled []*model.RoutingRule) (large map[int]bool, groups map[int]bool) {
+	sizes := map[int]int{} // 只含 groupConditionsOf 返回 ok 的组
+	seen := map[int]bool{}
+	usedOf := make(map[int][]int, len(enabled))
+	for _, rule := range enabled {
+		gids, err := DecodeDomainGroupIds(rule.DomainGroupIds)
+		if err != nil {
+			continue // buildRule 会丢弃这条规则
+		}
+		for _, gid := range gids {
+			if !seen[gid] {
+				seen[gid] = true
+				if domains, cidrs, ok := groupConditionsOf(gid); ok {
+					sizes[gid] = len(domains) + len(cidrs)
+				}
+			}
+			if _, ok := sizes[gid]; ok {
+				usedOf[rule.Id] = append(usedOf[rule.Id], gid)
+			}
+		}
+	}
+
+	large = make(map[int]bool, len(enabled))
+	groups = make(map[int]bool, len(sizes))
+	for gid := range sizes {
+		groups[gid] = false
+	}
+	for _, rule := range enabled {
+		used := usedOf[rule.Id]
+		sum, biggest := 0, 0
+		for _, gid := range used {
+			sum += sizes[gid]
+			biggest = max(biggest, sizes[gid])
+		}
+		switch {
+		case sum <= auditLargeThreshold:
+		case biggest > auditLargeThreshold:
+			large[rule.Id] = true
+		default:
+			large[rule.Id] = mergedEntryCount(used) > auditLargeThreshold
+		}
+		if !large[rule.Id] {
+			for _, gid := range used {
+				groups[gid] = true
+			}
+		}
+	}
+	return large, groups
+}
+
+// mergedEntryCount 按 planRule 的取法合并几个组并返回条目数，列表不外传。
+func mergedEntryCount(gids []int) int {
+	var domainLists, cidrLists [][]string
+	for _, gid := range gids {
+		if domains, cidrs, ok := groupConditionsOf(gid); ok {
+			domainLists = append(domainLists, domains)
+			cidrLists = append(cidrLists, cidrs)
+		}
+	}
+	return len(MergeDomains(domainLists...)) + len(MergeDomains(cidrLists...))
 }

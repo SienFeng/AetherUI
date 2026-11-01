@@ -2,6 +2,7 @@ package service
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,5 +334,124 @@ func TestAnomalyCaps(t *testing.T) {
 	}
 	if got.Count != 67 {
 		t.Errorf("Count = %d，期望 67（含超出上限的出站）", got.Count)
+	}
+}
+
+// traceLargeMatchers 记录大规则匹配器的构建/释放，并统计同一时刻存活的最大个数。
+func traceLargeMatchers(t *testing.T) (events *[]string, maxLive *int) {
+	t.Helper()
+	events, maxLive = &[]string{}, new(int)
+	live := 0
+	anomalyLargeTrace = func(event, key string) {
+		*events = append(*events, event+":"+key)
+		if event == "build" {
+			live++
+		} else {
+			live--
+		}
+		*maxLive = max(*maxLive, live)
+	}
+	t.Cleanup(func() { anomalyLargeTrace = nil })
+	return events, maxLive
+}
+
+func addAnomalyRule(t *testing.T, f *anomalyFixture, inboundIds []int, groups ...*model.DomainGroup) *model.RoutingRule {
+	t.Helper()
+	ids := []int{}
+	for _, g := range groups {
+		ids = append(ids, g.Id)
+	}
+	rule := &model.RoutingRule{
+		Remark: "anomaly2", InboundIds: mustEncodeIds(t, inboundIds),
+		DomainGroupIds: mustEncodeGroupIds(t, ids),
+		Action:         model.ActionProxy, OutboundId: f.node.Id, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(rule); err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+	return rule
+}
+
+// 两条大规则（不同组序列）：匹配器逐个构建、用完释放，任一时刻至多一个存活。
+func TestAnomalyLargeMatchersBuiltOneAtATime(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com", "domain:chatgpt.com", "full:x.ai"}, nil)
+	g2 := newTestGroupWithDomains(t, "Claude", []string{"domain:claude.ai", "domain:anthropic.com", "full:y.ai"})
+	rule2 := addAnomalyRule(t, f, []int{f.b.Id}, g2)
+	auditLargeThreshold = 2
+	insertLogs(t, 1, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+	r := wrongRow(f.b.Id, anomalyNow.Add(-time.Hour))
+	r.Target = "api.anthropic.com:443"
+	insertLogs(t, 1, r)
+	events, maxLive := traceLargeMatchers(t)
+
+	mustScan(t, f.svc, anomalyNow, true)
+	if *maxLive != 1 || len(*events) != 4 {
+		t.Fatalf("应逐个构建并释放（至多 1 个存活），events=%v maxLive=%d", *events, *maxLive)
+	}
+	for i, e := range *events {
+		if want := []string{"build", "release"}[i%2]; !strings.HasPrefix(e, want+":") {
+			t.Fatalf("构建与释放应交替: %v", *events)
+		}
+	}
+	if f.svc.Anomaly(f.rule.Id, anomalyNow).Count != 1 || f.svc.Anomaly(rule2.Id, anomalyNow).Count != 1 {
+		t.Errorf("两条大规则都应计入 1 次异常")
+	}
+}
+
+// 没有候选行（只有不覆盖的入站、走对的、被拒绝的、窗口外的行）时不构建大匹配器。
+func TestAnomalyLargeScanSkipsBuildWithoutCandidates(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com", "domain:chatgpt.com", "full:x.ai"}, nil)
+	auditLargeThreshold = 2
+	events, _ := traceLargeMatchers(t)
+
+	mustScan(t, f.svc, anomalyNow, true) // 没有任何行
+	at := anomalyNow.Add(-time.Hour)
+	insertLogs(t, 1, wrongRow(f.b.Id, at))                                                                                                     // 入站不在覆盖范围
+	insertLogs(t, 1, model.AccessLog{Time: at.UnixMilli(), InboundId: f.a.Id, Target: "api.openai.com:443", Route: "a-ui-us", Accepted: true}) // 走对
+	rejected := wrongRow(f.a.Id, at)
+	rejected.Accepted = false
+	insertLogs(t, 1, rejected)
+	mustScan(t, f.svc, anomalyNow.Add(time.Minute), true)
+	if len(*events) != 0 {
+		t.Fatalf("没有候选行时不应构建匹配器: %v", *events)
+	}
+}
+
+// 分档按合并（去重）后的条目数：两个组各 2 条、重叠 1 条 → 合并 3 条为大；完全重叠 → 2 条为小。
+func TestAnomalyClassifyUsesMergedCount(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+	g1 := newTestGroupWithDomains(t, "g1", []string{"domain:a.com", "domain:b.com"})
+	g2 := newTestGroupWithDomains(t, "g2", []string{"domain:b.com", "domain:c.com"})
+	g3 := newTestGroupWithDomains(t, "g3", []string{"domain:x.com", "domain:y.com"})
+	g4 := newTestGroupWithDomains(t, "g4", []string{"domain:y.com", "domain:x.com"})
+	overlap := addAnomalyRule(t, f, []int{f.b.Id}, g1, g2)
+	same := addAnomalyRule(t, f, []int{f.b.Id}, g3, g4)
+	auditLargeThreshold = 2
+
+	plans, _, err := f.svc.anomalyPlanSet()
+	if err != nil {
+		t.Fatalf("anomalyPlanSet: %v", err)
+	}
+	got := map[int]*anomalyRulePlan{}
+	for _, p := range plans.rules {
+		got[p.ruleId] = p
+	}
+	if p := got[overlap.Id]; p == nil || !p.large || p.matcher != nil || len(p.groupIds) != 2 {
+		t.Errorf("合并后 3 条应为大规则: %+v", p)
+	}
+	if p := got[same.Id]; p == nil || p.large || p.matcher == nil {
+		t.Errorf("合并后 2 条应为小规则且有常驻匹配器: %+v", p)
+	}
+	if p := got[f.rule.Id]; p == nil || p.large || p.matcher == nil {
+		t.Errorf("单组 1 条应为小规则: %+v", p)
+	}
+
+	// 大规则的组在计划重建时只放了占位，扫描时仍要按真实条目判定。
+	r := wrongRow(f.b.Id, anomalyNow.Add(-time.Hour))
+	r.Target = "www.c.com:443"
+	insertLogs(t, 1, r)
+	mustScan(t, f.svc, anomalyNow, true)
+	if n := f.svc.Anomaly(overlap.Id, anomalyNow).Count; n != 1 {
+		t.Errorf("大规则应按真实条目命中 c.com: Count=%d", n)
 	}
 }
