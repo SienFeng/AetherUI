@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,8 @@ type RuleVerifyResult struct {
 	AccessLog AccessLogState   `json:"accessLog"`
 	Truncated bool             `json:"truncated"`
 	Users     []UserVerify     `json:"users"`
+	// ApplyGen 是取快照那一刻的应用代次（XrayApplyGeneration），审计缓存据此判新旧。
+	ApplyGen uint64 `json:"applyGen"`
 }
 
 // ExpectedOutbound 是规则期望的出口。Action 为 proxy|block|direct。
@@ -416,6 +419,7 @@ func hasExample(list []string, s string) bool {
 const (
 	verifyRPCTimeout         = 3 * time.Second
 	verifyBudget             = 20 * time.Second
+	verifyAllBudget          = 60 * time.Second // 后台全量验证一整轮（审计设计 §3.3）
 	verifyPerGroupSamples    = 2
 	verifyPerUserSamples     = 6
 	verifyGlobalInboundLimit = 50
@@ -438,6 +442,12 @@ const (
 // routeFunc 是对核心做一次 TestRoute 的函数，签名同 XrayAPI.TestRoute。
 type routeFunc func(ctx context.Context, inboundTag, domain string, ip net.IP) (tag string, noMatch bool, err error)
 
+// VerifyAll 的两种「本轮不出结果」：调用方据此跳过本轮、不动缓存，下一轮重试。
+var (
+	ErrVerifyBusy   = errors.New("已有验证在进行")
+	ErrCoreNotReady = errors.New("xray 核心未就绪")
+)
+
 // verifyMu 保证同一时刻只有一个验证在跑：管理员连点时不把核心打满。
 // 与包级 lock 无关——lock 只由 RuntimeSnapshot 瞬时持有。
 var verifyMu sync.Mutex
@@ -453,6 +463,9 @@ type RoutingVerifyService struct {
 	// 访问日志两处读取的注入点，nil 时用真实实现；测试用它制造读取失败。
 	accessLogEnabled func() (bool, error)
 	groupLogs        func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
+
+	// 合成当前配置的注入点（只在需要默认出站 tag 时调用），nil 时用 GetXrayConfig。
+	xrayConfig func() (*xray.Config, error)
 }
 
 // verifyUser 是待验证的一个用户（入站）。
@@ -471,22 +484,19 @@ type verifyPlan struct {
 	users      []verifyUser
 	truncated  bool
 	labelOf    func(tag string) string
+	groupKey   string // 实际参与的组 id 序列，访问日志匹配器按它在一轮内复用
 }
 
 // Verify 验证一条规则。规则不存在返回 error；其余情况（含规则停用、不会写进配置、
 // 核心不可用）都返回结果，由 Core.State 说明原因。
+//
+// 与 VerifyAll 走同一段 prepareShared + verifyOne，按需与后台的口径不会漂移。
+// 结果带核心证据（核心在跑、不忙、控制面连得上、没有超出预算）时写回审计缓存，
+// 页面与列表看到同一份。
 func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
-	now := time.Now()
-	if s.now != nil {
-		now = s.now()
-	}
-	res := &RuleVerifyResult{
-		RuleId:    ruleId,
-		CheckedAt: now.UnixMilli(),
-		AccessLog: AccessLogState{WindowHours: verifyLogWindowHours},
-		Users:     []UserVerify{},
-	}
+	now := s.nowTime()
 	if !verifyMu.TryLock() {
+		res := newRuleVerifyResult(ruleId, now)
 		res.Core = CoreState{State: coreStateBusy, Message: "已有验证在进行，请稍后"}
 		return res, nil
 	}
@@ -497,73 +507,319 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 		return nil, err
 	}
 	if !rule.Enable {
+		res := newRuleVerifyResult(ruleId, now)
 		res.Core = CoreState{State: coreStateError, Message: "规则已停用，不会写进核心配置"}
 		return res, nil
 	}
 
-	runtime := s.runtime
-	if runtime == nil {
-		runtime = (&XrayService{}).RuntimeSnapshot
-	}
-	rt := runtime()
-
-	plan, reason := s.planRule(rule, rt)
-	if reason != "" {
-		res.Core = CoreState{State: coreStateError, Message: reason}
+	sh, err := s.prepareShared(s.snapshot())
+	if err != nil {
+		res := newRuleVerifyResult(ruleId, now)
+		res.Core = CoreState{State: coreStateError, Message: err.Error()}
 		return res, nil
 	}
-	res.Expected = plan.expected
-	res.Truncated = plan.truncated
+	defer sh.close()
 
-	res.Core = coreStateOf(rt)
-	route := s.route
-	if route == nil && (res.Core.State == coreStateOK || res.Core.State == coreStatePending) {
-		api := &xray.XrayAPI{}
-		if err := api.Init(rt.APIPort); err != nil {
-			res.Core = CoreState{State: coreStateError, Message: "连接核心控制面失败：" + err.Error()}
-		} else {
-			defer api.Close()
-			route = api.TestRoute
-		}
+	budgetCtx, cancel := context.WithTimeout(context.Background(), s.budgetOr(verifyBudget))
+	defer cancel()
+	res := s.verifyOne(budgetCtx, sh, rule, now)
+	// 与 VerifyAll 同口径：预算用完时剩下的样例只是「超时」，不拿它顶掉缓存里的旧结论。
+	if sh.ready && budgetCtx.Err() == nil {
+		storeVerifyResult(res)
 	}
-	canRoute := res.Core.State == coreStateOK || res.Core.State == coreStatePending
+	return res, nil
+}
+
+// VerifyAll 对所有启用规则跑一轮验证，返回各规则结果与本轮使用的应用代次。
+// 只读、与 Verify 互斥：拿不到 verifyMu（用户正在手动验证）或核心忙返回 ErrVerifyBusy；
+// 核心未运行或控制面连不上返回 ErrCoreNotReady。出错时不返回任何结果，调用方据此不动缓存。
+//
+// 整轮共用一个预算与一个 API 连接；入站、出站映射、节点、访问日志开关、每个域名组的
+// 条目与样例在一轮内只算一次。预算用完时，没跑完的规则不进结果（保留旧结果，
+// 不用一份全是「超时」的结论顶掉它）。
+func (s *RoutingVerifyService) VerifyAll() (map[int]*RuleVerifyResult, uint64, error) {
+	if !verifyMu.TryLock() {
+		return nil, 0, ErrVerifyBusy
+	}
+	defer verifyMu.Unlock()
+
+	rt := s.snapshot()
+	switch {
+	case rt.Busy:
+		return nil, 0, ErrVerifyBusy
+	case !rt.Running:
+		return nil, 0, ErrCoreNotReady
+	}
+
+	rules, err := (&RoutingRuleService{}).GetEnabled()
+	if err != nil {
+		return nil, 0, fmt.Errorf("读取分流规则失败：%w", err)
+	}
+	sh, err := s.prepareShared(rt)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer sh.close()
+	if !sh.ready {
+		return nil, 0, fmt.Errorf("%w：%s", ErrCoreNotReady, sh.core.Message)
+	}
+
+	now := s.nowTime()
+	budgetCtx, cancel := context.WithTimeout(context.Background(), s.budgetOr(verifyAllBudget))
+	defer cancel()
+	out := make(map[int]*RuleVerifyResult, len(rules))
+	for i, rule := range rules {
+		res := s.verifyOne(budgetCtx, sh, rule, now)
+		if budgetCtx.Err() != nil {
+			// 这条规则跑到一半预算就用完了，剩下的样例被记成「超时」，不是有效结论。
+			logger.Warning("路由全量验证：整轮预算用完，", len(rules)-i, "条规则本轮没有新结果")
+			break
+		}
+		out[rule.Id] = res
+	}
+	return out, rt.ApplyGen, nil
+}
+
+func (s *RoutingVerifyService) nowTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *RoutingVerifyService) snapshot() XrayRuntime {
+	if s.runtime != nil {
+		return s.runtime()
+	}
+	return (&XrayService{}).RuntimeSnapshot()
+}
+
+func (s *RoutingVerifyService) budgetOr(def time.Duration) time.Duration {
+	if s.budget > 0 {
+		return s.budget
+	}
+	return def
+}
+
+func newRuleVerifyResult(ruleId int, now time.Time) *RuleVerifyResult {
+	return &RuleVerifyResult{
+		RuleId:    ruleId,
+		CheckedAt: now.UnixMilli(),
+		AccessLog: AccessLogState{WindowHours: verifyLogWindowHours},
+		Users:     []UserVerify{},
+	}
+}
+
+// verifyShared 是一次验证（单条或一整轮）里与具体规则无关、只需算一次的上下文。
+// 只在持有 verifyMu 的单个 goroutine 里使用，惰性缓存不加锁。
+type verifyShared struct {
+	rt       XrayRuntime
+	core     CoreState // 核心级状态；控制面连不上时为 error 并带原因
+	route    routeFunc // core 为 ok/pending 时非 nil
+	closeAPI func()
+	// ready 表示核心在跑、不忙、控制面就绪：本次结果有核心证据，可以写进审计缓存。
+	ready      bool
+	rpcTimeout time.Duration
+
+	inboundTags map[int]string // 启用入站 id→tag，与生成期同一套过滤
+	inbounds    []*model.Inbound
+	usable      map[int]string // buildOutbounds 实际写进配置的节点 id→tag
+	nodes       map[int]*model.OutboundNode
+	remarkByTag map[string]string // 含停用节点：访问日志里可能还留着它们的 tag
+
+	xrayConfig    func() (*xray.Config, error)
+	cfgDefaultTag *string // 惰性：只有 direct 规则且快照里没有默认 tag 时才去合成配置
+
+	logEnabled bool
+	logErr     string
+	groupLogs  func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
+
+	groups   map[int]*groupConditions
+	matchers map[string]*matcherEntry
+	logRows  map[int]*logRowsEntry
+}
+
+// groupConditions 是一个域名组合并后的条目及其样例；skip 表示 buildRule 会剔掉这个组。
+type groupConditions struct {
+	domains, cidrs []string
+	targets        []sampleTarget
+	skip           bool
+}
+
+type matcherEntry struct {
+	m   *groupMatcher
+	err error
+}
+
+type logRowsEntry struct {
+	rows      []TargetRouteCount
+	truncated bool
+	err       error
+}
+
+func (sh *verifyShared) close() {
+	if sh.closeAPI != nil {
+		sh.closeAPI()
+	}
+}
+
+// prepareShared 读库与连核心控制面。读库失败返回 error（原因已带前缀）；控制面连不上
+// 不算 error，而是写进 core（State=error），由调用方决定是给出结果还是报未就绪。
+func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, error) {
+	inbounds, err := (&InboundService{}).GetAllInbounds()
+	if err != nil {
+		return nil, fmt.Errorf("读取入站失败：%w", err)
+	}
+	sort.Slice(inbounds, func(i, j int) bool { return inbounds[i].Id < inbounds[j].Id })
+
+	// 传空模板只为拿到「实际会写进配置的节点」映射，与生成期同一套过滤。
+	_, usable, _, err := (&RoutingInjector{}).buildOutbounds(nil)
+	if err != nil {
+		return nil, fmt.Errorf("读取出站节点失败：%w", err)
+	}
+	nodeList, err := (&OutboundNodeService{}).GetAll()
+	if err != nil {
+		return nil, fmt.Errorf("读取出站节点失败：%w", err)
+	}
+
+	sh := &verifyShared{
+		rt:          rt,
+		core:        coreStateOf(rt),
+		inbounds:    inbounds,
+		inboundTags: enabledInboundTags(inbounds),
+		usable:      usable,
+		nodes:       make(map[int]*model.OutboundNode, len(nodeList)),
+		remarkByTag: make(map[string]string, len(nodeList)),
+		xrayConfig:  s.xrayConfig,
+		groupLogs:   s.groupLogs,
+		groups:      map[int]*groupConditions{},
+		matchers:    map[string]*matcherEntry{},
+		logRows:     map[int]*logRowsEntry{},
+		rpcTimeout:  s.rpcTimeout,
+	}
+	for _, n := range nodeList {
+		sh.nodes[n.Id] = n
+		sh.remarkByTag[n.Tag] = nodeLabel(n)
+	}
+	if sh.xrayConfig == nil {
+		sh.xrayConfig = (&XrayService{}).GetXrayConfig
+	}
+	if sh.groupLogs == nil {
+		sh.groupLogs = (&AccessLogService{}).GroupByTargetRoute
+	}
+	if sh.rpcTimeout <= 0 {
+		sh.rpcTimeout = verifyRPCTimeout
+	}
 
 	accessLogEnabled := s.accessLogEnabled
 	if accessLogEnabled == nil {
 		accessLogEnabled = (&SettingService{}).GetAccessLogEnable
 	}
-	groupLogs := s.groupLogs
-	if groupLogs == nil {
-		groupLogs = (&AccessLogService{}).GroupByTargetRoute
-	}
 	// 读取失败一律写进 Error，不伪装成「未开启」或「没有连接」。
-	logEnabled, err := accessLogEnabled()
-	if err != nil {
+	if sh.logEnabled, err = accessLogEnabled(); err != nil {
 		logger.Warning("路由验证：读取访问日志开关失败：", err)
-		res.AccessLog.Error = "读取访问日志开关失败：" + err.Error()
-		logEnabled = false
-	}
-	res.AccessLog.Enabled = logEnabled
-	var matcher *groupMatcher
-	if logEnabled {
-		if matcher, err = newGroupMatcher(plan.domains, plan.cidrs); err != nil {
-			// 匹配器建不出来就没有日志证据，但不影响核心那一路。
-			logger.Warning("路由验证：构造访问日志匹配器失败，rule id:", rule.Id, "err:", err)
-			res.AccessLog.Error = "无法判断访问日志里哪些连接属于本规则：" + err.Error()
-			matcher = nil
-		}
+		sh.logErr = "读取访问日志开关失败：" + err.Error()
+		sh.logEnabled = false
 	}
 
-	rpcTimeout := s.rpcTimeout
-	if rpcTimeout <= 0 {
-		rpcTimeout = verifyRPCTimeout
+	// 控制面放在最后连：前面读库失败时不留下一个没人关的连接。
+	sh.route = s.route
+	if sh.core.State == coreStateOK || sh.core.State == coreStatePending {
+		if sh.route == nil {
+			api := &xray.XrayAPI{}
+			if err := api.Init(rt.APIPort); err != nil {
+				sh.core = CoreState{State: coreStateError, Message: "连接核心控制面失败：" + err.Error()}
+			} else {
+				sh.route = api.TestRoute
+				sh.closeAPI = api.Close
+			}
+		}
+		sh.ready = sh.core.State != coreStateError
 	}
-	budget := s.budget
-	if budget <= 0 {
-		budget = verifyBudget
+	return sh, nil
+}
+
+// configDefaultTag 取当前生成配置的默认出站 tag，一轮内只合成一次配置。
+func (sh *verifyShared) configDefaultTag() string {
+	if sh.cfgDefaultTag == nil {
+		tag := ""
+		if cfg, err := sh.xrayConfig(); err == nil {
+			tag = defaultOutboundTag(cfg)
+		}
+		sh.cfgDefaultTag = &tag
 	}
-	budgetCtx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
+	return *sh.cfgDefaultTag
+}
+
+// group 返回一个域名组的条目与样例，一轮内每个组只读库、取样一次。
+func (sh *verifyShared) group(gid int) *groupConditions {
+	if g, ok := sh.groups[gid]; ok {
+		return g
+	}
+	g := &groupConditions{skip: true}
+	if domains, cidrs, ok := groupConditionsOf(gid); ok {
+		g = &groupConditions{
+			domains: domains,
+			cidrs:   cidrs,
+			targets: sampleTargets(domains, cidrs, verifyPerGroupSamples),
+		}
+	}
+	sh.groups[gid] = g
+	return g
+}
+
+// matcher 返回一条规则的访问日志匹配器，按规则实际引用的组序列缓存。
+// 刻意不按组各建一个再取「任一命中」：取反条目（!geoip:cn）在合并列表里是对并集取反，
+// 拆成逐组再 OR 就成了对各组分别取反，语义与核心里那条合并后的规则不一致。
+func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
+	if e, ok := sh.matchers[plan.groupKey]; ok {
+		return e
+	}
+	m, err := newGroupMatcher(plan.domains, plan.cidrs)
+	e := &matcherEntry{m: m, err: err}
+	sh.matchers[plan.groupKey] = e
+	return e
+}
+
+// rows 返回一个入站在日志窗口内的分组统计；与规则无关，一轮内每个入站只查一次。
+func (sh *verifyShared) rows(inboundId int, sinceMs int64) *logRowsEntry {
+	if e, ok := sh.logRows[inboundId]; ok {
+		return e
+	}
+	rows, truncated, err := sh.groupLogs(inboundId, sinceMs, verifyLogGroupLimit)
+	e := &logRowsEntry{rows: rows, truncated: truncated, err: err}
+	sh.logRows[inboundId] = e
+	return e
+}
+
+// verifyOne 对一条规则下结论。Verify 与 VerifyAll 共用这一份判定。
+// budgetCtx 是调用方的整体预算（单条 20s，整轮 60s）。
+func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifyShared, rule *model.RoutingRule, now time.Time) *RuleVerifyResult {
+	res := newRuleVerifyResult(rule.Id, now)
+	res.ApplyGen = sh.rt.ApplyGen
+
+	plan, reason := s.planRule(sh, rule)
+	if reason != "" {
+		res.Core = CoreState{State: coreStateError, Message: reason}
+		return res
+	}
+	res.Expected = plan.expected
+	res.Truncated = plan.truncated
+	res.Core = sh.core
+	canRoute := res.Core.State == coreStateOK || res.Core.State == coreStatePending
+
+	res.AccessLog.Enabled = sh.logEnabled
+	res.AccessLog.Error = sh.logErr
+	var matcher *groupMatcher
+	if sh.logEnabled {
+		if e := sh.matcher(plan); e.err != nil {
+			// 匹配器建不出来就没有日志证据，但不影响核心那一路。
+			logger.Warning("路由验证：构造访问日志匹配器失败，rule id:", rule.Id, "err:", e.err)
+			res.AccessLog.Error = "无法判断访问日志里哪些连接属于本规则：" + e.err.Error()
+		} else {
+			matcher = e.m
+		}
+	}
 
 	sinceMs := now.Add(-verifyLogWindowHours * time.Hour).UnixMilli()
 	for _, vu := range plan.users {
@@ -582,18 +838,17 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 			targets = ipOnlyTargets(plan.targets)
 		}
 		if canRoute {
-			u.Samples = runSamples(budgetCtx, route, rpcTimeout, vu.inbound.Tag, targets, plan)
+			u.Samples = runSamples(budgetCtx, sh.route, sh.rpcTimeout, vu.inbound.Tag, targets, plan)
 		}
 		if matcher != nil {
-			rows, truncated, err := groupLogs(vu.inbound.Id, sinceMs, verifyLogGroupLimit)
-			if err != nil {
+			if e := sh.rows(vu.inbound.Id, sinceMs); e.err != nil {
 				// 只带 Error 的证据：Others 为空、Matched 为 0，combineVerdict 既不会因它
 				// 判 mismatch，也不会把它当作真实连接数。
-				logger.Warning("路由验证：读取访问日志失败，inbound id:", vu.inbound.Id, "err:", err)
-				u.Log = &LogEvidence{Others: []LogOther{}, Error: "读取访问日志失败：" + err.Error()}
+				logger.Warning("路由验证：读取访问日志失败，inbound id:", vu.inbound.Id, "err:", e.err)
+				u.Log = &LogEvidence{Others: []LogOther{}, Error: "读取访问日志失败：" + e.err.Error()}
 			} else {
-				ev := buildLogEvidence(rows, matcher, plan.expected, plan.defaultTag, plan.labelOf)
-				ev.Truncated = truncated
+				ev := buildLogEvidence(e.rows, matcher, plan.expected, plan.defaultTag, plan.labelOf)
+				ev.Truncated = e.truncated
 				u.Log = &ev
 			}
 		}
@@ -612,7 +867,7 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 		}
 		res.Users = append(res.Users, u)
 	}
-	return res, nil
+	return res
 }
 
 // coreStateOf 把运行时快照映射成核心级状态。pending 仍执行 TestRoute（设计 §3.5）。
@@ -665,55 +920,41 @@ func runSamples(budgetCtx context.Context, route routeFunc, rpcTimeout time.Dura
 	return out
 }
 
-// planRule 从库里推出验证计划；返回非空 reason 表示规则不会写进核心配置，不发 RPC。
+// planRule 从共享上下文推出一条规则的验证计划；返回非空 reason 表示规则不会写进
+// 核心配置，不发 RPC。
 //
 // 「会不会写进配置」直接交给 buildRule 判断，不另写一份：两份判定迟早漂移，
 // 漂移后这里说「可以验证」的规则核心里其实没有。
-func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime) (*verifyPlan, string) {
-	inbounds, err := (&InboundService{}).GetAllInbounds()
-	if err != nil {
-		return nil, "读取入站失败：" + err.Error()
-	}
-	sort.Slice(inbounds, func(i, j int) bool { return inbounds[i].Id < inbounds[j].Id })
-
-	injector := &RoutingInjector{}
-	// 传空模板只为拿到「实际会写进配置的节点」映射，与生成期同一套过滤。
-	_, usable, _, err := injector.buildOutbounds(nil)
-	if err != nil {
-		return nil, "读取出站节点失败：" + err.Error()
-	}
-
+func (s *RoutingVerifyService) planRule(sh *verifyShared, rule *model.RoutingRule) (*verifyPlan, string) {
 	// 默认出站 tag 取核心实际持有的配置；核心没在跑时退回当前生成配置，
 	// 两者都是 tagDefaultOutbound 写出的同一个值，只是前者才是核心眼里的。
-	defaultTag := rt.DefaultTag
+	defaultTag := sh.rt.DefaultTag
 	if defaultTag == "" && rule.Action == model.ActionDirect {
-		if cfg, cfgErr := (&XrayService{}).GetXrayConfig(); cfgErr == nil {
-			defaultTag = defaultOutboundTag(cfg)
-		}
+		defaultTag = sh.configDefaultTag()
 	}
-	if _, _, skip := injector.buildRule(rule, enabledInboundTags(inbounds), usable, defaultTag); skip != nil {
+	if _, _, skip := (&RoutingInjector{}).buildRule(rule, sh.inboundTags, sh.usable, defaultTag); skip != nil {
 		return nil, "本规则不会写进核心配置：" + skip.Error()
 	}
 
 	plan := &verifyPlan{defaultTag: defaultTag}
 	groupIds, _ := DecodeDomainGroupIds(rule.DomainGroupIds) // buildRule 已校验过
-	domainLists, cidrLists := ruleGroupConditions(groupIds)
-	for i := range domainLists {
-		plan.targets = append(plan.targets, sampleTargets(domainLists[i], cidrLists[i], verifyPerGroupSamples)...)
+	var domainLists, cidrLists [][]string
+	var used []string
+	for _, gid := range groupIds {
+		g := sh.group(gid)
+		if g.skip {
+			continue
+		}
+		domainLists = append(domainLists, g.domains)
+		cidrLists = append(cidrLists, g.cidrs)
+		plan.targets = append(plan.targets, g.targets...)
+		used = append(used, strconv.Itoa(gid))
 	}
 	plan.targets = dedupeTargets(plan.targets, verifyPerUserSamples)
 	plan.domains = MergeDomains(domainLists...)
 	plan.cidrs = MergeDomains(cidrLists...)
+	plan.groupKey = strings.Join(used, ",")
 
-	nodes, err := (&OutboundNodeService{}).GetAll()
-	if err != nil {
-		return nil, "读取出站节点失败：" + err.Error()
-	}
-	// 含停用节点：访问日志里可能还留着它们的 tag。
-	remarkByTag := make(map[string]string, len(nodes))
-	for _, n := range nodes {
-		remarkByTag[n.Tag] = nodeLabel(n)
-	}
 	plan.labelOf = func(tag string) string {
 		switch {
 		case tag == "":
@@ -725,7 +966,7 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 		case (defaultTag != "" && tag == defaultTag) || model.IsMeterTag(tag):
 			return labelDefaultOutbound
 		}
-		if label, ok := remarkByTag[tag]; ok {
+		if label, ok := sh.remarkByTag[tag]; ok {
 			return label
 		}
 		return tag
@@ -733,9 +974,9 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 
 	switch rule.Action {
 	case model.ActionProxy:
-		node, err := (&OutboundNodeService{}).Get(rule.OutboundId)
-		if err != nil {
-			return nil, "读取出站节点失败：" + err.Error()
+		node, ok := sh.nodes[rule.OutboundId]
+		if !ok {
+			return nil, "读取出站节点失败：节点不存在"
 		}
 		plan.expected = ExpectedOutbound{Action: rule.Action, Tag: node.Tag, Label: nodeLabel(node)}
 	case model.ActionBlock:
@@ -747,7 +988,7 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 	inboundIds, _ := DecodeInboundIds(rule.InboundIds) // buildRule 已校验过
 	if len(inboundIds) == 0 {
 		// 全局规则：只验证启用的入站，按 id 升序截到上限。
-		for _, in := range inbounds {
+		for _, in := range sh.inbounds {
 			if !in.Enable {
 				continue
 			}
@@ -759,8 +1000,8 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 		}
 		return plan, ""
 	}
-	byId := make(map[int]*model.Inbound, len(inbounds))
-	for _, in := range inbounds {
+	byId := make(map[int]*model.Inbound, len(sh.inbounds))
+	for _, in := range sh.inbounds {
 		byId[in.Id] = in
 	}
 	for _, id := range inboundIds {
@@ -774,41 +1015,35 @@ func (s *RoutingVerifyService) planRule(rule *model.RoutingRule, rt XrayRuntime)
 	return plan, ""
 }
 
-// ruleGroupConditions 按 groupIds 的顺序逐组取合并后的域名与 IP 条目，
-// 与 buildRule 的取法一致：组不存在、数据损坏、两侧都空的组剔除（buildRule 已记过日志）。
-// 返回的两个切片按下标一一对应同一个组。
-func ruleGroupConditions(groupIds []int) (domainLists, cidrLists [][]string) {
-	gs := &DomainGroupService{}
-	for _, gid := range groupIds {
-		group, err := gs.Get(gid)
-		if err != nil {
-			continue
-		}
-		manualDomains, err := DecodeDomains(group.Domains)
-		if err != nil {
-			continue
-		}
-		subscribedDomains, err := DecodeSubscribedDomains(group.SubscribedDomains)
-		if err != nil {
-			continue
-		}
-		manualCidrs, err := DecodeCidrs(group.Cidrs)
-		if err != nil {
-			continue
-		}
-		subscribedCidrs, err := DecodeSubscribedCidrs(group.SubscribedCidrs)
-		if err != nil {
-			continue
-		}
-		domains := MergeDomains(manualDomains, subscribedDomains)
-		cidrs := MergeDomains(manualCidrs, subscribedCidrs)
-		if len(domains) == 0 && len(cidrs) == 0 {
-			continue
-		}
-		domainLists = append(domainLists, domains)
-		cidrLists = append(cidrLists, cidrs)
+// groupConditionsOf 取一个域名组合并后的域名与 IP 条目，与 buildRule 的逐组取法一致：
+// 组不存在、数据损坏、两侧都空的组剔除（ok=false，buildRule 已记过日志）。
+func groupConditionsOf(gid int) (domains, cidrs []string, ok bool) {
+	group, err := (&DomainGroupService{}).Get(gid)
+	if err != nil {
+		return nil, nil, false
 	}
-	return domainLists, cidrLists
+	manualDomains, err := DecodeDomains(group.Domains)
+	if err != nil {
+		return nil, nil, false
+	}
+	subscribedDomains, err := DecodeSubscribedDomains(group.SubscribedDomains)
+	if err != nil {
+		return nil, nil, false
+	}
+	manualCidrs, err := DecodeCidrs(group.Cidrs)
+	if err != nil {
+		return nil, nil, false
+	}
+	subscribedCidrs, err := DecodeSubscribedCidrs(group.SubscribedCidrs)
+	if err != nil {
+		return nil, nil, false
+	}
+	domains = MergeDomains(manualDomains, subscribedDomains)
+	cidrs = MergeDomains(manualCidrs, subscribedCidrs)
+	if len(domains) == 0 && len(cidrs) == 0 {
+		return nil, nil, false
+	}
+	return domains, cidrs, true
 }
 
 // dedupeTargets 按展示值去重（多个组可能含同一个域名），并截到 limit 个。

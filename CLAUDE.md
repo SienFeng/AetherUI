@@ -321,7 +321,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 - **访问日志永远不能单独让用户变成 `verified`**，只能把结论推向 `mismatch` 或给 `verified` 补一个计数（`combineVerdict`）。日志读取失败（开关读不出、匹配器建不出、某用户查询失败）走 `AccessLogState.Error` / `LogEvidence.Error`，与「没有数据」区分开。
 - **核心 pending（运行中的配置 ≠ 现生成的配置）时，所有用户一律 `pending`，哪怕样例不符**：刚保存后核心仍持有旧配置，样例不符是必然的，报 `mismatch` 是误报（明细仍保留）。
 - **锁的边界**：包级 `lock` 只在 `XrayService.RuntimeSnapshot` 里 `TryLock` 到读完快照的那一刻，**绝不跨 RPC、不在持锁时合成配置**（重启/热应用会长时间占着它）；拿不到就返回 `Busy`。另有包级 `verifyMu` 保证同一时刻只有一个验证在跑，并发的请求得到 `busy`。
-- **「这条规则会不会被丢弃」直接调 `injector.buildRule` 判定**，验证与生成在这一点上不会漂移。改 `buildRule` 的跳过条件时无需同步改验证，但**不要**在验证侧另写一份判断。**取样用的条件却是一份镜像**：`ruleGroupConditions` 照抄了 `buildRule` 逐组解码手工/订阅两侧、`MergeDomains` 合并、跳过坏组与空组的那段循环（buildRule 只返回生成好的 xray 规则，拿不回逐组的条目）。改 `buildRule` 的逐组取法（新增条目来源、改合并顺序、改跳过条件）时**两处必须一起改**，否则验证会拿核心里根本没有的条目当样例。
+- **「这条规则会不会被丢弃」直接调 `injector.buildRule` 判定**，验证与生成在这一点上不会漂移。改 `buildRule` 的跳过条件时无需同步改验证，但**不要**在验证侧另写一份判断。**取样用的条件却是一份镜像**：`groupConditionsOf` 照抄了 `buildRule` 逐组解码手工/订阅两侧、`MergeDomains` 合并、跳过坏组与空组的那段循环（buildRule 只返回生成好的 xray 规则，拿不回逐组的条目）。改 `buildRule` 的逐组取法（新增条目来源、改合并顺序、改跳过条件）时**两处必须一起改**，否则验证会拿核心里根本没有的条目当样例。
 - **关了 sniffing 的入站不计域名样例**（`sniffingBlind`）：`TestRoute` 把 `TargetDomain` 直接交给 `PickRoute`、不经过嗅探，而真实流量里核心拿不到这类入站的域名（见「域名分流依赖 sniffing」）。判据逐条镜像 `routing.html` 的 `sniffingOff` / `isProxyInbound`（socks/http 代理入站除外），两边一起改。这类入站只测 IP 样例，一个都没有就是 `unverifiable`——对全局规则尤其要紧，页面的 `ruleIssue` 不逐个检查全局规则的入站。
 
 ### `util/link` 包

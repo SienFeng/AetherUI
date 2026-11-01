@@ -174,4 +174,32 @@ func TestRouteVerifyAgainstRealXray(t *testing.T) {
 	if u.Verdict != verdictPending {
 		t.Fatalf("核心 pending 时用户行应为 pending: %+v", u)
 	}
+
+	// 6. 下发后跑一轮全量：共用一个真实控制面连接，三条启用规则都有结果且与单条口径一致。
+	if err := xs.RestartXray(false); err != nil {
+		t.Fatalf("RestartXray(false): %v", err)
+	}
+	all, gen, err := vs.VerifyAll()
+	if err != nil {
+		t.Fatalf("VerifyAll: %v", err)
+	}
+	if gen != XrayApplyGeneration() || gen == 0 {
+		t.Fatalf("VerifyAll 代次 = %d，当前代次 %d", gen, XrayApplyGeneration())
+	}
+	if len(all) != 3 {
+		t.Fatalf("应有三条启用规则的结果: %+v", all)
+	}
+	want := map[int]string{rule.Id: verdictVerified, kwRule.Id: verdictUnverifiable, ncRule.Id: verdictVerified}
+	for id, verdict := range want {
+		res := all[id]
+		if res == nil || res.Core.State != coreStateOK || res.ApplyGen != gen {
+			t.Fatalf("规则 %d 全量结果 = %+v", id, res)
+		}
+		if u := onlyUser(res); u.Verdict != verdict {
+			t.Fatalf("规则 %d 全量结论应为 %s: %+v", id, verdict, u)
+		}
+	}
+	if s0 := onlyUser(all[rule.Id]).Samples[0]; s0.ActualTag != node.Tag {
+		t.Fatalf("全量验证里 A 访问 localhost 应走 %s: %+v", node.Tag, s0)
+	}
 }
