@@ -345,8 +345,12 @@ func TestVerifyDisabledInboundIsUnverifiable(t *testing.T) {
 		t.Errorf("A 应为 verified: %+v", u)
 	}
 	b := findUser(t, res, f.b.Id)
-	if b.Verdict != verdictUnverifiable || b.Reason != "该用户已停用，规则不会对其生效" {
+	if b.Verdict != verdictUnverifiable || b.Reason != "该用户已停用，规则不会对其生效" || !b.Disabled {
 		t.Errorf("B = %+v", b)
+	}
+	// 停用的 B 不参与规则级结论：A 已验证，整条规则就是已验证
+	if v, _ := ruleVerdictOf(res); v != verdictVerified {
+		t.Errorf("规则级结论 = %s，期望 verified", v)
 	}
 	for _, c := range fr.calls {
 		if len(c) >= len(f.b.Tag) && c[:len(f.b.Tag)] == f.b.Tag {

@@ -102,19 +102,26 @@ func verdictRank(v string) int {
 var verdictByRank = [...]string{verdictVerified, verdictUnverifiable, verdictPending, verdictMismatch}
 
 // ruleVerdictOf 把一条结果汇总成规则级结论：取用户里最坏的一档，并数出不符的用户数。
-// 没有用户行时没有任何证据：核心 pending → pending，其余（含 ok）→ unverifiable，不给绿。
+// 已停用的用户不参与：规则本来就不会对它生效，不该拖累整条规则。
+// 没有参与的用户时没有任何证据：核心 pending → pending，其余（含 ok）→ unverifiable，不给绿。
 func ruleVerdictOf(res *RuleVerifyResult) (verdict string, mismatchUsers int) {
 	if res == nil {
 		return verdictUnverifiable, 0
 	}
-	if len(res.Users) == 0 {
+	active := make([]UserVerify, 0, len(res.Users))
+	for _, u := range res.Users {
+		if !u.Disabled {
+			active = append(active, u)
+		}
+	}
+	if len(active) == 0 {
 		if res.Core.State == coreStatePending {
 			return verdictPending, 0
 		}
 		return verdictUnverifiable, 0
 	}
 	worst := 0
-	for _, u := range res.Users {
+	for _, u := range active {
 		if u.Verdict == verdictMismatch {
 			mismatchUsers++
 		}

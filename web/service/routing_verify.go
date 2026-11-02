@@ -79,12 +79,14 @@ type AccessLogState struct {
 
 // UserVerify 是图上一个用户（入站）的验证结果。
 type UserVerify struct {
-	InboundId int            `json:"inboundId"`
-	Name      string         `json:"name"`
-	Verdict   string         `json:"verdict"`
-	Reason    string         `json:"reason"`
-	Samples   []SampleResult `json:"samples"`
-	Log       *LogEvidence   `json:"log"`
+	InboundId int    `json:"inboundId"`
+	Name      string `json:"name"`
+	Verdict   string `json:"verdict"`
+	Reason    string `json:"reason"`
+	// Disabled 表示该入站已停用：规则不会对它生效，规则级结论不把它算进去。
+	Disabled bool           `json:"disabled,omitempty"`
+	Samples  []SampleResult `json:"samples"`
+	Log      *LogEvidence   `json:"log"`
 }
 
 // SampleResult 是对一个样例目标做 TestRoute 的结果。
@@ -916,6 +918,7 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 		if vu.disabled {
 			// 停用的入站不在核心配置里，buildRule 也会把它剔掉，对它调 TestRoute 没有意义。
 			u.Verdict, u.Reason = verdictUnverifiable, "该用户已停用，规则不会对其生效"
+			u.Disabled = true
 			res.Users = append(res.Users, u)
 			continue
 		}
