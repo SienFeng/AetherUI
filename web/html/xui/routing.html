@@ -393,6 +393,18 @@
         text-overflow: ellipsis;
     }
 
+    /* 名字过长时只截断名字，「含新增」始终完整显示 */
+    .rv-upill-txt {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .rv-upill-new {
+        flex: none;
+        opacity: .8;
+    }
+
     /* 「所有用户」：靛色，与改版前的 .chip-all 同色（#4338CA 在 #EEF2FF 上 7.0:1） */
     .rv-upill.is-all {
         background: #EEF2FF;
@@ -1828,6 +1840,9 @@
                                                             <p v-if="!userVerify(u.key).failed.length" class="rv-verify-line">
                                                                 [[ u.key === 'all' && verify.result.truncated ? '已验证的' : '全部' ]] [[ userVerify(u.key).total ]] 位用户[[ u.key === 'all' && verify.result.truncated ? '都通过了验证' : '已验证' ]]
                                                             </p>
+                                                            <p v-if="userVerify(u.key).disabled && userVerify(u.key).total" class="rv-verify-line">
+                                                                另有 [[ userVerify(u.key).disabled ]] 位用户已停用，不计入
+                                                            </p>
                                                         </template>
                                                         <div v-for="uv in verifyDetailUsers(u.key)" :key="'vu-' + uv.inboundId" class="rv-verify-user">
                                                             <div v-if="u.key === 'all' || u.key === 'more'" class="rv-verify-dhead">
@@ -2471,10 +2486,14 @@
                     const busySub = state === 'busy' && this.verify.retryTimer ? '验证正忙，稍后自动再验证一次' : coreMsg;
                     return { text: '无法验证 · ' + time, sub: busySub };
                 }
-                const verified = users.filter(x => x.verdict === 'verified').length;
-                const bad = users.filter(x => x.verdict === 'mismatch').length;
-                let text = '已验证 ' + verified + '/' + users.length + ' · ' + time;
+                // 已停用的用户不计入分母，与规则列表上的规则级结论同口径
+                const active = users.filter(x => !x.disabled);
+                const disabled = users.length - active.length;
+                const verified = active.filter(x => x.verdict === 'verified').length;
+                const bad = active.filter(x => x.verdict === 'mismatch').length;
+                let text = '已验证 ' + verified + '/' + active.length + ' · ' + time;
                 if (bad) text += ' · ' + bad + ' 位与配置不符';
+                if (disabled) text += ' · ' + disabled + ' 位已停用';
                 // 截断时绝不能读成「全部已验证」：明确报出还有多少人没验证
                 if (this.verifyUncheckedCount) text += ' · 另有 ' + this.verifyUncheckedCount + ' 位未验证';
                 let sub = coreMsg;
@@ -3375,6 +3394,23 @@
                 if (rule.action === 'direct') return '直连（本机出网）';
                 return rule.outboundId ? this.nodeName(rule.outboundId) : '未选择节点';
             },
+            // 以后新建的用户会不会自动进这条规则。空数组（所有用户）本身就含以后新建的；
+            // 指定用户的规则看 applyToNewInbounds（新建入站时写入期追加，见 model.RoutingRule）。
+            ruleAutoNew(rule) {
+                if (rule.broken) return false;
+                return !rule.inboundIds.length || !!rule.applyToNewInbounds;
+            },
+            ruleUsersTitle(rule) {
+                if (rule.broken) return null;
+                const parts = [];
+                // 带「含新增」时名字更容易被截断，只要有具体用户就把全名放进提示
+                const autoNew = this.ruleAutoNew(rule);
+                if (rule.inboundIds.length > 2 || (autoNew && rule.inboundIds.length)) {
+                    parts.push(rule.inboundIds.map(this.inboundName).join('、'));
+                }
+                if (autoNew) parts.push('以后新建的用户会自动加入这条规则');
+                return parts.length ? parts.join('\n') : null;
+            },
             ruleUsersLabel(rule) {
                 if (rule.broken) return '数据损坏';
                 const ids = rule.inboundIds;
@@ -3469,10 +3505,13 @@
                 } else {
                     users = this.editorPreview.inboundIds.slice(4).map(id => this.userVerifyById(id));
                 }
+                // 已停用的用户不参与汇总：规则本来就不会对它生效，它自己那一行仍显示原因。
+                const active = users.filter(x => !x.disabled);
                 return {
-                    verified: users.filter(x => x.verdict === 'verified').length,
-                    total: users.length,
-                    failed: users.filter(x => x.verdict !== 'verified'),
+                    verified: active.filter(x => x.verdict === 'verified').length,
+                    total: active.length,
+                    failed: active.filter(x => x.verdict !== 'verified'),
+                    disabled: users.length - active.length,
                 };
             },
             rowBadge(key) {
@@ -3507,7 +3546,9 @@
                 const m = this.verdictMeta(worst);
                 if (!v.total) {
                     const res = this.verify.result;
-                    const reason = (res.core && res.core.message) || '没有可验证的用户';
+                    const reason = v.disabled
+                        ? '覆盖的 ' + v.disabled + ' 位用户都已停用，规则不会对任何人生效'
+                        : ((res.core && res.core.message) || '没有可验证的用户');
                     return { cls: m.cls, icon: m.icon, text: m.text, title: reason, reason, expandable: true };
                 }
                 let text = v.verified + '/' + v.total + ' 已验证';
@@ -3517,6 +3558,7 @@
                     title = (v.failed.length ? v.failed.length + ' 位用户未通过验证；' : '')
                         + '只验证了前 ' + v.total + ' 个已启用入站，另有 ' + unchecked + ' 位未验证';
                 }
+                if (v.disabled) title += '；另有 ' + v.disabled + ' 位已停用，不计入';
                 return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true, count: v.verified + '/' + v.total };
             },
             // 明细里列出的用户：具体用户只有它自己；汇总行只列出不是「已验证」的

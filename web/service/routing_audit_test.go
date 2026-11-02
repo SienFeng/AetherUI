@@ -359,6 +359,11 @@ func TestRuleVerdictOf(t *testing.T) {
 		{"无用户 busy", &RuleVerifyResult{Core: CoreState{State: coreStateBusy}}, verdictUnverifiable, 0},
 		{"无用户 not_running", &RuleVerifyResult{Core: CoreState{State: coreStateNotRunning}}, verdictUnverifiable, 0},
 		{"nil", nil, verdictUnverifiable, 0},
+		// 停用用户不参与规则级结论
+		{"停用用户不拖累已验证", &RuleVerifyResult{Users: append(users(verdictVerified), UserVerify{Verdict: verdictUnverifiable, Disabled: true})}, verdictVerified, 0},
+		{"停用用户不掩盖不符", &RuleVerifyResult{Users: append(users(verdictMismatch), UserVerify{Verdict: verdictUnverifiable, Disabled: true})}, verdictMismatch, 1},
+		{"全部停用 ok 不给绿", &RuleVerifyResult{Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictUnverifiable, Disabled: true}}}, verdictUnverifiable, 0},
+		{"全部停用 pending", &RuleVerifyResult{Core: CoreState{State: coreStatePending}, Users: []UserVerify{{Verdict: verdictUnverifiable, Disabled: true}}}, verdictPending, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

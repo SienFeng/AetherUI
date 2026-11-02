@@ -41,8 +41,8 @@
             </span>
         </span>
         <span class="rv-upill" :class="{ 'is-all': !rule.broken && !rule.inboundIds.length, 'is-broken': rule.broken }"
-              :title="rule.inboundIds.length > 2 ? rule.inboundIds.map(inboundName).join('、') : null">
-            <a-icon :type="rule.broken ? 'close-circle' : (rule.inboundIds.length ? 'user' : 'global')"></a-icon>[[ ruleUsersLabel(rule) ]]
+              :title="ruleUsersTitle(rule)">
+            <a-icon :type="rule.broken ? 'close-circle' : (rule.inboundIds.length ? 'user' : 'global')"></a-icon><span class="rv-upill-txt">[[ ruleUsersLabel(rule) ]]</span><span v-if="ruleAutoNew(rule)" class="rv-upill-new">· 含新增</span>
         </span>
     </button>
     <!-- 后台审计的结论（真实流量有没有按配置走），与上面「生效中/未生效」（配置能不能
