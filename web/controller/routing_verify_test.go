@@ -1,0 +1,289 @@
+package controller
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"a-ui/database"
+	"a-ui/database/model"
+	"a-ui/web/service"
+)
+
+// 走真实路由发请求，同时钉住「路由确实注册在 /routing/rule/verify/:id」。
+func postVerify(t *testing.T, id string) map[string]any {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	NewRoutingController(r.Group("/"))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/routing/rule/verify/"+id, nil)
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s（路由未注册？）", rec.Code, rec.Body.String())
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("unmarshal: %v, body = %s", err, rec.Body.String())
+	}
+	return msg
+}
+
+// id 不是数字时必须直接报错，不能落到 service 里按 0 号规则去查。
+func TestVerifyRuleRejectsBadId(t *testing.T) {
+	msg := postVerify(t, "abc")
+	if msg["success"] != false {
+		t.Errorf("success = %v, want false, msg = %v", msg["success"], msg)
+	}
+}
+
+// 规则不存在是 service 返回的错误，要原样走 success=false，而不是伪装成一份空结果。
+func TestVerifyRuleUnknownRuleFails(t *testing.T) {
+	if err := database.InitDB(filepath.Join(t.TempDir(), "test.db")); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	msg := postVerify(t, "99999")
+	if msg["success"] != false {
+		t.Errorf("success = %v, want false, msg = %v", msg["success"], msg)
+	}
+}
+
+// postRouting 走真实路由发 POST，返回状态码与解码后的 JSON。
+func postRouting(t *testing.T, path string) map[string]any {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	NewRoutingController(r.Group("/"))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s（路由未注册？）", rec.Code, rec.Body.String())
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &msg); err != nil {
+		t.Fatalf("unmarshal: %v, body = %s", err, rec.Body.String())
+	}
+	return msg
+}
+
+func initTestDB(t *testing.T) {
+	t.Helper()
+	if err := database.InitDB(filepath.Join(t.TempDir(), "test.db")); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	service.ResetAuditResultsForTest()
+	service.ResetAnomaliesForTest()
+	t.Cleanup(service.ResetAuditResultsForTest)
+	t.Cleanup(service.ResetAnomaliesForTest)
+}
+
+// 直接落库造规则，绕过 RoutingRuleService.Add 的校验（这里只关心接口行为）。
+func seedRule(t *testing.T, enable bool) int {
+	t.Helper()
+	rule := &model.RoutingRule{Remark: "t", InboundIds: "[]", DomainGroupIds: "[1]", Action: model.ActionBlock, Enable: true}
+	if err := database.GetDB().Create(rule).Error; err != nil {
+		t.Fatalf("create rule: %v", err)
+	}
+	if !enable {
+		if err := database.GetDB().Model(rule).Update("enable", false).Error; err != nil {
+			t.Fatalf("disable rule: %v", err)
+		}
+	}
+	return rule.Id
+}
+
+func TestRuleAuditEndpoint(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	msg := postRouting(t, "/routing/rule/audit")
+	if msg["success"] != true {
+		t.Fatalf("success = %v, msg = %v", msg["success"], msg)
+	}
+	obj, _ := msg["obj"].(map[string]any)
+	for _, k := range []string{"applyGen", "accessLogEnabled", "rules"} {
+		if _, ok := obj[k]; !ok {
+			t.Errorf("obj 缺少 %s: %v", k, obj)
+		}
+	}
+	rules, _ := obj["rules"].(map[string]any)
+	if _, ok := rules[strconv.Itoa(id)]; !ok {
+		t.Errorf("rules 缺少启用规则 %d: %v", id, rules)
+	}
+}
+
+func TestAnomalyResetRejectsBadId(t *testing.T) {
+	msg := postRouting(t, "/routing/rule/anomaly/reset/abc")
+	if msg["success"] != false {
+		t.Errorf("success = %v, want false, msg = %v", msg["success"], msg)
+	}
+}
+
+func TestAnomalyResetOk(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	msg := postRouting(t, "/routing/rule/anomaly/reset/"+strconv.Itoa(id))
+	if msg["success"] != true {
+		t.Errorf("success = %v, want true, msg = %v", msg["success"], msg)
+	}
+}
+
+// 规则不存在时必须报错且不记忽略时刻：SQLite 会复用 id，留下的时刻会作用到下一条新规则。
+func TestAnomalyResetRejectsMissingRule(t *testing.T) {
+	initTestDB(t)
+	msg := postRouting(t, "/routing/rule/anomaly/reset/99999")
+	if msg["success"] != false {
+		t.Errorf("success = %v, want false, msg = %v", msg["success"], msg)
+	}
+}
+
+// stubRuntime 把 cached=1 判定看到的核心状态换成 rt，测试结束后还原。
+func stubRuntime(t *testing.T, rt service.XrayRuntime) {
+	t.Helper()
+	orig := verifyRuntimeSnapshot
+	verifyRuntimeSnapshot = func() service.XrayRuntime { return rt }
+	t.Cleanup(func() { verifyRuntimeSnapshot = orig })
+}
+
+// 核心在跑、没有待生效改动、缓存代次等于当前代次且规则启用：原样返回缓存
+// （CheckedAt 不变，不重新验证）。
+func TestVerifyCachedReturnsCache(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	gen := service.XrayApplyGeneration()
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: gen})
+	const checkedAt = int64(1234567890123)
+	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
+		RuleId: id, CheckedAt: checkedAt, ApplyGen: gen,
+	})
+	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	obj, _ := msg["obj"].(map[string]any)
+	if msg["success"] != true || obj["checkedAt"] != float64(checkedAt) {
+		t.Errorf("want cached result, msg = %v", msg)
+	}
+}
+
+// 保存后到核心载入新配置之前，代次还没变、缓存是旧配置的结论：不能返回它，
+// 必须现场验证（现场会如实报 pending）。核心没在跑、或正忙于重启/热应用时同理。
+func TestVerifyCachedIgnoresCacheUnlessCoreCurrent(t *testing.T) {
+	cases := []struct {
+		name string
+		rt   func(gen uint64) service.XrayRuntime
+	}{
+		{"pending", func(gen uint64) service.XrayRuntime {
+			return service.XrayRuntime{Running: true, Pending: true, ApplyGen: gen}
+		}},
+		{"not running", func(gen uint64) service.XrayRuntime { return service.XrayRuntime{ApplyGen: gen} }},
+		// Running 置真：只让 Busy 这一个条件不成立（真实快照 Busy 时 Running 恒为 false）
+		{"busy", func(gen uint64) service.XrayRuntime {
+			return service.XrayRuntime{Running: true, Busy: true, ApplyGen: gen}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initTestDB(t)
+			id := seedRule(t, true)
+			gen := service.XrayApplyGeneration()
+			stubRuntime(t, tc.rt(gen))
+			checkedAt := int64(1234567890200 + i)
+			service.StoreVerifyResultForTest(&service.RuleVerifyResult{
+				RuleId: id, CheckedAt: checkedAt, ApplyGen: gen,
+			})
+			msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+			obj, _ := msg["obj"].(map[string]any)
+			if msg["success"] != true || obj == nil || obj["checkedAt"] == float64(checkedAt) {
+				t.Errorf("want 现场验证结果（success 且 checkedAt 不同于缓存）, msg = %v", msg)
+			}
+		})
+	}
+}
+
+// 缓存代次落后于当前代次：不能返回旧结果，必须现场验证。
+func TestVerifyCachedIgnoresStaleGeneration(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: service.XrayApplyGeneration()})
+	const checkedAt = int64(1234567890124)
+	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
+		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration() + 1,
+	})
+	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	obj, _ := msg["obj"].(map[string]any)
+	if msg["success"] != true || obj == nil || obj["checkedAt"] == float64(checkedAt) {
+		t.Errorf("want 现场验证结果（success 且 checkedAt 不同于缓存）, msg = %v", msg)
+	}
+}
+
+// 携带的发现：缓存要到下一轮审计才清理，规则停用后缓存仍在，
+// cached=1 不得把它当成停用规则的结论返回，要走 Verify（它自己处理停用规则）。
+func TestVerifyCachedIgnoresDisabledRule(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, false)
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: service.XrayApplyGeneration()})
+	const checkedAt = int64(1234567890125)
+	service.StoreVerifyResultForTest(&service.RuleVerifyResult{
+		RuleId: id, CheckedAt: checkedAt, ApplyGen: service.XrayApplyGeneration(),
+	})
+	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	obj, _ := msg["obj"].(map[string]any)
+	if obj == nil || obj["checkedAt"] == float64(checkedAt) {
+		t.Fatalf("停用规则的缓存被返回: %v", msg)
+	}
+	core, _ := obj["core"].(map[string]any)
+	if core["state"] != "error" {
+		t.Errorf("want 现场 Verify 的停用结果, core = %v", core)
+	}
+}
+
+// 开关读取失败时仍返回规则摘要，但必须带 accessLogError，不能伪装成「已关闭」。
+func TestRuleAuditReportsAccessLogError(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	if err := database.GetDB().Migrator().DropTable(&model.Setting{}); err != nil {
+		t.Fatalf("drop settings: %v", err)
+	}
+	msg := postRouting(t, "/routing/rule/audit")
+	obj, _ := msg["obj"].(map[string]any)
+	if msg["success"] != true || obj == nil {
+		t.Fatalf("msg = %v", msg)
+	}
+	if e, _ := obj["accessLogError"].(string); e == "" {
+		t.Errorf("want accessLogError, obj = %v", obj)
+	}
+	rules, _ := obj["rules"].(map[string]any)
+	if _, ok := rules[strconv.Itoa(id)]; !ok {
+		t.Errorf("规则摘要丢失: %v", obj)
+	}
+}
+
+// 访问日志异常的最近一次晚于缓存的验证时刻：缓存没见过这条走错的连接，图上会是绿的而
+// 列表这一行是红的。必须走现场验证。
+func TestVerifyCachedIgnoresCacheOlderThanAnomaly(t *testing.T) {
+	initTestDB(t)
+	id := seedRule(t, true)
+	gen := service.XrayApplyGeneration()
+	stubRuntime(t, service.XrayRuntime{Running: true, ApplyGen: gen})
+	checkedAt := time.Now().Add(-10 * time.Minute).UnixMilli()
+	service.StoreVerifyResultForTest(&service.RuleVerifyResult{RuleId: id, CheckedAt: checkedAt, ApplyGen: gen})
+
+	// 异常早于缓存：缓存仍可用。
+	service.SeedAnomalyForTest(id, 1, checkedAt-1000)
+	msg := postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	if obj, _ := msg["obj"].(map[string]any); obj == nil || obj["checkedAt"] != float64(checkedAt) {
+		t.Fatalf("异常早于缓存时应返回缓存, msg = %v", msg)
+	}
+
+	// 异常晚于缓存：不得返回缓存。
+	service.SeedAnomalyForTest(id, 1, checkedAt+1000)
+	msg = postRouting(t, "/routing/rule/verify/"+strconv.Itoa(id)+"?cached=1")
+	obj, _ := msg["obj"].(map[string]any)
+	if obj == nil || obj["checkedAt"] == float64(checkedAt) {
+		t.Errorf("异常晚于缓存时应现场验证, msg = %v", msg)
+	}
+}

@@ -45,6 +45,13 @@
             <a-icon :type="rule.broken ? 'close-circle' : (rule.inboundIds.length ? 'user' : 'global')"></a-icon>[[ ruleUsersLabel(rule) ]]
         </span>
     </button>
+    <!-- 后台审计的结论（真实流量有没有按配置走），与上面「生效中/未生效」（配置能不能
+         生成）是两回事。只是一个状态图标，不可点——点规则行即可进入详情。停用规则不显示。 -->
+    <span v-if="rule.enable && ruleAuditBadges[rule.id]" class="rv-vicon rv-row-audit"
+          :class="ruleAuditBadges[rule.id].cls" role="img"
+          :title="ruleAuditBadges[rule.id].title" :aria-label="ruleAuditBadges[rule.id].title">
+        <a-icon :type="ruleAuditBadges[rule.id].icon" theme="filled" aria-hidden="true"></a-icon>
+    </span>
     <button type="button" role="switch" class="rv-switch"
             :aria-checked="rule.enable ? 'true' : 'false'"
             :aria-label="'启用规则「' + (rule.remark || ('#' + rule.id)) + '」'"

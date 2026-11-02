@@ -4,15 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
 	routerService "github.com/xtls/xray-core/app/router/command"
+	xcommon "github.com/xtls/xray-core/common"
+	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
 
@@ -58,6 +64,30 @@ func (x *XrayAPI) Init(apiPort int) error {
 	x.HandlerServiceClient = &hsClient
 	x.RoutingServiceClient = &rsClient
 	return nil
+}
+
+// WaitReady 主动建立连接并等到它就绪，ctx 到期或连接失败（如端口上没人监听）返回 error。
+//
+// grpc.NewClient 是惰性的：Init 成功不代表核心在听，核心刚拉起还没监听控制面端口时，
+// Init 照样成功、之后每次 RPC 才报 Unavailable。调用方要区分「核心未就绪」与
+// 「核心对某个目标给出了结论」时，先调它。
+func (x *XrayAPI) WaitReady(ctx context.Context) error {
+	if x.conn == nil {
+		return common.NewError("xray api is not initialized")
+	}
+	x.conn.Connect()
+	for {
+		state := x.conn.GetState()
+		switch state {
+		case connectivity.Ready:
+			return nil
+		case connectivity.TransientFailure, connectivity.Shutdown:
+			return common.NewError("xray 控制面连接失败:", state.String())
+		}
+		if !x.conn.WaitForStateChange(ctx, state) {
+			return common.NewError("等待 xray 控制面就绪超时:", ctx.Err())
+		}
+	}
 }
 
 // Close 释放连接。可重复调用，也可以在 Init 失败后调用——热应用的每条
@@ -173,6 +203,57 @@ func (x *XrayAPI) ApplyRoutingConfig(routing []byte) error {
 	return err
 }
 
+// TestRoute 向运行中的核心询问：来自 inboundTag 的、目标为 domain 或 ip 的
+// 一条 TCP/443 连接，会被路由到哪个出站。
+//
+// domain 与 ip 二选一，非空/非 nil 的那个生效（都给时 domain 优先）。
+// 只读：PublishResult=false，不会往路由统计里发布事件。端口与网络固定为
+// TCP/443，因为分流规则几乎不以端口区分，这里要的是「规则表怎么走」。
+//
+// 核心没有任何规则命中（ErrNoClue）时返回 ("", true, nil)，调用方应按
+// 「走默认出站」处理；其余错误原样返回。超时由调用方的 ctx 控制。
+func (x *XrayAPI) TestRoute(ctx context.Context, inboundTag, domain string, ip net.IP) (tag string, noMatch bool, err error) {
+	if x.RoutingServiceClient == nil {
+		return "", false, common.NewError("xray RoutingServiceClient is not initialized")
+	}
+	rc := &routerService.RoutingContext{
+		InboundTag: inboundTag,
+		Network:    xnet.Network_TCP,
+		TargetPort: 443,
+	}
+	if domain != "" {
+		rc.TargetDomain = domain
+	} else if ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			ip = v4
+		}
+		rc.TargetIPs = [][]byte{ip}
+	}
+	resp, err := (*x.RoutingServiceClient).TestRoute(ctx, &routerService.TestRouteRequest{
+		RoutingContext: rc,
+		FieldSelectors: []string{"outbound"},
+		PublishResult:  false,
+	})
+	if err != nil {
+		if isNoClueErr(err) {
+			return "", true, nil
+		}
+		return "", false, err
+	}
+	return resp.GetOutboundTag(), false, nil
+}
+
+// isNoClueErr 判断 err 是不是核心的 common.ErrNoClue（没有规则可判断）。
+//
+// 错误经 gRPC 跨进程后只剩 status 里的消息文本，errors.Is 已经认不出原始
+// 的 sentinel，比对消息文本是唯一可行的识别方式。
+func isNoClueErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(status.Convert(err).Message(), xcommon.ErrNoClue.Error())
+}
+
 // ensureXrayAssetLocation 把 xray 的资源目录指到面板的 bin/。
 //
 // 面板进程内的 infra/conf 解析 geosite:/geoip: 时要读 dat 文件，而它默认
@@ -190,4 +271,10 @@ func ensureXrayAssetLocation() {
 		return
 	}
 	_ = os.Setenv("XRAY_LOCATION_ASSET", abs)
+}
+
+// EnsureAssetLocation 供包外（路由验证的域名/IP 匹配器）在加载 geosite:/ext: 条目前
+// 把 xray 资源目录指到 bin/。
+func EnsureAssetLocation() {
+	ensureXrayAssetLocation()
 }

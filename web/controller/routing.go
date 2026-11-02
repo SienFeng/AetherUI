@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -198,6 +199,8 @@ type RoutingController struct {
 	portableService    service.RoutingPortableService
 	probeService       service.ProbeService
 	settingService     service.SettingService
+	verifyService      service.RoutingVerifyService
+	auditService       service.RoutingAuditService
 }
 
 func NewRoutingController(g *gin.RouterGroup) *RoutingController {
@@ -231,6 +234,9 @@ func (a *RoutingController) initRouter(g *gin.RouterGroup) {
 	rl.POST("/update/:id", a.updateRule)
 	rl.POST("/del/:id", a.delRule)
 	rl.POST("/reorder", a.reorderRules)
+	rl.POST("/verify/:id", a.verifyRule)
+	rl.POST("/audit", a.auditRules)
+	rl.POST("/anomaly/reset/:id", a.resetRuleAnomaly)
 
 	g.POST("/export", a.exportRouting)
 	g.POST("/import", a.importRouting)
@@ -758,6 +764,101 @@ func (a *RoutingController) reorderRules(c *gin.Context) {
 		// 规则数组顺序变了就是配置变了，必须重新下发。
 		a.xrayService.SetToNeedRestart()
 	}
+}
+
+// 验证「流量走向」：只读，不改库也不动核心，所以不置重启标志。
+//
+// ?cached=1 时优先用后台审计的缓存，但只在下列条件同时成立时：规则存在、已启用、
+// 核心在运行且没有待生效的改动、缓存代次等于核心此刻的应用代次。缓存要到下一轮审计
+// 才清理，规则停用或删除后仍可能留着旧结果；代次落后说明核心之后换过配置。
+// 「待生效」单独要判：保存后到核心载入新配置之前（最多约 10 秒）代次还没变，
+// 缓存却是旧配置的结论——现场 Verify 此时会如实报 pending，缓存会报一个过期的绿色。
+// 核心没在跑时同理，缓存说的是它停下之前的事。访问日志异常的最近一次晚于缓存的
+// 验证时刻时也不用缓存：那份结论没见过这条走错的连接，图上会是绿的而列表这一行是红的。
+// 任一不满足都走现场 Verify
+// （Verify 自己处理停用、不存在的规则与核心不可用）。
+func (a *RoutingController) verifyRule(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "验证分流规则", err)
+		return
+	}
+	if c.Query("cached") == "1" {
+		if res, ok := a.currentCachedVerify(id); ok {
+			jsonObj(c, res, nil)
+			return
+		}
+	}
+	result, err := a.verifyService.Verify(id)
+	jsonObj(c, result, err)
+}
+
+// verifyRuntimeSnapshot 是 cached=1 判定用的核心状态来源。测试里没有真实核心，
+// 替换它来覆盖「运行中 / 待生效 / 忙」几种状态。
+var verifyRuntimeSnapshot = func() service.XrayRuntime {
+	return (&service.XrayService{}).RuntimeSnapshot()
+}
+
+// currentCachedVerify 返回仍能代表核心当前状态的缓存结果，条件见 verifyRule。
+// 先查库与缓存、最后才取快照：快照要合成一次配置，没有缓存时不必付这笔开销。
+func (a *RoutingController) currentCachedVerify(id int) (*service.RuleVerifyResult, bool) {
+	rule, err := a.ruleService.Get(id)
+	if err != nil || !rule.Enable {
+		return nil, false
+	}
+	res, ok := a.auditService.Cached(id)
+	if !ok {
+		return nil, false
+	}
+	if a.auditService.Anomaly(id, time.Now()).LastAt > res.CheckedAt {
+		return nil, false
+	}
+	rt := verifyRuntimeSnapshot()
+	if !rt.Running || rt.Busy || rt.Pending || res.ApplyGen != rt.ApplyGen {
+		return nil, false
+	}
+	return res, true
+}
+
+// routingAuditResponse 是规则列表与侧栏红点用的审计摘要。
+type routingAuditResponse struct {
+	ApplyGen         uint64 `json:"applyGen"`
+	AccessLogEnabled bool   `json:"accessLogEnabled"`
+	// AccessLogError 非空表示开关读取失败（此时 AccessLogEnabled 不可信、恒为 false），
+	// 前端不能据此提示「请开启访问日志」，要与「确实没开」区分开。
+	AccessLogError string                           `json:"accessLogError,omitempty"`
+	Rules          map[int]service.RuleAuditSummary `json:"rules"`
+}
+
+// auditRules 只读缓存与内存摘要，不触发验证。
+func (a *RoutingController) auditRules(c *gin.Context) {
+	gen, rules := a.auditService.Summaries()
+	// 读不出开关时仍返回规则摘要，但把错误如实带给前端，不伪装成「已关闭」。
+	resp := &routingAuditResponse{ApplyGen: gen, Rules: rules}
+	enabled, err := a.settingService.GetAccessLogEnable()
+	if err != nil {
+		logger.Warning("读取访问日志开关失败:", err)
+		resp.AccessLogError = err.Error()
+	} else {
+		resp.AccessLogEnabled = enabled
+	}
+	jsonObj(c, resp, nil)
+}
+
+// resetRuleAnomaly 是「忽略此前的异常」，只改内存里的异常状态，不碰库与核心。
+func (a *RoutingController) resetRuleAnomaly(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "忽略此前的异常", err)
+		return
+	}
+	// 规则不存在时不记忽略时刻：SQLite 会复用 id，留下的时刻会作用到下一条新建的规则上。
+	if _, err := a.ruleService.Get(id); err != nil {
+		jsonMsg(c, "忽略此前的异常", err)
+		return
+	}
+	a.auditService.ResetAnomalies(id, time.Now())
+	jsonMsg(c, "忽略此前的异常", nil)
 }
 
 func (a *RoutingController) delRule(c *gin.Context) {

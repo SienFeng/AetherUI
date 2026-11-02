@@ -373,6 +373,53 @@ func (s *AccessLogService) CountByRoute(inboundId int, route string, since int64
 	return n, err
 }
 
+// TargetRouteCount 是访问日志按「目标 + 出站 + 是否放行」分组后的一行。
+type TargetRouteCount struct {
+	Target   string
+	Route    string
+	Accepted bool
+	Count    int64
+	LastAt   int64 // 毫秒
+}
+
+// GroupByTargetRoute 统计某入站自 sinceMs（毫秒，与 AccessLog.Time 同单位）以来的
+// 日志分组，按次数降序。最多返回 limit 行；多查一行用来判断是否被截断。
+// 访问日志库未初始化时返回空。
+func (s *AccessLogService) GroupByTargetRoute(inboundId int, sinceMs int64, limit int) (rows []TargetRouteCount, truncated bool, err error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return nil, false, nil
+	}
+	err = db.Model(&model.AccessLog{}).
+		Select("target, route, accepted, count(*) as count, max(time) as last_at").
+		Where("inbound_id = ? and time >= ?", inboundId, sinceMs).
+		Group("target, route, accepted").
+		Order("count desc, target, route").
+		Limit(limit + 1).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) > limit {
+		rows, truncated = rows[:limit], true
+	}
+	return rows, truncated, nil
+}
+
+// ReadAfter 按 (time, id) 升序读出游标之后的至多 limit 行，供异常扫描增量读取。
+// 条件不单用 id：SQLite 会复用自增 id，日志被清理到 0 行后新行 id 会回到 1，
+// 单看 id 会把它们全部漏掉。访问日志库未初始化时返回空。
+func (s *AccessLogService) ReadAfter(afterTime, afterId int64, limit int) ([]model.AccessLog, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return nil, nil
+	}
+	rows := make([]model.AccessLog, 0)
+	err := db.Where("time > ? OR (time = ? AND id > ?)", afterTime, afterTime, afterId).
+		Order("time, id").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
 func (s *AccessLogService) Cleanup(retentionDays int, now time.Time) (int64, error) {
 	db := database.GetAccessLogDB()
 	if db == nil || retentionDays <= 0 {
