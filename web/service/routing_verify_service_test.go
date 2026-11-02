@@ -698,3 +698,70 @@ func TestVerifyLogEmptyRouteLabel(t *testing.T) {
 		t.Fatalf("空 Route 应标为未知出站: %+v", u.Log)
 	}
 }
+
+// 被更靠前的规则抢先命中：结论仍是 mismatch（设计如此），但样例与日志分组标出抢先的规则，
+// Reason 点名它；与抢先规则出站不同的走错不归因。
+func TestVerifyAttributesShadowingRule(t *testing.T) {
+	f := newVerifyFixture(t)
+	setAccessLog(t, true)
+	us := &model.OutboundNode{
+		Tag: "a-ui-us", Remark: "美区家宽", Protocol: "socks", Enable: true,
+		Config: `{"protocol":"socks","settings":{"servers":[{"address":"5.6.7.8","port":1080}]}}`,
+	}
+	if err := database.GetDB().Save(us).Error; err != nil {
+		t.Fatalf("save node: %v", err)
+	}
+	openai := newTestGroupWithDomains(t, "OpenAI", []string{"full:o33249.ingest.us.sentry.io"})
+	claude := newTestGroupWithDomains(t, "Claude", []string{"full:claude.ai", "domain:sentry.io"})
+	special := &model.RoutingRule{
+		Remark: "OpenAI(特殊)", InboundIds: mustEncodeIds(t, []int{f.a.Id}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{openai.Id}),
+		Action:         model.ActionProxy, OutboundId: us.Id, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(special); err != nil {
+		t.Fatalf("add special: %v", err)
+	}
+	normal := &model.RoutingRule{
+		Remark: "Anthropic(常规)", InboundIds: mustEncodeIds(t, []int{}),
+		DomainGroupIds: mustEncodeGroupIds(t, []int{claude.Id}),
+		Action:         model.ActionProxy, OutboundId: f.node.Id, Enable: true,
+	}
+	if err := (&RoutingRuleService{}).Add(normal); err != nil {
+		t.Fatalf("add normal: %v", err)
+	}
+	now := time.UnixMilli(1793520000000)
+	rows := []model.AccessLog{
+		{Time: now.Add(-time.Hour).UnixMilli(), InboundId: f.a.Id, Target: "o33249.ingest.us.sentry.io:443", Route: us.Tag, Accepted: true},
+		{Time: now.Add(-time.Hour).UnixMilli(), InboundId: f.b.Id, Target: "o33249.ingest.us.sentry.io:443", Route: model.DefaultOutboundTag, Accepted: true},
+	}
+	if err := database.GetAccessLogDB().Create(&rows).Error; err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	res, err := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime()).Verify(normal.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	a := findUser(t, res, f.a.Id)
+	if a.Verdict != verdictMismatch || a.Log == nil || len(a.Log.Others) != 1 {
+		t.Fatalf("被抢先命中仍应为 mismatch: %+v log=%+v", a, a.Log)
+	}
+	if sb := a.Log.Others[0].ShadowedBy; sb == nil || sb.RuleId != special.Id || sb.Remark != "OpenAI(特殊)" {
+		t.Errorf("用户A 的日志分组应归因到 OpenAI(特殊)，得到 %+v", sb)
+	}
+	if !strings.Contains(a.Reason, "OpenAI(特殊)") || !strings.Contains(a.Reason, "抢先命中") {
+		t.Errorf("用户A 的 Reason 应点名抢先的规则，得到 %q", a.Reason)
+	}
+
+	// 用户B 不在 OpenAI(特殊) 的覆盖范围内、出站也不同：不归因，Reason 保持原样。
+	b := findUser(t, res, f.b.Id)
+	if b.Verdict != verdictMismatch || b.Log == nil || len(b.Log.Others) != 1 {
+		t.Fatalf("用户B 应为 mismatch: %+v log=%+v", b, b.Log)
+	}
+	if sb := b.Log.Others[0].ShadowedBy; sb != nil {
+		t.Errorf("用户B 不应归因，得到 %+v", sb)
+	}
+	if b.Reason != "访问日志里有连接走了其他出站" {
+		t.Errorf("用户B 的 Reason 不应被改写，得到 %q", b.Reason)
+	}
+}

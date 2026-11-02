@@ -1007,6 +1007,10 @@
         color: var(--aui-text);
     }
 
+    .rv-verify-dmeta {
+        color: var(--aui-text-2);
+    }
+
     .rv-verify-line {
         margin: 6px 0 0;
         overflow-wrap: anywhere;
@@ -1824,6 +1828,9 @@
                                                         <span class="status-badge" :class="rowBadges[u.key].cls">
                                                             <a-icon :type="rowBadges[u.key].icon"></a-icon>[[ rowBadges[u.key].text ]]
                                                         </span>
+                                                        <!-- 符合次数跟在徽章后面：单个用户在这一行，汇总行的每位用户在各自的小标题行 -->
+                                                        <span v-if="verifyShown && u.key !== 'all' && u.key !== 'more' && logMatched(userVerify(u.key))"
+                                                              class="rv-verify-dmeta">近 24 小时符合 [[ logMatched(userVerify(u.key)) ]] 次</span>
                                                     </div>
                                                     <p v-if="rowBadges[u.key].reason" class="rv-verify-line">[[ rowBadges[u.key].reason ]]</p>
                                                     <template v-if="verifyShown">
@@ -1847,11 +1854,13 @@
                                                         <div v-for="uv in verifyDetailUsers(u.key)" :key="'vu-' + uv.inboundId" class="rv-verify-user">
                                                             <div v-if="u.key === 'all' || u.key === 'more'" class="rv-verify-dhead">
                                                                 <b>[[ uv.name ]]</b>
-                                                                <span class="status-badge" :class="verdictMeta(uv.verdict).cls">
-                                                                    <a-icon :type="verdictMeta(uv.verdict).icon"></a-icon>[[ verdictMeta(uv.verdict).text ]]
+                                                                <span class="status-badge" :class="userVerdictMeta(uv).cls">
+                                                                    <a-icon :type="userVerdictMeta(uv).icon"></a-icon>[[ userVerdictMeta(uv).text ]]
                                                                 </span>
+                                                                <span v-if="logMatched(uv)" class="rv-verify-dmeta">近 24 小时符合 [[ logMatched(uv) ]] 次</span>
                                                             </div>
-                                                            <p v-if="(u.key === 'all' || u.key === 'more') && uv.reason" class="rv-verify-line">[[ uv.reason ]]</p>
+                                                            <!-- 被抢先命中时徽章已说清原因，不再重复一句说明 -->
+                                                            <p v-if="(u.key === 'all' || u.key === 'more') && uv.reason && !userShadows(uv)" class="rv-verify-line">[[ uv.reason ]]</p>
                                                             <ul v-if="uv.samples && uv.samples.length" class="rv-verify-list">
                                                                 <li v-for="(s, si) in uv.samples" :key="si">
                                                                     <a-icon :type="s.error ? 'question-circle' : (s.match ? 'check-circle' : 'close-circle')"
@@ -1861,7 +1870,7 @@
                                                                     <span class="sr-only">实际出站</span>
                                                                     <span>[[ s.error ? '查询失败：' + s.error : (s.actualLabel || s.actualTag || '—') ]]</span>
                                                                     <span v-if="!s.error && !s.match" class="status-text-danger">
-                                                                        （应为 [[ verify.result.expected.label || verify.result.expected.tag ]]）
+                                                                        （[[ s.shadowedBy ? '被 ' + shadowName(s.shadowedBy) + ' 抢先命中，' : '' ]]应为 [[ verify.result.expected.label || verify.result.expected.tag ]]）
                                                                     </span>
                                                                     <span v-if="!s.error && s.match && !s.hitByRule" class="rv-verify-note">
                                                                         出口一致，但不是由本规则命中
@@ -1871,10 +1880,9 @@
                                                             <template v-if="uv.log">
                                                                 <p v-if="uv.log.error" class="rv-verify-line">[[ uv.log.error ]]</p>
                                                                 <template v-else>
-                                                                    <p v-if="uv.log.matched > 0" class="rv-verify-line">近 24 小时符合 [[ uv.log.matched ]] 次</p>
                                                                     <div v-for="o in (uv.log.others || [])" :key="o.route" class="rv-verify-other">
                                                                         <p class="rv-verify-line status-text-danger">
-                                                                            近 24 小时有 [[ o.count ]] 次走了 [[ o.label || o.route ]]（最近一次 [[ verifyStamp(o.lastAt) ]]）
+                                                                            近 24 小时有 [[ o.count ]] 次[[ o.shadowedBy ? '被 ' + shadowName(o.shadowedBy) + ' 抢先命中，' : '' ]]走了 [[ o.label || o.route ]]（最近一次 [[ verifyStamp(o.lastAt) ]]）
                                                                         </p>
                                                                         <ul v-if="o.examples && o.examples.length" class="rv-verify-list is-examples">
                                                                             <li v-for="ex in o.examples" :key="ex">[[ ex ]]</li>
@@ -2490,9 +2498,11 @@
                 const active = users.filter(x => !x.disabled);
                 const disabled = users.length - active.length;
                 const verified = active.filter(x => x.verdict === 'verified').length;
-                const bad = active.filter(x => x.verdict === 'mismatch').length;
+                const bad = active.filter(x => x.verdict === 'mismatch');
+                const shadowed = bad.filter(x => this.userShadows(x)).length;
                 let text = '已验证 ' + verified + '/' + active.length + ' · ' + time;
-                if (bad) text += ' · ' + bad + ' 位与配置不符';
+                if (bad.length - shadowed) text += ' · ' + (bad.length - shadowed) + ' 位与配置不符';
+                if (shadowed) text += ' · ' + shadowed + ' 位被上方规则抢先命中';
                 if (disabled) text += ' · ' + disabled + ' 位已停用';
                 // 截断时绝不能读成「全部已验证」：明确报出还有多少人没验证
                 if (this.verifyUncheckedCount) text += ' · 另有 ' + this.verifyUncheckedCount + ' 位未验证';
@@ -2508,33 +2518,14 @@
                 for (const u of this.flowUsers) out[u.key] = this.rowBadge(u.key);
                 return out;
             },
-            // 连线着色用：每行一个 verdict（没有证据时为 ''，画中性灰）
-            wireVerdicts() {
-                return this.flowUsers.map(u => {
-                    if (!this.verifyShown) return '';
-                    const v = this.userVerify(u.key);
-                    if (u.key !== 'all' && u.key !== 'more') return v.verdict;
-                    if (v.failed.some(x => x.verdict === 'mismatch')) return 'mismatch';
-                    // 全局规则被截断：没验证到的那部分没有证据，连线保持中性灰
-                    if (u.key === 'all' && this.verifyUncheckedCount) return '';
-                    return v.total > 0 && v.verified === v.total ? 'verified' : '';
-                });
-            },
             // 走错用户的实际去向（设计 §5.3）：只看当前规则已加载的结果，核心等待下发时不画（Ruling 1）。
             // 来源是核心样例里不符的 actualTag 与访问日志 others 的 route，两者并集、按 tag 去重；
             // 「出口符合但不是本规则命中的」样例（match=true）不算走错。
-            // userKeys 对应 flowUsers 的行：全局规则只有 'all'，折叠的用户归到 'more'。
             actualDests() {
                 const empty = { list: [], moreCount: 0 };
                 if (!this.verifyShown) return empty;
                 const res = this.verify.result;
                 if (res.core && res.core.state === 'pending') return empty;
-                const ids = this.editorPreview.inboundIds;
-                const rowKeyOf = id => {
-                    if (!ids.length) return 'all';
-                    const i = ids.indexOf(id);
-                    return i >= 0 && i < 4 ? id : 'more';
-                };
                 const byKey = {}, order = [];
                 // 去重键：默认出站是同一个真实出口，但后端给它好几种写法——未命中样例 actualTag 为空、
                 // 标签 labelNoMatch「默认出站（未命中任何规则）」；日志里默认 tag 与每个 a-ui-meter-* tag
@@ -2550,13 +2541,11 @@
                     const key = label === DEFAULT_LABEL && !tag ? 'default' : (tag || ('label:' + label));
                     let a = byKey[key];
                     if (!a) {
-                        a = byKey[key] = { key, tag: tag || '', label: '', users: [], userKeys: [], names: [] };
+                        a = byKey[key] = { key, tag: tag || '', label: '', users: [], names: [] };
                         order.push(key);
                     }
                     if (!a.label && label) a.label = label;
                     if (!a.users.includes(uv.inboundId)) a.users.push(uv.inboundId);
-                    const rk = rowKeyOf(uv.inboundId);
-                    if (!a.userKeys.includes(rk)) a.userKeys.push(rk);
                     if (!a.names.includes(uv.name)) a.names.push(uv.name);
                 };
                 for (const uv of this.verifyScopeUsers) {
@@ -2573,7 +2562,7 @@
                     const names = a.names.filter(Boolean);
                     const shown = names.slice(0, 3).join('、');
                     const who = names.length > 3 ? shown + ' 等 ' + a.users.length + ' 位' : (shown || a.users.length + ' 位用户');
-                    return { key: a.key, tag: a.tag, label: a.label || '未知出站', userKeys: a.userKeys, who };
+                    return { key: a.key, tag: a.tag, label: a.label || '未知出站', who };
                 });
                 return { list, moreCount: all.length - list.length };
             },
@@ -3443,6 +3432,36 @@
                     default: return { cls: 'status-neutral', icon: 'exclamation-circle', text: '无法验证' };
                 }
             },
+            // 不符的用户若全部证据都被更靠前的规则抢先命中（服务端 attributeShadows 标的 shadowedBy），
+            // 徽章改说「被 02 某规则抢先命中」；颜色与图标不变，结论仍是服务端的 mismatch。
+            userVerdictMeta(uv) {
+                const m = this.verdictMeta(uv.verdict);
+                const sh = this.userShadows(uv);
+                if (!sh) return m;
+                const text = sh.length === 1 ? '被 ' + this.shadowName(sh[0]) + ' 抢先命中' : '被上方 ' + sh.length + ' 条规则抢先命中';
+                return Object.assign({}, m, { text });
+            },
+            // 全部不符证据（不符的样例 + 日志里的其他出站）都带 shadowedBy 时返回去重后的规则，否则 null：
+            // 有一条说不清是谁抢的，就不能把整位用户说成「被抢先命中」。
+            userShadows(uv) {
+                if (!uv || uv.verdict !== 'mismatch') return null;
+                const items = (uv.samples || []).filter(s => !s.error && !s.match)
+                    .concat((uv.log && !uv.log.error && uv.log.others) || []);
+                if (!items.length || items.some(x => !x.shadowedBy)) return null;
+                const out = [];
+                items.forEach(x => { if (!out.some(r => r.ruleId === x.shadowedBy.ruleId)) out.push(x.shadowedBy); });
+                return out;
+            },
+            // 访问日志里符合的次数；日志读取失败或没有日志证据时为 0（不显示）
+            logMatched(uv) {
+                return uv && uv.log && !uv.log.error ? (uv.log.matched || 0) : 0;
+            },
+            // 抢先的规则按列表上的序号 + 名称显示（与左侧列表的「02」对得上）；规则已不在列表里时只给名称。
+            shadowName(ref) {
+                const r = this.rules.find(x => x.id === ref.ruleId);
+                if (!r) return '「' + (ref.remark || '未命名规则') + '」';
+                return String(this.ruleOrder(r)).padStart(2, '0') + ' ' + (r.remark || '未命名规则');
+            },
             // 规则列表里的审计图标：图标形状与流量走向图一致（verdictMeta），说明写进 title。
             // 摘要里没有这条规则（刚启用、下一轮审计还没到）按「尚未验证」。
             ruleAuditBadge(sum) {
@@ -3529,8 +3548,9 @@
                 if (!this.verifyShown) return neutral('exclamation-circle', '未验证', '尚未验证');
                 const v = this.userVerify(key);
                 if (key !== 'all' && key !== 'more') {
-                    const m = this.verdictMeta(v.verdict);
-                    const reason = v.verdict === 'verified' ? '' : (v.reason || '');
+                    const m = this.userVerdictMeta(v);
+                    // 被抢先命中时徽章文字就是原因，明细里不再重复一句说明
+                    const reason = v.verdict === 'verified' || this.userShadows(v) ? '' : (v.reason || '');
                     let title = m.text + (reason ? '：' + reason : '');
                     if (v.verdict === 'verified' && v.log && v.log.matched > 0) {
                         title += '，近 24h ' + v.log.matched + ' 次真实连接';
@@ -3687,12 +3707,12 @@
                 const L = R(list), C = R(center), N = R(dest);
                 const rows = Array.from(d.querySelectorAll('.rv-urow')).map(R);
                 const action = this.ruleEditor.rule.action;
-                // 连线颜色跟随验证结论：已验证用原来的蓝，不符用 --aui-danger，
-                // 其余（没有证据、等待下发、无法验证）一律中性灰——没有证据就不画成「通」的样子。
+                // 着色分工：左侧「用户 → 规则」只表示规则覆盖了谁，颜色固定，不随验证结论变；
+                // 右侧「规则 → 配置去向」是配置走的路，保持绿色（block 保持红）；
+                // 走错的连接另画红色虚线箭头，从规则节点右侧引到对应的「实际：…」节点。
+                // 验证结论本身由左列行内图标与下方明细表达，连线不再重复着色。
                 const danger = getComputedStyle(document.documentElement).getPropertyValue('--aui-danger').trim() || '#B91C1C';
-                const verdicts = this.wireVerdicts;
-                const anyMismatch = verdicts.includes('mismatch');
-                const col = anyMismatch ? danger : (action === 'block' ? '#D9363E' : '#12A150');
+                const col = action === 'block' ? '#D9363E' : '#12A150';
                 const curve = (x1, y1, x2, y2) => {
                     const k = (x2 - x1) * 0.55;
                     return 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + k) + ' ' + y1 + ', ' + (x2 - k) + ' ' + y2 + ', ' + x2 + ' ' + y2;
@@ -3705,43 +3725,42 @@
                 }).join('');
                 let h = '<defs>' +
                     '<linearGradient id="rv-gl" gradientUnits="userSpaceOnUse" x1="' + L.r + '" x2="' + C.l + '"><stop offset="0" stop-color="#8EC5FF"></stop><stop offset="1" stop-color="#3D7BFF"></stop></linearGradient>' +
-                    '<linearGradient id="rv-gr" gradientUnits="userSpaceOnUse" x1="' + C.r + '" x2="' + N.l + '"><stop offset="0" stop-color="' + (anyMismatch ? danger : (action === 'block' ? '#FF9A9A' : '#3FD6A4')) + '"></stop><stop offset="1" stop-color="' + col + '"></stop></linearGradient>' +
+                    '<linearGradient id="rv-gr" gradientUnits="userSpaceOnUse" x1="' + C.r + '" x2="' + N.l + '"><stop offset="0" stop-color="' + (action === 'block' ? '#FF9A9A' : '#3FD6A4') + '"></stop><stop offset="1" stop-color="' + col + '"></stop></linearGradient>' +
                     '<filter id="rv-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.2"></feGaussianBlur></filter>' +
-                    '<marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + col + '"></path></marker></defs>';
+                    // 箭头按用户坐标定尺寸（不随线宽缩放），绿红两支一样大
+                    '<marker id="rv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + col + '"></path></marker>' +
+                    '<marker id="rv-arrow-x" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1.5 9 5 1 8.5z" fill="' + danger + '"></path></marker></defs>';
                 const n = rows.length, spread = Math.min(8, (C.h - 24) / Math.max(1, n - 1));
                 rows.forEach((u, i) => {
                     const x1 = L.r + 2, p =curve(x1, u.y, C.l - 2, C.y + (i - (n - 1) / 2) * spread);
-                    const v = verdicts[i];
-                    const solid = v === 'verified' ? '#3D7BFF' : (v === 'mismatch' ? danger : '#94A0B8');
-                    const soft = v === 'verified' ? 'url(#rv-gl)' : solid;
+                    const solid = '#3D7BFF', soft = 'url(#rv-gl)';
                     h += '<path d="' + p + '" fill="none" stroke="' + soft + '" stroke-width="5" opacity=".18" filter="url(#rv-glow)"></path>' +
                         '<path d="' + p + '" fill="none" stroke="' + soft + '" stroke-width="1.8" opacity=".55"></path>' +
                         '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="' + solid + '" stroke-width="1.8" stroke-linecap="round"></path>' +
                         '<circle cx="' + x1 + '" cy="' + u.y + '" r="3.5" fill="#fff" stroke="' + solid + '" stroke-width="1.8"></circle>' +
                         dots(p, solid, 1, 2.2, i * 0.35);
                 });
-                const p = curve(C.r + 2, C.y, N.l - 4, N.y);
-                h += '<path d="' + p + '" fill="none" stroke="url(#rv-gr)" stroke-width="6" opacity=".2" filter="url(#rv-glow)"></path>' +
-                    '<path d="' + p + '" fill="none" stroke="url(#rv-gr)" stroke-width="2.2" marker-end="url(#rv-arrow)"></path>' +
+                // 去向连线 = 曲线 + 末端一小段水平直线：箭头落在直线上，朝向与节点垂直，
+                // 不会因为曲线末端太陡而歪成「小旗子」
+                const LEAD = 12;
+                const tail = (x, y) => ' L ' + x + ' ' + y;
+                const p = curve(C.r + 2, C.y, N.l - 2 - LEAD, N.y);
+                const pFull = p + tail(N.l - 2, N.y);
+                h += '<path d="' + pFull + '" fill="none" stroke="url(#rv-gr)" stroke-width="6" opacity=".2" filter="url(#rv-glow)"></path>' +
+                    '<path d="' + pFull + '" fill="none" stroke="url(#rv-gr)" stroke-width="2.2" marker-end="url(#rv-arrow)"></path>' +
                     '<path class="rv-wire-flow" d="' + p + '" fill="none" stroke="#fff" stroke-width="1.4" opacity=".85" stroke-linecap="round"></path>' +
-                    dots(p, col, 2, 1.6, 0) +
-                    '<circle cx="' + (C.r + 2) + '" cy="' + C.y + '" r="3.5" fill="#fff" stroke="' + col + '" stroke-width="1.8"></circle>';
-                // 实际去向：从走错的用户行直接连到对应的实际去向节点（红色虚线），配置去向的连线不动
-                const rowIndex = {};
-                this.flowUsers.forEach((u, i) => { rowIndex[u.key] = i; });
-                this.actualDests.list.forEach((a, j) => {
-                    const el = Array.from(d.querySelectorAll('.rv-dest.is-actual')).find(x => x.getAttribute('data-akey') === a.key);
-                    if (!el) return;
-                    const A = R(el);
-                    a.userKeys.forEach(k => {
-                        const u = rows[rowIndex[k]];
-                        if (!u) return;
-                        const x1 = L.r + 2, ap = curve(x1, u.y, A.l - 4, A.y);
-                        h += '<path d="' + ap + '" fill="none" stroke="' + danger + '" stroke-width="1.6" stroke-dasharray="5 4" opacity=".85" stroke-linecap="round"></path>' +
-                            '<circle cx="' + (A.l - 4) + '" cy="' + A.y + '" r="2.6" fill="' + danger + '"></circle>' +
-                            dots(ap, danger, 1, 2.6, j * 0.4);
-                    });
+                    dots(p, col, 2, 1.6, 0);
+                // 实际去向：从规则节点右侧引一条红色虚线箭头到对应的「实际：…」节点（每个去向一条，
+                // 涉及哪些用户写在节点文字里），配置去向的绿色连线不动
+                d.querySelectorAll('.rv-dest.is-actual').forEach((el, j) => {
+                    const A = R(el), ap = curve(C.r + 2, C.y, A.l - 2 - LEAD, A.y);
+                    // 虚线只画曲线部分；末端直线用实线承接箭头，避免虚线的空隙落在箭头根部
+                    h += '<path d="' + ap + '" fill="none" stroke="' + danger + '" stroke-width="1.8" stroke-dasharray="5 4" opacity=".9" stroke-linecap="round"></path>' +
+                        '<path d="M ' + (A.l - 2 - LEAD) + ' ' + A.y + tail(A.l - 2, A.y) + '" fill="none" stroke="' + danger + '" stroke-width="1.8" opacity=".9" marker-end="url(#rv-arrow-x)"></path>' +
+                        dots(ap, danger, 1, 2.6, j * 0.4);
                 });
+                // 起点圆点最后画，压在所有出线之上
+                h += '<circle cx="' + (C.r + 2) + '" cy="' + C.y + '" r="3.5" fill="#fff" stroke="' + col + '" stroke-width="1.8"></circle>';
                 svg.innerHTML = h;
             },
             delRule(rule) {
@@ -4109,10 +4128,6 @@
                 }
                 const r = this.savedRule;
                 if (r && this.verify.ruleId === r.id && !this.verify.result && !this.verify.loading) this.runVerify(r.id);
-            },
-            // 验证结论一变，连线颜色跟着重画
-            wireVerdicts() {
-                this.scheduleRuleWires();
             },
             // 实际去向节点增减会改变右列高度，连线跟着重画
             actualDests() {
