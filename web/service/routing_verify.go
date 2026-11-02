@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,6 +98,14 @@ type SampleResult struct {
 	Match       bool   `json:"match"`
 	HitByRule   bool   `json:"hitByRule"`
 	Error       string `json:"error"`
+	// ShadowedBy 非 nil：这个不符的样例被排在本规则之前的另一条规则抢先命中（见 attributeShadows）。
+	ShadowedBy *ShadowRule `json:"shadowedBy,omitempty"`
+}
+
+// ShadowRule 是抢先命中某类连接的、在核心里排在本规则之前的另一条分流规则。
+type ShadowRule struct {
+	RuleId int    `json:"ruleId"`
+	Remark string `json:"remark"`
 }
 
 // LogEvidence 是访问日志里属于本规则的真实连接统计。
@@ -116,6 +125,8 @@ type LogOther struct {
 	Count    int64    `json:"count"`
 	LastAt   int64    `json:"lastAt"`
 	Examples []string `json:"examples"`
+	// ShadowedBy 非 nil：这组连接（按示例判定）被排在本规则之前的另一条规则抢先命中。
+	ShadowedBy *ShadowRule `json:"shadowedBy,omitempty"`
 }
 
 // sampleTarget 是一个待 TestRoute 的目标：域名与 IP 二选一。
@@ -696,6 +707,16 @@ type verifyShared struct {
 	matcherKey string
 	matcherEnt *matcherEntry
 	logRows    map[logRowsKey]*logRowsEntry
+
+	// 抢先命中归因（attributeShadows）用：核心里的规则顺序与各候选规则的匹配器。
+	// 小规则的匹配器一轮内常驻；大规则只留一个槽，归因结束即释放（与 releaseLarge 同一口径）。
+	coreOrder      []*model.RoutingRule
+	coreOrderErr   error
+	coreOrderReady bool
+	shadowSmall    map[string]*matcherEntry
+	shadowLargeKey string
+	shadowLargeEnt *matcherEntry
+	shadowLargeIds []int
 }
 
 // logRowsKey 是入站日志分组的缓存键：窗口起点随规则的忽略时刻而不同，必须进键。
@@ -759,6 +780,7 @@ func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, err
 		groupLogs:   s.groupLogs,
 		groups:      map[int]*groupConditions{},
 		logRows:     map[logRowsKey]*logRowsEntry{},
+		shadowSmall: map[string]*matcherEntry{},
 		rpcTimeout:  s.rpcTimeout,
 	}
 	for _, n := range nodeList {
@@ -959,7 +981,219 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 		}
 		res.Users = append(res.Users, u)
 	}
+	if plan.large {
+		// 先放掉本规则的大匹配器再做归因：归因可能要建另一条大规则的匹配器，同一时刻只留一个。
+		sh.releaseLarge(plan)
+	}
+	s.attributeShadows(sh, rule, res.Users)
 	return res
+}
+
+// attributeShadows 给走错的样例与访问日志分组标注「被哪条更靠前的规则抢先命中」，
+// 并在一个用户的全部不符证据都能归因时改写它的 Reason。只改说明，不改 Verdict：
+// 被遮蔽仍算本规则走错（设计 docs/superpowers/specs/2026-11-01-routing-flow-audit-design.md）。
+//
+// 核心的 TestRoute 只回出站 tag、访问日志也不记规则，所以归因由面板推断：在核心规则顺序里
+// 排在本规则之前、覆盖该用户、出站恰是实际出站、且域名组命中目标（xray 自己的匹配器，
+// 与 buildLogEvidence 同一套）的第一条规则。推不出来（模板里手写的规则、IP 两遍匹配等）
+// 就不标，界面退回原来的「与配置不符」，宁可不说也不乱指一条规则。
+func (s *RoutingVerifyService) attributeShadows(sh *verifyShared, rule *model.RoutingRule, users []UserVerify) {
+	defer sh.releaseShadowLarge()
+	for i := range users {
+		u := &users[i]
+		if u.Verdict != verdictMismatch {
+			continue
+		}
+		total, shadowed := 0, 0
+		var refs []*ShadowRule
+		note := func(ref *ShadowRule) {
+			total++
+			if ref == nil {
+				return
+			}
+			shadowed++
+			for _, r := range refs {
+				if r.RuleId == ref.RuleId {
+					return
+				}
+			}
+			refs = append(refs, ref)
+		}
+		for j := range u.Samples {
+			smp := &u.Samples[j]
+			if smp.Error != "" || smp.Match {
+				continue
+			}
+			if smp.ActualTag != "" {
+				smp.ShadowedBy = sh.findShadow(rule, u.InboundId, smp.ActualTag, []string{smp.Target})
+			}
+			note(smp.ShadowedBy)
+		}
+		if u.Log != nil {
+			for j := range u.Log.Others {
+				o := &u.Log.Others[j]
+				o.ShadowedBy = sh.findShadow(rule, u.InboundId, o.Route, o.Examples)
+				note(o.ShadowedBy)
+			}
+		}
+		if total == 0 || shadowed != total {
+			continue
+		}
+		if len(refs) == 1 {
+			u.Reason = fmt.Sprintf("这些连接被排在前面的规则「%s」抢先命中，没有轮到本规则", shadowRemark(refs[0]))
+		} else {
+			u.Reason = fmt.Sprintf("这些连接被排在前面的 %d 条规则抢先命中，没有轮到本规则", len(refs))
+		}
+	}
+}
+
+func shadowRemark(r *ShadowRule) string {
+	if r.Remark != "" {
+		return r.Remark
+	}
+	return "未命名规则"
+}
+
+// findShadow 在核心顺序里本规则之前的规则中，找出把 examples 送到 route 出站的那一条。
+// examples 必须全部归到同一条规则才算数：日志分组只按出站聚合，几条示例分属不同规则时
+// 说不清这一组「被谁抢先」，不标。
+func (sh *verifyShared) findShadow(rule *model.RoutingRule, inboundId int, route string, examples []string) *ShadowRule {
+	if len(examples) == 0 {
+		return nil
+	}
+	order := sh.rulesInCoreOrder()
+	var found *model.RoutingRule
+	for _, ex := range examples {
+		var hit *model.RoutingRule
+		for _, c := range order {
+			if c.Id == rule.Id {
+				break // 只看排在本规则之前的
+			}
+			if !sh.shadowCandidate(c, inboundId, route) {
+				continue
+			}
+			if m := sh.shadowMatcher(c); m != nil && m.Match(ex) {
+				hit = c
+				break
+			}
+		}
+		if hit == nil || (found != nil && found.Id != hit.Id) {
+			return nil
+		}
+		found = hit
+	}
+	return &ShadowRule{RuleId: found.Id, Remark: found.Remark}
+}
+
+// rulesInCoreOrder 是启用规则在核心里的先后：block 整组在前，其余按 priority、id 升序
+// （GetEnabled 的顺序），与 RoutingInjector.buildRules 一致。一轮内只读一次库。
+func (sh *verifyShared) rulesInCoreOrder() []*model.RoutingRule {
+	if sh.coreOrderReady {
+		return sh.coreOrder
+	}
+	sh.coreOrderReady = true
+	rules, err := (&RoutingRuleService{}).GetEnabled()
+	if err != nil {
+		logger.Warning("路由验证：读取分流规则失败，不做抢先命中归因：", err)
+		sh.coreOrderErr = err
+		return nil
+	}
+	ordered := make([]*model.RoutingRule, 0, len(rules))
+	for _, r := range rules {
+		if r.Action == model.ActionBlock {
+			ordered = append(ordered, r)
+		}
+	}
+	for _, r := range rules {
+		if r.Action != model.ActionBlock {
+			ordered = append(ordered, r)
+		}
+	}
+	sh.coreOrder = ordered
+	return ordered
+}
+
+// shadowCandidate：规则会写进配置（同 planRule 交给 buildRule 判）、覆盖该入站、出站就是 route。
+func (sh *verifyShared) shadowCandidate(c *model.RoutingRule, inboundId int, route string) bool {
+	defaultTag := sh.rt.DefaultTag
+	if defaultTag == "" && c.Action == model.ActionDirect {
+		defaultTag = sh.configDefaultTag()
+	}
+	if _, _, skip := (&RoutingInjector{}).buildRule(c, sh.inboundTags, sh.usable, defaultTag); skip != nil {
+		return false
+	}
+	ids, err := DecodeInboundIds(c.InboundIds)
+	if err != nil {
+		return false
+	}
+	if len(ids) > 0 && !slices.Contains(ids, inboundId) {
+		return false
+	}
+	switch c.Action {
+	case model.ActionProxy:
+		return sh.usable[c.OutboundId] == route
+	case model.ActionBlock:
+		return route == model.BlockOutboundTag
+	case model.ActionDirect:
+		return route == defaultTag || model.IsMeterTag(route)
+	}
+	return false
+}
+
+// shadowMatcher 返回候选规则合并后条目的匹配器；建不出来返回 nil（该候选不参与归因）。
+func (sh *verifyShared) shadowMatcher(c *model.RoutingRule) *groupMatcher {
+	gids, err := DecodeDomainGroupIds(c.DomainGroupIds)
+	if err != nil {
+		return nil
+	}
+	var domainLists, cidrLists [][]string
+	var used []string
+	var usedIds []int
+	for _, gid := range gids {
+		g := sh.group(gid)
+		if g.skip {
+			continue
+		}
+		domainLists = append(domainLists, g.domains)
+		cidrLists = append(cidrLists, g.cidrs)
+		used = append(used, strconv.Itoa(gid))
+		usedIds = append(usedIds, gid)
+	}
+	key := strings.Join(used, ",")
+	if e, ok := sh.shadowSmall[key]; ok {
+		return e.m
+	}
+	if sh.shadowLargeEnt != nil && sh.shadowLargeKey == key {
+		return sh.shadowLargeEnt.m
+	}
+	domains, cidrs := MergeDomains(domainLists...), MergeDomains(cidrLists...)
+	large := len(domains)+len(cidrs) > auditLargeThreshold
+	if large {
+		sh.releaseShadowLarge() // 先放旧的再建，同一时刻只留一个大匹配器
+	}
+	m, err := newGroupMatcher(domains, cidrs)
+	if err != nil {
+		logger.Warning("路由验证：构造规则匹配器失败，rule id:", c.Id, "err:", err)
+		m = nil
+	}
+	e := &matcherEntry{m: m, err: err}
+	if large {
+		sh.shadowLargeKey, sh.shadowLargeEnt, sh.shadowLargeIds = key, e, usedIds
+	} else {
+		sh.shadowSmall[key] = e
+	}
+	return m
+}
+
+// releaseShadowLarge 放掉归因用的大匹配器及其组条目（组条目可能是为它才读进 sh.groups 的）。
+func (sh *verifyShared) releaseShadowLarge() {
+	if sh.shadowLargeEnt == nil {
+		return
+	}
+	for _, gid := range sh.shadowLargeIds {
+		delete(sh.groups, gid)
+	}
+	sh.shadowLargeKey, sh.shadowLargeEnt, sh.shadowLargeIds = "", nil, nil
 }
 
 // coreStateOf 把运行时快照映射成核心级状态。pending 仍执行 TestRoute（设计 §3.5）。
