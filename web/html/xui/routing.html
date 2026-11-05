@@ -691,6 +691,57 @@
         background: var(--aui-surface-soft);
     }
 
+    .rv-gadd-name {
+        white-space: nowrap;
+    }
+
+    /* 加进来会与别的规则冲突时的提示，排在组名右侧 */
+    .rv-gadd-note {
+        margin-left: auto;
+        padding-left: 12px;
+        font-size: 12px;
+        color: var(--aui-warning);
+        white-space: nowrap;
+    }
+
+    .rv-conflict-list {
+        margin: 12px 0 0;
+        padding: 10px 12px;
+        list-style: none;
+        border-radius: 8px;
+        background: var(--aui-surface-soft);
+        max-height: 220px;
+        overflow-y: auto;
+    }
+
+    .rv-conflict-list li + li {
+        margin-top: 8px;
+    }
+
+    .rv-conflict-by {
+        font-weight: 600;
+        color: var(--aui-text);
+    }
+
+    .rv-conflict-names {
+        color: var(--aui-text-2);
+        word-break: break-all;
+    }
+
+    .rv-conflict-opts {
+        margin: 12px 0 0;
+        padding-left: 18px;
+        color: var(--aui-text-2);
+        line-height: 1.7;
+    }
+
+    .rv-conflict-foot {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+    }
+
     .rv-gadd-empty {
         padding: 6px 10px;
         font-size: 12px;
@@ -1950,7 +2001,7 @@
                                                                          :disabled="!!inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)">
                                                             [[ i.remark || i.tag ]]
                                                             <span v-if="inboundOccupiedBy(i.id) && !ruleEditor.rule.inboundIds.includes(i.id)"
-                                                                  class="rule-pick-note">已被规则「[[ inboundOccupiedBy(i.id) ]]」覆盖</span>
+                                                                  class="rule-pick-note">已被规则 [[ inboundOccupiedBy(i.id) ]]覆盖</span>
                                                             <span v-if="!i.enable" class="rule-pick-note">已停用</span>
                                                         </a-select-option>
                                                     </a-select>
@@ -1989,7 +2040,9 @@
                                                                                  :src="'{{ .base_path }}assets/brand-icons/' + g.brand.slug + '.svg?{{ .cur_ver }}'" alt="">
                                                                             <span v-else class="rv-pick-mark" :style="{ background: groupColorOf(g) }"
                                                                                   aria-hidden="true">[[ groupInitials(g) ]]</span>
-                                                                            [[ g.remark ]]
+                                                                            <span class="rv-gadd-name">[[ g.remark ]]</span>
+                                                                            <span v-if="groupAddConflicts[g.id]" class="rv-gadd-note"
+                                                                                  :title="groupAddConflicts[g.id].lost.map(u => u.name).join('、')">[[ groupConflictNote(groupAddConflicts[g.id]) ]]</span>
                                                                         </button>
                                                                     </li>
                                                                     <li v-if="!addableGroups.length" class="rv-gadd-empty" role="none">没有匹配的域名组</li>
@@ -2233,6 +2286,52 @@
     <input type="file" ref="importFile" accept=".json,application/json"
            style="display:none" @change="onImportFileChosen">
 
+    <!-- 加组冲突：同一个域名组下一个用户至多被一条规则覆盖。修复前这里不问就把
+         冲突用户从选择里剔除，管理员看不出有人被删掉了。 -->
+    <a-modal :visible="groupConflict.visible" :width="560" @cancel="cancelGroupConflict">
+        <template slot="title">
+            <div class="modal-head">
+                <span class="modal-icon tone-amber" aria-hidden="true"><a-icon type="warning"></a-icon></span>
+                <span class="modal-head-text">
+                    <span class="modal-head-title">「[[ groupConflict.groupName ]]」与其他规则冲突</span>
+                    <span class="modal-head-sub">同一个域名组下，每位用户只能被一条规则覆盖</span>
+                </span>
+            </div>
+        </template>
+        <div>
+            当前规则选中的用户里，有 <b>[[ groupConflict.lost.length ]]</b> 位已被其他规则覆盖了「[[ groupConflict.groupName ]]」：
+        </div>
+        <ul class="rv-conflict-list">
+            <li v-for="row in groupConflictByRule()" :key="row.by">
+                <span class="rv-conflict-by">[[ row.by ]]</span>
+                <span>（[[ row.names.length ]] 人）：</span>
+                <span class="rv-conflict-names">[[ row.names.join('、') ]]</span>
+            </li>
+        </ul>
+        <ul class="rv-conflict-opts">
+            <li v-if="groupConflict.kept.length">
+                <b>单独新建规则</b>：当前规则保持不变；另开一条只含其余 [[ groupConflict.kept.length ]] 位用户、
+                只用「[[ groupConflict.groupName ]]」的新规则草稿，去向与当前规则相同，不自动加入以后新增的用户。
+            </li>
+            <li>
+                <b>仍然加入</b>：把「[[ groupConflict.groupName ]]」加进当前规则，并从当前规则中移除上面这
+                [[ groupConflict.lost.length ]] 位用户——他们将不再受当前规则约束<template v-if="!groupConflict.kept.length">，当前规则将没有任何用户</template>。
+            </li>
+        </ul>
+        <div v-if="groupConflict.kept.length && groupConflict.splitBlocked" class="rv-help is-warn">
+            [[ groupConflict.splitBlocked ]]
+        </div>
+        <template slot="footer">
+            <div class="rv-conflict-foot">
+                <a-button @click="cancelGroupConflict">取消</a-button>
+                <a-button @click="confirmGroupConflictRemove">仍然加入并移除这 [[ groupConflict.lost.length ]] 人</a-button>
+                <a-button v-if="groupConflict.kept.length" type="primary"
+                          :disabled="!!groupConflict.splitBlocked"
+                          @click="confirmGroupConflictSplit">为其余 [[ groupConflict.kept.length ]] 人单独新建规则</a-button>
+            </div>
+        </template>
+    </a-modal>
+
     <a-modal v-model="importReportVisible" :footer="null" :width="720">
         <template slot="title">
             <div class="modal-head">
@@ -2319,6 +2418,8 @@
             },
             // 域名组「＋ 添加」弹层
             groupAdd: { open: false, q: '' },
+            // 加组时与别的规则冲突的确认弹窗（addRuleGroup）
+            groupConflict: { visible: false, groupId: 0, groupName: '', lost: [], kept: [], splitBlocked: '' },
             ruleFilter: 'all',
             ruleQuery: '',
             // 正在提交启停的规则 id，防止连点
@@ -2578,25 +2679,19 @@
             // 每个入站已被哪条规则覆盖。key 是入站 id，value 是规则名。
             // key 0 是特殊项：存在「所有用户」规则时用它记录，它占住所有人。
             occupiedInbounds() {
-                const map = {};
-                if (!this.ruleEditor.active) return map;
-                const gids = this.ruleEditor.rule.domainGroupIds;
-                if (!gids.length) return map;
-                for (const r of this.rules) {
-                    if (r.id === this.ruleEditor.rule.id) continue;
-                    // 冲突判定的单位是「域名组 × 用户」的组合：组集合不相交
-                    // 就不冲突，同一个域名组可以被多条规则引用。
-                    if (!r.domainGroupIds.some(id => gids.includes(id))) continue;
-                    const label = r.remark || ('规则 #' + r.id);
-                    if (!r.inboundIds.length) {
-                        if (map[0] === undefined) map[0] = label;
-                        continue;
-                    }
-                    for (const id of r.inboundIds) {
-                        if (map[id] === undefined) map[id] = label;
-                    }
+                if (!this.ruleEditor.active) return {};
+                return this.occupiedFor(this.ruleEditor.rule.domainGroupIds);
+            },
+            // 「＋ 添加」弹层里每个候选组的冲突提示：加进来之后，当前已选的
+            // 用户里有几位会因为被别的规则占用而无法保留。加组之前就看得见。
+            groupAddConflicts() {
+                const out = {};
+                if (!this.ruleEditor.active || !this.groupAdd.open) return out;
+                for (const g of this.addableGroups) {
+                    const c = this.groupConflictOf(g.id);
+                    if (c.globalBy || c.lost.length) out[g.id] = c;
                 }
-                return map;
+                return out;
             },
             allUsersDisabled() {
                 return Object.keys(this.occupiedInbounds).length > 0;
@@ -2620,7 +2715,7 @@
             allUsersDisabledReason() {
                 const map = this.occupiedInbounds;
                 if (map[0]) {
-                    return '该域名组已有覆盖所有用户的规则「' + map[0] + '」，不能再对它添加任何规则';
+                    return '该域名组已有覆盖所有用户的规则 ' + map[0] + '，不能再对它添加任何规则';
                 }
                 if (Object.keys(map).length > 0) {
                     return '该域名组已有针对具体用户的规则，不能再选「所有用户」';
@@ -3138,15 +3233,20 @@
                     this.$refs.ruleDetail.scrollIntoView({ block: 'start' });
                 }
             },
-            async newRule() {
+            // prefill 由「加组冲突 → 拆成新规则」传入，是一份已填好的 RoutingRule；
+            // 列表上的「添加规则」按钮不传（模板里 newRule() 带括号，不会收到事件对象）。
+            async newRule(prefill) {
                 if (!this.guardRuleEdit()) return;
                 await this.refreshRulesQuiet();
-                const r = new RoutingRule();
-                // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
-                // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
-                // 后端零值仍是 false——否则导入的旧文件也会变成 true。
-                r.applyToNewInbounds = true;
-                r.inboundIds = this.inbounds.map(i => i.id).sort((a, b) => a - b);
+                let r = prefill;
+                if (!r) {
+                    r = new RoutingRule();
+                    // 新建时默认勾上：绝大多数分流规则本来就该覆盖所有人；
+                    // 只给特定几个人的规则由管理员手动取消。这是【表单初始值】，
+                    // 后端零值仍是 false——否则导入的旧文件也会变成 true。
+                    r.applyToNewInbounds = true;
+                    r.inboundIds = this.inbounds.map(i => i.id).sort((a, b) => a - b);
+                }
                 Object.assign(this.ruleEditor, {
                     rule: r, isNew: true, active: true, tried: false,
                     brokenWarn: '', base: '', origin: '',
@@ -3170,15 +3270,124 @@
                 if (first) this.loadEditor(first);
                 else this.ruleEditor.active = false;
             },
-            addRuleGroup(id) {
-                this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.concat(id));
+            // 当前草稿的域名组集合换成 gids 时，各入站已被哪条规则覆盖（不含正在编辑的这条）。
+            // key 是入站 id，value 是规则名；key 0 是特殊项：存在「所有用户」规则时用它记录。
+            // 禁用的规则同样占位（与后端 checkConflict 一致）。
+            occupiedFor(gids) {
+                const map = {};
+                if (!gids.length) return map;
+                for (const r of this.rules) {
+                    if (r.id === this.ruleEditor.rule.id) continue;
+                    // 冲突判定的单位是「域名组 × 用户」的组合：组集合不相交
+                    // 就不冲突，同一个域名组可以被多条规则引用。
+                    if (!r.domainGroupIds.some(id => gids.includes(id))) continue;
+                    // 带上列表序号，与左侧「07」对得上；label 也用在下拉「已被规则 … 覆盖」里
+                    const label = String(this.ruleOrder(r)).padStart(2, '0') + '「' + (r.remark || '未命名规则') + '」';
+                    if (!r.inboundIds.length) {
+                        if (map[0] === undefined) map[0] = label;
+                        continue;
+                    }
+                    for (const id of r.inboundIds) {
+                        if (map[id] === undefined) map[id] = label;
+                    }
+                }
+                return map;
+            },
+            // 把域名组 gid 加进当前草稿会发生什么：globalBy 非空表示该组已被某条
+            // 「所有用户」规则整个占住；lost 是当前已选、加组后必须移除的用户；kept 是其余的。
+            groupConflictOf(gid) {
+                const r = this.ruleEditor.rule;
+                const map = this.occupiedFor(r.domainGroupIds.concat(gid));
+                if (map[0]) return { globalBy: map[0], lost: [], kept: [] };
+                const lost = [], kept = [];
+                for (const id of r.inboundIds) {
+                    if (map[id]) lost.push({ id, name: this.inboundName(id), by: map[id] });
+                    else kept.push(id);
+                }
+                return { globalBy: '', lost, kept };
+            },
+            groupConflictNote(c) {
+                if (c.globalBy) return '已被 ' + c.globalBy + '覆盖所有用户';
+                const by = [...new Set(c.lost.map(x => x.by))];
+                return c.lost.length + ' 人已被 ' + (by.length > 1 ? by[0] + '等' : by[0]) + '覆盖';
+            },
+            closeGroupAdd() {
                 this.groupAdd.open = false;
                 this.groupAdd.q = '';
-                // 弹层关掉后焦点回到「＋ 添加」，键盘可以接着加下一个
+            },
+            focusGroupAddBtn() {
+                // 弹层/弹窗关掉后焦点回到「＋ 添加」，键盘可以接着加下一个
                 this.$nextTick(() => {
                     const b = this.$refs.groupAddBtn;
                     if (b) b.focus();
                 });
+            },
+            // 加组前先算冲突。修复前这里直接 setRuleGroups，其中的 reconcileInboundSelection
+            // 会把被别的规则占用的用户静默剔除——给一条覆盖 18 人的封禁规则加一个已被
+            // 另一条规则覆盖 17 人的组，保存后就只剩 1 人，其余 17 人的封禁当场失效。
+            addRuleGroup(id) {
+                const c = this.groupConflictOf(id);
+                this.closeGroupAdd();
+                const g = this.groups.find(x => x.id === id);
+                const groupName = g ? g.remark : ('域名组 #' + id);
+                if (c.globalBy) {
+                    this.$message.error('「' + groupName + '」已被规则 ' + c.globalBy + '覆盖所有用户，不能再加入其他规则');
+                    this.focusGroupAddBtn();
+                    return;
+                }
+                if (!c.lost.length) {
+                    this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.concat(id));
+                    this.focusGroupAddBtn();
+                    return;
+                }
+                Object.assign(this.groupConflict, {
+                    visible: true, groupId: id, groupName, lost: c.lost, kept: c.kept,
+                    // 拆分会切到一份新草稿；当前规则若已有未保存的修改，切换会被
+                    // guardRuleEdit 拦下，这里提前说明而不是让按钮点了没反应。
+                    splitBlocked: this.ruleEditor.isNew ? '当前规则还没保存，无法拆分'
+                        : (this.ruleDirty ? '当前规则有未保存的修改，先保存或撤销后才能拆分' : ''),
+                });
+            },
+            // 冲突弹窗里按占用它们的规则分组列出要移除的用户
+            groupConflictByRule() {
+                const out = [];
+                for (const u of this.groupConflict.lost) {
+                    let row = out.find(x => x.by === u.by);
+                    if (!row) out.push(row = { by: u.by, names: [] });
+                    row.names.push(u.name);
+                }
+                return out;
+            },
+            cancelGroupConflict() {
+                this.groupConflict.visible = false;
+                this.focusGroupAddBtn();
+            },
+            // 仍然加入：沿用原来的 setRuleGroups，由 reconcileInboundSelection 剔除冲突用户。
+            // 只改草稿，管理员还要点保存。
+            confirmGroupConflictRemove() {
+                const id = this.groupConflict.groupId;
+                this.groupConflict.visible = false;
+                this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.concat(id));
+                this.focusGroupAddBtn();
+            },
+            // 拆成新规则：当前规则一个字节不动，打开一份预填好的新草稿，
+            // 走 saveRule 的全部校验与后端 checkConflict，不另开写入路径。
+            async confirmGroupConflictSplit() {
+                const c = this.groupConflict;
+                if (c.splitBlocked || !c.kept.length) return;
+                const src = this.ruleEditor.rule;
+                const prefill = new RoutingRule();
+                prefill.remark = (src.remark ? src.remark + ' · ' : '') + c.groupName;
+                prefill.action = src.action;
+                prefill.outboundId = src.outboundId;
+                prefill.domainGroupIds = [c.groupId];
+                prefill.inboundIds = c.kept.slice();
+                // 不自动加入以后新增的用户：AttachInbound 不做冲突判定，覆盖同一个组的
+                // 「含新增」规则（例如 07）会同时收下新用户，两条规则从此互相冲突。
+                prefill.applyToNewInbounds = false;
+                c.visible = false;
+                await this.newRule(prefill);
+                this.$message.info('已为 ' + c.kept.length + ' 位用户打开新规则草稿，确认无误后点保存');
             },
             removeRuleGroup(id) {
                 this.setRuleGroups(this.ruleEditor.rule.domainGroupIds.filter(x => x !== id));
