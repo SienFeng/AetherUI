@@ -257,9 +257,14 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	oldInbound.Regions = inbound.Regions
 	oldInbound.UpMbit = inbound.UpMbit
 	oldInbound.DownMbit = inbound.DownMbit
-	// 管理员碰过这条记录，「因超流量被自动停用」的理由就不再成立。不清的话，
-	// 一个被手动停用的入站会在下一个重置周期自己活过来，而面板不会有任何提示。
-	oldInbound.DisabledByTraffic = false
+	// 只有启用状态被管理员改动过（或现在是启用的），「因超流量被自动停用」的理由才不再成立：
+	// 手动停用（开→关）之后不能在下一个重置周期自己活过来；重新启用后标记自然作废。
+	// 只改备注、限速等其他字段时保留标记——修复前任何编辑都清掉它，管理员改个备注，
+	// 这个入站就悄悄失去了下个周期自动恢复的资格，列表上也看不出区别。
+	// 想让它保持停用、不再自动恢复：先启用再停用一次即可（列表上会显示「手动停用」）。
+	if inbound.Enable || inbound.Enable != oldInbound.Enable {
+		oldInbound.DisabledByTraffic = false
+	}
 	// 切换重置周期时把时刻顶到当前，避免改一次设置就立刻触发一次计划外的
 	// 清零：从「按订阅周期(28 号)」改到「每月 1 号」时，上次重置停在 8/28，
 	// 而 9/1 这个新周期点已经过去，任务下一轮就会马上清一次。首次开启同理

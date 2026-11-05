@@ -42,6 +42,11 @@ const (
 	// 长期占着槽位。
 	meterProbeGiveUpRounds = 3
 
+	// meterMinTrialConns 是一个还没量到过字节的域名进池试用前，窗口内至少要有多少次
+	// 「落到规则表末尾」的连接（见 AccessLogService.MeterableConnCounts）。一两次连接的
+	// 域名进池后几乎从不产生字节，只会让池每小时空转、整表热下发一次路由。
+	meterMinTrialConns = 3
+
 	// meterCooldown 是退场后多久不再参选。
 	meterCooldown = 24 * time.Hour
 
@@ -133,11 +138,17 @@ func meterAvgBytesPerConn(aggs []meterAgg) float64 {
 //
 // 排序键是 (Weight desc, Count desc, Domain asc)。末位用域名字典序兜底是硬
 // 要求：生成期靠这个顺序保证配置逐字节确定。
+//
+// meterable 是各域名窗口内「计量规则接得住」的连接数（落到规则表末尾的）。非 nil 时，
+// 还没量到过字节的域名按它折算权重，不在池的还要达到 meterMinTrialConns 才参选——
+// 被分流规则送走的域名连接数再多，计量规则也轮不到它。nil 表示拿不到这份数据（访问
+// 日志关闭），退回按全部连接数折算的旧口径。
 func buildMeterCandidates(
 	aggs []meterAgg,
 	inPool map[string]*model.MeterDomain,
 	cooling map[string]bool,
 	retired map[string]bool,
+	meterable map[string]int64,
 	now time.Time,
 ) []meterCandidate {
 	avg := meterAvgBytesPerConn(aggs)
@@ -170,14 +181,21 @@ func buildMeterCandidates(
 			continue
 		}
 		a := byDomain[d]
+		row, pooled := inPool[d]
 		w := float64(a.Bytes)
 		if a.Bytes == 0 {
 			// 只按实测字节排会让池在第二天就冻死：没进过池的域名字节恒为 0，
 			// 永远排在所有已计量域名之后。折算值只用于选谁进池，不写库、
 			// 不出现在任何接口返回体里。
-			w = float64(a.Count) * avg
+			conns := a.Count
+			if meterable != nil {
+				conns = meterable[d]
+				if !pooled && conns < meterMinTrialConns {
+					continue
+				}
+			}
+			w = float64(conns) * avg
 		}
-		row, pooled := inPool[d]
 		mustKeep := false
 		if pooled {
 			w *= meterSwapMargin
@@ -441,7 +459,13 @@ func (s *MeterPoolService) recomputeInbound(
 		}
 	}
 
-	cands := buildMeterCandidates(aggs, inPool, cooling, retired, now)
+	meterable, err := (&AccessLogService{}).MeterableConnCounts(inboundId, since*1000)
+	if err != nil {
+		// 读不出就退回旧口径，不让访问日志库的一次锁冲突卡住整个计量池。
+		logger.Warning("计量池：读取可计量连接数失败，本轮按全部连接数选池：", err)
+		meterable = nil
+	}
+	cands := buildMeterCandidates(aggs, inPool, cooling, retired, meterable, now)
 	newPool := pickPool(cands, k)
 	inNew := make(map[string]bool, len(newPool))
 	for _, d := range newPool {

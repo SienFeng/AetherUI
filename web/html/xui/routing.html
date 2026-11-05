@@ -1889,7 +1889,14 @@
                                                                         </ul>
                                                                     </div>
                                                                     <p v-if="uv.log.rejected > 0" class="rv-verify-line">另有 [[ uv.log.rejected ]] 次连接被拒绝</p>
-                                                                    <p v-if="!uv.log.matched && !(uv.log.others || []).length && !uv.log.rejected" class="rv-verify-line">
+                                                                    <!-- 下面两类不是本规则造成的，不计入走错（见 routing_verify.go 的 LogEvidence） -->
+                                                                    <p v-if="uv.log.geoBlocked > 0" class="rv-verify-line">
+                                                                        另有 [[ uv.log.geoBlocked ]] 次来自地区限制范围外的 IP，被该用户的地区限制拦截（不计入本规则）
+                                                                    </p>
+                                                                    <p v-if="uv.log.noRuleHit > 0" class="rv-verify-line">
+                                                                        另有 [[ uv.log.noRuleHit ]] 次核心按实际看到的目标分流、未命中任何规则（访问日志记的是客户端请求的目标，常见于 TLS/QUIC 握手里的域名与之不同），不计入本规则
+                                                                    </p>
+                                                                    <p v-if="!uv.log.matched && !(uv.log.others || []).length && !uv.log.rejected && !uv.log.geoBlocked && !uv.log.noRuleHit" class="rv-verify-line">
                                                                         近 24 小时没有访问过这些域名
                                                                     </p>
                                                                     <p v-if="uv.log.truncated" class="rv-verify-line">访问记录较多，只统计了其中一部分</p>
@@ -2267,7 +2274,7 @@
     const PROBE_FRESH_MS = 60 * 1000;
 
     const app = new Vue({
-        mixins: [panelVersionMixin, routingAuditMixin],
+        mixins: [panelVersionMixin, routingAuditMixin, inboundAttentionMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
@@ -3555,6 +3562,10 @@
                     if (v.verdict === 'verified' && v.log && v.log.matched > 0) {
                         title += '，近 24h ' + v.log.matched + ' 次真实连接';
                     }
+                    // 地区拦截不算本规则走错、不标红，但用户可能已经整个用不了，至少在提示里说出来
+                    if (v.log && v.log.geoBlocked > 0) {
+                        title += '；另有 ' + v.log.geoBlocked + ' 次被地区限制拦截';
+                    }
                     return { cls: m.cls, icon: m.icon, text: m.text, title, reason, expandable: true };
                 }
                 // 汇总徽章取最坏的那一档：不符 > 等待下发 > 无法验证 > 已验证。
@@ -3579,6 +3590,11 @@
                         + '只验证了前 ' + v.total + ' 个已启用入站，另有 ' + unchecked + ' 位未验证';
                 }
                 if (v.disabled) title += '；另有 ' + v.disabled + ' 位已停用，不计入';
+                const geoUsers = ((this.verify.result && this.verify.result.users) || [])
+                    .filter(u => u.log && !u.log.error && u.log.geoBlocked > 0);
+                if (geoUsers.length) {
+                    title += '；' + geoUsers.map(u => u.name).join('、') + ' 近 24h 有连接被地区限制拦截';
+                }
                 return { cls: m.cls, icon: m.icon, text, title, reason: '', expandable: true, count: v.verified + '/' + v.total };
             },
             // 明细里列出的用户：具体用户只有它自己；汇总行只列出不是「已验证」的

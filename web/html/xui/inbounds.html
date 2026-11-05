@@ -85,7 +85,7 @@
                                 <span>[[ inboundSpeed.down === null ? '暂时读不到连接表' : '各入站在线连接的速度之和' ]]</span>
                             </div>
                         </div>
-                        <!-- 过期、7 天内到期、共享风险达到「高」以上的入站数。有数才变红。 -->
+                        <!-- 过期、7 天内到期、共享风险达到「中」以上、近 24 小时被地区限制拦截的入站数。有数才变红。 -->
                         <div class="stat-card" :class="dueSummary.total ? 'tone-alert' : 'tone-ok'">
                             <span class="stat-icon">
                                 <a-icon :type="dueSummary.total ? 'warning' : 'check-circle'"></a-icon>
@@ -524,6 +524,10 @@
                                           :title="l.title">[[ l.text ]]</span>
                                 </template>
                                 <span v-else class="cell-muted">—</span>
+                                <!-- 地区限制把这个用户挡在外面了：被拦的来源可能就是他自己换了网络，
+                                     列表上不说出来的话，只有他来问才会发现。 -->
+                                <span v-if="geoBlockedOf(dbInbound)" class="stat-tag is-warn geo-blocked-tag"
+                                      :title="geoBlockedTitleOf(dbInbound)">地区拦截 [[ geoBlockedOf(dbInbound).count ]] 次</span>
                             </template>
 
                             <template slot="enable" slot-scope="text, dbInbound">
@@ -531,6 +535,13 @@
                                     <a-switch v-model="dbInbound.enable" @change="switchEnable(dbInbound)"
                                               :aria-label="'启用 ' + (dbInbound.remark || ('入站 #' + dbInbound.id))"></a-switch>
                                 </span>
+                                <!-- 停用原因：超额停用的会在下个重置周期自动恢复，手动停用的不会。
+                                     两者开关看起来一模一样，不写出来管理员分不清。 -->
+                                <template v-if="!dbInbound.enable && disabledNoteOf(dbInbound)">
+                                    <div class="cell-sub" :title="disabledNoteOf(dbInbound).title">[[ disabledNoteOf(dbInbound).text ]]</div>
+                                    <div v-if="disabledNoteOf(dbInbound).sub" class="cell-sub cell-num"
+                                         :title="disabledNoteOf(dbInbound).title">[[ disabledNoteOf(dbInbound).sub ]]</div>
+                                </template>
                             </template>
 
                             <template slot="action" slot-scope="text, dbInbound">
@@ -685,7 +696,8 @@
     }, {
         title: "启用",
         align: 'center',
-        width: 60,
+        // 停用的行在开关下方写停用原因与自动恢复日期（「超额停用」「11-24 恢复」），60 放不下
+        width: 96,
         scopedSlots: { customRender: 'enable' },
     }, {
         title: "操作",
@@ -763,7 +775,7 @@
     const trafficCharts = {};
 
     const app = new Vue({
-        mixins: [panelVersionMixin, routingAuditMixin],
+        mixins: [panelVersionMixin, routingAuditMixin, inboundAttentionMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {
@@ -832,6 +844,8 @@
                 }
                 this.setInbounds(msg.obj);
                 this.loadRisk();
+                // 启停、续期、改地区都会改变停用原因与地区拦截，列表刷新时一并补拉
+                this.refreshInboundAttention();
             },
             // 快照缺失时返回 learning，**绝不回落成 low**：面板刚启动、
             // 入站刚建好、或引擎版本变了都会走到这里，把这些显示成「低风险」
@@ -953,6 +967,41 @@
                 const ms = dbInbound.expiryTime - Date.now();
                 if (ms <= 0) return '已过期';
                 return Math.ceil(ms / 86400000) + ' 天后';
+            },
+            geoBlockedOf(dbInbound) {
+                if (!dbInbound.enable) return null;
+                const g = this.inboundAttentionOf(dbInbound.id).geoBlocked;
+                return g && g.count > 0 ? g : null;
+            },
+            geoBlockedTitleOf(dbInbound) {
+                const g = this.geoBlockedOf(dbInbound);
+                if (!g) return '';
+                const ips = (g.ips || []).map(i => i.ip + ' ×' + i.count).join('、');
+                const more = g.moreIps ? '，另有 ' + g.moreIps + ' 个来源' : '';
+                return '近 24 小时有 ' + g.count + ' 次连接来自地区限制范围外的 IP，已被拦截（最近一次 '
+                    + DateUtil.formatMillis(g.lastAt).slice(5, 16) + '）。来源：' + ips + more
+                    + '。如果是这位用户自己换了网络，需要放宽地区限制。';
+            },
+            // 停用原因与自动恢复日期；启用中的、或摘要还没拉到的返回 null。
+            disabledNoteOf(dbInbound) {
+                const a = this.inboundAttentionOf(dbInbound.id);
+                switch (a.disabledReason) {
+                    case 'expired':
+                        return { text: '已到期', title: '已过到期时间，续期后恢复' };
+                    case 'traffic':
+                        if (a.autoRestoreAt) {
+                            const day = DateUtil.formatMillis(a.autoRestoreAt).slice(5, 10);
+                            return {
+                                text: '超额停用', sub: day + ' 恢复',
+                                title: '流量用完被自动停用，' + DateUtil.formatMillis(a.autoRestoreAt).slice(0, 10)
+                                    + ' 流量重置时自动恢复（重置任务每小时跑一次）。想让它保持停用：先启用再停用一次',
+                            };
+                        }
+                        return { text: '超额停用', title: '流量用完被自动停用；没有开启流量重置，或重置前就会到期，不会自动恢复' };
+                    case 'manual':
+                        return { text: '手动停用', title: '管理员手动停用，不会自动恢复' };
+                }
+                return null;
             },
             expiryTagToneOf(dbInbound) {
                 const ms = dbInbound.expiryTime - Date.now();
@@ -1762,18 +1811,21 @@
             // 与系统状态页「需要关注」同一套口径：过期、7 天内到期、风险结论为高 / 严重
             dueSummary() {
                 const now = Date.now();
-                let expired = 0, soon = 0, risky = 0;
+                let expired = 0, soon = 0, risky = 0, geo = 0;
                 this.dbInbounds.forEach(i => {
                     if (i.expiryTime > 0 && i.expiryTime <= now) expired++;
                     else if (i.expiryTime > now && i.expiryTime - now <= 7 * 86400000) soon++;
                     const r = this.riskOf(i.id);
-                    if (r.state === 'ready' && (r.level === 'high' || r.level === 'severe')) risky++;
+                    // 「中」起算：中风险已经是「很可能多人共用」，只数高风险会让它在汇总里看不见
+                    if (r.state === 'ready' && ['medium', 'high', 'severe'].includes(r.level)) risky++;
+                    if (this.geoBlockedOf(i)) geo++;
                 });
                 const parts = [];
                 if (expired) parts.push(`${expired} 已过期`);
                 if (soon) parts.push(`${soon} 即将到期`);
-                if (risky) parts.push(`${risky} 高风险`);
-                return { total: expired + soon + risky, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
+                if (risky) parts.push(`${risky} 中高风险`);
+                if (geo) parts.push(`${geo} 地区拦截`);
+                return { total: expired + soon + risky + geo, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
             },
         },
     });

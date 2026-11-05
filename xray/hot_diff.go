@@ -395,3 +395,60 @@ func normalizeJSON(raw []byte) ([]byte, bool) {
 	}
 	return out, true
 }
+
+// OnlyTouchesTags 报告 diff 是否只增删了 isTag 认得的出站、以及只在这类出站的路由规则上
+// 有差异（入站不动、其余规则与 routing 其他字段逐项相同）。oldCfg/newCfg 是 diff 的两端。
+//
+// 面板用它识别「只换了计量池」的热应用：计量规则排在所有规则之后，只接住本来会走
+// 默认出站的流量，不改变任何一条分流规则的结论，因此不必让分流审计把全部规则重验一遍
+// （计量池每小时都会换几个域名）。判定保守：任何一处解析不了或看不准都返回 false。
+func OnlyTouchesTags(oldCfg, newCfg *Config, diff *HotDiff, isTag func(string) bool) bool {
+	if diff == nil || diff.Empty() || oldCfg == nil || newCfg == nil {
+		return false
+	}
+	if len(diff.RemovedInboundTags) > 0 || len(diff.AddedInbounds) > 0 {
+		return false
+	}
+	for _, tag := range diff.RemovedOutboundTags {
+		if !isTag(tag) {
+			return false
+		}
+	}
+	for _, raw := range diff.AddedOutbounds {
+		var ob struct {
+			Tag string `json:"tag"`
+		}
+		if err := json.Unmarshal(raw, &ob); err != nil || !isTag(ob.Tag) {
+			return false
+		}
+	}
+	if diff.RoutingConfig == nil {
+		return true
+	}
+	oldR, ok1 := routingWithoutTags(oldCfg.RouterConfig, isTag)
+	newR, ok2 := routingWithoutTags(newCfg.RouterConfig, isTag)
+	return ok1 && ok2 && bytes.Equal(oldR, newR)
+}
+
+// routingWithoutTags 去掉 outboundTag 被 isTag 认得的规则后，把 routing 段规范化编码
+// （encoding/json 对 map 的 key 排序，结果逐字节确定）。
+func routingWithoutTags(raw []byte, isTag func(string) bool) ([]byte, bool) {
+	var routing map[string]any
+	if err := json.Unmarshal(raw, &routing); err != nil || routing == nil {
+		return nil, false
+	}
+	if rules, ok := routing["rules"].([]any); ok {
+		kept := make([]any, 0, len(rules))
+		for _, r := range rules {
+			if m, ok := r.(map[string]any); ok {
+				if tag, _ := m["outboundTag"].(string); tag != "" && isTag(tag) {
+					continue
+				}
+			}
+			kept = append(kept, r)
+		}
+		routing["rules"] = kept
+	}
+	out, err := json.Marshal(routing)
+	return out, err == nil
+}

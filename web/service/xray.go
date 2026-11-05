@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/xray"
 )
@@ -17,7 +18,12 @@ var isNeedXrayRestart atomic.Bool
 var result string
 
 // xrayApplyGen 是「核心加载了新配置」的次数。只在核心确实拿到新配置的两处
-// 递增：tryHotApply 带非空 diff 成功，以及 p.Start() 成功。空 diff 分支只是
+// 递增：tryHotApply 带非空 diff 成功，以及 p.Start() 成功。
+// 例外：热应用只换了计量出站与计量规则（xray.OnlyTouchesTags）时不递增。计量规则排在
+// 所有规则之后，只接住本来会走默认出站的流量，不改变任何分流规则的结论；而计量池每小时
+// 都会换几个域名，递增会让分流审计每小时把全部规则（含十几万条的大规则）重验一遍。
+// 这个计数的读取方全是分流审计（验证缓存、列表摘要、异常扫描计划），所以按「会不会改变
+// 分流结论」计数。空 diff 分支只是
 // 同步面板侧快照、核心什么都没变；失败退回重启的路径由 Start 那一处计数，
 // 热应用中途失败不单独计，避免一次生效被记两次。
 // 读取方据此判断「某次观测之后核心是否换过配置」，由 XrayApplyGeneration 暴露。
@@ -185,6 +191,8 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 	if !ok {
 		return false
 	}
+	// 必须在 SetConfig 之前判定：要拿下发前核心持有的那份配置来比。
+	meterOnly := xray.OnlyTouchesTags(process.GetConfig(), newCfg, diff, model.IsMeterTag)
 	if diff.Empty() {
 		// 配置只有格式差异（空白、key 顺序）。同步快照即可，否则下一轮
 		// cron 还会认为配置不同，白重启一次。没有任何 RPC 发生，措辞上
@@ -251,6 +259,12 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 		}
 	}
 
+	if meterOnly {
+		// 只换了计量池：不推进应用代次，分流审计的结论继续有效（见 xrayApplyGen 的说明）。
+		process.SetConfig(newCfg)
+		logger.Debug("xray 计量池改动已通过控制面下发，无需重启")
+		return true
+	}
 	process.SetConfig(newCfg)
 	xrayApplyGen.Inc()
 	logger.Info("xray 配置改动已通过控制面下发，无需重启")

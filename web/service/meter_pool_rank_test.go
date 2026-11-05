@@ -73,7 +73,7 @@ func TestBuildMeterCandidatesFiltersUnmeterable(t *testing.T) {
 		{Domain: "2001:db8::1", Bytes: 999, Count: 9},     // IPv6 字面量：同上
 		{Domain: "www.example.com", Bytes: 999, Count: 9}, // 子域名：池里只放归并后的注册域名
 	}
-	cands := buildMeterCandidates(aggs, nil, nil, nil, now)
+	cands := buildMeterCandidates(aggs, nil, nil, nil, nil, now)
 	got := make(map[string]bool, len(cands))
 	for _, c := range cands {
 		got[c.Domain] = true
@@ -97,7 +97,7 @@ func TestBuildMeterCandidatesEstimatesUnmeteredDomains(t *testing.T) {
 		{Domain: "a.com", Bytes: 1000, Count: 5},
 		{Domain: "b.com", Bytes: 0, Count: 4},
 	}
-	cands := buildMeterCandidates(aggs, nil, nil, nil, now)
+	cands := buildMeterCandidates(aggs, nil, nil, nil, nil, now)
 	byDom := map[string]meterCandidate{}
 	for _, c := range cands {
 		byDom[c.Domain] = c
@@ -126,7 +126,7 @@ func TestBuildMeterCandidatesGivesIncumbentsTheSwapMargin(t *testing.T) {
 		{Domain: "a.com", Bytes: 100, Count: 1},
 		{Domain: "b.com", Bytes: 100, Count: 1},
 	}
-	cands := buildMeterCandidates(aggs, inPool, nil, nil, now)
+	cands := buildMeterCandidates(aggs, inPool, nil, nil, nil, now)
 	byDom := map[string]meterCandidate{}
 	for _, c := range cands {
 		byDom[c.Domain] = c
@@ -150,7 +150,7 @@ func TestBuildMeterCandidatesKeepsPoolDomainsWithNoRows(t *testing.T) {
 		// 刚进池，窗口内一条 DomainStat 行都没有（零增量不写行）
 		"fresh.com": {Domain: "fresh.com", EnteredAt: now.Unix()},
 	}
-	cands := buildMeterCandidates(nil, inPool, nil, nil, now)
+	cands := buildMeterCandidates(nil, inPool, nil, nil, nil, now)
 	if len(cands) != 1 || cands[0].Domain != "fresh.com" {
 		t.Fatalf("候选 = %+v，期望包含池里那个没有任何行的域名——"+
 			"漏掉它会让它绕过最小驻留闸门被静默挤出去", cands)
@@ -171,7 +171,7 @@ func TestBuildMeterCandidatesExcludesCoolingAndRetired(t *testing.T) {
 		"gone.com": {Domain: "gone.com", EnteredAt: now.Add(-10 * time.Hour).Unix()},
 	}
 	cands := buildMeterCandidates(aggs, inPool,
-		map[string]bool{"cool.com": true}, map[string]bool{"gone.com": true}, now)
+		map[string]bool{"cool.com": true}, map[string]bool{"gone.com": true}, nil, now)
 	if len(cands) != 1 || cands[0].Domain != "ok.com" {
 		t.Fatalf("候选 = %+v，期望只剩 ok.com", cands)
 	}
@@ -208,5 +208,44 @@ func TestPickPoolCapacityZeroSelectsNothing(t *testing.T) {
 	cands := []meterCandidate{{Domain: "a.com", Weight: 1, MustKeep: true}}
 	if got := pickPool(cands, 0); len(got) != 0 {
 		t.Errorf("pickPool(k=0) = %v，期望空——预算摊薄到 0 时整个功能停用", got)
+	}
+}
+
+// 有可计量连接数据时：没量到过字节、也没落到规则表末尾的域名（被分流规则送走的）不参选；
+// 落到末尾的次数够了才试用，并按这个次数折算权重。已在池的不受门槛限制。
+func TestBuildMeterCandidatesUsesMeterableConns(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	aggs := []meterAgg{
+		{Domain: "measured.com", Bytes: 5000, Count: 10},
+		{Domain: "routed-away.com", Count: 500},  // 全部被规则送去别处
+		{Domain: "rare.com", Count: 40},          // 只有 2 次落到末尾
+		{Domain: "default-heavy.com", Count: 50}, // 30 次落到末尾
+		{Domain: "pooled-quiet.com", Count: 100}, // 已在池、暂时没有可计量连接
+	}
+	inPool := map[string]*model.MeterDomain{
+		"pooled-quiet.com": {Domain: "pooled-quiet.com", EnteredAt: now.Add(-30 * time.Minute).Unix()},
+	}
+	meterable := map[string]int64{"rare.com": 2, "default-heavy.com": 30, "measured.com": 10}
+	cands := buildMeterCandidates(aggs, inPool, nil, nil, meterable, now)
+	got := map[string]meterCandidate{}
+	for _, c := range cands {
+		got[c.Domain] = c
+	}
+	for _, d := range []string{"routed-away.com", "rare.com"} {
+		if _, ok := got[d]; ok {
+			t.Errorf("%s 不应参选", d)
+		}
+	}
+	for _, d := range []string{"measured.com", "default-heavy.com", "pooled-quiet.com"} {
+		if _, ok := got[d]; !ok {
+			t.Errorf("%s 应参选", d)
+		}
+	}
+	// 平均每连接 500 字节（只看量到过字节的 measured.com），default-heavy 折算 30×500。
+	if w := got["default-heavy.com"].Weight; w != 30*500 {
+		t.Errorf("default-heavy.com 权重 = %v，期望按可计量连接数折算 %v", w, 30*500)
+	}
+	if !got["pooled-quiet.com"].MustKeep {
+		t.Error("最小驻留期内的在池域名仍应受保护")
 	}
 }

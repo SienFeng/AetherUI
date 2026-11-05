@@ -3356,6 +3356,12 @@ button.xray-badge:focus-visible {
     margin-top: 3px;
 }
 
+/* 地区拦截提醒跟在限制 chip 后面，换行时与上一行留出同样的间距 */
+.geo-blocked-tag {
+    margin: 1px 4px 1px 0;
+    white-space: nowrap;
+}
+
 /* 展开面板的段头：标题在左，控件在右 */
 .row-section-head {
     display: flex;

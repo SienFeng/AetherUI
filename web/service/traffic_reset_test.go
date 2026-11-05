@@ -405,9 +405,9 @@ func TestInboundRejectsBillCycleWithoutExpiryTime(t *testing.T) {
 	}
 }
 
-// 管理员碰过 enable，自动停用的理由就不再成立。不清标记的话，一个被手动
-// 停用的入站会在下一个重置周期自己活过来，而面板不会有任何提示。
-func TestUpdateInboundClearsDisabledByTraffic(t *testing.T) {
+// 只改备注等其他字段时保留「因超流量停用」：修复前任何编辑都清掉它，改个备注就让
+// 入站失去下个周期自动恢复的资格，列表上也看不出区别。
+func TestUpdateInboundKeepsDisabledByTrafficOnUnrelatedEdit(t *testing.T) {
 	setupDB(t)
 	in := makeInboundFor(t, 10011, func(in *model.Inbound) {
 		in.Enable, in.DisabledByTraffic = false, true
@@ -421,8 +421,48 @@ func TestUpdateInboundClearsDisabledByTraffic(t *testing.T) {
 		t.Fatalf("UpdateInbound: %v", err)
 	}
 
+	if got := reloadInbound(t, in.Id); !got.DisabledByTraffic || got.Enable {
+		t.Errorf("只改备注后 Enable=%v DisabledByTraffic=%v，期望仍为停用且保留标记", got.Enable, got.DisabledByTraffic)
+	}
+}
+
+// 管理员动过启用状态，自动停用的理由就不再成立：重新启用直接作废标记；
+// 启用后再手动停用，就是手动停用，不能在下个周期自己活过来。
+func TestUpdateInboundClearsDisabledByTrafficWhenEnableTouched(t *testing.T) {
+	setupDB(t)
+	in := makeInboundFor(t, 10011, func(in *model.Inbound) {
+		in.Enable, in.DisabledByTraffic = false, true
+		in.Total, in.Up, in.Down = 1000, 600, 400
+	})
+
+	s := InboundService{}
+	on := *in
+	on.Enable = true
+	if err := s.UpdateInbound(&on); err != nil {
+		t.Fatalf("UpdateInbound(启用): %v", err)
+	}
 	if got := reloadInbound(t, in.Id); got.DisabledByTraffic {
-		t.Error("UpdateInbound 之后 DisabledByTraffic 仍为 true")
+		t.Fatal("重新启用后 DisabledByTraffic 仍为 true")
+	}
+
+	// 模拟它又因超流量被停用，然后管理员手动启用→停用。
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", in.Id).
+		Updates(map[string]any{"enable": false, "disabled_by_traffic": true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	cur := reloadInbound(t, in.Id)
+	enable := *cur
+	enable.Enable = true
+	if err := s.UpdateInbound(&enable); err != nil {
+		t.Fatal(err)
+	}
+	disable := *reloadInbound(t, in.Id)
+	disable.Enable = false
+	if err := s.UpdateInbound(&disable); err != nil {
+		t.Fatal(err)
+	}
+	if got := reloadInbound(t, in.Id); got.DisabledByTraffic || got.Enable {
+		t.Errorf("手动停用后 Enable=%v DisabledByTraffic=%v，期望停用且不带自动恢复标记", got.Enable, got.DisabledByTraffic)
 	}
 }
 

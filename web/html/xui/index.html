@@ -421,7 +421,7 @@
     };
 
     const app = new Vue({
-        mixins: [panelVersionMixin, routingAuditMixin],
+        mixins: [panelVersionMixin, routingAuditMixin, inboundAttentionMixin],
         delimiters: ['[[', ']]'],
         el: '#app',
         data: {

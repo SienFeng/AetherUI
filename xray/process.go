@@ -125,6 +125,10 @@ func (p *Process) SetConfig(c *Config) {
 	p.config = c
 }
 
+// APIInboundTag 是模板里预置的控制面入站（dokodemo-door，127.0.0.1）的 tag，
+// 面板靠它找 gRPC 端口；它产生的访问记录是面板自己的轮询，不是用户流量。
+const APIInboundTag = "api"
+
 func (p *process) refreshAPIPort() {
 	for _, inbound := range p.config.InboundConfigs {
 		if inbound.Tag == "api" {

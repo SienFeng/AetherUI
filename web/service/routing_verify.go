@@ -111,8 +111,15 @@ type ShadowRule struct {
 // LogEvidence 是访问日志里属于本规则的真实连接统计。
 // Error 非空表示该用户的日志查询失败，其余字段此时无意义（不是「没有连接」）。
 type LogEvidence struct {
-	Matched   int64      `json:"matched"`
-	Rejected  int64      `json:"rejected"`
+	Matched  int64 `json:"matched"`
+	Rejected int64 `json:"rejected"`
+	// GeoBlocked 是来源 IP 在入站地区限制之外、被地区规则送进黑洞的连接数。地区规则排在
+	// 所有分流规则之前，这些连接从未轮到本规则，不算走错，单独列出（见 geoBlockMatcher）。
+	GeoBlocked int64 `json:"geoBlocked"`
+	// NoRuleHit 是核心没有命中任何规则（访问日志里的 " >> "）的连接数。日志记的是客户端
+	// 请求的目标，核心分流看的是嗅探出的域名；目标属于本规则却没命中任何规则，说明核心
+	// 看到的是另一个域名，不算本规则走错（见 accesslog.Entry.NoRuleHit）。
+	NoRuleHit int64      `json:"noRuleHit"`
 	Truncated bool       `json:"truncated"`
 	Others    []LogOther `json:"others"`
 	Error     string     `json:"error,omitempty"`
@@ -379,8 +386,10 @@ func (m *groupMatcher) Match(target string) bool {
 }
 
 // buildLogEvidence 把日志分组折算成证据：只统计属于本组的行；被拒绝的计入 Rejected，
-// 其余按 routeHead 与期望出站比对，符合计入 Matched，不符的按出站分组进 Others。
-func buildLogEvidence(rows []TargetRouteCount, m *groupMatcher, exp ExpectedOutbound, defaultTag string, labelOf func(tag string) string) LogEvidence {
+// 其余按 routeHead 与期望出站比对，符合计入 Matched。不符的行先排除两类不是本规则
+// 造成的：被入站地区限制拦下的（geoBlocked 判来源，nil 表示不做此判断）计入 GeoBlocked，
+// 核心没命中任何规则的计入 NoRuleHit；剩下的按出站分组进 Others。
+func buildLogEvidence(rows []TargetRouteCount, m *groupMatcher, exp ExpectedOutbound, defaultTag string, labelOf func(tag string) string, geoBlocked func(sourceIP string) bool) LogEvidence {
 	ev := LogEvidence{Others: []LogOther{}}
 	byRoute := map[string]*LogOther{}
 	var order []string
@@ -395,6 +404,14 @@ func buildLogEvidence(rows []TargetRouteCount, m *groupMatcher, exp ExpectedOutb
 		head := routeHead(r.Route)
 		if match, _ := judgeSample(exp, head, false, defaultTag); match {
 			ev.Matched += r.Count
+			continue
+		}
+		if head == model.BlockOutboundTag && geoBlocked != nil && geoBlocked(r.SourceIP) {
+			ev.GeoBlocked += r.Count
+			continue
+		}
+		if r.NoRuleHit {
+			ev.NoRuleHit += r.Count
 			continue
 		}
 		o := byRoute[head]
@@ -699,6 +716,9 @@ type verifyShared struct {
 	logEnabled bool
 	logErr     string
 	groupLogs  func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
+	// geoBlock 判断封禁连接是否来自入站地区限制之外；惰性构建，一轮内只建一次。
+	geoBlock      *geoBlockMatcher
+	geoBlockReady bool
 
 	groups map[int]*groupConditions
 	// 单槽匹配器缓存：只留最近一个组序列的匹配器。一个 2 万条的匹配器就要十几 MB，
@@ -846,6 +866,15 @@ func (sh *verifyShared) configDefaultTag() string {
 	return *sh.cfgDefaultTag
 }
 
+// geoBlocker 返回本轮的地区限制判定，一轮内只构建一次。
+func (sh *verifyShared) geoBlocker() *geoBlockMatcher {
+	if !sh.geoBlockReady {
+		sh.geoBlockReady = true
+		sh.geoBlock = newGeoBlockMatcher(sh.inbounds)
+	}
+	return sh.geoBlock
+}
+
 // group 返回一个域名组的条目与样例，一轮内每个组只读库、取样一次。
 func (sh *verifyShared) group(gid int) *groupConditions {
 	if g, ok := sh.groups[gid]; ok {
@@ -961,7 +990,9 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 				logger.Warning("路由验证：读取访问日志失败，inbound id:", vu.inbound.Id, "err:", e.err)
 				u.Log = &LogEvidence{Others: []LogOther{}, Error: "读取访问日志失败：" + e.err.Error()}
 			} else {
-				ev := buildLogEvidence(e.rows, matcher, plan.expected, plan.defaultTag, plan.labelOf)
+				geo, inboundId := sh.geoBlocker(), vu.inbound.Id
+				ev := buildLogEvidence(e.rows, matcher, plan.expected, plan.defaultTag, plan.labelOf,
+					func(src string) bool { return geo.Blocks(inboundId, src) })
 				ev.Truncated = e.truncated
 				u.Log = &ev
 			}
