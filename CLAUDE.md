@@ -93,7 +93,7 @@ go mod tidy && go vet ./...
 - `XrayTrafficJob`（10s，启动后延迟 5s 注册）— 拉取流量并按 tag 累加到 Inbound 的 up/down（`reset=true`，xray 侧计数清零）。
 - `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。**停用原因要分开记**：`DisableInvalidInbounds` 拆成两条 UPDATE，超流量那条额外写 `disabled_by_traffic = true`，到期那条不写；顺序不能反，两者同时成立时先执行的到期那条已经把 `enable` 置 false，超流量那条的 `enable = true` 条件不再匹配，于是「过期」这个更强的停用理由胜出，该入站不会在下一个重置周期自己活过来。
 - `TrafficResetJob`（1h）— 见「流量自动重置」一节。
-- `MeterPoolJob`（1h）— 重算计量池（每个入站当前正在被计量的 Top-K 注册域名），只在池真的变了时才置重启标志。刻意不做延迟首次触发：池已经在库里，面板重启后生成期照常读得到。
+- `MeterPoolJob`（1h）— 重算计量池（每个入站当前正在被计量的 Top-K 注册域名），只在池真的变了时才置重启标志。刻意不做延迟首次触发：池已经在库里，面板重启后生成期照常读得到。**还没量到过字节的域名要进池试用，窗口内必须有至少 `meterMinTrialConns`（3）次「落到规则表末尾」的连接**（`AccessLogService.MeterableConnCounts`：`no_rule_hit` 或已走计量出站），并按这个次数折算权重——计量规则排在最后，被分流规则送走的域名连接数再多也量不到；线上实测改动前一天 366 次进池只有 4 次量到过字节，其余每小时空转、整表热下发一次路由。访问日志关闭时退回只看域名统计连接数的旧口径。
 - `RouteAuditJob`（30s）与 `RouteAnomalyJob`（1m）— 分流规则的后台审计与访问日志异常扫描，见「域名分流管理 → 流量走向验证」的后台审计一段。
 - `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（settings 表的 `subscriptionUpdateTime`，在分流管理页单独读写：`/aui/routing/subscription-time[/update]` → `SettingService.Get/SetSubscriptionUpdateTime`；**刻意不在 `entity.AllSetting` 里**，否则开着没刷新的设置页整份保存时会把分流页刚改的值写回旧值，`TestUpdateAllSettingLeavesSubscriptionUpdateTimeAlone` 守着），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
@@ -320,6 +320,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 - **`ErrNoClue` = 没有规则命中 → 走默认出站。** 错误经 gRPC 跨进程后只剩 status 消息文本，`errors.Is` 已认不出 sentinel，`isNoClueErr` 比对消息文本是唯一可行的识别方式；`TestRoute` 此时返回 `noMatch=true` 而非 error。
 - **访问日志里「某条连接是否属于本规则」必须复用 xray 自己的匹配器**：域名走 `geodata.ParseDomainRules(…, Domain_Substr)` + `router.NewDomainMatcher`，IP 走 `geodata.ParseIPRules` + `router.NewIPMatcher`（`newGroupMatcher`）。**不许手写匹配**——面板与核心的语义一旦漂移，界面会在错误结论上亮绿灯。
 - **访问日志永远不能单独让用户变成 `verified`**，只能把结论推向 `mismatch` 或给 `verified` 补一个计数（`combineVerdict`）。日志读取失败（开关读不出、匹配器建不出、某用户查询失败）走 `AccessLogState.Error` / `LogEvidence.Error`，与「没有数据」区分开。
+- **两类连接不是本规则走错，单独计数、不进 Others、不进异常摘要**（`buildLogEvidence` 与 `anomalyScan.candidate` 同口径，两处一起改）：① `GeoBlocked`——走了 `a-ui-block` 且来源 IP 被入站地区规则拒绝（`geoBlockMatcher`，`web/service/routing_geo_evidence.go`）。地区规则排在所有分流规则之前，不分目标一律拦，修复前一个用户换到地区外 IP 会让覆盖他的每条规则同时变红。判定条件取自 `geoRuleSources`（与 `rulesFromGeoPlan` 共用一份），交给 xray 的 `geodata.ParseIPRules` + `router.NewIPMatcher(…, MatcherAsType_Source)`；`GroupByTargetRoute` 因此只对 `a-ui-block` 的行按来源 IP 拆分组。② `NoRuleHit`——访问日志分隔符是 ` >> `（核心没命中任何规则，`accesslog.Entry.NoRuleHit`，落库为 `access_logs.no_rule_hit`）。xray 访问日志记的是**客户端请求的目标**，分流用的却是**嗅探出的域名**（destOverride），两者不同时日志会显示「本该命中的域名走了默认出站」；实测见 `util/accesslog` 的解析测试注释。升级前写入的行该列为 false，按原口径算。
 - **核心 pending（运行中的配置 ≠ 现生成的配置）时，所有用户一律 `pending`，哪怕样例不符**：刚保存后核心仍持有旧配置，样例不符是必然的，报 `mismatch` 是误报（明细仍保留）。
 - **锁的边界**：包级 `lock` 只在 `XrayService.RuntimeSnapshot` 里 `TryLock` 到读完快照的那一刻，**绝不跨 RPC、不在持锁时合成配置**（重启/热应用会长时间占着它）；拿不到就返回 `Busy`。另有包级 `verifyMu` 保证同一时刻只有一个验证在跑，并发的请求得到 `busy`。
 - **「这条规则会不会被丢弃」直接调 `injector.buildRule` 判定**，验证与生成在这一点上不会漂移。改 `buildRule` 的跳过条件时无需同步改验证，但**不要**在验证侧另写一份判断。**取样用的条件却是一份镜像**：`groupConditionsOf` 照抄了 `buildRule` 逐组解码手工/订阅两侧、`MergeDomains` 合并、跳过坏组与空组的那段循环（buildRule 只返回生成好的 xray 规则，拿不回逐组的条目）。改 `buildRule` 的逐组取法（新增条目来源、改合并顺序、改跳过条件）时**两处必须一起改**，否则验证会拿核心里根本没有的条目当样例。
@@ -327,7 +328,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **后台审计（`RoutingAuditService`，设计文档 `docs/superpowers/specs/2026-11-01-routing-flow-audit-design.md`）** 让规则列表与侧栏不用逐条手点验证就能看到绿/红：
 
-- **应用代次（`XrayApplyGeneration`）只在两处递增**：热应用成功（diff 非空）与 `p.Start()` 成功之后（`web/service/xray.go`）。它是「核心换过配置」的唯一信号。已知未覆盖：库里改了、还没下发的改动不会涨代次，由 `Summaries` 的运行时 Pending 判定兜住。
+- **应用代次（`XrayApplyGeneration`）只在两处递增**：热应用成功（diff 非空）与 `p.Start()` 成功之后（`web/service/xray.go`）。它是「核心换过配置」的唯一信号。**例外：热应用只增删了计量出站、只改了计量规则（`xray.OnlyTouchesTags`）时不递增**——计量规则排在最后、不改变任何分流规则的结论，而计量池每小时都会换池，递增会让审计每小时把全部规则（含大规则）重验一遍。代次的读取方全是分流审计，所以它按「会不会改变分流结论」计数；新增别的读取方前先确认这个口径适用。已知未覆盖：库里改了、还没下发的改动不会涨代次，由 `Summaries` 的运行时 Pending 判定兜住。
 - **两个任务**：`RouteAuditJob`（30s 唤醒；代次变了或距上次成功满 10 分钟才真审计，遇 `ErrVerifyBusy`/`ErrCoreNotReady`/`ErrVerifyTruncated` 跳过且不推进状态——被 60 秒整轮预算截断的一轮已跑完的结果照常写入，但不算成功，下一轮让没有当前代次结果的规则排在前面先跑；连续截断 3 轮后按完成推进，回到「代次变化或满 10 分钟」的节奏，免得规则多到每轮都跑不完时一轮接一轮地满负荷跑，没拿到新结果的规则在摘要里仍是 stale/未验证）与 `RouteAnomalyJob`（1 分钟扫小规则；大规则每 10 分钟，或 `LargeScanBacklogged` 时下一轮立刻再扫）。cron 不会跳过仍在跑的上一轮，两者都靠 `TryLock` 防重入。
 - **后台绝不在 `RestartXray` 的 `lock` 内验证，也不与手动验证抢 `verifyMu`**：后台拿不到就让（返回 busy，下一轮重试）。手动验证优先。
 - **核心未就绪不落结果**：`grpc.NewClient` 是惰性的，核心刚拉起、控制面端口还没监听时 `Init` 照样成功。`prepareShared` 因此先 `XrayAPI.WaitReady`（主动连一次，连不上记核心 error），`VerifyAll` 另外盯着本轮任一 RPC 是否报 `codes.Unavailable`（中途退出）；两者都返回 `ErrCoreNotReady`、缓存不动。没有这两道，重启后第一轮会把一份全灰的结果当成功存下。
@@ -339,6 +340,14 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 - **小机器预算（实测）**：规则合并后条目数 ≤ 20000 为小规则（匹配器按代次常驻），超过为大规则（每次扫描时逐条构建、用完释放，不同时持有多个）；每条规则最多展开 50 个用户、每用户 5 个出站。`TestAnomalyScanLargeGroupFootprint`：10 万条域名 + 1 万条日志扫一次大规则，堆峰值增量约 80 MB（81.4 MB 峰值，扫描前 1.7 MB）、耗时约 0.16 秒，断言上限 100 MB，不要放宽。**后台全量验证（`VerifyAll`）同一口径**：大规则的组条目与匹配器在该规则判定完即释放（`releaseLarge`），匹配器缓存是单槽（只留最近一个组序列，规则按组序列排序以便复用），一轮内同一时刻至多一个匹配器存活——按组序列各缓存一个的话，几条大规则一轮就要几百 MB。`TestVerifyAllLargeRulesFootprint`：两条各 10 万条域名的规则 + 2000 条日志跑一轮，堆峰值增量约 74~79 MB（多次实测峰值 75.7~81.1 MB，验证前约 1.8 MB；改动前按组序列各缓存一个匹配器时为 125.5 MB）、耗时约 0.25 秒，断言上限 100 MB，不要放宽。
 - **前端**（`web/assets/js/util/routing-audit.js`）：规则列表与侧栏每 60 秒轮询 `/aui/routing/rule/audit`（只读缓存，页面隐藏时暂停），最近一次成功拉取距最近一次尝试/失败 ≥ 120 秒（即连续两轮失败，约 2 分钟没刷新）则图标改灰「状态未更新」——阈值必须 ≤ 两个轮询周期，否则要到第三轮才会改灰。保存后的现场验证返回 `pending` 或 `busy`（后台审计正占着 `verifyMu`）时，12 秒后自动再验一次，仅一次。流量走向图的「实际去向」节点把默认出站的几种写法折叠成一个，`routing.html` 里的 `DEFAULT_LABEL`/`NO_MATCH_LABEL` 抄自 `routing_verify.go` 的 `labelDefaultOutbound`/`labelNoMatch`，**两处必须一起改**。
 
+### 入站「需要留意」摘要（`web/service/inbound_attention.go`）
+
+`POST /aui/inbound/attention/summary` 只读，给出：停用入站的原因（`expired` / `traffic` / `manual`，到期优先，与 `DisableInvalidInbounds`、`ResetDueTraffic` 同口径）与超额停用的自动恢复时刻（下一个重置时刻，那之前就到期的为 0）；启用入站是否 7 天内到期；配了地区限制的启用入站近 24 小时被地区规则拦下的连接（复用 `geoBlockMatcher`，允许集内来源进黑洞不算）。前端 `web/assets/js/util/inbound-attention.js` 是给四个带侧栏页面共用的 mixin（5 分钟一轮、页面隐藏时暂停），侧栏「入站列表」的提醒点 = 7 天内到期或地区拦截的启用入站数；入站列表的「到期与风险」卡从「中」风险起算，并计入地区拦截。
+
+### 访问日志采集进度（`web/service/accesslog.go` 的 `Collect`）
+
+读取 `bin/access.log` 的偏移持久化在**访问日志库**的 `AccessLogCursor`（单行，带文件首行作为身份），与本批日志**同一个事务**提交，提交成功才推进 `Tailer`（`Peek` → `storeWithCursor` → `Commit`）。修复前偏移只在内存：面板每次重启（`a-ui.sh` 的 geo 定时更新每两天 04:00 `systemctl restart`）都把整份文件从 0 重导一遍，线上积了十几万重复行；且先推进再写库，`database is locked` 时那一批直接丢失。重启时首行对不上或文件比偏移短就从 0 读（宁可重复不丢）；进程内首次恢复失败则这一轮不读、下一轮重试。控制面入站（`xray.APIInboundTag`）的记录是面板自己的 gRPC 轮询，采集时直接丢弃。
+
 ### `util/link` 包
 
 移植自 3x-ui（`internal/util/link/`，GPL-3.0，与本项目同许可），负责把分享链接解析成 xray outbound。零第三方依赖，自带测试。支持 vmess / vless / trojan / ss / hysteria2 / wireguard，**socks 是本项目自行补充的**（`socks.go`）。文件头保留了来源声明，从上游同步更新时注意不要覆盖掉 `socks.go`。
@@ -348,7 +357,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 每个入站可以选一种重置周期，到点把 `up`/`down` 清零（`web/service/traffic_reset.go`、`web/job/traffic_reset_job.go`）。`model.Inbound` 为此加了三列，默认值全是零值，所以 **AutoMigrate 给老库加上它们之后，没有任何入站会被清零——升级后行为零变化**。
 
 - `TrafficResetMode` — `TrafficResetOff`(0) / `TrafficResetMonthly`(1，每月 1 号) / `TrafficResetBillCycle`(2，按订阅周期)。
-- `DisabledByTraffic` — 标记「这次停用是因超流量」，写入方只有 `DisableInvalidInbounds`（置 true）、`UpdateInbound`/`RenewInbound`/一次成功的重新启用（置 false）。
+- `DisabledByTraffic` — 标记「这次停用是因超流量」，写入方只有 `DisableInvalidInbounds`（置 true）、`UpdateInbound`/`RenewInbound`/一次成功的重新启用（置 false）。`UpdateInbound` **只在启用状态被改动或保存后为启用时**才清它：只改备注、限速等其他字段时保留（修复前任何编辑都清掉它，入站悄悄失去下个周期自动恢复的资格）；要让超额停用的入站保持停用，先启用再停用一次。列表上的停用原因与自动恢复日期由只读接口 `POST /aui/inbound/attention/summary`（`InboundAttentionService`）给出，标记本身仍不下发、不可提交。
 - `LastResetAt` — 上一次清零对应的**周期时刻**，不是执行时刻。
 
 后两列 `json` 与 `form` 标签都是 `"-"`：**它们是服务端状态，既不下发给前端也不接受前端提交**。让浏览器能改 `DisabledByTraffic`，一个被管理员手动停用的入站就能被伪造成「因超流量停用」、下个周期自己活过来；能改 `LastResetAt`，把它置 0 就能让下一轮任务立刻清一次流量、绕过流量配额。两条绑定路径各有一条回归测试（`web/controller/inbound_traffic_reset_test.go`）。注意 `web/inbound_model_test.go` 的既有不变量要求 `model.Inbound` 的每个 json 字段在 `models.js` 的 `DBInbound` 里有同名属性——标成 `json:"-"` 正是让它跳过这两列的方式，**不要为了让那条测试通过而把它们加进前端模型**。

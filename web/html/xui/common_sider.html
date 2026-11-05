@@ -10,7 +10,12 @@
 <a-menu-item-group title="管理">
     <a-menu-item key="{{ .base_path }}aui/inbounds">
         <a-icon type="user"></a-icon>
-        <span>入站列表</span>
+        <!-- 提醒点：有启用入站 7 天内到期，或近 24 小时被地区限制拦截（inbound-attention.js 每 5 分钟拉一次）。
+             与分流管理的红点同一写法：点本身读屏读不到，数量另写一份 sr-only 文字。 -->
+        <a-badge :dot="inboundAttention.alertCount > 0">
+            <span :title="inboundAttention.alertCount > 0 ? inboundAttention.alertCount + ' 个入站即将到期或被地区限制拦截' : undefined">入站列表</span>
+        </a-badge>
+        <span v-if="inboundAttention.alertCount > 0" class="sr-only">（[[ inboundAttention.alertCount ]] 个入站即将到期或被地区限制拦截）</span>
     </a-menu-item>
     <a-menu-item key="{{ .base_path }}aui/routing">
         <a-icon type="fork"></a-icon>

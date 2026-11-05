@@ -40,6 +40,9 @@ func TestParseLineAcceptedWithArrowSeparator(t *testing.T) {
 	if !e.Accepted {
 		t.Error("Accepted = false，期望 true")
 	}
+	if e.NoRuleHit {
+		t.Error("\"->\" 表示命中了路由规则，NoRuleHit 应为 false")
+	}
 }
 
 func TestParseLineAcceptedWithDoubleAngleSeparator(t *testing.T) {
@@ -51,6 +54,10 @@ func TestParseLineAcceptedWithDoubleAngleSeparator(t *testing.T) {
 	}
 	if e.Inbound != "inbound-39101" || e.Route != "direct" {
 		t.Errorf("Inbound/Route = %q/%q，期望 inbound-39101/direct", e.Inbound, e.Route)
+	}
+	// ">>" 是 xray 的「没有任何规则命中，走默认出站」（app/dispatcher 的 routedDispatch）。
+	if !e.NoRuleHit {
+		t.Error("\">>\" 表示没有命中任何路由规则，NoRuleHit 应为 true")
 	}
 }
 
@@ -111,6 +118,9 @@ func TestParseLineThreeSegmentDetour(t *testing.T) {
 	}
 	if e.Route != "proxy-hk -> direct" {
 		t.Errorf("Route = %q，期望 proxy-hk -> direct", e.Route)
+	}
+	if e.NoRuleHit {
+		t.Error("首个分隔符是 \"->\"，NoRuleHit 应为 false")
 	}
 }
 
@@ -286,5 +296,96 @@ func append_(t *testing.T, path, content string) {
 	defer f.Close()
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Peek 不推进偏移：调用方把读到的行写库成功之后才 Commit，写库失败时下一轮会重读同一段，
+// 不会丢。
+func TestTailerPeekDoesNotAdvanceUntilCommit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	write(t, path, "line1\nline2\n")
+
+	tl := &Tailer{Path: path}
+	lines, next, err := tl.Peek(1 << 20)
+	if err != nil || len(lines) != 2 || next != int64(len("line1\nline2\n")) {
+		t.Fatalf("Peek = %v, %d, %v", lines, next, err)
+	}
+	again, _, err := tl.Peek(1 << 20)
+	if err != nil || len(again) != 2 {
+		t.Fatalf("未 Commit 前再次 Peek 应读到同样两行，得到 %v, %v", again, err)
+	}
+	tl.Commit(next)
+	if rest, _, _ := tl.Peek(1 << 20); len(rest) != 0 {
+		t.Fatalf("Commit 之后不应再读到旧行，得到 %v", rest)
+	}
+}
+
+// 进程重启：新 Tailer 用持久化的偏移与文件首行恢复，只读重启后新增的行。
+// 修复前偏移只在内存里，每次重启都把整份日志重新导入一遍。
+func TestTailerResumeAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	write(t, path, "first\nsecond\n")
+
+	old := &Tailer{Path: path}
+	_, next, err := old.Peek(1 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Commit(next)
+	head, err := old.Head()
+	if err != nil || head != "first" {
+		t.Fatalf("Head = %q, %v，期望 first", head, err)
+	}
+
+	append_(t, path, "third\n")
+	restarted := &Tailer{Path: path}
+	if ok, err := restarted.Resume(next, head); err != nil || !ok {
+		t.Fatalf("Resume = %v, %v，期望恢复成功", ok, err)
+	}
+	lines, _, err := restarted.Peek(1 << 20)
+	if err != nil || len(lines) != 1 || lines[0] != "third" {
+		t.Fatalf("重启后读到 %v, %v，期望只有 [third]", lines, err)
+	}
+}
+
+// 文件已经换了（被截断后又写过、或被外部替换）：首行对不上就从头读，宁可重复也不丢。
+func TestTailerResumeRejectsDifferentFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	write(t, path, "new-first\nnew-second\nnew-third\n")
+
+	tl := &Tailer{Path: path}
+	if ok, err := tl.Resume(5, "old-first"); err != nil || ok {
+		t.Fatalf("Resume = %v, %v，首行不同不应恢复", ok, err)
+	}
+	if lines, _, _ := tl.Peek(1 << 20); len(lines) != 3 {
+		t.Fatalf("未恢复时应从头读，得到 %v", lines)
+	}
+}
+
+// 文件比记录的偏移还短：同样不恢复（截断判定与 Peek 一致）。
+func TestTailerResumeRejectsShorterFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	write(t, path, "first\n")
+
+	tl := &Tailer{Path: path}
+	if ok, err := tl.Resume(100, "first"); err != nil || ok {
+		t.Fatalf("Resume = %v, %v，文件比偏移短不应恢复", ok, err)
+	}
+}
+
+// 还没有任何完整行时首行为空串，空串不能当作身份去匹配。
+func TestTailerHeadNeedsCompleteLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access.log")
+	tl := &Tailer{Path: path}
+	if head, err := tl.Head(); err != nil || head != "" {
+		t.Fatalf("文件不存在时 Head = %q, %v，期望空串", head, err)
+	}
+	write(t, path, "partial")
+	if head, err := tl.Head(); err != nil || head != "" {
+		t.Fatalf("只有半行时 Head = %q, %v，期望空串", head, err)
+	}
+	if ok, _ := tl.Resume(0, ""); ok {
+		t.Error("空首行不应恢复")
 	}
 }

@@ -25,6 +25,13 @@ type Entry struct {
 	Route    string
 	Accepted bool
 	Email    string
+	// NoRuleHit 表示入站后的分隔符是 " >> "：核心没有任何路由规则命中，走了默认出站
+	// （xray app/dispatcher 的 routedDispatch；命中规则时是 " -> "）。
+	//
+	// 必须单独留下这个区别：日志里的 Target 是客户端请求的目标，而核心分流用的是嗅探出来的
+	// 域名（sniffing destOverride）。两者不同时，日志会显示「某个本该命中规则的域名走了默认
+	// 出站」，只有这个标记能说明核心当时实际没命中任何规则、看的是另一个域名。
+	NoRuleHit bool
 }
 
 // ParseLine 解析一行访问日志。无法识别的行返回 false，调用方应当丢弃，
@@ -71,7 +78,7 @@ func ParseLine(line string, loc *time.Location) (Entry, bool) {
 	if open < 0 || closeIdx < open {
 		return Entry{}, false
 	}
-	inbound, route := splitDetour(rest[open+1 : closeIdx])
+	inbound, route, noRuleHit := splitDetour(rest[open+1 : closeIdx])
 	if inbound == "" {
 		return Entry{}, false
 	}
@@ -84,14 +91,15 @@ func ParseLine(line string, loc *time.Location) (Entry, bool) {
 	}
 
 	return Entry{
-		Time:     ts,
-		SourceIP: sourceIP,
-		Network:  network,
-		Target:   targetAddr,
-		Inbound:  inbound,
-		Route:    route,
-		Accepted: accepted,
-		Email:    emailOf(rest[closeIdx+1:]),
+		Time:      ts,
+		SourceIP:  sourceIP,
+		Network:   network,
+		Target:    targetAddr,
+		Inbound:   inbound,
+		Route:     route,
+		Accepted:  accepted,
+		Email:     emailOf(rest[closeIdx+1:]),
+		NoRuleHit: noRuleHit,
 	}, true
 }
 
@@ -135,21 +143,22 @@ func HostOf(addr string) (string, bool) {
 }
 
 // splitDetour 把方括号里的内容拆成入站 tag 与其后的路由串。
-// 分隔符实测有 "->" 与 ">>" 两种：命中路由规则用前者，走默认出站用后者。
-func splitDetour(detour string) (inbound, route string) {
+// 分隔符实测有 "->" 与 ">>" 两种：命中路由规则用前者，走默认出站用后者；
+// noRuleHit 报告入站后面紧跟的是不是 ">>"。
+func splitDetour(detour string) (inbound, route string, noRuleHit bool) {
 	detour = strings.TrimSpace(detour)
 	best := -1
-	bestLen := 0
+	bestSep := ""
 	for _, sep := range []string{" -> ", " >> "} {
 		if idx := strings.Index(detour, sep); idx >= 0 && (best < 0 || idx < best) {
-			best, bestLen = idx, len(sep)
+			best, bestSep = idx, sep
 		}
 	}
 	if best < 0 {
 		// rejected 的行只有入站 tag，没有出站。
-		return detour, ""
+		return detour, "", false
 	}
-	return strings.TrimSpace(detour[:best]), strings.TrimSpace(detour[best+bestLen:])
+	return strings.TrimSpace(detour[:best]), strings.TrimSpace(detour[best+len(bestSep):]), bestSep == " >> "
 }
 
 // emailOf 取出行尾可选的 " email: xxx"。本项目不给客户端配 email，

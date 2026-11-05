@@ -26,6 +26,7 @@ type InboundController struct {
 	ipUsageService        service.IPUsageService
 	settingService        service.SettingService
 	routingRuleService    service.RoutingRuleService
+	attentionService      service.InboundAttentionService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -57,6 +58,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/sharing/summary", a.getSharingSummary)
 	g.POST("/sharing/detail/:id", a.getSharingDetail)
 	g.POST("/sharing/risk/summary", a.getSharingRiskSummary)
+	g.POST("/attention/summary", a.getAttentionSummary)
 	g.POST("/sharing/risk/detail/:id", a.getSharingRiskDetail)
 	g.POST("/provinces", a.getProvinces)
 }
@@ -496,6 +498,17 @@ func (a *InboundController) getSharingRiskSummary(c *gin.Context) {
 	result, err := a.sharingRiskService.Summary()
 	if err != nil {
 		jsonMsg(c, "获取共享风险统计", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// getAttentionSummary 返回需要留意的入站：停用原因与自动恢复时刻、近 24 小时的地区拦截。
+// 只读；停用原因标记本身仍不下发、不可从前端改（见 InboundAttentionService）。
+func (a *InboundController) getAttentionSummary(c *gin.Context) {
+	result, err := a.attentionService.Summary(time.Now())
+	if err != nil {
+		jsonMsg(c, "获取入站提醒", err)
 		return
 	}
 	jsonObj(c, result, nil)

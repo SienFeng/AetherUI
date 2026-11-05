@@ -116,12 +116,62 @@ func TestBuildLogEvidence(t *testing.T) {
 		{Target: "chatgpt.com:443", Route: "", Accepted: false, Count: 1},
 	}
 	exp := ExpectedOutbound{Action: model.ActionProxy, Tag: "a-ui-us"}
-	got := buildLogEvidence(rows, m, exp, "direct", func(tag string) string { return "" })
+	got := buildLogEvidence(rows, m, exp, "direct", func(tag string) string { return "" }, nil)
 	if got.Matched != 4 || got.Rejected != 1 {
 		t.Fatalf("Matched=%d Rejected=%d，期望 4/1", got.Matched, got.Rejected)
 	}
 	want := []LogOther{{Route: "a-ui-default", Count: 2, LastAt: x, Examples: []string{"chatgpt.com:443"}}}
 	if !reflect.DeepEqual(got.Others, want) {
 		t.Errorf("Others = %+v，期望 %+v", got.Others, want)
+	}
+}
+
+// 被入站地区限制拦下的封禁、核心没命中任何规则（" >> "）的连接都不是本规则走错：
+// 各自单独计数，不进 Others，也不计入 Matched。
+func TestBuildLogEvidenceSeparatesGeoBlockedAndNoRuleHit(t *testing.T) {
+	m, err := newGroupMatcher([]string{"domain:xiaohongshu.com"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const x = int64(1700000000000)
+	rows := []TargetRouteCount{
+		{Target: "www.xiaohongshu.com:443", Route: "a-ui-sg", Accepted: true, Count: 5},
+		// 地区限制外的来源：进了黑洞，但不是分流规则的事。
+		{Target: "www.xiaohongshu.com:443", Route: model.BlockOutboundTag, Accepted: true, SourceIP: "203.0.113.81", Count: 7},
+		// 允许集内的来源也进了黑洞：那是分流规则把它送进去的，仍算走错。
+		{Target: "api.xiaohongshu.com:443", Route: model.BlockOutboundTag, Accepted: true, SourceIP: "198.51.100.77", Count: 2, LastAt: x},
+		// 核心按嗅探到的另一个域名分流、没命中任何规则。
+		{Target: "mall.xiaohongshu.com:443", Route: "a-ui-default", Accepted: true, NoRuleHit: true, Count: 3},
+		// 升级前写入的行没有这个标记，按原口径算走错。
+		{Target: "so.xiaohongshu.com:443", Route: "a-ui-default", Accepted: true, Count: 1, LastAt: x},
+	}
+	exp := ExpectedOutbound{Action: model.ActionProxy, Tag: "a-ui-sg"}
+	geo := func(src string) bool { return src == "203.0.113.81" }
+	got := buildLogEvidence(rows, m, exp, "a-ui-default", func(string) string { return "" }, geo)
+	if got.Matched != 5 || got.GeoBlocked != 7 || got.NoRuleHit != 3 {
+		t.Fatalf("Matched=%d GeoBlocked=%d NoRuleHit=%d，期望 5/7/3", got.Matched, got.GeoBlocked, got.NoRuleHit)
+	}
+	want := []LogOther{
+		{Route: model.BlockOutboundTag, Count: 2, LastAt: x, Examples: []string{"api.xiaohongshu.com:443"}},
+		{Route: "a-ui-default", Count: 1, LastAt: x, Examples: []string{"so.xiaohongshu.com:443"}},
+	}
+	if !reflect.DeepEqual(got.Others, want) {
+		t.Errorf("Others = %+v，期望 %+v", got.Others, want)
+	}
+}
+
+// 规则本身就是封禁时，进黑洞就是符合，不论来源是否在地区限制外。
+func TestBuildLogEvidenceGeoBlockedOnBlockRuleIsMatch(t *testing.T) {
+	m, err := newGroupMatcher([]string{"domain:speedtest.net"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []TargetRouteCount{
+		{Target: "www.speedtest.net:443", Route: model.BlockOutboundTag, Accepted: true, SourceIP: "203.0.113.81", Count: 4},
+	}
+	exp := ExpectedOutbound{Action: model.ActionBlock, Tag: model.BlockOutboundTag}
+	got := buildLogEvidence(rows, m, exp, "a-ui-default", func(string) string { return "" }, func(string) bool { return true })
+	if got.Matched != 4 || got.GeoBlocked != 0 || len(got.Others) != 0 {
+		t.Errorf("Matched=%d GeoBlocked=%d Others=%+v，期望 4/0/空", got.Matched, got.GeoBlocked, got.Others)
 	}
 }

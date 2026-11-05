@@ -2,8 +2,10 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"a-ui/database/model"
@@ -578,12 +580,9 @@ func (s *RoutingInjector) buildRule(
 			// 面板首页照样显示 running。
 			return nil, false, common.NewError("规则指定的入站全部不存在或已禁用, ids:", inboundIds)
 		}
-		if len(missing) > 0 {
-			// 部分失效不整条丢弃：剩下的入站仍该按规则走。但必须记录，
-			// 否则被剔除的那些用户会静默回落直连而无人察觉。
-			logger.Warning("routing rule drops inbounds that no longer exist or are disabled, rule id:",
-				rule.Id, "inbound ids:", missing)
-		}
+		// 部分失效不整条丢弃：剩下的入站仍该按规则走。但必须记录，
+		// 否则被剔除的那些用户会静默回落直连而无人察觉。
+		noteDroppedInbounds(rule.Id, missing)
 		// tags 的顺序由 InboundIds 的升序保证，不得改用遍历 inboundTagById
 		// 这个 map 来产生顺序——那样生成不再逐字节确定。
 		inboundTags = tags
@@ -673,4 +672,36 @@ func (s *RoutingInjector) buildGeoRules() ([]any, error) {
 		return nil, common.NewError("生成地区限制数据文件失败:", err)
 	}
 	return rulesFromGeoPlan(inbounds, plan, hash), nil
+}
+
+// droppedInboundsLogged 记着每条规则上一次告警过的失效入站名单。
+var (
+	droppedInboundsMu     sync.Mutex
+	droppedInboundsLogged = map[int]string{}
+)
+
+// noteDroppedInbounds 在规则的失效入站名单变化时告警一次。
+//
+// buildRule 不只在生成配置时调用：流量走向验证、后台审计与异常扫描每轮都会对每条规则调它
+// （判定「会不会被丢弃」必须与生成同一份），于是同一句告警每分钟刷一遍，把真正的告警淹没
+// 在日志里。名单不变就不再重复；名单清空后再次出现会重新告警。返回这次是否告警。
+func noteDroppedInbounds(ruleId int, missing []int) bool {
+	sig := fmt.Sprint(missing)
+	if len(missing) == 0 {
+		sig = ""
+	}
+	droppedInboundsMu.Lock()
+	changed := droppedInboundsLogged[ruleId] != sig
+	if sig == "" {
+		delete(droppedInboundsLogged, ruleId)
+	} else {
+		droppedInboundsLogged[ruleId] = sig
+	}
+	droppedInboundsMu.Unlock()
+	if changed && sig != "" {
+		logger.Warning("routing rule drops inbounds that no longer exist or are disabled, rule id:",
+			ruleId, "inbound ids:", missing)
+		return true
+	}
+	return false
 }

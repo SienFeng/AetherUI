@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -13,8 +14,10 @@ import (
 	"a-ui/database/model"
 	"a-ui/logger"
 	"a-ui/util/accesslog"
+	"a-ui/util/domain"
 	"a-ui/xray"
 	"github.com/shirou/gopsutil/disk"
+	"gorm.io/gorm"
 )
 
 const (
@@ -41,6 +44,9 @@ var (
 	accessLogTailer     = &accesslog.Tailer{Path: accessLogPath}
 	accessLogLock       sync.Mutex
 	accessLogDiskWarned bool
+	// accessLogResumed 表示本进程已从库里恢复过读取进度（见 model.AccessLogCursor）。
+	// 恢复之前一行都不读：恢复失败（例如库被锁）时下一轮重试，而不是从 0 读起再导一遍。
+	accessLogResumed bool
 )
 
 // injectAccessLog 把访问日志路径合并进 xray 的 log 配置。
@@ -156,9 +162,62 @@ func (s *AccessLogService) Store(entries []accesslog.Entry) (int, error) {
 	if db == nil || len(entries) == 0 {
 		return 0, nil
 	}
-	tagToId, err := inboundTagToId()
+	rows, err := accessLogRows(entries)
 	if err != nil {
 		return 0, err
+	}
+	if err := db.CreateInBatches(rows, accessLogBatchSize).Error; err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+// storeWithCursor 把记录与读取进度放在同一个事务里提交：要么日志落库且进度前进，
+// 要么都不变（下一轮从原进度重读这一段）。没有记录时只更新进度——整段都是认不出的行
+// 也要跳过去，否则每轮都卡在同一处。
+func storeWithCursor(db *gorm.DB, entries []accesslog.Entry, cursor model.AccessLogCursor) error {
+	rows, err := accessLogRows(entries)
+	if err != nil {
+		return err
+	}
+	cursor.Id = 1
+	return db.Transaction(func(tx *gorm.DB) error {
+		if len(rows) > 0 {
+			if err := tx.CreateInBatches(rows, accessLogBatchSize).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Save(&cursor).Error
+	})
+}
+
+// resumeAccessLogTailer 从库里恢复读取进度。没有记录（首次启用）或文件已换过时从头读。
+func resumeAccessLogTailer(db *gorm.DB) error {
+	var cursor model.AccessLogCursor
+	err := db.Where("id = ?", 1).Limit(1).Find(&cursor).Error
+	if err != nil {
+		return fmt.Errorf("读取访问日志进度失败: %w", err)
+	}
+	if cursor.Id == 0 {
+		return nil
+	}
+	ok, err := accessLogTailer.Resume(cursor.Offset, cursor.Head)
+	if err != nil {
+		return fmt.Errorf("恢复访问日志进度失败: %w", err)
+	}
+	if !ok {
+		logger.Info("访问日志文件已更换或被截断过，从文件开头读取")
+	}
+	return nil
+}
+
+func accessLogRows(entries []accesslog.Entry) ([]model.AccessLog, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	tagToId, err := inboundTagToId()
+	if err != nil {
+		return nil, err
 	}
 
 	rows := make([]model.AccessLog, 0, len(entries))
@@ -172,12 +231,10 @@ func (s *AccessLogService) Store(entries []accesslog.Entry) (int, error) {
 			Target:     e.Target,
 			Route:      e.Route,
 			Accepted:   e.Accepted,
+			NoRuleHit:  e.NoRuleHit,
 		})
 	}
-	if err := db.CreateInBatches(rows, accessLogBatchSize).Error; err != nil {
-		return 0, err
-	}
-	return len(rows), nil
+	return rows, nil
 }
 
 func inboundTagToId() (map[string]int, error) {
@@ -373,11 +430,16 @@ func (s *AccessLogService) CountByRoute(inboundId int, route string, since int64
 	return n, err
 }
 
-// TargetRouteCount 是访问日志按「目标 + 出站 + 是否放行」分组后的一行。
+// TargetRouteCount 是访问日志按「目标 + 出站 + 是否放行 + 是否命中规则」分组后的一行。
 type TargetRouteCount struct {
 	Target   string
 	Route    string
 	Accepted bool
+	// NoRuleHit 见 model.AccessLog.NoRuleHit。
+	NoRuleHit bool
+	// SourceIP 只对出站为 a-ui-block 的行填写（其余行为空、不按来源拆分）：判断一条封禁
+	// 是不是入站的地区限制造成的，要看来源 IP。只拆这一类行，分组数才不会随来源成倍增长。
+	SourceIP string
 	Count    int64
 	LastAt   int64 // 毫秒
 }
@@ -390,11 +452,12 @@ func (s *AccessLogService) GroupByTargetRoute(inboundId int, sinceMs int64, limi
 	if db == nil {
 		return nil, false, nil
 	}
+	sourceExpr := "CASE WHEN route = '" + model.BlockOutboundTag + "' THEN source_ip ELSE '' END"
 	err = db.Model(&model.AccessLog{}).
-		Select("target, route, accepted, count(*) as count, max(time) as last_at").
+		Select("target, route, accepted, no_rule_hit, "+sourceExpr+" as source_ip, count(*) as count, max(time) as last_at").
 		Where("inbound_id = ? and time >= ?", inboundId, sinceMs).
-		Group("target, route, accepted").
-		Order("count desc, target, route").
+		Group("target, route, accepted, no_rule_hit, " + sourceExpr).
+		Order("count desc, target, route, source_ip").
 		Limit(limit + 1).
 		Scan(&rows).Error
 	if err != nil {
@@ -404,6 +467,44 @@ func (s *AccessLogService) GroupByTargetRoute(inboundId int, sinceMs int64, limi
 		rows, truncated = rows[:limit], true
 	}
 	return rows, truncated, nil
+}
+
+// MeterableConnCounts 统计某入站自 sinceMs 起「落到了路由规则表末尾」的连接数，按注册域名
+// （domain.Registrable，与域名统计同一口径）汇总：没命中任何规则（" >> "）或已经走了计量出站。
+//
+// 计量规则排在所有规则之后，只接得住本来会走默认出站的流量。被分流规则送去别处的域名
+// 连接数再多也永远量不到字节——线上一天 366 次进池里只有 4 次量到过字节，其余都是
+// 这类域名在「进池 → 3 轮零字节退场 → 冷却 24 小时 → 再进池」地空转，每次换池都整表
+// 热下发一次路由。计量池用这份计数决定谁值得试用。
+//
+// 访问日志关闭或库不可用时返回 nil（不是空 map）：调用方据此退回只看域名统计的旧口径。
+func (s *AccessLogService) MeterableConnCounts(inboundId int, sinceMs int64) (map[string]int64, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return nil, nil
+	}
+	enabled, err := s.settingService.GetAccessLogEnable()
+	if err != nil || !enabled {
+		return nil, err
+	}
+	var rows []struct {
+		Target string
+		Count  int64
+	}
+	err = db.Model(&model.AccessLog{}).
+		Select("target, count(*) as count").
+		Where("inbound_id = ? and time >= ? and accepted = ? and (no_rule_hit = ? or route like ?)",
+			inboundId, sinceMs, true, true, model.MeterOutboundTagPrefix+"%").
+		Group("target").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(rows))
+	for _, r := range rows {
+		out[domain.Registrable(r.Target)] += r.Count
+	}
+	return out, nil
 }
 
 // ReadAfter 按 (time, id) 升序读出游标之后的至多 limit 行，供异常扫描增量读取。
@@ -488,20 +589,48 @@ func (s *AccessLogService) Collect() error {
 	}
 	accessLogDiskWarned = false
 
-	lines, err := accessLogTailer.Read(accessLogMaxReadBytes)
+	db := database.GetAccessLogDB()
+	if db == nil {
+		// 访问日志库没初始化成功，没有地方可写：照旧读过即弃，并保住文件大小上限——
+		// 不读不截的话 xray 会让 access.log 无限增长。
+		if _, err := accessLogTailer.Read(accessLogMaxReadBytes); err != nil {
+			return err
+		}
+		return accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
+	}
+	if !accessLogResumed {
+		if err := resumeAccessLogTailer(db); err != nil {
+			return err
+		}
+		accessLogResumed = true
+	}
+
+	lines, next, err := accessLogTailer.Peek(accessLogMaxReadBytes)
 	if err != nil {
 		return err
 	}
-	entries := make([]accesslog.Entry, 0, len(lines))
-	for _, line := range lines {
-		// xray 的 access 文件只写访问记录，但保险起见丢掉认不出的行，
-		// 不往库里塞垃圾。
-		if e, ok := accesslog.ParseLine(line, time.Local); ok {
+	if next != accessLogTailer.Offset() {
+		entries := make([]accesslog.Entry, 0, len(lines))
+		for _, line := range lines {
+			// xray 的 access 文件只写访问记录，但保险起见丢掉认不出的行，
+			// 不往库里塞垃圾。
+			e, ok := accesslog.ParseLine(line, time.Local)
+			// 控制面入站的记录是面板自己每几秒一次的 gRPC 轮询，不是任何用户的流量：
+			// 线上一天一万五千多行、约占全表 15%，只白占空间、拖慢查询。
+			if !ok || e.Inbound == xray.APIInboundTag {
+				continue
+			}
 			entries = append(entries, e)
 		}
-	}
-	if _, err := s.Store(entries); err != nil {
-		return err
+		head, err := accessLogTailer.Head()
+		if err != nil {
+			return err
+		}
+		// 写库失败时不 Commit：下一轮从原进度重读这一段，不丢也不重。
+		if err := storeWithCursor(db, entries, model.AccessLogCursor{Offset: next, Head: head}); err != nil {
+			return err
+		}
+		accessLogTailer.Commit(next)
 	}
 	return accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
 }

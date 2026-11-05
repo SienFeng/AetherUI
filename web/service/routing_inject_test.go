@@ -1303,3 +1303,24 @@ func TestInjectBlockRulesComeBeforeDirectRules(t *testing.T) {
 		t.Errorf("rules[2] = %v, want the direct rule", rules[2])
 	}
 }
+
+// 失效入站的告警按名单变化去重：验证/审计每分钟都会调 buildRule，不去重就每分钟刷一遍。
+func TestNoteDroppedInboundsWarnsOncePerChange(t *testing.T) {
+	const ruleId = 987654
+	t.Cleanup(func() { noteDroppedInbounds(ruleId, nil) })
+	steps := []struct {
+		missing []int
+		want    bool
+	}{
+		{[]int{10, 13}, true},
+		{[]int{10, 13}, false}, // 名单没变，不再告警
+		{[]int{10}, true},      // 名单变了
+		{nil, false},           // 恢复正常，不告警
+		{[]int{10}, true},      // 清空后再次出现，重新告警
+	}
+	for i, s := range steps {
+		if got := noteDroppedInbounds(ruleId, s.missing); got != s.want {
+			t.Errorf("第 %d 步 missing=%v：告警=%v，期望 %v", i, s.missing, got, s.want)
+		}
+	}
+}

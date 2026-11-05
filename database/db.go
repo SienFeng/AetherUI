@@ -184,7 +184,7 @@ func InitAccessLogDB(dbPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := adb.AutoMigrate(&model.AccessLog{}); err != nil {
+	if err := adb.AutoMigrate(&model.AccessLog{}, &model.AccessLogCursor{}); err != nil {
 		return err
 	}
 	accessDB = adb

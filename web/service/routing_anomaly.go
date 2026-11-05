@@ -20,6 +20,8 @@ import (
 // 目标命中规则域名组（xray 自己的匹配器）、routeHead(Route) 经 judgeSample 判为不符，
 // 且只看 Accepted=true 的行。被更高优先级规则遮蔽的域名同样记为下层规则的异常——
 // 「这条规则在这个域名上没生效」正是要告诉管理员的事，这里不重新推导规则先后。
+// 两类不是分流规则造成的连接不计（与 buildLogEvidence 同口径）：被入站地区限制拦下的
+// 封禁（geoBlockMatcher），以及核心没命中任何规则（NoRuleHit，核心看的是嗅探出的另一个域名）。
 //
 // 小机器约束（§4.3）：规则按引用的全部域名组合并后的条目数分两档。小规则的匹配器
 // 按代次常驻缓存，每分钟扫描；大规则的匹配器每次扫描时临时构建、用完即释放，
@@ -182,6 +184,9 @@ type anomalyPlanSet struct {
 	rules      []*anomalyRulePlan
 	matchers   map[string]*groupMatcher // 小规则的匹配器，按组序列共享
 	enabledIds map[int]bool
+	// geo 判断封禁连接是否被入站地区限制拦下。地区设置或允许集变化都会改核心配置、
+	// 推进代次，计划随之重建，所以与规则计划同一个缓存口径。
+	geo *geoBlockMatcher
 }
 
 var (
@@ -388,6 +393,7 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 	}
 
 	sc := &anomalyScan{
+		geo:        plans.geo,
 		rows:       rows,
 		cutoff:     anomalyCutoffKey(now),
 		watermarks: watermarks,
@@ -444,6 +450,7 @@ func (s *RoutingAuditService) ScanAccessLog(now time.Time, large bool) error {
 // anomalyScan 是一轮扫描在锁外的工作区：已读出的行、扫描开始时的水位与忽略时刻快照，
 // 以及本轮累出的增量（合并进摘要时再持锁）。
 type anomalyScan struct {
+	geo        *geoBlockMatcher
 	rows       []model.AccessLog
 	cutoff     int64
 	watermarks map[int]logCursor
@@ -463,8 +470,14 @@ func (sc *anomalyScan) candidate(p *anomalyRulePlan, r *model.AccessLog, head st
 	if wm, ok := sc.watermarks[p.ruleId]; ok && !wm.less(logCursor{Time: r.Time, Id: r.Id}) {
 		return false // 规则换档前在另一档已计过
 	}
-	match, _ := judgeSample(p.expected, head, false, p.defaultTag)
-	return !match
+	if match, _ := judgeSample(p.expected, head, false, p.defaultTag); match {
+		return false
+	}
+	// 不是本规则造成的两类连接，判定次序与 buildLogEvidence 一致。
+	if r.NoRuleHit || sc.geo.isGeoBlocked(r.InboundId, r.Route, r.SourceIP) {
+		return false
+	}
+	return true
 }
 
 // accumulate 用给定的匹配器把行累加进 rules 的增量。匹配器为 nil 的规则跳过。
@@ -652,7 +665,11 @@ func (s *RoutingAuditService) buildAnomalyPlans(enabled []*model.RoutingRule) (*
 		}
 	}
 
-	set := &anomalyPlanSet{matchers: map[string]*groupMatcher{}, enabledIds: make(map[int]bool, len(enabled))}
+	set := &anomalyPlanSet{
+		matchers:   map[string]*groupMatcher{},
+		enabledIds: make(map[int]bool, len(enabled)),
+		geo:        sh.geoBlocker(),
+	}
 	for _, rule := range enabled {
 		set.enabledIds[rule.Id] = true
 		plan, reason := v.planRule(sh, rule)

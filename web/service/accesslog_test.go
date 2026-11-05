@@ -1,6 +1,7 @@
 package service
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -10,6 +11,9 @@ import (
 	"a-ui/database/model"
 	"a-ui/util/accesslog"
 	"a-ui/xray"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestInjectAccessLogLeavesConfigUntouchedWhenDisabled(t *testing.T) {
@@ -617,5 +621,215 @@ func TestQuerySkipTotalStillAppliesFilters(t *testing.T) {
 	}
 	if list[0].Target != "google.com:443" {
 		t.Errorf("命中的是 %q", list[0].Target)
+	}
+}
+
+// useTempAccessLogFile 把采集用的 Tailer 指到临时文件，并模拟一个刚启动、还没恢复进度的进程。
+func useTempAccessLogFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "access.log")
+	oldTailer, oldResumed := accessLogTailer, accessLogResumed
+	t.Cleanup(func() { accessLogTailer, accessLogResumed = oldTailer, oldResumed })
+	simulateRestart(path)
+	return path
+}
+
+// simulateRestart 丢掉内存里的读取进度，就像面板进程重启了一样。
+func simulateRestart(path string) {
+	accessLogTailer = &accesslog.Tailer{Path: path}
+	accessLogResumed = false
+}
+
+func countAccessLogs(t *testing.T) int64 {
+	t.Helper()
+	var n int64
+	if err := database.GetAccessLogDB().Model(&model.AccessLog{}).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func accessLine(tag, target string, sec int) string {
+	ts := time.Date(2026, 11, 4, 20, 0, sec, 0, time.Local).Format("2006/01/02 15:04:05.000000")
+	return ts + " from tcp:192.0.2.235:9677 accepted tcp:" + target + " [" + tag + " -> direct]\n"
+}
+
+// 面板重启后不能把整份访问日志重新导入一遍（线上每次 geo 定时更新重启都重复导入一次）。
+func TestCollectDoesNotReimportAfterRestart(t *testing.T) {
+	setupAccessLogDB(t)
+	setAccessLog(t, true)
+	in := mkInbound(t, 50021)
+	path := useTempAccessLogFile(t)
+	s := AccessLogService{}
+
+	writeFile(t, path, accessLine(in.Tag, "a.com:443", 1)+accessLine(in.Tag, "b.com:443", 2))
+	if err := s.Collect(); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if n := countAccessLogs(t); n != 2 {
+		t.Fatalf("首次采集写入 %d 行，期望 2", n)
+	}
+
+	simulateRestart(path)
+	appendFile(t, path, accessLine(in.Tag, "c.com:443", 3))
+	if err := s.Collect(); err != nil {
+		t.Fatalf("重启后 Collect: %v", err)
+	}
+	if n := countAccessLogs(t); n != 3 {
+		t.Fatalf("重启后共 %d 行，期望 3（只追加重启后新写的那一行）", n)
+	}
+}
+
+// 重启前文件被换过（首行不同）时从头读：宁可重复也不跳过没读过的行。
+func TestCollectRereadsReplacedFileAfterRestart(t *testing.T) {
+	setupAccessLogDB(t)
+	setAccessLog(t, true)
+	in := mkInbound(t, 50022)
+	path := useTempAccessLogFile(t)
+	s := AccessLogService{}
+
+	writeFile(t, path, accessLine(in.Tag, "a.com:443", 1))
+	if err := s.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	simulateRestart(path)
+	writeFile(t, path, accessLine(in.Tag, "x.com:443", 5)+accessLine(in.Tag, "y.com:443", 6))
+	if err := s.Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAccessLogs(t); n != 3 {
+		t.Fatalf("共 %d 行，期望 3：换过的文件要整份读进来", n)
+	}
+}
+
+// 写库失败时进度不前进，下一轮重读同一段：不丢。修复前先推进偏移再写库，
+// 「database is locked」那一批就永久丢了。
+func TestCollectRetriesBatchAfterStoreFailure(t *testing.T) {
+	setupAccessLogDB(t)
+	setAccessLog(t, true)
+	in := mkInbound(t, 50023)
+	path := useTempAccessLogFile(t)
+	s := AccessLogService{}
+
+	writeFile(t, path, accessLine(in.Tag, "a.com:443", 1))
+	// 用一个只读事务之外的手段制造写失败：删掉表，让插入报错。
+	adb := database.GetAccessLogDB()
+	if err := adb.Migrator().DropTable(&model.AccessLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Collect(); err == nil {
+		t.Fatal("表不存在时 Collect 应报错")
+	}
+	if err := adb.AutoMigrate(&model.AccessLog{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Collect(); err != nil {
+		t.Fatalf("恢复后 Collect: %v", err)
+	}
+	if n := countAccessLogs(t); n != 1 {
+		t.Fatalf("恢复后共 %d 行，期望 1：失败那一轮的行应在下一轮补上", n)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appendFile(t *testing.T, path, content string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 升级：线上已有的访问日志库（下面是 v1.45.0 的建表语句，取自生产库）加上 no_rule_hit 列后，
+// 老行按 false 处理，分组查询照常可用。
+func TestAccessLogDBMigratesOldSchema(t *testing.T) {
+	if err := database.InitDB(filepath.Join(t.TempDir(), "main.db")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "access.db")
+	old, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		"CREATE TABLE `access_logs` (`id` integer,`time` integer,`inbound_id` integer,`inbound_tag` text,`source_ip` text,`network` text,`target` text,`route` text,`accepted` numeric,PRIMARY KEY (`id`))",
+		"INSERT INTO access_logs (time, inbound_id, inbound_tag, source_ip, network, target, route, accepted) VALUES (1793796554275, 3, 'inbound-2190', '192.0.2.235', 'tcp', 'mall.xiaohongshu.com:443', 'a-ui-default', 1)",
+	} {
+		if err := old.Exec(stmt).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if db, err := old.DB(); err == nil {
+		db.Close()
+	}
+
+	if err := database.InitAccessLogDB(path); err != nil {
+		t.Fatalf("InitAccessLogDB 迁移旧库: %v", err)
+	}
+	rows, _, err := (&AccessLogService{}).GroupByTargetRoute(3, 0, 10)
+	if err != nil {
+		t.Fatalf("GroupByTargetRoute: %v", err)
+	}
+	if len(rows) != 1 || rows[0].NoRuleHit || rows[0].Count != 1 {
+		t.Fatalf("rows = %+v，期望 1 行、NoRuleHit=false", rows)
+	}
+}
+
+// 控制面入站（api）的访问记录是面板自己的轮询，不入库。
+func TestCollectSkipsAPIInbound(t *testing.T) {
+	setupAccessLogDB(t)
+	setAccessLog(t, true)
+	in := mkInbound(t, 50024)
+	path := useTempAccessLogFile(t)
+	writeFile(t, path, accessLine(xray.APIInboundTag, "127.0.0.1:62789", 1)+accessLine(in.Tag, "a.com:443", 2))
+	if err := (&AccessLogService{}).Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAccessLogs(t); n != 1 {
+		t.Fatalf("入库 %d 行，期望 1（api 那一行应丢弃）", n)
+	}
+}
+
+// 计量池试用的依据：只算落到规则表末尾的连接（" >> " 或已走计量出站），按注册域名汇总。
+func TestMeterableConnCounts(t *testing.T) {
+	setupAccessLogDB(t)
+	in := mkInbound(t, 50025)
+	s := AccessLogService{}
+	now := time.Now().UnixMilli()
+	add := func(target, route string, noRuleHit, accepted bool, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := database.GetAccessLogDB().Create(&model.AccessLog{Time: now, InboundId: in.Id, Target: target,
+				Route: route, NoRuleHit: noRuleHit, Accepted: accepted}).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add("www.example.com:443", "a-ui-default", true, true, 2)
+	add("img.example.com:443", "a-ui-meter-1-example.com", false, true, 3)
+	add("chatgpt.com:443", "a-ui-sg", false, true, 9)          // 被分流规则送走
+	add("www.example.com:443", "a-ui-default", true, false, 4) // 被拒绝的不算
+
+	setAccessLog(t, false)
+	if got, err := s.MeterableConnCounts(in.Id, 0); err != nil || got != nil {
+		t.Fatalf("访问日志关闭时应返回 nil，得到 %v, %v", got, err)
+	}
+	setAccessLog(t, true)
+	got, err := s.MeterableConnCounts(in.Id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["example.com"] != 5 || got["chatgpt.com"] != 0 {
+		t.Errorf("got = %v，期望 example.com=5、chatgpt.com 不计", got)
 	}
 }

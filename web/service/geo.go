@@ -212,6 +212,15 @@ func buildGeoRules(inbounds []*model.Inbound, db provinceCIDRSource, datHash str
 	return rulesFromGeoPlan(inbounds, plan, datHash), nil
 }
 
+// geoRuleSources 是一个允许集 tag 对应的两条拒绝规则的 source 条件，顺序同规则顺序：
+// 先拒绝全部 IPv6 来源，再拒绝不在允许集里的 IPv4 来源。
+//
+// 规则生成（rulesFromGeoPlan）与流量走向验证（geoBlockMatcher）共用这一份：验证要用
+// xray 的匹配器按同样的条件判断「这条连接是不是被地区限制拦下的」，两边各写一份迟早漂移。
+func geoRuleSources(tag string) (v6, outside []string) {
+	return []string{"::/0"}, []string{"ext:" + geoDatRef + ":!" + tag}
+}
+
 func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) []any {
 	rules := make([]any, 0, len(plan.TagByInbound)*2)
 	// 按入站 id 升序遍历，不遍历 map。
@@ -220,11 +229,12 @@ func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) 
 		if !ok {
 			continue
 		}
+		v6, outside := geoRuleSources(tag)
 		rules = append(rules, map[string]any{
 			"type":        "field",
 			"ruleTag":     "a-ui-geo6-" + itoa(in.Id),
 			"inboundTag":  []string{in.Tag},
-			"source":      []string{"::/0"},
+			"source":      v6,
 			"outboundTag": model.BlockOutboundTag,
 		})
 		rules = append(rules, map[string]any{
@@ -234,7 +244,7 @@ func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) 
 			// 字节变则重启，不必为 dat 单独造一套变更检测。
 			"ruleTag":     "a-ui-geo-" + itoa(in.Id) + "-" + datHash,
 			"inboundTag":  []string{in.Tag},
-			"source":      []string{"ext:" + geoDatRef + ":!" + tag},
+			"source":      outside,
 			"outboundTag": model.BlockOutboundTag,
 		})
 	}
