@@ -116,6 +116,9 @@ func initRouting() error {
 	if err := db.AutoMigrate(&model.IPBan{}); err != nil {
 		return err
 	}
+	if err := db.AutoMigrate(&model.InboundRegionPass{}); err != nil {
+		return err
+	}
 	if err := migrateRoutingRuleInboundIds(); err != nil {
 		return err
 	}

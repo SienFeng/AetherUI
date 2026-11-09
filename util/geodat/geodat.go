@@ -4,8 +4,9 @@
 // 取反。地区限制正是靠这个实现的：dat 里存「允许的省份对应的 IP 段」，
 // 规则写成「来源不在这个集合里 → 黑洞」。
 //
-// 只做编码，不做解码：读回来是 xray 的事。protobuf 定义如下，字段号写死在
-// 常量里，不引入 protobuf 运行时。
+// 编码供生成配置用；解码只用来读回本包自己写的文件——地区规则生成失败时，
+// 要沿用上一次成功写进 dat 的允许集（面板冷启动时内存里还没有）。protobuf
+// 定义如下，字段号写死在常量里，不引入 protobuf 运行时。
 //
 //	CIDR      { bytes ip = 1; uint32 prefix = 2; }
 //	GeoIP     { string country_code = 1; repeated CIDR cidr = 2; }
@@ -106,4 +107,110 @@ func appendVarint(dst []byte, v uint64) []byte {
 		v >>= 7
 	}
 	return append(dst, byte(v))
+}
+
+// Decode 是 Encode 的逆操作，只认本包写出的格式：遇到未知字段号、截断或
+// 越界一律报错，不尝试兼容别人生成的 dat。CIDR 以「ip/前缀」返回，IPv4
+// 为点分形式；tag 原样返回（Encode 写入时已转成大写）。
+func Decode(data []byte) ([]Entry, error) {
+	var out []Entry
+	err := walkFields(data, func(tag byte, payload []byte) error {
+		if tag != tagGeoIPListItem {
+			return fmt.Errorf("geodat: GeoIPList 中出现未知字段 0x%02x", tag)
+		}
+		e, err := decodeGeoIP(payload)
+		if err != nil {
+			return err
+		}
+		out = append(out, e)
+		return nil
+	})
+	return out, err
+}
+
+func decodeGeoIP(data []byte) (Entry, error) {
+	var e Entry
+	err := walkFields(data, func(tag byte, payload []byte) error {
+		switch tag {
+		case tagGeoIPCountry:
+			e.Tag = string(payload)
+		case tagGeoIPCIDR:
+			c, err := decodeCIDR(payload)
+			if err != nil {
+				return err
+			}
+			e.CIDRs = append(e.CIDRs, c)
+		default:
+			return fmt.Errorf("geodat: GeoIP 中出现未知字段 0x%02x", tag)
+		}
+		return nil
+	})
+	return e, err
+}
+
+func decodeCIDR(data []byte) (string, error) {
+	var ip net.IP
+	prefix := -1
+	for len(data) > 0 {
+		tag := data[0]
+		data = data[1:]
+		switch tag {
+		case tagCIDRIP:
+			payload, rest, err := readBytesField(data)
+			if err != nil {
+				return "", err
+			}
+			ip, data = net.IP(payload), rest
+		case tagCIDRPrefix:
+			v, n := readVarint(data)
+			if n == 0 {
+				return "", fmt.Errorf("geodat: CIDR 前缀被截断")
+			}
+			prefix, data = int(v), data[n:]
+		default:
+			return "", fmt.Errorf("geodat: CIDR 中出现未知字段 0x%02x", tag)
+		}
+	}
+	bits := len(ip) * 8
+	if (len(ip) != net.IPv4len && len(ip) != net.IPv6len) || prefix < 0 || prefix > bits {
+		return "", fmt.Errorf("geodat: CIDR 数据非法")
+	}
+	return (&net.IPNet{IP: ip, Mask: net.CIDRMask(prefix, bits)}).String(), nil
+}
+
+// walkFields 遍历一段只含长度前缀字段的消息。
+func walkFields(data []byte, fn func(tag byte, payload []byte) error) error {
+	for len(data) > 0 {
+		tag := data[0]
+		payload, rest, err := readBytesField(data[1:])
+		if err != nil {
+			return err
+		}
+		if err := fn(tag, payload); err != nil {
+			return err
+		}
+		data = rest
+	}
+	return nil
+}
+
+func readBytesField(data []byte) (payload, rest []byte, err error) {
+	n, used := readVarint(data)
+	if used == 0 || uint64(len(data)-used) < n {
+		return nil, nil, fmt.Errorf("geodat: 数据被截断")
+	}
+	end := used + int(n)
+	return data[used:end], data[end:], nil
+}
+
+// readVarint 返回值与消耗的字节数；数据不完整时消耗数为 0。
+func readVarint(data []byte) (uint64, int) {
+	var v uint64
+	for i := 0; i < len(data) && i < 10; i++ {
+		v |= uint64(data[i]&0x7f) << (7 * i)
+		if data[i] < 0x80 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
 }

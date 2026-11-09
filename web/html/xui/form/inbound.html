@@ -91,7 +91,7 @@
                             <template slot="title">
                                 只允许所选地区的 IP 使用该节点，其余一律拒绝。留空表示不限制。<br/>
                                 可多选，例如同时选江苏与河南。<br/>
-                                <b>启用后该入站只监听 IPv4</b>，通过 IPv6 连接的客户端会被拒绝。<br/>
+                                <b>启用后通过 IPv6 连接的客户端会被拒绝</b>。<br/>
                                 地区数据来自「面板设置 → IP 归属地库」，未加载时这里是空的。
                             </template>
                             <a-icon type="question-circle" theme="filled"></a-icon>
@@ -102,9 +102,77 @@
                               placeholder="留空表示不限制">
                         <a-select-option v-for="r in provinces" :key="r" :value="r">[[ r ]]</a-select-option>
                     </a-select>
+                    <!-- 预演与建议都基于这个入站近 7 天的真实来源，新建的入站还没有数据 -->
+                    <div v-if="dbInbound.id > 0" class="region-tools">
+                        <a-button size="small" icon="experiment" :loading="inModal.preview.loading"
+                                  :disabled="dbInbound.regionList.length === 0"
+                                  @click="inModal.runPreview()">预演：会拦掉谁</a-button>
+                        <a-button size="small" icon="bulb" :loading="inModal.preview.loading"
+                                  @click="inModal.fillSuggestion()">按近 7 天填入建议</a-button>
+                    </div>
                 </a-form-item>
             </a-col>
         </a-row>
+        <a-row v-if="dbInbound.regionList.length > 0" :gutter="16">
+            <a-col :span="24">
+                <a-form-item>
+                    <span slot="label">
+                        自动出差放行
+                        <a-tooltip>
+                            <template slot="title">
+                                客户出差时不会来找你：开启后，家里一段时间没用、外地来源被地区规则拦下时，
+                                自动放行那一个省一段时间，家里恢复使用就收回。<br/>
+                                有每月天数、每周次数上限；发现家里与外地同时在用、或你手动收回过自动通行证，会暂停一段时间。<br/>
+                                这些阈值在「面板设置 → 连接限制 → 自动出差放行」里调整。<br/>
+                                需要开启访问日志；只放行国内 IPv4 来源。
+                            </template>
+                            <a-icon type="question-circle" theme="filled"></a-icon>
+                        </a-tooltip>
+                    </span>
+                    <a-switch v-model="dbInbound.autoTravel" aria-label="自动出差放行"></a-switch>
+                </a-form-item>
+            </a-col>
+        </a-row>
+        <!-- 预演结果：只读，不改任何东西。三种状态要分清：加载中 / 没有数据 / 出错。 -->
+        <div v-if="inModal.preview.shown" class="region-preview" aria-live="polite">
+            <div v-if="inModal.preview.error" class="region-preview-error" role="alert">
+                <a-icon type="exclamation-circle"></a-icon> [[ inModal.preview.error ]]
+            </div>
+            <template v-else-if="inModal.preview.result">
+                <div v-if="inModal.preview.result.totalHours === 0" class="cell-muted">
+                    近 [[ inModal.preview.result.windowDays ]] 天没有这个入站的来源记录，无法预演。
+                </div>
+                <template v-else>
+                    <div class="region-preview-head">
+                        <template v-if="inModal.preview.result.blocked.length === 0">
+                            <a-icon type="check-circle" class="tone-ok"></a-icon>
+                            按 [[ inModal.preview.regionsText ]] 限制，近 [[ inModal.preview.result.windowDays ]] 天的来源都不会被拦。
+                        </template>
+                        <template v-else>
+                            <a-icon type="warning" class="tone-warn"></a-icon>
+                            按 [[ inModal.preview.regionsText ]] 限制，近 [[ inModal.preview.result.windowDays ]] 天会拦掉
+                            <b>[[ inModal.preview.result.blocked.length + inModal.preview.result.moreBlocked ]]</b> 个来源，
+                            占流量 <b>[[ inModal.blockedShare() ]]</b>
+                        </template>
+                    </div>
+                    <table v-if="inModal.preview.result.blocked.length" class="region-preview-table">
+                        <thead><tr><th scope="col">来源 IP</th><th scope="col">归属地</th><th scope="col">活跃小时</th><th scope="col">流量</th></tr></thead>
+                        <tbody>
+                        <tr v-for="b in inModal.preview.result.blocked" :key="b.ip">
+                            <td class="cell-num">[[ b.ip ]]</td>
+                            <td>[[ [b.province, b.city, b.isp].filter(x => x).join(' ') || '未知' ]]</td>
+                            <td class="cell-num">[[ b.hours ]]</td>
+                            <td class="cell-num">[[ sizeFormat(b.bytes) ]]</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                    <div v-if="inModal.preview.result.moreBlocked" class="cell-muted">另有 [[ inModal.preview.result.moreBlocked ]] 个来源未列出</div>
+                    <div v-if="inModal.preview.result.ipv6.length" class="cell-muted">
+                        另有 [[ inModal.preview.result.ipv6.length ]] 个 IPv6 来源：启用地区限制后它们无法使用（[[ inModal.preview.result.ipv6.map(x => x.ip).join('、') ]]）
+                    </div>
+                </template>
+            </template>
+        </div>
     </a-form>
 </div>
 

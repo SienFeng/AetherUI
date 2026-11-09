@@ -457,35 +457,10 @@ func TestInjectSkipsGeoEntirelyWhenNoInboundUsesRegions(t *testing.T) {
 	}
 }
 
-func TestInjectFailsLoudlyWhenIPDBMissingButRegionsConfigured(t *testing.T) {
-	setupDB(t)
-	cleanupGeoDat(t)
-	in := newTestInbound(t, 60103)
-	encoded, _ := EncodeRegionsStrict([]string{"江苏省"})
-	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).
-		UpdateColumn("regions", encoded).Error; err != nil {
-		t.Fatal(err)
-	}
-	// 直接把包级变量清空，模拟「库文件缺失/损坏，Load 失败」的部署。
-	// 测试与实现同包，不需要为此在生产代码里开测试专用的口子。
-	ipdbLock.Lock()
-	ipdbDBs = map[string]*ipdb.DB{}
-	ipdbLock.Unlock()
-
-	cfg := newTemplateConfig(t)
-	err := (&RoutingInjector{}).Inject(cfg)
-	// 绝不能因为 IP 库没加载就把地区规则悄悄省掉——那等于地区限制失效，
-	// 而面板上一切显示正常。宁可让整份配置生成失败、xray 保持原状。
-	if err == nil {
-		t.Fatal("IP 库未加载却生成了配置，地区限制会静默失效")
-	}
-	if !strings.Contains(err.Error(), "IP") {
-		t.Errorf("错误信息 %q 没有指出是 IP 库的问题", err)
-	}
-}
-
 func TestAddAndUpdateInboundNormalizeRegions(t *testing.T) {
 	setupGeoDB(t)
+	// 保存时会对照 IP 库校验省名（checkRegionsUsable），所以这里要有真库。
+	requireIPDB(t)
 	s := InboundService{}
 	in := &model.Inbound{
 		UserId: 1, Port: 60201, Protocol: model.VLESS, Tag: "inbound-60201",
@@ -524,5 +499,39 @@ func TestAddInboundRejectsCorruptRegions(t *testing.T) {
 	// 管理员很难联想到是某个入站的地区字段坏了。
 	if err := (&InboundService{}).AddInbound(in); err == nil {
 		t.Error("地区数据损坏时应当拒绝写入")
+	}
+}
+
+type fakeProvinceList []string
+
+func (f fakeProvinceList) Provinces() []string { return f }
+
+func TestCheckRegionsUsable(t *testing.T) {
+	list := fakeProvinceList{"江苏省", "河南省", "火星省以外"}
+	src := testProvinceDB()
+	cases := []struct {
+		name       string
+		newV, oldV string
+		db         provinceLister
+		wantErr    string
+	}{
+		{"未变不校验", `["火星省"]`, `["火星省"]`, list, ""},
+		{"清空不校验", `[]`, `["江苏省"]`, list, ""},
+		{"合法", `["江苏省"]`, `[]`, list, ""},
+		{"非法省名", `["江苏省","火星省"]`, `[]`, list, "火星省"},
+		{"库未加载", `["江苏省"]`, `[]`, nil, "IP 归属地库未加载"},
+		{"口径下为空", `["火星省以外"]`, `[]`, list, "没有任何 IP 段"},
+	}
+	for _, c := range cases {
+		err := checkRegionsUsable(c.newV, c.oldV, c.db, src)
+		if c.wantErr == "" {
+			if err != nil {
+				t.Errorf("%s: 不该报错: %v", c.name, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: err = %v, 期望包含 %q", c.name, err, c.wantErr)
+		}
 	}
 }

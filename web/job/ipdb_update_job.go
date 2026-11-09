@@ -20,6 +20,7 @@ import (
 // RunInitial 跑在 startTask 自己起的 goroutine 里，覆盖不到那一层，见下。
 type IPDBUpdateJob struct {
 	ipdbService service.IPDBService
+	xrayService service.XrayService
 }
 
 func NewIPDBUpdateJob() *IPDBUpdateJob {
@@ -35,6 +36,9 @@ func (j *IPDBUpdateJob) Run() {
 	}
 	if updated > 0 {
 		logger.Info("ip database updated, 数据源个数:", updated)
+		// 地区限制的允许集按库现算：不置重启标志的话，核心手里一直是旧的允许集，
+		// 要等某次无关改动才一次性推下去。配置其实没变时 Config.Equals 会把它过滤掉。
+		j.xrayService.SetToNeedRestart()
 	}
 }
 
@@ -54,5 +58,6 @@ func (j *IPDBUpdateJob) RunInitial() {
 	}
 	if updated > 0 {
 		logger.Info("ip database initial update done, 数据源个数:", updated)
+		j.xrayService.SetToNeedRestart() // 理由同 Run
 	}
 }

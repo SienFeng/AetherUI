@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"sort"
@@ -152,37 +153,91 @@ func regionCIDRSource(db *ipdb.Multi, settingService *SettingService) provinceCI
 type geoPlan struct {
 	Entries      []geodatEntry
 	TagByInbound map[int]string
+	// FailClosed 是本轮只能锁死的入站（id → 原因），它们不引用 dat。
+	FailClosed map[int]string
+	// Degraded 是本轮降级的入站，含沿用旧允许集（stale）与锁死（closed）两种。
+	Degraded map[int]GeoDegradation
 }
 
-// buildGeoPlan 按省份集合去重，算出 dat 的内容与每个入站对应的 tag。
+// buildGeoPlan 是 buildGeoPlanWith 的严格包装：任一入站需要降级就返回错误。
+// 只给既有的单元测试与「保存时预检」用；生成配置走 buildGeoPlanWith。
 func buildGeoPlan(inbounds []*model.Inbound, db provinceCIDRSource) (*geoPlan, error) {
-	plan := &geoPlan{TagByInbound: map[int]string{}}
+	plan := buildGeoPlanWith(inbounds, db, nil, nil)
+	for _, in := range inbounds {
+		if reason, ok := plan.FailClosed[in.Id]; ok {
+			return nil, common.NewError(reason)
+		}
+	}
+	return plan, nil
+}
+
+// buildGeoPlanWith 按省份集合去重，算出 dat 的内容与每个入站对应的 tag。
+//
+// 不返回错误：出问题的入站沿用 lastGood 里同 tag 的允许集，没有就锁死，其余入站
+// 照常生成（理由见 geo_degrade.go）。db 为 nil 表示 IP 归属地库未加载。
+// passes 是活动出差通行证（入站 id → 通行证），按 effectiveRegions 并入。
+func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes map[int]*model.InboundRegionPass, lastGood map[string][]string) *geoPlan {
+	plan := &geoPlan{
+		TagByInbound: map[int]string{},
+		FailClosed:   map[int]string{},
+		Degraded:     map[int]GeoDegradation{},
+	}
 	byTag := map[string][]string{}
+	// failedTag 记住本轮已判定为「算不出」的 tag，同 tag 的入站沿用同一结论。
+	failedTag := map[string]string{}
+
+	closeInbound := func(id int, reason string) {
+		plan.FailClosed[id] = reason
+		plan.Degraded[id] = GeoDegradation{Mode: geoDegradeClosed, Reason: reason}
+	}
 
 	for _, in := range inbounds {
 		if !in.Enable {
 			continue
 		}
-		provinces, err := DecodeRegions(in.Regions)
+		provinces, suspended, err := effectiveRegions(in, passes[in.Id])
 		if err != nil {
-			return nil, common.NewError("入站的地区数据损坏, id:", in.Id, "err:", err)
+			closeInbound(in.Id, fmt.Sprint("入站的地区数据损坏: ", err))
+			continue
 		}
-		if len(provinces) == 0 {
+		if suspended || len(provinces) == 0 {
 			continue
 		}
 		tag := regionTag(provinces)
-		plan.TagByInbound[in.Id] = tag
-		if _, ok := byTag[tag]; ok {
+		if reason, failed := failedTag[tag]; failed {
+			if cidrs, ok := lastGood[tag]; ok && len(cidrs) > 0 {
+				plan.TagByInbound[in.Id] = tag
+				plan.Degraded[in.Id] = GeoDegradation{Mode: geoDegradeStale, Reason: reason}
+			} else {
+				closeInbound(in.Id, reason)
+			}
 			continue
 		}
-		cidrs := db.CIDRsOfProvinces(provinces)
-		if len(cidrs) == 0 {
-			// 允许集为空会让「来源不在集合里」匹配到所有人，该入站被彻底封死。
-			// 报错让整份配置生成失败，好过生成一条把人全挡在门外的规则。
-			return nil, common.NewError("找不到这些地区的 IP 段, 入站 id:", in.Id,
-				"地区:", strings.Join(provinces, "、"), "（IP 归属地库可能未加载或地区名已变更）")
+		if _, ok := byTag[tag]; ok {
+			plan.TagByInbound[in.Id] = tag
+			continue
 		}
-		byTag[tag] = cidrs
+		var cidrs []string
+		reason := ""
+		if db == nil {
+			reason = "IP 归属地库未加载"
+		} else if cidrs = db.CIDRsOfProvinces(provinces); len(cidrs) == 0 {
+			reason = "找不到这些地区的 IP 段: " + strings.Join(provinces, "、") +
+				"（IP 归属地库可能未加载或地区名已变更）"
+		}
+		if reason == "" {
+			byTag[tag] = cidrs
+			plan.TagByInbound[in.Id] = tag
+			continue
+		}
+		failedTag[tag] = reason
+		if old, ok := lastGood[tag]; ok && len(old) > 0 {
+			byTag[tag] = old
+			plan.TagByInbound[in.Id] = tag
+			plan.Degraded[in.Id] = GeoDegradation{Mode: geoDegradeStale, Reason: reason}
+			continue
+		}
+		closeInbound(in.Id, reason)
 	}
 
 	tags := make([]string, 0, len(byTag))
@@ -195,7 +250,7 @@ func buildGeoPlan(inbounds []*model.Inbound, db provinceCIDRSource) (*geoPlan, e
 	for _, tag := range tags {
 		plan.Entries = append(plan.Entries, geodatEntry{Tag: tag, CIDRs: byTag[tag]})
 	}
-	return plan, nil
+	return plan
 }
 
 // buildGeoRules 为每个配了地区的入站生成两条拒绝规则。
@@ -222,9 +277,20 @@ func geoRuleSources(tag string) (v6, outside []string) {
 }
 
 func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) []any {
-	rules := make([]any, 0, len(plan.TagByInbound)*2)
+	rules := make([]any, 0, len(plan.TagByInbound)*2+len(plan.FailClosed))
 	// 按入站 id 升序遍历，不遍历 map。
 	for _, in := range inbounds {
+		if _, closed := plan.FailClosed[in.Id]; closed {
+			// 不引用 dat：写 dat 失败时也必须能生成这一条。
+			rules = append(rules, map[string]any{
+				"type":        "field",
+				"ruleTag":     "a-ui-geo-closed-" + itoa(in.Id),
+				"inboundTag":  []string{in.Tag},
+				"source":      []string{"0.0.0.0/0", "::/0"},
+				"outboundTag": model.BlockOutboundTag,
+			})
+			continue
+		}
 		tag, ok := plan.TagByInbound[in.Id]
 		if !ok {
 			continue

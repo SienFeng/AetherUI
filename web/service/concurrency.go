@@ -113,6 +113,8 @@ func (s *ConcurrencyService) Enforce() error {
 	}
 	if len(inbounds) == 0 {
 		// 没人设额度、也没有封禁，就一次系统调用都不做，空转成本为零。
+		// 但上一轮残留的被拒标记要清掉，见 retainRejectedPorts。
+		onlineTrackerInstance.retainRejectedPorts(nil)
 		return nil
 	}
 	if !netdiag.Supported {
@@ -126,7 +128,10 @@ func (s *ConcurrencyService) Enforce() error {
 	// 得慢，也不要因为读配置失败就把所有人都当成闲置、并发限制整个失效。
 	idleAfter := idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())
 
+	enforced := make(map[int]bool, len(inbounds))
+	defer func() { onlineTrackerInstance.retainRejectedPorts(enforced) }()
 	for _, inbound := range inbounds {
+		enforced[inbound.Port] = true
 		list := onlineTrackerInstance.snapshotIdle(inbound.Port, noLocate, idleAfter)
 
 		// 封禁先于额度判定执行：被封的连接每轮都要断，而且断完之后它腾出来的

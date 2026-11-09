@@ -289,6 +289,23 @@ func (t *onlineTracker) setRejected(port int, ips []string, now time.Time) {
 	t.purgeRejectedLocked(now)
 }
 
+// retainRejectedPorts 清掉不在 ports 里的端口的被拒标记。
+//
+// rejectedNow 只会被 setRejected 按端口整体替换，而 setRejected 只对本轮仍在并发
+// 判定里的入站调用。入站一旦退出判定（额度改回 0、停用、没人设额度时 Enforce
+// 整轮提前返回），它上一轮的标记就永久残留：这些 IP 重连后一直显示「超额被拒」，
+// 共享检测（sharingObservable）也一直不计它们的活跃时长。rejectedAt 不动——它有
+// 自己的保留期，用来展示已被断开的来源。
+func (t *onlineTracker) retainRejectedPorts(ports map[int]bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.rejectedNow {
+		if !ports[key.port] {
+			delete(t.rejectedNow, key)
+		}
+	}
+}
+
 func (t *onlineTracker) purgeRejectedLocked(now time.Time) {
 	for key, at := range t.rejectedAt {
 		if now.Sub(at) > onlineRejectRetention {

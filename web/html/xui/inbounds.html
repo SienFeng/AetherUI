@@ -526,8 +526,20 @@
                                 <span v-else class="cell-muted">—</span>
                                 <!-- 地区限制把这个用户挡在外面了：被拦的来源可能就是他自己换了网络，
                                      列表上不说出来的话，只有他来问才会发现。 -->
-                                <span v-if="geoBlockedOf(dbInbound)" class="stat-tag is-warn geo-blocked-tag"
-                                      :title="geoBlockedTitleOf(dbInbound)">地区拦截 [[ geoBlockedOf(dbInbound).count ]] 次</span>
+                                <button v-if="geoBlockedOf(dbInbound)" type="button" class="stat-tag is-warn geo-blocked-tag"
+                                        :title="geoBlockedTitleOf(dbInbound)"
+                                        @click.stop="showRegionPass(dbInbound)">地区拦截 [[ geoBlockedOf(dbInbound).count ]] 次</button>
+                                <!-- 出差通行证：临时放宽的地区，到期自动恢复 -->
+                                <button v-if="regionPassChipOf(dbInbound)" type="button" class="chip is-pass"
+                                        :title="regionPassChipOf(dbInbound).title"
+                                        @click.stop="showRegionPass(dbInbound)">[[ regionPassChipOf(dbInbound).text ]]</button>
+                                <!-- 地区规则降级：只影响这一个入站，但必须让管理员看见 -->
+                                <button v-if="geoDegradedOf(dbInbound)" type="button" class="chip is-degraded"
+                                        :title="geoDegradedOf(dbInbound).reason"
+                                        @click.stop="showRegionPass(dbInbound)">
+                                    <a-icon type="exclamation-circle" aria-hidden="true"></a-icon>
+                                    [[ geoDegradedOf(dbInbound).mode === 'closed' ? '地区规则异常，已全部拦截' : '地区数据沿用旧版' ]]
+                                </button>
                             </template>
 
                             <template slot="enable" slot-scope="text, dbInbound">
@@ -579,6 +591,9 @@
                                         </a-menu-item>
                                         <a-menu-item key="accessLog">
                                             <a-icon type="file-search"></a-icon>访问日志
+                                        </a-menu-item>
+                                        <a-menu-item v-if="dbInbound.regionList.length > 0" key="regionPass">
+                                            <a-icon type="environment"></a-icon>出差通行证
                                         </a-menu-item>
                                         <a-menu-item key="delete">
                                             <span style="color: var(--aui-danger)">
@@ -891,6 +906,29 @@
             showSharing(dbInbound) {
                 sharingModal.show(dbInbound);
             },
+            // 同 showSharing：passModal 是另一个 Vue 根实例里的顶层 const。
+            showRegionPass(dbInbound) {
+                passModal.show(dbInbound, this.inboundAttentionOf(dbInbound.id));
+            },
+            regionPassChipOf(dbInbound) {
+                if (!dbInbound.enable) return null;
+                const p = this.inboundAttentionOf(dbInbound.id).regionPass;
+                if (!p) return null;
+                let list = [];
+                try { list = JSON.parse(p.regions || '[]'); } catch (e) { list = []; }
+                const scope = list.length === 1 && list[0] === '*' ? '暂停地区限制' : list.join('·');
+                const until = DateUtil.formatMillis(p.until).slice(5, 16);
+                // 列很窄：chip 只放「谁发的 · 放了哪 · 哪天到期」，完整时刻放进 title
+                return {
+                    text: (p.auto ? '自动' : '') + '通行证 · ' + scope + ' · 至 ' + until.slice(0, 5),
+                    title: (p.auto ? '自动出差放行发放的' : '手动发放的') + '临时通行证：' + scope + '，'
+                        + until + ' 到期后恢复入站本身的地区限制。点击查看或收回。',
+                };
+            },
+            geoDegradedOf(dbInbound) {
+                if (!dbInbound.enable) return null;
+                return this.inboundAttentionOf(dbInbound.id).geoDegraded || null;
+            },
             setInbounds(dbInbounds) {
                 this.inbounds.splice(0);
                 this.dbInbounds.splice(0);
@@ -1018,7 +1056,7 @@
                     out.push({
                         key: 'region',
                         text: regions.length <= 2 ? regions.join(' · ') : `地区 ${regions.length} 个`,
-                        title: '仅允许这些地区连接：' + regions.join('、') + '（启用后该入站只监听 IPv4）',
+                        title: '仅允许这些地区连接：' + regions.join('、') + '（启用后 IPv6 来源无法使用）',
                     });
                 }
                 if (dbInbound.concurrencyLimit > 0) {
@@ -1080,6 +1118,9 @@
                     case "info":
                         this.showInfo(dbInbound);
                         break;
+                    case "regionPass":
+                        this.showRegionPass(dbInbound);
+                        break;
                     case "edit":
                         this.openEditInbound(dbInbound);
                         break;
@@ -1131,6 +1172,7 @@
                     enable: dbInbound.enable,
                     expiryTime: dbInbound.expiryTime,
                     concurrencyLimit: dbInbound.concurrencyLimit,
+                    autoTravel: dbInbound.autoTravel,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,
@@ -1154,6 +1196,7 @@
                     enable: dbInbound.enable,
                     expiryTime: dbInbound.expiryTime,
                     concurrencyLimit: dbInbound.concurrencyLimit,
+                    autoTravel: dbInbound.autoTravel,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,
@@ -1684,6 +1727,7 @@
             this.onlineCountTimer = setInterval(() => this.loadOnlineCounts(), 2000);
             // sharing_modal.html 有自己的 Vue 根实例（照 access_log_modal 的
             // 做法），两棵树之间靠事件通信。
+            window.addEventListener('region-pass-changed', () => this.refreshInboundAttention());
             window.addEventListener('sharing-adopt-regions', (e) => {
                 const dbInbound = this.dbInbounds.find(i => i.id === e.detail.inboundId);
                 if (!dbInbound) return;
@@ -1818,13 +1862,13 @@
                     const r = this.riskOf(i.id);
                     // 「中」起算：中风险已经是「很可能多人共用」，只数高风险会让它在汇总里看不见
                     if (r.state === 'ready' && ['medium', 'high', 'severe'].includes(r.level)) risky++;
-                    if (this.geoBlockedOf(i)) geo++;
+                    if (this.geoBlockedOf(i) || this.geoDegradedOf(i)) geo++;
                 });
                 const parts = [];
                 if (expired) parts.push(`${expired} 已过期`);
                 if (soon) parts.push(`${soon} 即将到期`);
                 if (risky) parts.push(`${risky} 中高风险`);
-                if (geo) parts.push(`${geo} 地区拦截`);
+                if (geo) parts.push(`${geo} 地区拦截或异常`);
                 return { total: expired + soon + risky + geo, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
             },
         },
@@ -1849,5 +1893,6 @@
 {{template "renewModal"}}
 {{template "accessLogModal"}}
 {{template "sharingModal"}}
+{{template "regionPassModal"}}
 </body>
 </html>

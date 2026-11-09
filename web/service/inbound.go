@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gorm.io/gorm"
+	"strings"
 	"time"
 	"a-ui/database"
 	"a-ui/database/model"
@@ -67,6 +68,56 @@ func normalizeInboundRegions(inbound *model.Inbound) error {
 	return nil
 }
 
+// provinceLister 是 checkRegionsUsable 需要的 IP 库能力，测试里可替换。
+type provinceLister interface {
+	Provinces() []string
+}
+
+// checkRegionsUsable 在保存时拦住「下发时才会出问题」的地区集合。
+//
+// 只在地区集合真的变了时才校验：省名可能因 IP 库更新而失效，那种存量入站
+// 若连改个备注都被拒，管理员就被卡在一个与他这次操作无关的错误上。
+// db 为 nil 表示 IP 库未加载。
+func checkRegionsUsable(newRegions, oldRegions string, db provinceLister, src provinceCIDRSource) error {
+	next, err := DecodeRegions(newRegions)
+	if err != nil {
+		return common.NewError("地区数据格式不正确:", err)
+	}
+	prev, _ := DecodeRegions(oldRegions)
+	if len(next) == 0 || strings.Join(next, "\x00") == strings.Join(prev, "\x00") {
+		return nil
+	}
+	if db == nil {
+		return common.NewError("IP 归属地库未加载，无法设置地区限制；请先到「面板设置 → IP 归属地库」更新")
+	}
+	known := map[string]bool{}
+	for _, p := range db.Provinces() {
+		known[p] = true
+	}
+	var unknown []string
+	for _, p := range next {
+		if !known[p] {
+			unknown = append(unknown, p)
+		}
+	}
+	if len(unknown) > 0 {
+		return common.NewError("这些地区不在 IP 归属地库里:", strings.Join(unknown, "、"))
+	}
+	if len(src.CIDRsOfProvinces(next)) == 0 {
+		return common.NewError("这些地区在当前合并口径下没有任何 IP 段:", strings.Join(next, "、"))
+	}
+	return nil
+}
+
+// regionsUsable 用当前 IP 库与合并口径调 checkRegionsUsable。
+func regionsUsable(newRegions, oldRegions string) error {
+	db := (&IPDBService{}).DB()
+	if db == nil {
+		return checkRegionsUsable(newRegions, oldRegions, nil, nil)
+	}
+	return checkRegionsUsable(newRegions, oldRegions, db, regionCIDRSource(db, &SettingService{}))
+}
+
 // validateInbound 把入站交给真实 xray 校验。停用的入站同样要校验：
 // 现在放过去，等管理员某天启用它，炸的是所有用户。
 func validateInbound(inbound *model.Inbound, replacedTag string) error {
@@ -83,6 +134,9 @@ func validateInbound(inbound *model.Inbound, replacedTag string) error {
 
 func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	if err := normalizeInboundRegions(inbound); err != nil {
+		return err
+	}
+	if err := regionsUsable(inbound.Regions, ""); err != nil {
 		return err
 	}
 	if err := checkTrafficResetMode(inbound); err != nil {
@@ -214,6 +268,11 @@ func (s *InboundService) DelInbound(id int) error {
 		if err := ruleService.DetachInbound(tx, id); err != nil {
 			return err
 		}
+		// 出差通行证同样按入站 id 存：不删的话下一个建出来的入站会继承上一个
+		// 用户的放行地区。放在同一个事务里，失败即阻断。
+		if err := (&RegionPassService{}).DeleteByInbound(tx, id); err != nil {
+			return err
+		}
 		return tx.Delete(model.Inbound{}, id).Error
 	})
 }
@@ -254,6 +313,10 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	oldInbound.Enable = inbound.Enable
 	oldInbound.ExpiryTime = inbound.ExpiryTime
 	oldInbound.ConcurrencyLimit = inbound.ConcurrencyLimit
+	oldInbound.AutoTravel = inbound.AutoTravel
+	if err := regionsUsable(inbound.Regions, oldInbound.Regions); err != nil {
+		return err
+	}
 	oldInbound.Regions = inbound.Regions
 	oldInbound.UpMbit = inbound.UpMbit
 	oldInbound.DownMbit = inbound.DownMbit

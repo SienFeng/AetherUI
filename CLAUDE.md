@@ -94,6 +94,7 @@ go mod tidy && go vet ./...
 - `CheckInboundJob`（30s）— 把超流量或已过期的 inbound 置 `enable=false` 并触发重启。**停用原因要分开记**：`DisableInvalidInbounds` 拆成两条 UPDATE，超流量那条额外写 `disabled_by_traffic = true`，到期那条不写；顺序不能反，两者同时成立时先执行的到期那条已经把 `enable` 置 false，超流量那条的 `enable = true` 条件不再匹配，于是「过期」这个更强的停用理由胜出，该入站不会在下一个重置周期自己活过来。
 - `TrafficResetJob`（1h）— 见「流量自动重置」一节。
 - `MeterPoolJob`（1h）— 重算计量池（每个入站当前正在被计量的 Top-K 注册域名），只在池真的变了时才置重启标志。刻意不做延迟首次触发：池已经在库里，面板重启后生成期照常读得到。**还没量到过字节的域名要进池试用，窗口内必须有至少 `meterMinTrialConns`（3）次「落到规则表末尾」的连接**（`AccessLogService.MeterableConnCounts`：`no_rule_hit` 或已走计量出站），并按这个次数折算权重——计量规则排在最后，被分流规则送走的域名连接数再多也量不到；线上实测改动前一天 366 次进池只有 4 次量到过字节，其余每小时空转、整表热下发一次路由。访问日志关闭时退回只看域名统计连接数的旧口径。
+- `AutoTravelJob`（1m）— 自动出差放行，见「地区限制的降级、出差通行证与自动出差放行」。
 - `RouteAuditJob`（30s）与 `RouteAnomalyJob`（1m）— 分流规则的后台审计与访问日志异常扫描，见「域名分流管理 → 流量走向验证」的后台审计一段。
 - `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（settings 表的 `subscriptionUpdateTime`，在分流管理页单独读写：`/aui/routing/subscription-time[/update]` → `SettingService.Get/SetSubscriptionUpdateTime`；**刻意不在 `entity.AllSetting` 里**，否则开着没刷新的设置页整份保存时会把分流页刚改的值写回旧值，`TestUpdateAllSettingLeavesSubscriptionUpdateTimeAlone` 守着），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
@@ -342,7 +343,7 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 ### 入站「需要留意」摘要（`web/service/inbound_attention.go`）
 
-`POST /aui/inbound/attention/summary` 只读，给出：停用入站的原因（`expired` / `traffic` / `manual`，到期优先，与 `DisableInvalidInbounds`、`ResetDueTraffic` 同口径）与超额停用的自动恢复时刻（下一个重置时刻，那之前就到期的为 0）；启用入站是否 7 天内到期；配了地区限制的启用入站近 24 小时被地区规则拦下的连接（复用 `geoBlockMatcher`，允许集内来源进黑洞不算）。前端 `web/assets/js/util/inbound-attention.js` 是给四个带侧栏页面共用的 mixin（5 分钟一轮、页面隐藏时暂停），侧栏「入站列表」的提醒点 = 7 天内到期或地区拦截的启用入站数；入站列表的「到期与风险」卡从「中」风险起算，并计入地区拦截。
+`POST /aui/inbound/attention/summary` 只读，给出：停用入站的原因（`expired` / `traffic` / `manual`，到期优先，与 `DisableInvalidInbounds`、`ResetDueTraffic` 同口径）与超额停用的自动恢复时刻（下一个重置时刻，那之前就到期的为 0）；启用入站是否 7 天内到期；配了地区限制的启用入站近 24 小时被地区规则拦下的连接（复用 `geoBlockMatcher`，允许集内来源进黑洞不算；每个来源带多数票省份与 `coexist`/`travel` 标注）；地区规则降级状态 `geoDegraded`、活动通行证 `regionPass`、自动出差放行最近一次非空闲判定 `autoTravel`。前端 `web/assets/js/util/inbound-attention.js` 是给四个带侧栏页面共用的 mixin（5 分钟一轮、页面隐藏时暂停），侧栏「入站列表」的提醒点 = 7 天内到期或地区拦截的启用入站数；入站列表的「到期与风险」卡从「中」风险起算，并计入地区拦截。
 
 ### 访问日志采集进度（`web/service/accesslog.go` 的 `Collect`）
 
@@ -461,6 +462,18 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 判定是**逐地址**而不是逐段的（扫描线），因为各源的段边界不对齐：同一个段内不同地址的票数可能不同，按段判会让边界上的地址整段跟着放行或拒绝。事件点用 `uint64`——末地址是 `255.255.255.255` 时结束点是 2^32，用 `uint32` 会溢出成 0 把整个区间折叠掉。
 
 `regionCIDRSource` 读设置失败时**退回并集**：读设置失败是个与地区限制无关的故障（库锁、磁盘满），不该由它决定谁能连上。
+
+### 地区限制的降级、出差通行证与自动出差放行
+
+设计见 `docs/superpowers/specs/2026-11-09-region-flexibility-auto-travel-design.md`。只记代码里看不出来的约束：
+
+- **地区规则从不让整份配置失败**（`web/service/geo_degrade.go`）。改动前任一入站的地区出问题（省名对不上、IP 库未加载、写 dat 失败）都让 `GetXrayConfig` 报错，而 10 秒 cron 已先消费了重启标志——整机的到期停用、增删入站全卡住，冷启动时全部入站起不来。现在按入站降级：沿用该 tag 上次成功的允许集（`stale`，冷启动时从现有 `bin/a-ui-geo.dat` 用 `geodat.Decode` 做种子），没有就只锁死这一个入站（`closed`，规则 `a-ui-geo-closed-<id>`，source `0.0.0.0/0`+`::/0`，不引用 dat）。降级状态经「需要留意」的 `geoDegraded` 下发。`buildGeoPlan`（返回 error 的那个）只是给旧测试的严格包装，生成配置走 `buildGeoPlanWith`。
+- **IP 库更新后置重启标志**（`IPDBUpdateJob` 与 `updateIPDB`，`updated > 0` 时）：允许集按库现算，不置标志的话核心一直用旧允许集。
+- **保存时校验省名**（`checkRegionsUsable`）：只在地区集合真的变了时才查，存量入站改个备注不会被卡住。
+- **通行证单独建表**（`model.InboundRegionPass`，主库），不在 Inbound 上：编辑表单整行写回会把它清零或复活。生成期只看 `ended_at = 0`，**不读时间**；到期由 `CheckInboundJob` 调 `ExpireDue` 改库后置重启标志。有效地区 = 存储的 `Regions` ∪ 活动通行证（`effectiveRegions`），`["*"]` 表示暂停地区规则；`model.GenXrayInboundConfig` 的 listen 逻辑只看存储的 `Regions`。删除入站时在 `DelInbound` 的事务里连带删除（SQLite 复用 id）。
+- **自动出差放行**（`AutoTravelJob`，1m；`Inbound.AutoTravel` 按入站开启）：判定是纯函数 `decideAutoTravel`，只**放宽**、永远有到期，绝不自动收紧或封禁（那是被否决过的 TOFU）。它与错峰共享数据同形，只靠频率上限压制：家里静默（小时行 ≥1MB 或在线表活跃都算在用）、近 7 天有家的天数、风险等级非 high/severe、每周次数、每月天数、并存结束或**管理员手动收回自动通行证**后的冷却（不冷却的话下一分钟会原样发回去，本地实测踩到过）。这六个阈值是设置项 `autoTravel*`（默认 2 小时 / 3 天 / 72 小时 / 10 天 / 3 次 / 7 天，「面板设置 → 连接限制」），由 `SettingService.GetAutoTravelParams` 读取，单项读不出或越界时回落默认值；`entity.CheckValid` 守着取值范围。被拦来源取自访问日志 `a-ui-block` 行——带路由结果说明已过协议鉴权，扫描器进不来；所以访问日志关闭时无法自动放行。候选省份按多数票取，再用执行同口径的 CIDR 集合（`cidrSet`/`allowedSetFor`）验证。
+- `geoBlockMatcher` 对持有通行证的入站额外按**存储的**地区判断（`storedAllow`）：它的调用方回放过去 24 小时的日志，只按此刻的有效地区判断会把发证前的地区拦截算成「走错出站」，覆盖该用户的分流规则全部变红。自动放行的发放用 `GrantAuto`（已有任何活动通行证就放弃）、收回用 `RevokePass(id)`，不会碰到管理员同时发的手动通行证。
+- 预演（`/aui/inbound/regions/preview/:id`）与「需要留意」里被拦来源的「疑似共享 / 疑似出差」标注都用同一个 `cidrSet`，不用 `geoBlockMatcher`：后者只认 dat 里已有的 tag，候选集合与「存储的地区」（发了通行证后）都不在 dat 里。
 
 ### 界面显示的归属地按多数票，画像键仍按源顺序
 
