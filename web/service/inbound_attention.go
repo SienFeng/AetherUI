@@ -26,6 +26,30 @@ const geoBlockedWindow = 24 * time.Hour
 // expiringSoonWindow 是「即将到期」的提前量，与入站列表的到期过滤、汇总卡同口径。
 const expiringSoonWindow = 7 * 24 * time.Hour
 
+// 被拦来源的标注（GeoBlockedIP.Kind）。只做提示，不自动放行——自动放行由
+// AutoTravelService 按更严的条件单独负责。
+const (
+	// geoBlockedCoexist：被拦的那一小时或前一小时，家里（存储的允许集）也在实质使用，
+	// 两地同时在用，疑似共享。
+	geoBlockedCoexist = "coexist"
+	// geoBlockedTravel：同一时段家里没有实质流量，更像本人出差。
+	geoBlockedTravel = "travel"
+)
+
+// classifyBlocked 按 lastAt（毫秒）所在小时与前一小时里，家里有没有实质流量判断。
+// 「实质」与并存判定同一门槛（coexistMinActiveBytes）。
+func classifyBlocked(lastAt int64, rows []model.InboundIPHour, home *cidrSet) string {
+	sec := lastAt / 1000
+	hour := sec - sec%3600
+	for _, r := range rows {
+		if (r.HourStart == hour || r.HourStart == hour-3600) &&
+			r.ActiveBytes >= coexistMinActiveBytes && home.Contains(r.IP) {
+			return geoBlockedCoexist
+		}
+	}
+	return geoBlockedTravel
+}
+
 // geoBlockedTopIPs 是每个入站列出的被拦来源 IP 数上限。
 const geoBlockedTopIPs = 5
 
@@ -40,6 +64,12 @@ type InboundAttention struct {
 	ExpiresSoon bool `json:"expiresSoon,omitempty"`
 	// GeoBlocked 是近 24 小时被入站地区限制拦下的连接；没有则为 nil。
 	GeoBlocked *GeoBlockedSummary `json:"geoBlocked,omitempty"`
+	// GeoDegraded 是本入站地区规则的降级状态（沿用旧数据 / 已全部拦截），见 geo_degrade.go。
+	GeoDegraded *GeoDegradation `json:"geoDegraded,omitempty"`
+	// RegionPass 是本入站的活动出差通行证。
+	RegionPass *model.InboundRegionPass `json:"regionPass,omitempty"`
+	// AutoTravel 是自动出差放行最近一次的判定结果（只对开了自动出差的入站）。
+	AutoTravel *AutoTravelStatus `json:"autoTravel,omitempty"`
 }
 
 // GeoBlockedSummary 是一个入站近 24 小时的地区拦截统计。
@@ -56,6 +86,10 @@ type GeoBlockedIP struct {
 	IP     string `json:"ip"`
 	Count  int64  `json:"count"`
 	LastAt int64  `json:"lastAt"`
+	// Province 是多数票省份，供一键发通行证；境外、IPv6 或查不到时为空。
+	Province string `json:"province"`
+	// Kind 是 geoBlockedCoexist 或 geoBlockedTravel；判断不了（IP 库未加载）时为空。
+	Kind string `json:"kind"`
 }
 
 type InboundAttentionService struct {
@@ -97,6 +131,31 @@ func (s *InboundAttentionService) Summary(now time.Time) (map[int]*InboundAttent
 	}
 	for id, g := range geo {
 		get(id).GeoBlocked = g
+	}
+	enabled := map[int]bool{}
+	for _, in := range inbounds {
+		enabled[in.Id] = in.Enable
+	}
+	for id, d := range GeoDegradedInbounds() {
+		if enabled[id] {
+			d := d
+			get(id).GeoDegraded = &d
+		}
+	}
+	for id, st := range AutoTravelStatuses() {
+		if enabled[id] && st.Action != autoTravelIdle {
+			st := st
+			get(id).AutoTravel = &st
+		}
+	}
+	passes, err := (&RegionPassService{}).Active()
+	if err != nil {
+		return nil, err
+	}
+	for id, p := range passes {
+		if enabled[id] {
+			get(id).RegionPass = p
+		}
 	}
 	return out, nil
 }
@@ -187,8 +246,13 @@ func geoBlockedByInbound(inbounds []*model.Inbound, now time.Time) (map[int]*Geo
 		}
 		byInbound[r.InboundId] = append(byInbound[r.InboundId], GeoBlockedIP{IP: r.SourceIp, Count: r.Count, LastAt: r.LastAt})
 	}
+	regionsOf := map[int]string{}
+	for _, in := range inbounds {
+		regionsOf[in.Id] = in.Regions
+	}
 	out := make(map[int]*GeoBlockedSummary, len(byInbound))
 	for id, list := range byInbound {
+		annotateBlocked(list, id, regionsOf[id], now)
 		sort.Slice(list, func(i, j int) bool {
 			if list[i].Count != list[j].Count {
 				return list[i].Count > list[j].Count
@@ -208,4 +272,25 @@ func geoBlockedByInbound(inbounds []*model.Inbound, now time.Time) (map[int]*Geo
 		out[id] = g
 	}
 	return out, nil
+}
+
+// annotateBlocked 给被拦来源补上省份与「疑似共享 / 疑似出差」标注。家里按**存储的**
+// 地区判断（不含通行证）：通行证放进来的省份不是「家」。IP 库未加载时不标注。
+func annotateBlocked(list []GeoBlockedIP, inboundId int, storedRegions string, now time.Time) {
+	provinces, err := DecodeRegions(storedRegions)
+	if err != nil || len(provinces) == 0 {
+		return
+	}
+	home, err := allowedSetFor(provinces)
+	if err != nil {
+		return
+	}
+	rows, err := (&SharingService{}).windowRows(inboundId, 2, now)
+	if err != nil {
+		return
+	}
+	for i := range list {
+		list[i].Province = provinceOfIP(list[i].IP)
+		list[i].Kind = classifyBlocked(list[i].LastAt, rows, home)
+	}
 }

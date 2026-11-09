@@ -130,3 +130,29 @@ func TestInboundAttentionExpiresSoonAndDisabled(t *testing.T) {
 		t.Errorf("停用入站只给停用原因、不提醒到期：%+v", a)
 	}
 }
+
+func TestClassifyBlocked(t *testing.T) {
+	const mb = 1 << 20
+	home := newCIDRSet([]string{"192.0.2.0/24"})
+	hour := int64(1_800_000_000 / 3600 * 3600)
+	lastAt := (hour + 1800) * 1000 // 这一小时的中间，毫秒
+	row := func(ip string, h int64, bytes int64) model.InboundIPHour {
+		return model.InboundIPHour{IP: ip, HourStart: h, ActiveBytes: bytes}
+	}
+	cases := []struct {
+		name string
+		rows []model.InboundIPHour
+		want string
+	}{
+		{"同小时家里有实质流量", []model.InboundIPHour{row("192.0.2.9", hour, 2 * mb)}, geoBlockedCoexist},
+		{"家里流量不足 1MB", []model.InboundIPHour{row("192.0.2.9", hour, 500 << 10)}, geoBlockedTravel},
+		{"前一小时家里在用", []model.InboundIPHour{row("192.0.2.9", hour-3600, 2 * mb)}, geoBlockedCoexist},
+		{"两小时前家里在用", []model.InboundIPHour{row("192.0.2.9", hour-7200, 2 * mb)}, geoBlockedTravel},
+		{"只有外地来源", []model.InboundIPHour{row("198.51.100.1", hour, 9 * mb)}, geoBlockedTravel},
+	}
+	for _, c := range cases {
+		if got := classifyBlocked(lastAt, c.rows, home); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}

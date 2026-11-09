@@ -2,6 +2,7 @@ package geodat
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 )
 
@@ -141,5 +142,33 @@ func TestVarintEncoding(t *testing.T) {
 		if got := appendVarint(nil, c.in); !bytes.Equal(got, c.want) {
 			t.Errorf("appendVarint(%d) = % x，期望 % x", c.in, got, c.want)
 		}
+	}
+}
+
+func TestDecodeRoundTrip(t *testing.T) {
+	want := []Entry{
+		{Tag: "A", CIDRs: []string{"192.0.2.0/24", "2001:db8::/32"}},
+		{Tag: "B", CIDRs: []string{"198.51.100.0/25"}},
+	}
+	data, err := Encode(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(data)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Decode = %#v, want %#v", got, want)
+	}
+}
+
+func TestDecodeRejectsTruncated(t *testing.T) {
+	data, err := Encode([]Entry{{Tag: "A", CIDRs: []string{"192.0.2.0/24"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(data[:len(data)-3]); err == nil {
+		t.Error("截断的数据应当报错")
 	}
 }

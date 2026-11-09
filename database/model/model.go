@@ -91,6 +91,11 @@ type Inbound struct {
 	// 会把用户自己卡死。
 	ConcurrencyLimit int `json:"concurrencyLimit" form:"concurrencyLimit"`
 
+	// AutoTravel 打开「自动出差放行」：配了地区限制的入站，家里一段时间没在用、
+	// 外地来源被地区规则拦下时，自动发一张只放那个省的临时通行证。
+	// 见 service.AutoTravelService。
+	AutoTravel bool `json:"autoTravel" form:"autoTravel"`
+
 	// config part
 	Listen         string   `json:"listen" form:"listen"`
 	Port           int      `json:"port" form:"port" gorm:"unique"`

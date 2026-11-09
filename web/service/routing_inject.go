@@ -643,34 +643,35 @@ func (s *RoutingInjector) buildRule(
 
 // buildGeoRules 生成地区限制规则，并把允许集写进 bin/a-ui-geo.dat。
 //
-// 任何一步失败都返回错误让整份配置生成失败，绝不退而求其次地省掉规则：
-// 省掉等于地区限制失效，而面板上一切显示正常。配置生成失败时 xray 保持
-// 原状继续跑，是安全的一侧。
+// 不因地区数据出问题让整份配置失败：按入站降级（沿用旧允许集或只锁死该入站），
+// 降级状态经 GeoDegradedInbounds 下发到「需要留意」。理由见 geo_degrade.go。
+// 只有读入站列表这类与地区无关的故障才返回错误。
 func (s *RoutingInjector) buildGeoRules() ([]any, error) {
 	inbounds, err := s.inboundService.GetAllInbounds()
 	if err != nil {
 		return nil, err
 	}
 	if !AnyInboundUsesRegions(inbounds) {
+		setGeoDegraded(map[int]GeoDegradation{})
 		return nil, nil
 	}
 
-	db := s.ipdbService.DB()
-	if db == nil {
-		return nil, common.NewError("已配置地区限制，但 IP 归属地库未加载；" +
-			"请到「面板设置 → IP 归属地库」更新，或清空入站的地区限制")
+	var src provinceCIDRSource
+	if db := s.ipdbService.DB(); db != nil {
+		src = regionCIDRSource(db, &s.settingService)
 	}
-	plan, err := buildGeoPlan(inbounds, regionCIDRSource(db, &s.settingService))
-	if err != nil {
-		return nil, err
+	plan := buildGeoPlanWith(inbounds, src, activePassesOrNil(), lastGoodSnapshot())
+
+	hash := ""
+	if len(plan.Entries) > 0 {
+		hash, err = writeGeoDat(geoDatPath, plan.Entries)
+		if err != nil {
+			hash = fallbackToExistingDat(plan, err)
+		} else {
+			rememberLastGood(plan.Entries)
+		}
 	}
-	if len(plan.Entries) == 0 {
-		return nil, nil
-	}
-	hash, err := writeGeoDat(geoDatPath, plan.Entries)
-	if err != nil {
-		return nil, common.NewError("生成地区限制数据文件失败:", err)
-	}
+	setGeoDegraded(plan.Degraded)
 	return rulesFromGeoPlan(inbounds, plan, hash), nil
 }
 

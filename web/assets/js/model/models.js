@@ -45,6 +45,7 @@ class DBInbound {
         this.enable = true;
         this.expiryTime = 0;
         this.concurrencyLimit = 0;
+        this.autoTravel = false;
         // ObjectUtil.cloneProps 只克隆目标已有的 key，这里不列的话服务端
         // 返回的值会被直接丢弃，选择器永远停在「不重置」。
         this.trafficResetMode = TRAFFIC_RESET_MODE.OFF;
@@ -210,6 +211,12 @@ class AllSetting {
         this.trafficHourRetentionDays = 30;
         this.trafficDayRetentionDays = 365;
         this.concurrencyIdleTimeout = 120;
+        this.autoTravelHomeSilenceHours = 2;
+        this.autoTravelStableDays = 3;
+        this.autoTravelPassHours = 72;
+        this.autoTravelMonthlyDays = 10;
+        this.autoTravelWeeklyGrants = 3;
+        this.autoTravelCooldownDays = 7;
         this.ipRuleResolveDomain = 0;
         this.dnsServers = "";
         this.tcInterface = "";

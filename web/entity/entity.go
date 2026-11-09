@@ -51,6 +51,14 @@ type AllSetting struct {
 	TrafficDayRetentionDays  int `json:"trafficDayRetentionDays" form:"trafficDayRetentionDays"`
 	ConcurrencyIdleTimeout   int `json:"concurrencyIdleTimeout" form:"concurrencyIdleTimeout"`
 
+	// 自动出差放行的阈值，见 service.autoTravelParams。
+	AutoTravelHomeSilenceHours int `json:"autoTravelHomeSilenceHours" form:"autoTravelHomeSilenceHours"`
+	AutoTravelStableDays       int `json:"autoTravelStableDays" form:"autoTravelStableDays"`
+	AutoTravelPassHours        int `json:"autoTravelPassHours" form:"autoTravelPassHours"`
+	AutoTravelMonthlyDays      int `json:"autoTravelMonthlyDays" form:"autoTravelMonthlyDays"`
+	AutoTravelWeeklyGrants     int `json:"autoTravelWeeklyGrants" form:"autoTravelWeeklyGrants"`
+	AutoTravelCooldownDays     int `json:"autoTravelCooldownDays" form:"autoTravelCooldownDays"`
+
 	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
 
 	DNSServers string `json:"dnsServers" form:"dnsServers"`
@@ -316,6 +324,25 @@ func (s *AllSetting) CheckValid() error {
 	// 只是暂时没有流量的正常用户判成离线。
 	if s.ConcurrencyIdleTimeout != 0 && (s.ConcurrencyIdleTimeout < 30 || s.ConcurrencyIdleTimeout > 86400) {
 		return common.NewError("并发闲置超时应为 0（关闭）或 30 ~ 86400 秒:", s.ConcurrencyIdleTimeout)
+	}
+	// 自动出差放行：每一项都直接决定「放得多松」。静默不允许 0（等于家里还在用也放行）；
+	// 稳定天数的窗口只有 7 天；冷却 0 表示不暂停。
+	autoTravelRanges := []struct {
+		name     string
+		v        int
+		min, max int
+	}{
+		{"自动出差：家里静默小时数", s.AutoTravelHomeSilenceHours, 1, 24},
+		{"自动出差：稳定天数", s.AutoTravelStableDays, 1, 7},
+		{"自动出差：通行证小时数", s.AutoTravelPassHours, 1, 720},
+		{"自动出差：每月天数上限", s.AutoTravelMonthlyDays, 1, 31},
+		{"自动出差：每周次数上限", s.AutoTravelWeeklyGrants, 1, 20},
+		{"自动出差：暂停天数", s.AutoTravelCooldownDays, 0, 30},
+	}
+	for _, r := range autoTravelRanges {
+		if r.v < r.min || r.v > r.max {
+			return common.NewError(r.name, "应在", r.min, "~", r.max, "之间:", r.v)
+		}
 	}
 	if s.AccessLogRetentionDays < 1 || s.AccessLogRetentionDays > 365 {
 		return common.NewError("访问日志保留天数应在 1 ~ 365 天之间:", s.AccessLogRetentionDays)

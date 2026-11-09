@@ -361,6 +361,9 @@ func (s *Server) startTask() {
 
 	s.cron.AddJob("@every 5s", job.NewAccessLogCollectJob())
 
+	// 自动出差放行：只对开了「自动出差」的地区受限入站生效，见 AutoTravelService。
+	s.cron.AddJob("@every 1m", job.NewAutoTravelJob())
+
 	// 路由规则后台审计：代次变化或满 10 分钟才真正验证；异常扫描每分钟一次。
 	s.cron.AddJob("@every 30s", job.NewRouteAuditJob())
 	s.cron.AddJob("@every 1m", job.NewRouteAnomalyJob())

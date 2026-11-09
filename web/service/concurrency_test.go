@@ -270,3 +270,32 @@ func TestPlanRejectionsDoesNotLetGhostEntryOccupyTheQuota(t *testing.T) {
 		t.Errorf("被拒的是 %v，唯一真实在线的用户不该被踢", over)
 	}
 }
+
+// 入站退出并发判定之后（额度改回 0、停用），它上一轮的被拒标记必须清掉：
+// 否则这些 IP 重连后一直挂着「超额被拒」，共享检测也一直不计它们的活跃时长。
+func TestRetainRejectedPortsDropsStale(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+	tk.update([]netdiag.Conn{conn(1, testPort, "192.0.2.1", 10, 10)}, testPorts, now)
+	tk.setRejected(testPort, []string{"192.0.2.1"}, now)
+
+	tk.retainRejectedPorts(map[int]bool{})
+
+	list := tk.snapshot(testPort, noLocation)
+	if len(list) != 1 || list[0].Blocked {
+		t.Fatalf("退出判定的端口仍标着被拒: %+v", list)
+	}
+}
+
+func TestRetainRejectedPortsKeepsEnforced(t *testing.T) {
+	tk := newOnlineTracker()
+	now := time.Unix(1000, 0)
+	tk.update([]netdiag.Conn{conn(1, testPort, "192.0.2.1", 10, 10)}, testPorts, now)
+	tk.setRejected(testPort, []string{"192.0.2.1"}, now)
+
+	tk.retainRejectedPorts(map[int]bool{testPort: true})
+
+	if list := tk.snapshot(testPort, noLocation); len(list) != 1 || !list[0].Blocked {
+		t.Fatalf("仍在判定的端口不该被清: %+v", list)
+	}
+}

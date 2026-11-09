@@ -344,7 +344,7 @@
                             <span class="setting-tab-icon tone-cyan is-large"><a-icon type="api"></a-icon></span>
                             <div>
                                 <h2 class="setting-pane-title">连接限制</h2>
-                                <div class="card-sub">并发闲置超时与端口限速</div>
+                                <div class="card-sub">并发闲置超时、自动出差放行与端口限速</div>
                             </div>
                         </div>
                         <h3 class="setting-group-title is-first">并发限制</h3>
@@ -352,6 +352,29 @@
                             <setting-list-item type="number" title="闲置超时（秒）"
                                                desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
                                                :changed="isChanged('concurrencyIdleTimeout')" v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
+                        </a-list>
+                        <!-- 只对在入站里打开了「自动出差放行」的入站生效。放得越松，客户越少被误挡，
+                             错峰共享也越容易混过去——每一项都写清楚往哪边调是放宽。 -->
+                        <h3 class="setting-group-title">自动出差放行</h3>
+                        <a-list item-layout="horizontal" class="setting-list">
+                            <setting-list-item type="number" title="家里静默多久才放行（小时）"
+                                               desc="允许的地区里连续这么久没有实质流量，外地来源被拦时才自动放行。调小 = 更快放行，也更容易放过错峰共享。可填 1 ~ 24，默认 2"
+                                               :changed="isChanged('autoTravelHomeSilenceHours')" v-model.number="allSetting.autoTravelHomeSilenceHours"></setting-list-item>
+                            <setting-list-item type="number" title="稳定使用天数"
+                                               desc="近 7 天里至少这么多天在允许的地区有流量，才算「有固定的家」，新客户不会被自动放行。可填 1 ~ 7，默认 3"
+                                               :changed="isChanged('autoTravelStableDays')" v-model.number="allSetting.autoTravelStableDays"></setting-list-item>
+                            <setting-list-item type="number" title="每张通行证时长（小时）"
+                                               desc="自动发放的通行证有效多久；家里一直没用、外地仍在用时会按这个时长续期。可填 1 ~ 720，默认 72"
+                                               :changed="isChanged('autoTravelPassHours')" v-model.number="allSetting.autoTravelPassHours"></setting-list-item>
+                            <setting-list-item type="number" title="每月最多自动放行天数"
+                                               desc="按面板时区的自然月累计。调大 = 常出差的客户更少被挡，转卖者可用的时间也更多。可填 1 ~ 31，默认 10"
+                                               :changed="isChanged('autoTravelMonthlyDays')" v-model.number="allSetting.autoTravelMonthlyDays"></setting-list-item>
+                            <setting-list-item type="number" title="每周最多自动放行次数"
+                                               desc="近 7 天内自动发放的次数上限。家里和外地频繁交替不像出差，更像错峰共享。可填 1 ~ 20，默认 3"
+                                               :changed="isChanged('autoTravelWeeklyGrants')" v-model.number="allSetting.autoTravelWeeklyGrants"></setting-list-item>
+                            <setting-list-item type="number" title="暂停自动放行天数"
+                                               desc="发现家里与外地同时在用，或你手动收回了自动通行证之后，这个入站暂停自动放行多少天。0 表示不暂停。可填 0 ~ 30，默认 7"
+                                               :changed="isChanged('autoTravelCooldownDays')" v-model.number="allSetting.autoTravelCooldownDays"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">端口限速</h3>
                         <a-list item-layout="horizontal" class="setting-list">
@@ -421,7 +444,8 @@
                 '3': ['dnsServers', 'ipRuleResolveDomain', 'xrayTemplateConfig'],
                 '4': ['dbipSourceUrl', 'ip2locationSourceUrl', 'ipdbSourceUrl', 'ipdbUpdateTime', 'qqwrySourceUrl', 'regionMatchMode'],
                 '5': ['accessLogEnable', 'accessLogRetentionDays', 'trafficDayRetentionDays', 'trafficHourRetentionDays'],
-                '6': ['concurrencyIdleTimeout', 'tcInterface'],
+                '6': ['autoTravelCooldownDays', 'autoTravelHomeSilenceHours', 'autoTravelMonthlyDays', 'autoTravelPassHours',
+                      'autoTravelStableDays', 'autoTravelWeeklyGrants', 'concurrencyIdleTimeout', 'tcInterface'],
                 '7': ['defaultCertFile', 'defaultDomain', 'defaultKeyFile', 'timeLocation']
     };
 

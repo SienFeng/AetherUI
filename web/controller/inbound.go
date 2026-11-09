@@ -27,6 +27,8 @@ type InboundController struct {
 	settingService        service.SettingService
 	routingRuleService    service.RoutingRuleService
 	attentionService      service.InboundAttentionService
+	regionPassService     service.RegionPassService
+	regionPreviewService  service.RegionPreviewService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -61,6 +63,10 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/attention/summary", a.getAttentionSummary)
 	g.POST("/sharing/risk/detail/:id", a.getSharingRiskDetail)
 	g.POST("/provinces", a.getProvinces)
+	g.POST("/regions/preview/:id", a.previewRegions)
+	g.POST("/regions/pass/grant/:id", a.grantRegionPass)
+	g.POST("/regions/pass/revoke/:id", a.revokeRegionPass)
+	g.POST("/regions/pass/list/:id", a.listRegionPasses)
 }
 
 func (a *InboundController) startTask() {
@@ -563,6 +569,102 @@ func (a *InboundController) getSharingDetail(c *gin.Context) {
 	result, err := a.sharingService.Detail(id, time.Now())
 	if err != nil {
 		jsonMsg(c, "获取共享检测明细", err)
+		return
+	}
+	jsonObj(c, result, nil)
+}
+
+// regionPassMaxHours 是手动通行证的时长上限（30 天）：再长就该直接改地区限制。
+const regionPassMaxHours = 720
+
+// grantRegionPass 手动发一张出差通行证。regions 是 JSON 省名数组，["*"] 表示暂停地区限制。
+func (a *InboundController) grantRegionPass(c *gin.Context) {
+	const action = "发放出差通行证"
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	form := struct {
+		Regions string `form:"regions"`
+		Hours   int    `form:"hours"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	if form.Hours < 1 || form.Hours > regionPassMaxHours {
+		jsonMsg(c, action, common.NewError("时长必须在 1 到", regionPassMaxHours, "小时之间"))
+		return
+	}
+	regions, err := service.DecodeRegions(form.Regions)
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	now := time.Now()
+	pass, err := a.regionPassService.Grant(id, regions, now.Add(time.Duration(form.Hours)*time.Hour).UnixMilli(), false, now)
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	a.xrayService.SetToNeedRestart()
+	jsonObj(c, pass, nil)
+}
+
+// revokeRegionPass 收回入站的活动通行证。
+func (a *InboundController) revokeRegionPass(c *gin.Context) {
+	const action = "收回出差通行证"
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	ended, err := a.regionPassService.Revoke(id, model.RegionPassRevoked, time.Now())
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	if ended {
+		a.xrayService.SetToNeedRestart()
+	}
+	jsonMsg(c, action, nil)
+}
+
+// listRegionPasses 返回某入站最近 30 条通行证记录。
+func (a *InboundController) listRegionPasses(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "获取通行证记录", err)
+		return
+	}
+	list, err := a.regionPassService.List(id, 30)
+	jsonObj(c, list, err)
+}
+
+// previewRegions 预演「按这几个省限制，过去 7 天会拦掉谁」。只读，不改任何东西。
+func (a *InboundController) previewRegions(c *gin.Context) {
+	const action = "预演地区限制"
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	form := struct {
+		Regions string `form:"regions"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	regions, err := service.DecodeRegions(form.Regions)
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	result, err := a.regionPreviewService.Preview(id, regions, time.Now())
+	if err != nil {
+		jsonMsg(c, action, err)
 		return
 	}
 	jsonObj(c, result, nil)

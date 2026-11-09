@@ -23,6 +23,7 @@ type SettingController struct {
 	panelService   service.PanelService
 	ipdbService    service.IPDBService
 	shapingService service.ShapingService
+	xrayService    service.XrayService
 }
 
 func NewSettingController(g *gin.RouterGroup) *SettingController {
@@ -185,6 +186,10 @@ func (a *SettingController) updateIPDB(c *gin.Context) {
 	if err != nil {
 		jsonMsg(c, "更新 IP 库", err)
 		return
+	}
+	if updated > 0 {
+		// 地区限制的允许集按库现算，换了库就要重新下发，否则核心一直用旧允许集。
+		a.xrayService.SetToNeedRestart()
 	}
 	jsonObj(c, gin.H{"updated": updated, "upToDate": upToDate}, nil)
 }

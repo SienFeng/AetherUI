@@ -14,7 +14,7 @@ const inboundAttentionMixin = {
             inboundAttention: {
                 // { "<入站 id>": { disabledReason, autoRestoreAt, expiresSoon, geoBlocked } }
                 byId: {},
-                // 侧栏提醒点：7 天内到期或近 24 小时被地区限制拦截的启用入站数
+                // 侧栏提醒点：7 天内到期、近 24 小时被地区限制拦截、或地区规则降级的启用入站数
                 alertCount: 0,
                 loadedAt: 0,
             },
@@ -41,7 +41,7 @@ const inboundAttentionMixin = {
             const byId = body.obj || {};
             Object.assign(this.inboundAttention, {
                 byId,
-                alertCount: Object.keys(byId).filter(id => byId[id] && (byId[id].expiresSoon || byId[id].geoBlocked)).length,
+                alertCount: Object.keys(byId).filter(id => byId[id] && (byId[id].expiresSoon || byId[id].geoBlocked || byId[id].geoDegraded)).length,
                 loadedAt: Date.now(),
             });
         },

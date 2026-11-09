@@ -48,6 +48,13 @@ var defaultValueMap = map[string]string{
 	"trafficHourRetentionDays": "30",
 	"trafficDayRetentionDays":  "365",
 	"concurrencyIdleTimeout":   "120",
+	// 自动出差放行的阈值，含义见 autoTravelParams；与 defaultAutoTravelParams 一致。
+	"autoTravelHomeSilenceHours": "2",
+	"autoTravelStableDays":       "3",
+	"autoTravelPassHours":        "72",
+	"autoTravelMonthlyDays":      "10",
+	"autoTravelWeeklyGrants":     "3",
+	"autoTravelCooldownDays":     "7",
 	"ipRuleResolveDomain":      "0",
 	"dnsServers":               "",
 	"tcInterface":              "",
@@ -550,6 +557,27 @@ func (s *SettingService) SetAccessLogEnable(v bool) error {
 		n = 1
 	}
 	return s.setInt("accessLogEnable", n)
+}
+
+// GetAutoTravelParams 读自动出差放行的阈值。某一项读不出或越界时用默认值并告警：
+// 这些阈值只决定放行松紧，读设置的故障不该让自动放行整体停摆或变得失控。
+func (s *SettingService) GetAutoTravelParams() autoTravelParams {
+	p := defaultAutoTravelParams()
+	read := func(key string, min, max int, apply func(int)) {
+		v, err := s.getInt(key)
+		if err != nil || v < min || v > max {
+			logger.Warning("读取设置", key, "失败或越界，按默认值:", v, err)
+			return
+		}
+		apply(v)
+	}
+	read("autoTravelHomeSilenceHours", 1, 24, func(v int) { p.HomeSilence = time.Duration(v) * time.Hour })
+	read("autoTravelStableDays", 1, 7, func(v int) { p.StableDays = v })
+	read("autoTravelPassHours", 1, 720, func(v int) { p.PassDuration = time.Duration(v) * time.Hour })
+	read("autoTravelMonthlyDays", 1, 31, func(v int) { p.MonthlyDays = v })
+	read("autoTravelWeeklyGrants", 1, 20, func(v int) { p.WeeklyGrants = v })
+	read("autoTravelCooldownDays", 0, 30, func(v int) { p.Cooldown = time.Duration(v) * 24 * time.Hour })
+	return p
 }
 
 // GetConcurrencyIdleTimeout 返回并发判定的闲置阈值（秒）。0 表示关闭闲置判定。

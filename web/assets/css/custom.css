@@ -3362,6 +3362,20 @@ button.xray-badge:focus-visible {
     white-space: nowrap;
 }
 
+/* 地区拦截提醒现在可以点开出差通行证弹窗：按钮外观保持徽标原样 */
+button.geo-blocked-tag {
+    border: 0;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+button.geo-blocked-tag:focus-visible,
+button.chip.is-pass:focus-visible,
+button.chip.is-degraded:focus-visible {
+    outline: 2px solid var(--aui-primary);
+    outline-offset: 1px;
+}
+
 /* 展开面板的段头：标题在左，控件在右 */
 .row-section-head {
     display: flex;
@@ -4503,3 +4517,92 @@ button.xray-badge:focus-visible {
         animation: none;
     }
 }
+
+/* ── 地区限制：预演、出差通行证、降级 ───────────────────────────────
+ * 状态 chip 一律带文字，颜色只是辅助（通行证用主色、降级用危险色）。 */
+.region-tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.region-preview {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--aui-line);
+    border-radius: var(--aui-r-md);
+    background: var(--aui-surface-soft);
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+}
+
+.region-preview-head {
+    margin-bottom: 6px;
+    color: var(--aui-text);
+}
+
+.region-preview-error {
+    color: var(--aui-danger);
+}
+
+.region-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 4px;
+}
+
+.region-preview-table th,
+.region-preview-table td {
+    padding: 3px 8px 3px 0;
+    border-bottom: 1px solid var(--aui-line);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.region-preview-table th {
+    color: var(--aui-text-3);
+    font-weight: 500;
+}
+
+.tone-ok   { color: var(--aui-success); }
+.tone-warn { color: var(--aui-warning); }
+
+/* 限制列很窄：允许换行而不是省略，到期日是这个 chip 里最有用的信息 */
+.chip.is-pass,
+.chip.is-degraded {
+    max-width: 100%;
+    white-space: normal;
+    text-align: left;
+    vertical-align: top;
+}
+
+.chip.is-pass {
+    border-color: var(--aui-primary-line);
+    background: var(--aui-primary-soft);
+    color: var(--aui-primary-hover);
+}
+
+.chip.is-degraded {
+    border-color: #FECACA;
+    background: #FEF2F2;
+    color: var(--aui-danger);
+}
+
+button.chip.is-pass:hover,
+button.chip.is-degraded:hover {
+    border-color: currentColor;
+}
+
+.pass-kind {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: var(--aui-r-sm);
+    font-size: 12px;
+    line-height: 18px;
+    white-space: nowrap;
+}
+
+.pass-kind.is-coexist { background: #FEF2F2; color: var(--aui-danger); }
+.pass-kind.is-travel  { background: #F0FDF4; color: var(--aui-success); }

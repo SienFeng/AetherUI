@@ -50,8 +50,59 @@
                 this.dbInbound = new DBInbound();
             }
             this.confirm = confirm;
+            this.preview = { shown: false, loading: false, error: '', result: null, regionsText: '' };
             this.visible = true;
             this.loadProvinces();
+        },
+        // 地区预演：按当前选中的省份，看这个入站近 7 天的真实来源会被拦掉哪些。只读。
+        preview: { shown: false, loading: false, error: '', result: null, regionsText: '' },
+        async requestPreview(regions) {
+            const id = this.dbInbound.id;
+            this.preview = { shown: true, loading: true, error: '', result: null, regionsText: regions.join('、') };
+            let msg;
+            try {
+                const resp = await axios.post('/aui/inbound/regions/preview/' + id, { regions: JSON.stringify(regions) });
+                msg = resp && resp.data;
+            } catch (e) {
+                msg = { success: false, msg: e.toString() };
+            }
+            // 弹窗换了入站或已关闭，结果作废
+            if (this.dbInbound.id !== id) return null;
+            this.preview.loading = false;
+            if (!msg || !msg.success) {
+                this.preview.error = '预演失败：' + ((msg && msg.msg) || '未知错误');
+                return null;
+            }
+            this.preview.result = msg.obj;
+            return msg.obj;
+        },
+        runPreview() {
+            const regions = this.dbInbound.regionList.slice();
+            if (regions.length === 0) return;
+            this.requestPreview(regions);
+        },
+        // 建议来自同一份数据（覆盖 95% 活跃时长的省份）。只填进表单，保存仍走原流程。
+        async fillSuggestion() {
+            const regions = this.dbInbound.regionList.length ? this.dbInbound.regionList.slice() : this.provinces.slice(0, 1);
+            if (regions.length === 0) {
+                this.preview = { shown: true, loading: false, error: 'IP 归属地库未加载，没有可选地区', result: null, regionsText: '' };
+                return;
+            }
+            const result = await this.requestPreview(regions);
+            if (!result) return;
+            const suggested = (result.suggestion && result.suggestion.suggested) || [];
+            if (suggested.length === 0) {
+                this.preview.error = '近 7 天没有足够的归属地数据，给不出建议';
+                return;
+            }
+            this.dbInbound.regionList = suggested.slice();
+            this.requestPreview(suggested);
+        },
+        blockedShare() {
+            const r = this.preview.result;
+            if (!r || !r.totalBytes) return '0%';
+            const pct = r.blockedBytes * 100 / r.totalBytes;
+            return (pct > 0 && pct < 1 ? '<1' : pct.toFixed(0)) + '%';
         },
         // 只对**新建**的入站生效：编辑既有入站时用的是它自己存下来的值，
         // 覆盖会静默改掉管理员之前的配置。
@@ -163,6 +214,9 @@
             },
         },
         methods: {
+            sizeFormat(size) {
+                return window.sizeFormat(size);
+            },
             streamNetworkChange(oldValue) {
                 if (oldValue === 'kcp') {
                     this.inModal.inbound.tls = false;
