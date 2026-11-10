@@ -1178,6 +1178,13 @@
                         title: '这个入站不拦机房 / 云服务器来源（给自己的服务器做中转用）',
                     });
                 }
+                if (dbInbound.skipSpikeThrottle) {
+                    out.push({
+                        key: 'nospike',
+                        text: '不限暴涨',
+                        title: '这个入站不参与流量暴涨自动限速（中转节点等用量本来就会大起大落的入站）',
+                    });
+                }
                 if (dbInbound.upMbit > 0 || dbInbound.downMbit > 0) {
                     const up = dbInbound.upMbit > 0 ? dbInbound.upMbit + 'M' : '不限';
                     const down = dbInbound.downMbit > 0 ? dbInbound.downMbit + 'M' : '不限';
@@ -1290,6 +1297,7 @@
                     concurrencyLimit: dbInbound.concurrencyLimit,
                     autoTravel: dbInbound.autoTravel,
                     allowServerSources: dbInbound.allowServerSources,
+                    skipSpikeThrottle: dbInbound.skipSpikeThrottle,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,
@@ -1314,6 +1322,7 @@
                     concurrencyLimit: dbInbound.concurrencyLimit,
                     autoTravel: dbInbound.autoTravel,
                     allowServerSources: dbInbound.allowServerSources,
+                    skipSpikeThrottle: dbInbound.skipSpikeThrottle,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,

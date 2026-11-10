@@ -371,6 +371,8 @@ func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundE
 	oldInbound.ExpiryTime = inbound.ExpiryTime
 	oldInbound.ConcurrencyLimit = inbound.ConcurrencyLimit
 	oldInbound.AllowServerSources = inbound.AllowServerSources
+	spikeExemptTurnedOn := !oldInbound.SkipSpikeThrottle && inbound.SkipSpikeThrottle
+	oldInbound.SkipSpikeThrottle = inbound.SkipSpikeThrottle
 	newAutoTravel := base.pick(base.AutoTravel, inbound.AutoTravel, oldInbound.AutoTravel)
 	autoTravelTurnedOff := oldInbound.AutoTravel && !newAutoTravel
 	oldInbound.AutoTravel = newAutoTravel
@@ -430,6 +432,13 @@ func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundE
 		}
 		if err := tx.Save(oldInbound).Error; err != nil {
 			return err
+		}
+		// 打开了「不参与流量暴涨限速」：生效中的限速单当场撤掉，ShapingJob 10 秒内把 tc 收敛回去。
+		// 不撤的话要等暴涨检测下一轮（10 分钟）。
+		if spikeExemptTurnedOn {
+			if err := tx.Where("inbound_id = ?", oldInbound.Id).Delete(&model.InboundThrottle{}).Error; err != nil {
+				return err
+			}
 		}
 		// 关掉了自动出差放行：生效中的自动通行证一并结束——之后再没有谁按「家里恢复使用」去收回
 		// 或续期它，它会不受管地一直放行到到期。管理员手动发的不动。

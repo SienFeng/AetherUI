@@ -55,7 +55,7 @@ func dbInboundConstructor(t *testing.T, src string) string {
 	return rest[ctor : ctor+end]
 }
 
-// 新增 / 编辑入站的请求体是逐字段手写的：漏掉「允许服务器来源」的话，Gin 把它绑成 false 写回，
+// 新增 / 编辑入站的请求体是逐字段手写的：漏掉「允许服务器来源」「不参与流量暴涨限速」的话，Gin 把它绑成 false 写回，
 // 管理员打开的豁免保存一次就被清掉，界面上没有任何报错。表单里也要真有这个开关。
 func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
 	page, err := htmlFS.ReadFile("html/xui/inbounds.html")
@@ -72,8 +72,10 @@ func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
 		if end := strings.Index(body, "};"); end >= 0 {
 			body = body[:end]
 		}
-		if !strings.Contains(body, "allowServerSources: dbInbound.allowServerSources") {
-			t.Errorf("%s 的请求体里没有 allowServerSources", fn)
+		for _, field := range []string{"allowServerSources", "skipSpikeThrottle"} {
+			if !strings.Contains(body, field+": dbInbound."+field) {
+				t.Errorf("%s 的请求体里没有 %s", fn, field)
+			}
 		}
 	}
 	form, err := htmlFS.ReadFile("html/xui/form/inbound.html")
@@ -82,5 +84,8 @@ func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
 	}
 	if !strings.Contains(string(form), `v-model="dbInbound.allowServerSources"`) {
 		t.Error("入站表单里没有「允许服务器来源」开关")
+	}
+	if !strings.Contains(string(form), `v-model="dbInbound.skipSpikeThrottle"`) {
+		t.Error("入站表单里没有「不参与流量暴涨限速」开关")
 	}
 }

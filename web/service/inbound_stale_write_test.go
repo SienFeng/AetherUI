@@ -223,3 +223,36 @@ func TestResetInboundTrafficDoesNotReviveExpiredOrManuallyDisabled(t *testing.T)
 		}
 	}
 }
+
+// 「不参与流量暴涨限速」只能从编辑表单改：漏拷就保存「成功」却从不落库。打开时生效中的限速单当场撤掉
+// ——不然中转节点要被限到当天结束（检测 10 分钟一轮，等它撤也要等一轮）。
+func TestUpdateInboundPersistsSkipSpikeThrottle(t *testing.T) {
+	setupDB(t)
+	in := makeInboundFor(t, 10035, func(*model.Inbound) {})
+	now := time.Now()
+	if err := database.GetDB().Create(&model.InboundThrottle{InboundId: in.Id, Mbps: 5,
+		Until: now.Add(time.Hour).UnixMilli(), CreatedAt: now.UnixMilli()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := InboundService{}
+	edit := *in
+	edit.SkipSpikeThrottle = true
+	if err := s.UpdateInboundFrom(&edit, InboundEditBase{}); err != nil {
+		t.Fatalf("UpdateInboundFrom: %v", err)
+	}
+	if got := reloadInbound(t, in.Id); !got.SkipSpikeThrottle {
+		t.Fatal("打开不参与暴涨限速后没有落库")
+	}
+	var n int64
+	database.GetDB().Model(&model.InboundThrottle{}).Where("inbound_id = ?", in.Id).Count(&n)
+	if n != 0 {
+		t.Error("打开不参与暴涨限速后生效中的限速单没有撤掉")
+	}
+	edit.SkipSpikeThrottle = false
+	if err := s.UpdateInboundFrom(&edit, InboundEditBase{}); err != nil {
+		t.Fatalf("UpdateInboundFrom: %v", err)
+	}
+	if got := reloadInbound(t, in.Id); got.SkipSpikeThrottle {
+		t.Error("关掉不参与暴涨限速后仍是打开的")
+	}
+}
