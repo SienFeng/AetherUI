@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xtls/xray-core/common/geodata"
+
 	"a-ui/database"
 	"a-ui/database/model"
 )
@@ -605,8 +607,12 @@ func TestVerifyAccessLogQueryErrorIsReported(t *testing.T) {
 
 // 全局规则覆盖一个关了 sniffing 的 vmess 入站：核心拿不到它的域名，域名样例在
 // TestRoute 里命中也不算证据，没有 IP 样例时只能 unverifiable，且不发域名 RPC。
+// 前提是「补全流量识别」关着——开着时生成配置会替它打开嗅探（见下一个测试）。
 func TestVerifyGlobalRuleSniffingOffInboundIsUnverifiable(t *testing.T) {
 	f := newVerifyFixture(t)
+	if err := (&SettingService{}).setInt("forceSniffing", 0); err != nil {
+		t.Fatal(err)
+	}
 	off := newVerifyInbound(t, 41003, "嗅探关闭", true)
 	if err := database.GetDB().Model(off).Updates(map[string]any{"protocol": "vmess", "sniffing": "{}"}).Error; err != nil {
 		t.Fatalf("update inbound: %v", err)
@@ -763,5 +769,79 @@ func TestVerifyAttributesShadowingRule(t *testing.T) {
 	}
 	if b.Reason != "访问日志里有连接走了其他出站" {
 		t.Errorf("用户B 的 Reason 不应被改写，得到 %q", b.Reason)
+	}
+}
+
+// templatePrivateRoute 模拟默认模板：目标 IP 落在 geoip:private 就先被那条
+// geoip:private → blocked 截走，其余才轮到注入的规则（这里一律命中 tag）。
+func templatePrivateRoute(tag string) func(context.Context, string, string, net.IP) (string, bool, error) {
+	private := geodata.GetPrivateIPMatcher()
+	return func(_ context.Context, _ string, _ string, ip net.IP) (string, bool, error) {
+		if ip != nil && private.Match(ip) {
+			return "blocked", false, nil
+		}
+		return tag, false, nil
+	}
+}
+
+// 规则写的是 0.0.0.0/0（或 ::/0）：它对公网目标完全生效，改动前却拿 0.0.0.1 去测，
+// 被模板的私网屏蔽截走后判成「不符」——一条工作正常的规则在列表里亮红灯。
+// 整段都是私网（10.0.0.0/8）时同样不能报「不符」：那不是本规则配错，是模板的
+// 安全规则按设计排在前面，样例根本轮不到本规则，应是「无法验证」并说清原因。
+func TestVerifyIPSamplesAvoidTemplatePrivateBlock(t *testing.T) {
+	cases := []struct {
+		name, cidr string
+		verdict    string
+	}{
+		{"整网 IPv4", "0.0.0.0/0", verdictVerified},
+		{"整网 IPv6", "::/0", verdictVerified},
+		{"整段私网", "10.0.0.0/8", verdictUnverifiable},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newVerifyFixture(t)
+			cidrs, err := EncodeCidrs([]string{c.cidr})
+			if err != nil {
+				t.Fatalf("EncodeCidrs: %v", err)
+			}
+			// 只留推不出样例的关键词：这条规则的结论完全取决于 IP 样例。
+			if err := database.GetDB().Model(f.group).Updates(map[string]any{
+				"domains": `["keyword:gpt"]`, "cidrs": cidrs,
+			}).Error; err != nil {
+				t.Fatalf("update group: %v", err)
+			}
+			rule := f.addRule(t, model.ActionProxy, []int{f.a.Id})
+			res, err := newVerifyService(&fakeRoute{fn: templatePrivateRoute(f.node.Tag)}, okRuntime()).Verify(rule.Id)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			u := findUser(t, res, f.a.Id)
+			if u.Verdict != c.verdict {
+				t.Fatalf("%s：结论 = %s（%s），期望 %s；样例 %+v", c.cidr, u.Verdict, u.Reason, c.verdict, u.Samples)
+			}
+			if c.verdict == verdictUnverifiable && !strings.Contains(u.Reason, "geoip:private") {
+				t.Errorf("整段私网时原因要点明 geoip:private，实际 %q", u.Reason)
+			}
+		})
+	}
+}
+
+// 「补全流量识别」开着（默认）：同一个关了 sniffing 的 vmess 入站在核心里拿得到域名，域名样例照常算证据。
+func TestVerifyGlobalRuleForcedSniffingInboundUsesDomainSamples(t *testing.T) {
+	f := newVerifyFixture(t)
+	if err := (&SettingService{}).setInt("forceSniffing", 1); err != nil {
+		t.Fatal(err)
+	}
+	off := newVerifyInbound(t, 41004, "嗅探关闭但被补全", true)
+	if err := database.GetDB().Model(off).Updates(map[string]any{"protocol": "vmess", "sniffing": "{}"}).Error; err != nil {
+		t.Fatalf("update inbound: %v", err)
+	}
+	rule := f.addRule(t, model.ActionProxy, []int{})
+	res, err := newVerifyService(&fakeRoute{fn: returnTag(f.node.Tag)}, okRuntime()).Verify(rule.Id)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if u := findUser(t, res, off.Id); u.Verdict != verdictVerified || len(u.Samples) == 0 {
+		t.Fatalf("补全流量识别开着时应按域名样例验证: %+v", u)
 	}
 }

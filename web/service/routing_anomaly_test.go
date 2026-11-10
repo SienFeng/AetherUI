@@ -495,3 +495,74 @@ func TestLargeScanBacklogged(t *testing.T) {
 		t.Fatal("读不满一批后应清除积压标记")
 	}
 }
+
+// ruleStateOf 读出一条规则在内存里的全部审计状态：异常摘要计数、水位、忽略时刻、验证缓存。
+func ruleStateOf(id int, now time.Time) (anomalies int64, hasWatermark bool, ignoreAt int64, cached bool) {
+	anomalies, _ = anomalyTotals(id, now)
+	anomalyMu.Lock()
+	_, hasWatermark = anomalyWatermarks[id]
+	ignoreAt = anomalyIgnore[id]
+	anomalyMu.Unlock()
+	_, cached = cachedVerifyResult(id)
+	return
+}
+
+// 删掉最新的那条规则、紧接着新建一条：SQLite 复用 id，新规则拿到同一个 id。
+// 改动前异常摘要、水位、忽略时刻与验证缓存都要等下一轮扫描/审计才按「规则已不在」
+// 清理——而新规则已经占住了这个 id，清理再也不会发生，新规则一出生就顶着旧规则
+// 24 小时的「不符」。删除时必须同步清掉。
+func TestDelRuleClearsAnomalyAndAuditStateImmediately(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+	insertLogs(t, 3, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+	mustScan(t, f.svc, anomalyNow, false)
+	f.svc.ResetAnomalies(f.rule.Id, anomalyNow.Add(-30*time.Minute))
+	insertLogs(t, 2, wrongRow(f.a.Id, anomalyNow.Add(-time.Minute)))
+	mustScan(t, f.svc, anomalyNow.Add(time.Second), false)
+	storeVerifyResult(&RuleVerifyResult{RuleId: f.rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictMismatch}}})
+	if n, wm, ig, cached := ruleStateOf(f.rule.Id, anomalyNow); n != 2 || !wm || ig == 0 || !cached {
+		t.Fatalf("前提不成立：删除前应有异常/水位/忽略时刻/缓存，实际 %d %v %d %v", n, wm, ig, cached)
+	}
+
+	oldId := f.rule.Id
+	if err := (&RoutingRuleService{}).Del(oldId); err != nil {
+		t.Fatalf("Del: %v", err)
+	}
+	// 不扫描：清理必须在删除时同步发生。
+	if n, wm, ig, cached := ruleStateOf(oldId, anomalyNow); n != 0 || wm || ig != 0 || cached {
+		t.Errorf("删除后该 id 仍留着状态：异常 %d、水位 %v、忽略时刻 %d、缓存 %v", n, wm, ig, cached)
+	}
+
+	reused := addAnomalyRule(t, f, []int{f.a.Id}, newTestGroupWithDomains(t, "新组", []string{"domain:example.com"}))
+	if reused.Id != oldId {
+		t.Fatalf("前提不成立：新规则 id = %d，期望复用 %d", reused.Id, oldId)
+	}
+	_, rules := f.svc.Summaries()
+	if got := rules[reused.Id]; got.AnomalyCount != 0 || got.CheckedAt != 0 || got.Verdict != verdictUnverifiable {
+		t.Errorf("新规则继承了旧规则的状态：%+v", got)
+	}
+}
+
+// 删除走的不是 RoutingRuleService.Del（DetachInbound 在删入站的事务里整条删规则、
+// 手工改库）时，状态同样会被下一条复用这个 id 的新规则继承——新建时也要清一次：
+// 新插入的规则拿到的 id，此前任何状态都只可能属于一条已经不存在的规则。
+func TestAddRuleDropsStateLeftByAnotherDeletionPath(t *testing.T) {
+	f := newAnomalyFixture(t, []string{"domain:openai.com"}, nil)
+	insertLogs(t, 3, wrongRow(f.a.Id, anomalyNow.Add(-time.Hour)))
+	mustScan(t, f.svc, anomalyNow, false)
+	f.svc.ResetAnomalies(f.rule.Id, anomalyNow.Add(-30*time.Minute))
+	storeVerifyResult(&RuleVerifyResult{RuleId: f.rule.Id, ApplyGen: XrayApplyGeneration(), CheckedAt: 500,
+		Core: CoreState{State: coreStateOK}, Users: []UserVerify{{Verdict: verdictVerified}}})
+
+	oldId := f.rule.Id
+	if err := database.GetDB().Delete(model.RoutingRule{}, oldId).Error; err != nil {
+		t.Fatalf("delete rule row: %v", err)
+	}
+	reused := addAnomalyRule(t, f, []int{f.a.Id}, newTestGroupWithDomains(t, "新组", []string{"domain:example.com"}))
+	if reused.Id != oldId {
+		t.Fatalf("前提不成立：新规则 id = %d，期望复用 %d", reused.Id, oldId)
+	}
+	if n, wm, ig, cached := ruleStateOf(reused.Id, anomalyNow); n != 0 || wm || ig != 0 || cached {
+		t.Errorf("新规则继承了旧规则的状态：异常 %d、水位 %v、忽略时刻 %d、缓存 %v", n, wm, ig, cached)
+	}
+}

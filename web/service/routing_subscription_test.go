@@ -1097,3 +1097,222 @@ func mustSubscribedDomains(t *testing.T, s *DomainGroupService, groupId int) []s
 	}
 	return list
 }
+
+// subServer 起一个本地订阅源，body 每次请求时现读，测试可以中途改它；
+// fail 为 true 时返回 500。
+func subServer(t *testing.T, body *string, fail *bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail != nil && *fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(*body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func saveSubGroup(t *testing.T, subscribeUrl string) *model.DomainGroup {
+	t.Helper()
+	group := &model.DomainGroup{Remark: "订阅组", Domains: "[]", SubscribeUrl: subscribeUrl}
+	if err := database.GetDB().Save(group).Error; err != nil {
+		t.Fatalf("save group: %v", err)
+	}
+	return group
+}
+
+// 多个订阅地址里删掉一个：剩下那个地址的历史结果仍然是它自己拉来的，
+// 必须立刻重新合并生效。改动前 Update 一见地址串变了就把合并结果清空、
+// last_updated_at 归零，而剩下的地址今天已经拉过、RefreshDue 不会再拉，
+// 这个组于是空到第二天——引用它的封禁/分流规则被 buildRule 整条跳过，
+// 流量静默退回直连，界面还显示「等待首次拉取」。
+func TestUpdateDroppingOneURLKeepsTheOthersContent(t *testing.T) {
+	setupDB(t)
+	aBody, bBody := "DOMAIN-SUFFIX,a.example.com\n", "DOMAIN-SUFFIX,b.example.com\n"
+	a, b := subServer(t, &aBody, nil), subServer(t, &bBody, nil)
+	group := saveSubGroup(t, a.URL+"\n"+b.URL)
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if err := s.Update(&model.DomainGroup{Id: group.Id, Remark: "订阅组", Domains: "[]", SubscribeUrl: a.URL}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	want := []string{"domain:a.example.com"}
+	if got := mustSubscribedDomains(t, s, group.Id); !reflect.DeepEqual(got, want) {
+		t.Fatalf("删掉一个地址后合并结果 = %v，期望 %v（剩下地址的内容必须立刻生效）", got, want)
+	}
+	if g, _ := s.Get(group.Id); g.LastUpdatedAt == 0 {
+		t.Error("LastUpdatedAt 归零了：界面会显示「等待首次拉取」，而这个组其实有内容")
+	}
+	states, err := s.subscriptionStates(group.Id)
+	if err != nil {
+		t.Fatalf("subscriptionStates: %v", err)
+	}
+	if _, ok := states[b.URL]; ok {
+		t.Error("被移除的地址的结果行必须一并删除，否则它会一直占着库，重新加回来时还会被当成历史内容合并")
+	}
+
+	// 定时任务这一轮没有到期的地址，也绝不能把它再清空。
+	if _, err := s.RefreshDue(); err != nil {
+		t.Fatalf("RefreshDue: %v", err)
+	}
+	if got := mustSubscribedDomains(t, s, group.Id); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RefreshDue 之后合并结果 = %v，期望 %v", got, want)
+	}
+}
+
+// 只调换地址顺序：内容全都还在，合并顺序跟着新顺序走，不能清空。
+func TestUpdateReorderingURLsRemergesInTheNewOrder(t *testing.T) {
+	setupDB(t)
+	aBody, bBody := "DOMAIN-SUFFIX,a.example.com\n", "DOMAIN-SUFFIX,b.example.com\n"
+	a, b := subServer(t, &aBody, nil), subServer(t, &bBody, nil)
+	group := saveSubGroup(t, a.URL+"\n"+b.URL)
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	if err := s.Update(&model.DomainGroup{Id: group.Id, Remark: "订阅组", Domains: "[]", SubscribeUrl: b.URL + "\n" + a.URL}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	want := []string{"domain:b.example.com", "domain:a.example.com"}
+	if got := mustSubscribedDomains(t, s, group.Id); !reflect.DeepEqual(got, want) {
+		t.Fatalf("调换顺序后合并结果 = %v，期望 %v", got, want)
+	}
+}
+
+// 升级前那个缺陷已经清空过的组（合并结果为空、last_updated_at=0，但每个地址
+// 今天都已拉成功）：没有到期的地址也要立刻按历史结果重新合并，不能再空一天。
+func TestRefreshDueRemergesGroupEmptiedByAnURLEdit(t *testing.T) {
+	setupDB(t)
+	urlA, urlB := "http://a.example.com/list", "http://b.example.com/list"
+	group := saveSubGroup(t, urlA+"\n"+urlB)
+	now := time.Now().UnixMilli()
+	for _, row := range []*model.DomainGroupSubscription{
+		{GroupId: group.Id, Url: urlA, Domains: `["domain:a.example.com"]`, Cidrs: `[]`, LastUpdatedAt: now},
+		{GroupId: group.Id, Url: urlB, Domains: `["domain:b.example.com"]`, Cidrs: `["192.0.2.0/24"]`, LastUpdatedAt: now},
+	} {
+		if err := database.GetDB().Create(row).Error; err != nil {
+			t.Fatalf("seed row: %v", err)
+		}
+	}
+
+	s := &DomainGroupService{}
+	count, err := s.RefreshDue()
+	if err != nil {
+		t.Fatalf("RefreshDue: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d，期望 1：重新合并改动了合并结果，必须计数，调用方据此下发配置", count)
+	}
+	if got, want := mustSubscribedDomains(t, s, group.Id), []string{"domain:a.example.com", "domain:b.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("合并结果 = %v，期望 %v", got, want)
+	}
+	g, _ := s.Get(group.Id)
+	if cidrs, _ := DecodeSubscribedCidrs(g.SubscribedCidrs); !reflect.DeepEqual(cidrs, []string{"192.0.2.0/24"}) {
+		t.Errorf("SubscribedCidrs = %v，期望 [192.0.2.0/24]", cidrs)
+	}
+	if g.LastUpdatedAt == 0 {
+		t.Error("重新合并之后 LastUpdatedAt 不应仍为 0")
+	}
+}
+
+// 不在地址列表里的结果行（升级前删掉地址留下的、或拉取期间被改掉地址残留的）
+// 在下一次成功刷新时清掉：单行可达数 MB，而且地址重新加回来又拉取失败时，
+// 它那份很久以前的内容会被当成「上一次的结果」合并回来。
+func TestRefreshPrunesRowsOfURLsNoLongerListed(t *testing.T) {
+	setupDB(t)
+	body := "DOMAIN-SUFFIX,a.example.com\n"
+	srv := subServer(t, &body, nil)
+	group := saveSubGroup(t, srv.URL)
+	orphan := &model.DomainGroupSubscription{
+		GroupId: group.Id, Url: "http://gone.example.com/list",
+		Domains: `["domain:gone.example.com"]`, Cidrs: `[]`, LastUpdatedAt: 1,
+	}
+	if err := database.GetDB().Create(orphan).Error; err != nil {
+		t.Fatalf("seed orphan: %v", err)
+	}
+
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	states, err := s.subscriptionStates(group.Id)
+	if err != nil {
+		t.Fatalf("subscriptionStates: %v", err)
+	}
+	if _, ok := states[orphan.Url]; ok {
+		t.Error("不在地址列表里的结果行应在成功刷新后删除")
+	}
+	if _, ok := states[srv.URL]; !ok {
+		t.Error("列表里的地址自己的结果行不能被删")
+	}
+}
+
+// 删掉一个地址、之后再加回来而它恰好拉取失败：它不该带着删除前的旧内容参与合并。
+func TestReAddedURLDoesNotResurrectItsOldContent(t *testing.T) {
+	setupDB(t)
+	aBody, bBody := "DOMAIN-SUFFIX,a.example.com\n", "DOMAIN-SUFFIX,b.example.com\n"
+	bFails := false
+	a, b := subServer(t, &aBody, nil), subServer(t, &bBody, &bFails)
+	group := saveSubGroup(t, a.URL+"\n"+b.URL)
+	s := &DomainGroupService{}
+	if err := s.Refresh(group.Id); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if err := s.Update(&model.DomainGroup{Id: group.Id, Remark: "订阅组", Domains: "[]", SubscribeUrl: a.URL}); err != nil {
+		t.Fatalf("Update(删掉 b): %v", err)
+	}
+
+	bFails = true
+	if err := s.Update(&model.DomainGroup{Id: group.Id, Remark: "订阅组", Domains: "[]", SubscribeUrl: a.URL + "\n" + b.URL}); err != nil {
+		t.Fatalf("Update(加回 b): %v", err)
+	}
+	if err := s.Refresh(group.Id); err == nil {
+		t.Fatal("b 返回 500，Refresh 应如实报告有地址失败")
+	}
+	if got, want := mustSubscribedDomains(t, s, group.Id), []string{"domain:a.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("合并结果 = %v，期望 %v：b 删除前的旧内容不该复活", got, want)
+	}
+}
+
+// 一个地址成功、另一个失败：新内容已经写进库，这个组必须算作「更新了」，
+// 否则 SubscriptionJob 不置重启标志，新内容一直不下发，规则全都挂着「等待下发」。
+func TestRefreshDueCountsPartiallyUpdatedGroup(t *testing.T) {
+	setupDB(t)
+	goodBody, badBody := "DOMAIN-SUFFIX,a.example.com\n", ""
+	bad := true
+	good, broken := subServer(t, &goodBody, nil), subServer(t, &badBody, &bad)
+	group := saveSubGroup(t, good.URL+"\n"+broken.URL)
+
+	s := &DomainGroupService{}
+	count, err := s.RefreshDue()
+	if err != nil {
+		t.Fatalf("RefreshDue: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d，期望 1：部分地址失败时内容照样写进了库，必须计数", count)
+	}
+	if got, want := mustSubscribedDomains(t, s, group.Id), []string{"domain:a.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("合并结果 = %v，期望 %v", got, want)
+	}
+}
+
+// 订阅里的国际化域名同样要转成 punycode；非 ASCII 的 DOMAIN-KEYWORD 永远匹配不到，
+// 跳过并计数，绝不原样进配置。
+func TestParseSubscriptionConvertsIDNAndSkipsNonASCIIKeywords(t *testing.T) {
+	domains, _, skipped, err := ParseSubscription("DOMAIN-SUFFIX,例子.example.com\nDOMAIN,Bücher.example.com\n测试.example.com\nDOMAIN-KEYWORD,例子\n")
+	if err != nil {
+		t.Fatalf("ParseSubscription: %v", err)
+	}
+	want := []string{"domain:xn--fsqu00a.example.com", "full:xn--bcher-kva.example.com", "domain:xn--0zwm56d.example.com"}
+	if !reflect.DeepEqual(domains, want) {
+		t.Errorf("domains = %v，期望 %v", domains, want)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d，期望 1（非 ASCII 的关键词）", skipped)
+	}
+}

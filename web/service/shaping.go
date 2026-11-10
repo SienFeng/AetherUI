@@ -55,8 +55,18 @@ var (
 	// shapingRejectedHash 是被自动撤销过的那套配置。不记住它的话，
 	// 下一轮又会下发同一套，变成「下发、撤销、再下发」的死循环。
 	shapingRejectedHash string
-	shapingRolledBack   bool
+	// shapingRejectedAt 是那次自动撤销的时刻：一小时后带着自动撤销再试一次——管理员可能只是关了页面，
+	// 一次撤销就让这套限速一直不生效（直到进程重启）是另一种失效。
+	shapingRejectedAt time.Time
+	shapingRolledBack bool
+	// shapingLastHeartbeat 是最近一次已登录的面板请求。只有它在 shapingRollbackTimeout 之内（管理员此刻
+	// 就在面板前），下发才武装自动撤销：到期 / 超流量停用、月初自动恢复、流量暴涨限速这些后台改动，
+	// 往往发生在没人看面板的时候，武装了就会在 2 分钟后把所有人的限速整个拆掉。
+	shapingLastHeartbeat time.Time
 )
+
+// shapingRejectRetry：被自动撤销的配置隔多久再试一次。
+const shapingRejectRetry = time.Hour
 
 // resetShapingState 只在测试之间清状态。
 func resetShapingState() {
@@ -66,7 +76,9 @@ func resetShapingState() {
 	shapingStarted = false
 	shapingPendingSince = time.Time{}
 	shapingRejectedHash = ""
+	shapingRejectedAt = time.Time{}
 	shapingRolledBack = false
+	shapingLastHeartbeat = time.Time{}
 }
 
 // ShapingStatus 供界面显示当前限速状态。
@@ -86,22 +98,45 @@ type ShapingService struct {
 
 // desiredLimits 返回当前应当生效的限速集合。
 func (s *ShapingService) desiredLimits() ([]tcshape.Limit, error) {
-	var inbounds []*model.Inbound
-	err := database.GetDB().Model(model.Inbound{}).
-		Where("enable = ? and (up_mbit > 0 or down_mbit > 0)", true).
-		Order("id asc").
-		Find(&inbounds).Error
+	// 生效中的流量暴涨限速（见 SpikeThrottleService）：没手动限速的按它限，手动限得更低的保持手动值。
+	throttles, err := activeThrottles(time.Now())
 	if err != nil {
+		return nil, err
+	}
+	ids := make([]int, 0, len(throttles))
+	for id := range throttles {
+		ids = append(ids, id)
+	}
+	var inbounds []*model.Inbound
+	q := database.GetDB().Model(model.Inbound{}).Where("enable = ?", true)
+	if len(ids) > 0 {
+		q = q.Where("up_mbit > 0 or down_mbit > 0 or id in ?", ids)
+	} else {
+		q = q.Where("up_mbit > 0 or down_mbit > 0")
+	}
+	if err := q.Order("id asc").Find(&inbounds).Error; err != nil {
 		return nil, err
 	}
 	limits := make([]tcshape.Limit, 0, len(inbounds))
 	for _, in := range inbounds {
+		up, down := in.UpMbit, in.DownMbit
+		if t, ok := throttles[in.Id]; ok {
+			up, down = tighterLimit(up, t), tighterLimit(down, t)
+		}
 		limits = append(limits, tcshape.Limit{
 			InboundId: in.Id, Port: in.Port,
-			UpMbit: in.UpMbit, DownMbit: in.DownMbit,
+			UpMbit: up, DownMbit: down,
 		})
 	}
 	return limits, nil
+}
+
+// tighterLimit：0 表示没限速；两个都有时取更低的。
+func tighterLimit(manual, throttle int) int {
+	if manual <= 0 || throttle < manual {
+		return throttle
+	}
+	return manual
 }
 
 func limitsHash(iface string, limits []tcshape.Limit) string {
@@ -166,9 +201,15 @@ func (s *ShapingService) Reconcile() error {
 	if hash == shapingAppliedHash {
 		return nil
 	}
+	retryingRejected := false
 	if hash == shapingRejectedHash {
-		// 这套配置刚被自动撤销过，改之前不再重试。
-		return nil
+		// 这套配置刚被自动撤销过：一小时之内、改之前不再重试；之后再试一次，带着自动撤销。
+		// 只在管理员此刻在面板前时重试：没人在场就没人确认，2 分钟后必然再撤一次，限速变成每小时
+		// 只生效 2 分钟、「限速中」标签却一直亮着。
+		if time.Since(shapingRejectedAt) < shapingRejectRetry || time.Since(shapingLastHeartbeat) >= shapingRollbackTimeout {
+			return nil
+		}
+		retryingRejected = true
 	}
 
 	cmds, err := tcshape.BuildApplyPlan(iface, limits)
@@ -183,9 +224,10 @@ func (s *ShapingService) Reconcile() error {
 
 	shapingAppliedHash = hash
 	shapingRolledBack = false
-	if shapingStarted {
-		// 运行中的变更才武装自动撤销：这时管理员就在面板前面。
-		shapingPendingSince = time.Now()
+	now := time.Now()
+	// 运行中、而且管理员此刻就在面板前（或在重试一套被撤销过的配置）才武装自动撤销，见 shapingLastHeartbeat。
+	if shapingStarted && (retryingRejected || now.Sub(shapingLastHeartbeat) < shapingRollbackTimeout) {
+		shapingPendingSince = now
 	}
 	shapingStarted = true
 	logger.Warning("已下发端口限速规则, 网卡:", iface, "入站数:", len(limits))
@@ -197,6 +239,7 @@ func (s *ShapingService) Heartbeat() {
 	shapingLock.Lock()
 	defer shapingLock.Unlock()
 	shapingPendingSince = time.Time{}
+	shapingLastHeartbeat = time.Now()
 }
 
 // CheckRollback 在超时仍未确认面板可访问时自动撤销限速。
@@ -213,6 +256,7 @@ func (s *ShapingService) CheckRollback(now time.Time) {
 		return
 	}
 	shapingRejectedHash = rejected
+	shapingRejectedAt = now
 	shapingRolledBack = true
 	logger.Warning("下发限速后在", shapingRollbackTimeout,
 		"内没有收到任何面板请求，已自动撤销全部限速规则。若确认网络正常，请修改限速配置后重试")

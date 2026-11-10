@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,23 +60,128 @@ type ConcurrencyService struct {
 	banService     IPBanService
 }
 
-// limitedInbounds 返回真正需要做并发判定的入站：设了额度且处于启用状态。
-// 停用的入站根本不在 xray 配置里，没有连接可管。
+// limitedInbounds 返回真正需要做并发判定的入站，见 limitedInboundsWithDefault。
 func (s *ConcurrencyService) limitedInbounds(now time.Time) ([]*model.Inbound, error) {
+	inbounds, _, err := s.limitedInboundsWithDefault(now)
+	return inbounds, err
+}
+
+// limitedInboundsWithDefault 返回需要做并发判定的入站与默认的同时在用网络数：启用的入站里，自己设了额度的、
+// 有封禁的，以及默认额度不为 0 时的全部。停用的入站根本不在 xray 配置里，没有连接可管。
+func (s *ConcurrencyService) limitedInboundsWithDefault(now time.Time) ([]*model.Inbound, int, error) {
+	def := s.settingService.GetDefaultConcurrencyLimit()
 	var inbounds []*model.Inbound
 	// 有封禁的入站也要进判定，否则没设并发额度的入站上封禁永远不会被执行。
 	banned := database.GetDB().Model(&model.IPBan{}).
 		Select("inbound_id").
 		Where("expires_at = 0 or expires_at > ?", now.UnixMilli())
-	err := database.GetDB().Model(model.Inbound{}).
-		Where("enable = ?", true).
-		Where("concurrency_limit > 0 or id in (?)", banned).
-		Order("id asc").
-		Find(&inbounds).Error
-	if err != nil {
-		return nil, err
+	q := database.GetDB().Model(model.Inbound{}).Where("enable = ?", true)
+	if def <= 0 {
+		q = q.Where("concurrency_limit > 0 or id in (?)", banned)
 	}
-	return inbounds, nil
+	if err := q.Order("id asc").Find(&inbounds).Error; err != nil {
+		return nil, 0, err
+	}
+	return inbounds, def, nil
+}
+
+// effectiveConcurrencyLimit：入站自己设了额度用自己的，没设（0）用默认的同时在用网络数。
+func effectiveConcurrencyLimit(in *model.Inbound, def int) int {
+	if in.ConcurrencyLimit > 0 {
+		return in.ConcurrencyLimit
+	}
+	return max(def, 0)
+}
+
+// networkKey 是「一个网络」的身份：IPv4 一个地址（同一个 Wi-Fi 的设备共用一个出口地址），IPv6 按 /64
+// （同一户人家的设备、手机轮换的隐私地址都在同一个 /64 里——按单个地址数，一台手机就能占满额度）。
+func networkKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.String()
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// planNetworkRejections 决定某入站本轮应当拒绝哪些来源 IP：按网络（networkKey）数同时在用的来源，
+// 先来后到保留最早的 limit 个网络，其余网络的全部 IP 拒绝。
+//
+// blocked 为真的来源不计入：被地区规则、机房拦截挡在门外的连接本来就用不了这个入站，让它占名额的话，
+// 额度为 1 时一个先连上、一直被拦着重试的外省共享者会把本人挤掉。
+func planNetworkRejections(list []OnlineIP, limit int, blocked func(ip string) bool) []string {
+	if limit <= 0 {
+		return nil
+	}
+	type network struct {
+		key       string
+		firstSeen int64
+		ips       []string
+	}
+	byKey := map[string]*network{}
+	var nets []*network
+	for _, e := range liveOnly(list) {
+		if blocked != nil && blocked(e.IP) {
+			continue
+		}
+		k := networkKey(e.IP)
+		n := byKey[k]
+		if n == nil {
+			n = &network{key: k, firstSeen: e.FirstSeen}
+			byKey[k] = n
+			nets = append(nets, n)
+		}
+		n.firstSeen = min(n.firstSeen, e.FirstSeen)
+		n.ips = append(n.ips, e.IP)
+	}
+	if len(nets) <= limit {
+		return nil
+	}
+	// 次序必须确定（理由见 selectOverQuota）：首次观测时间相同时按网络身份排序。
+	sort.Slice(nets, func(i, j int) bool {
+		if nets[i].firstSeen != nets[j].firstSeen {
+			return nets[i].firstSeen < nets[j].firstSeen
+		}
+		return nets[i].key < nets[j].key
+	})
+	var over []string
+	for _, n := range nets[limit:] {
+		over = append(over, n.ips...)
+	}
+	sort.Strings(over)
+	return over
+}
+
+var (
+	concurrencyBlockMu    sync.Mutex
+	concurrencyBlockAt    time.Time
+	concurrencyBlockGeo   *geoBlockMatcher
+	concurrencyBlockCount int
+)
+
+// sourceBlocker 返回「这个来源会被核心挡在门外」的判断：地区规则（按核心用上的那一份）与机房拦截。
+// 匹配器 30 秒重建一次——判定每秒一轮，每轮读 dat、建集合太贵；通行证的增减最多晚 30 秒反映到这里。
+func (s *ConcurrencyService) sourceBlocker(inbounds []*model.Inbound, now time.Time) func(in *model.Inbound) func(ip string) bool {
+	concurrencyBlockMu.Lock()
+	if concurrencyBlockGeo == nil || now.Sub(concurrencyBlockAt) > 30*time.Second || concurrencyBlockCount != len(inbounds) {
+		// 只看核心此刻生效的规则（不回放存储地区）：持有通行证的入站，通行证省份的网络照样占名额。
+		concurrencyBlockGeo = newLiveGeoBlockMatcher(inbounds)
+		concurrencyBlockAt, concurrencyBlockCount = now, len(inbounds)
+	}
+	geo := concurrencyBlockGeo
+	concurrencyBlockMu.Unlock()
+	idc := idcBlockedSet(&s.settingService, &IPDBService{})
+	return func(in *model.Inbound) func(ip string) bool {
+		dokodemo := strings.EqualFold(string(in.Protocol), "dokodemo-door")
+		return func(ip string) bool {
+			if geo.Blocks(in.Id, ip) {
+				return true
+			}
+			return idc != nil && !dokodemo && idc.Contains(ip)
+		}
+	}
 }
 
 // markBanned 给列表打上封禁标记，并把连接已经被断干净、因而不在连接表里的
@@ -107,7 +213,7 @@ func markBanned(list []OnlineIP, banned map[string]*model.IPBan) []OnlineIP {
 // 跳变事件。因此漏掉一轮、面板重启、客户端重连都不会让状态跑偏。
 func (s *ConcurrencyService) Enforce() error {
 	now := time.Now()
-	inbounds, err := s.limitedInbounds(now)
+	inbounds, def, err := s.limitedInboundsWithDefault(now)
 	if err != nil {
 		return err
 	}
@@ -128,6 +234,7 @@ func (s *ConcurrencyService) Enforce() error {
 	// 得慢，也不要因为读配置失败就把所有人都当成闲置、并发限制整个失效。
 	idleAfter := idleTimeoutOrZero(s.settingService.GetConcurrencyIdleTimeout())
 
+	blockerFor := s.sourceBlocker(inbounds, now)
 	enforced := make(map[int]bool, len(inbounds))
 	defer func() { onlineTrackerInstance.retainRejectedPorts(enforced) }()
 	for _, inbound := range inbounds {
@@ -144,7 +251,7 @@ func (s *ConcurrencyService) Enforce() error {
 			s.disconnectBanned(inbound, list)
 		}
 
-		over := planRejections(list, inbound.ConcurrencyLimit)
+		over := planNetworkRejections(list, effectiveConcurrencyLimit(inbound, def), blockerFor(inbound))
 		onlineTrackerInstance.setRejected(inbound.Port, over, now)
 		s.disconnect(inbound, over)
 	}

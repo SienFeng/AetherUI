@@ -73,7 +73,38 @@ func validIface(name string) bool {
 
 func mbit(v int) string { return strconv.Itoa(v) + "mbit" }
 
-func classId(inboundId int) string { return "1:" + strconv.Itoa(inboundId) }
+func classId(slot int) string { return "1:" + strconv.Itoa(slot) }
+
+// classSlots 给每个限速入站一个 HTB 类号。tc 把类号按十六进制解析（最大 ffff），默认类是 DefaultClassId：
+// 入站 id 小于它时直接用 id（与改动前一致，现有机器上的规则不换号）；更大的 id（SQLite 自增到上万之后）
+// 从 DefaultClassId-1 往下分配还没被占用的号。改动前一个这样的入站会让整份计划被拒绝，所有人的限速一起失效。
+// 绝不分到 DefaultClassId：那是不限速的兜底类，撞上它整机未分类流量（含 SSH）会被一起限死。
+func classSlots(sorted []Limit) (map[int]int, error) {
+	slots := make(map[int]int, len(sorted))
+	used := map[int]bool{}
+	for _, l := range sorted {
+		if l.InboundId < DefaultClassId {
+			slots[l.InboundId] = l.InboundId
+			used[l.InboundId] = true
+		}
+	}
+	next := DefaultClassId - 1
+	for _, l := range sorted {
+		if l.InboundId < DefaultClassId {
+			continue
+		}
+		for next > 0 && used[next] {
+			next--
+		}
+		if next <= 0 {
+			return nil, fmt.Errorf("tcshape: 限速的入站太多，类号不够用")
+		}
+		slots[l.InboundId] = next
+		used[next] = true
+		next--
+	}
+	return slots, nil
+}
 
 // BuildApplyPlan 生成「推倒重建」的完整命令序列。
 //
@@ -87,11 +118,8 @@ func BuildApplyPlan(iface string, limits []Limit) ([]Command, error) {
 	sorted := make([]Limit, 0, len(limits))
 	seen := map[int]bool{}
 	for _, l := range limits {
-		if l.InboundId <= 0 || l.InboundId >= DefaultClassId {
-			// 撞上默认类的话，这个用户的限速会变成整机未分类流量的限速，
-			// SSH 会跟着一起被限死。
-			return nil, fmt.Errorf("tcshape: 入站 id %d 超出可用范围 1~%d",
-				l.InboundId, DefaultClassId-1)
+		if l.InboundId <= 0 {
+			return nil, fmt.Errorf("tcshape: 入站 id %d 不合法", l.InboundId)
 		}
 		if seen[l.InboundId] {
 			return nil, fmt.Errorf("tcshape: 入站 id %d 重复", l.InboundId)
@@ -114,6 +142,10 @@ func BuildApplyPlan(iface string, limits []Limit) ([]Command, error) {
 	// 按入站 id 升序：命令序列必须逐条确定，否则没法用哈希判断
 	// 「需不需要重新下发」，每轮都会推倒重建。
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].InboundId < sorted[j].InboundId })
+	slots, err := classSlots(sorted)
+	if err != nil {
+		return nil, err
+	}
 
 	cmds := BuildTeardownPlan(iface)
 
@@ -129,8 +161,8 @@ func BuildApplyPlan(iface string, limits []Limit) ([]Command, error) {
 		if l.DownMbit == 0 {
 			continue
 		}
-		cmds = append(cmds, leafClass(iface, l.InboundId, l.DownMbit))
-		cmds = append(cmds, portFilters(iface, "sport", l.Port, l.InboundId)...)
+		cmds = append(cmds, leafClass(iface, slots[l.InboundId], l.DownMbit))
+		cmds = append(cmds, portFilters(iface, "sport", l.Port, slots[l.InboundId])...)
 	}
 
 	// 上行：主网卡 ingress 全量重定向到 ifb，在 ifb 上做 egress。
@@ -142,8 +174,8 @@ func BuildApplyPlan(iface string, limits []Limit) ([]Command, error) {
 		if l.UpMbit == 0 {
 			continue
 		}
-		cmds = append(cmds, leafClass(IfbDevice, l.InboundId, l.UpMbit))
-		cmds = append(cmds, portFilters(IfbDevice, "dport", l.Port, l.InboundId)...)
+		cmds = append(cmds, leafClass(IfbDevice, slots[l.InboundId], l.UpMbit))
+		cmds = append(cmds, portFilters(IfbDevice, "dport", l.Port, slots[l.InboundId])...)
 	}
 	cmds = append(cmds,
 		Command{Args: []string{"tc", "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"}},
@@ -169,18 +201,18 @@ func rootTree(dev string) []Command {
 	}
 }
 
-func leafClass(dev string, inboundId, rate int) Command {
+func leafClass(dev string, slot, rate int) Command {
 	return Command{Args: []string{
-		"tc", "class", "add", "dev", dev, "parent", "1:", "classid", classId(inboundId),
+		"tc", "class", "add", "dev", dev, "parent", "1:", "classid", classId(slot),
 		"htb", "rate", mbit(rate), "ceil", mbit(rate),
 	}}
 }
 
 // portFilters 为一个端口生成 IPv4 与 IPv6 两条 filter。
 // u32 的 protocol ip 只匹配 IPv4，只下 v4 的话 IPv6 客户端完全不受限速。
-func portFilters(dev, which string, port, inboundId int) []Command {
+func portFilters(dev, which string, port, slot int) []Command {
 	p := strconv.Itoa(port)
-	flow := classId(inboundId)
+	flow := classId(slot)
 	return []Command{
 		{Args: []string{
 			"tc", "filter", "add", "dev", dev, "parent", "1:",

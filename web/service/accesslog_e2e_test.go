@@ -73,6 +73,8 @@ func TestAccessLogPipelineAgainstRealXray(t *testing.T) {
 	}
 
 	cmd := exec.Command(xray.GetBinaryPath(), "run", "-c", cfgPath)
+	// 与 Process.Start 一致：核心按 UTC 写日志，采集按 UTC 解析。
+	cmd.Env = append(os.Environ(), "TZ=UTC")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("启动 xray: %v", err)
 	}
@@ -91,7 +93,7 @@ func TestAccessLogPipelineAgainstRealXray(t *testing.T) {
 
 	var entries []accesslog.Entry
 	for _, line := range lines {
-		e, ok := accesslog.ParseLine(line, time.Local)
+		e, ok := accesslog.ParseLine(line, time.UTC)
 		if !ok {
 			t.Fatalf("真实 xray 日志行解析失败，格式可能变了:\n%s", line)
 		}

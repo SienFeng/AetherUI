@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,7 +103,19 @@ func TestCheckValidRejectsPanelCertOnLoopbackListen(t *testing.T) {
 func TestCheckValidAllowsPanelCertOnPublicListen(t *testing.T) {
 	certFile, keyFile := writeSelfSignedPair(t)
 
-	for _, listen := range []string{"", "0.0.0.0", "10.0.0.5"} {
+	// 第三个用例是「监听本机某块网卡上的具体地址」。CheckValid 现在要求这个地址
+	// 确实配在本机网卡上（见 entity.CheckWebListenIsLocal），所以不能再写死一个
+	// 10.0.0.5，改为运行时取一个本机的非回环地址；取不到就只测前两个。
+	listens := []string{"", "0.0.0.0"}
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil {
+				listens = append(listens, n.IP.String())
+				break
+			}
+		}
+	}
+	for _, listen := range listens {
 		name := listen
 		if name == "" {
 			name = "空串(所有 IP)"

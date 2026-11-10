@@ -24,7 +24,9 @@ func writeTestGeoDat(t *testing.T, allow []string) string {
 		t.Cleanup(func() { _ = os.Remove(dir) })
 	}
 	provinces := []string{"北京市"}
-	if _, err := writeGeoDat(geoDatPath, []geodatEntry{{Tag: regionTag(provinces), CIDRs: allow}}); err != nil {
+	// 与生产一样按内容寻址；核心还没用上过（没有已生效的状态）时匹配器按省份集合的 tag 在 dat 里找。
+	resetGeoGenerations(t)
+	if _, err := writeGeoDat(geoDatPath, []geodatEntry{{Tag: geoDatCode(regionTag(provinces), allow), CIDRs: allow}}); err != nil {
 		t.Fatalf("writeGeoDat: %v", err)
 	}
 	cleanupGeoDat(t)

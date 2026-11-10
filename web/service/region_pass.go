@@ -81,6 +81,15 @@ func (s *RegionPassService) grant(inboundId int, regions []string, until int64, 
 		GrantedAt: now.UnixMilli(), Until: until,
 	}
 	err = database.GetDB().Transaction(func(tx *gorm.DB) error {
+		// 在事务里再看一次入站：上面那次读与这里之间，入站可能刚被删掉。SQLite 会复用 id，
+		// 留下的通行证会被下一个新建的入站继承。
+		var current model.Inbound
+		if err := tx.Where("id = ?", inboundId).Take(&current).Error; err != nil {
+			return err
+		}
+		if !model.HasRegions(current.Regions) {
+			return common.NewError("该入站没有设置地区限制，不需要通行证")
+		}
 		if requireNone {
 			var n int64
 			if err := tx.Model(&model.InboundRegionPass{}).
@@ -137,19 +146,22 @@ func (s *RegionPassService) Revoke(inboundId int, reason string, now time.Time) 
 	return res.RowsAffected > 0, res.Error
 }
 
-// RevokePass 只结束指定的那张通行证（且仍在生效时），返回是否真的结束了。
+// RevokePass 只结束指定的那张通行证（且仍在生效、属于这个入站时），返回是否真的结束了。
 // 自动出差放行用它：按判定时看到的那张收回，不会连带收回管理员刚发的手动通行证。
-func (s *RegionPassService) RevokePass(passId int, reason string, now time.Time) (bool, error) {
+// 带上入站 id：SQLite 会复用 id，只认通行证 id 可能碰到别的入站的那一张。
+func (s *RegionPassService) RevokePass(inboundId, passId int, reason string, now time.Time) (bool, error) {
 	res := database.GetDB().Model(&model.InboundRegionPass{}).
-		Where("id = ? AND ended_at = 0", passId).
+		Where("id = ? AND inbound_id = ? AND ended_at = 0", passId, inboundId).
 		Updates(map[string]any{"ended_at": now.UnixMilli(), "end_reason": reason})
 	return res.RowsAffected > 0, res.Error
 }
 
 // Renew 把活动通行证的到期时间改为 until。
-func (s *RegionPassService) Renew(passId int, until int64) error {
-	return database.GetDB().Model(&model.InboundRegionPass{}).
-		Where("id = ? AND ended_at = 0", passId).Update("until", until).Error
+// 返回是否真的续上了：通行证在判定之后被收回、替换或到期时，什么都不改，也不能报「已续期」。
+func (s *RegionPassService) Renew(inboundId, passId int, until int64) (bool, error) {
+	res := database.GetDB().Model(&model.InboundRegionPass{}).
+		Where("id = ? AND inbound_id = ? AND ended_at = 0", passId, inboundId).Update("until", until)
+	return res.RowsAffected > 0, res.Error
 }
 
 // Active 返回所有活动通行证（入站 id → 通行证）。

@@ -49,7 +49,7 @@
             </a-col>
             <a-col :span="12">
                 <a-form-item label="端口">
-                    <a-input type="number" v-model.number="inbound.port"></a-input>
+                    <a-input-number v-model="inbound.port" :precision="0" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
             <a-col :span="12">
@@ -124,7 +124,8 @@
                                 自动放行那一个省一段时间，家里恢复使用就收回。<br/>
                                 有每月天数、每周次数上限；发现家里与外地同时在用、或你手动收回过自动通行证，会暂停一段时间。<br/>
                                 这些阈值在「面板设置 → 连接限制 → 自动出差放行」里调整。<br/>
-                                需要开启访问日志；只放行国内 IPv4 来源。
+                                需要开启访问日志；只放行国内 IPv4 来源。<br/>
+                                「自动管理地区限制」总开关开着时，系统会替有地区限制的入站打开一次；之后你关掉就不再打开。
                             </template>
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
@@ -144,9 +145,14 @@
                 </div>
                 <template v-else>
                     <div class="region-preview-head">
-                        <template v-if="inModal.preview.result.blocked.length === 0">
+                        <template v-if="inModal.preview.result.blocked.length === 0 && inModal.preview.result.ipv6.length === 0">
                             <a-icon type="check-circle" class="tone-ok"></a-icon>
                             按 [[ inModal.preview.regionsText ]] 限制，近 [[ inModal.preview.result.windowDays ]] 天的来源都不会被拦。
+                        </template>
+                        <template v-else-if="inModal.preview.result.blocked.length === 0">
+                            <a-icon type="warning" class="tone-warn"></a-icon>
+                            按 [[ inModal.preview.regionsText ]] 限制，近 [[ inModal.preview.result.windowDays ]] 天的 IPv4 来源都不会被拦，
+                            但 <b>[[ inModal.preview.result.ipv6.length ]]</b> 个 IPv6 来源将无法使用。
                         </template>
                         <template v-else>
                             <a-icon type="warning" class="tone-warn"></a-icon>
@@ -155,6 +161,10 @@
                             占流量 <b>[[ inModal.blockedShare() ]]</b>
                         </template>
                     </div>
+                    <a-alert v-if="inModal.coexistingPicked().length" type="error" show-icon style="margin-bottom: 8px"
+                             :message="'这些地区出现在异地同时使用记录里：' + inModal.coexistingPicked().join('、')"
+                             description="可能是共享者所在地。直接保存等于把对方所在的地区一并放行，请判断后删掉不该放行的省份。">
+                    </a-alert>
                     <table v-if="inModal.preview.result.blocked.length" class="region-preview-table">
                         <thead><tr><th scope="col">来源 IP</th><th scope="col">归属地</th><th scope="col">活跃小时</th><th scope="col">流量</th></tr></thead>
                         <tbody>
@@ -167,7 +177,7 @@
                         </tbody>
                     </table>
                     <div v-if="inModal.preview.result.moreBlocked" class="cell-muted">另有 [[ inModal.preview.result.moreBlocked ]] 个来源未列出</div>
-                    <div v-if="inModal.preview.result.ipv6.length" class="cell-muted">
+                    <div v-if="inModal.preview.result.ipv6.length && inModal.preview.result.blocked.length" class="cell-muted">
                         另有 [[ inModal.preview.result.ipv6.length ]] 个 IPv6 来源：启用地区限制后它们无法使用（[[ inModal.preview.result.ipv6.map(x => x.ip).join('、') ]]）
                     </div>
                 </template>
@@ -187,15 +197,16 @@
                         并发限制
                         <a-tooltip>
                             <template slot="title">
-                                同时使用该节点的不同来源 IP 数上限，0 表示不限制。<br/>
-                                按 IP 计而不是按连接数计：一个浏览器就会开几十条连接。<br/>
-                                超额时拒绝后来的 IP，已在线的人不受影响。<br/>
+                                同一时间最多几个网络在用：同一个 Wi-Fi 下的多台设备算一个，IPv6 按 /64 算。<br/>
+                                0 表示跟随「面板设置 → 连接限制 → 默认同时在用的网络数」；要放宽就在这里填更大的数。<br/>
+                                按网络计而不是按连接数计：一个浏览器就会开几十条连接。<br/>
+                                超额时拒绝后来的网络，已在线的人不受影响；被地区规则、机房拦截挡住的来源不占名额。<br/>
                                 仅对 TCP 类传输（tcp / ws / grpc / h2）生效，mKCP、QUIC 无法统计。
                             </template>
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
                     </span>
-                    <a-input-number v-model="dbInbound.concurrencyLimit" :min="0" :max="1000" style="width: 100%;"></a-input-number>
+                    <a-input-number v-model="dbInbound.concurrencyLimit" :min="0" :max="1000" :precision="0" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
             <a-col :span="8">
@@ -211,7 +222,7 @@
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
                     </span>
-                    <a-input-number v-model="dbInbound.downMbit" :min="0" :max="100000" style="width: 100%;"></a-input-number>
+                    <a-input-number v-model="dbInbound.downMbit" :min="0" :max="100000" :precision="0" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
             <a-col :span="8">
@@ -226,7 +237,7 @@
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
                     </span>
-                    <a-input-number v-model="dbInbound.upMbit" :min="0" :max="100000" style="width: 100%;"></a-input-number>
+                    <a-input-number v-model="dbInbound.upMbit" :min="0" :max="100000" :precision="0" style="width: 100%;"></a-input-number>
                 </a-form-item>
             </a-col>
         </a-row>
@@ -356,10 +367,12 @@
             {{template "form/tlsSettings"}}
         </template>
 
-        <!-- reality settings（REALITY 属于安全层而不是传输方式，因此不放在「传输」块里） -->
-        <template v-if="inbound.canEnableStream()">
-            {{template "form/realitySettings"}}
-        </template>
+        <!-- reality settings（REALITY 属于安全层而不是传输方式，因此不放在「传输」块里）。
+             可见性只跟安全层走（模板自身是 v-if="inbound.stream.isReality"），能不能选中
+             reality 由上面单选的 canEnableReality() 决定。这里曾多套一层 canEnableStream()，
+             它不含 Trojan：Trojan 选得中 reality 却看不到伪装目标与 serverNames，保存的
+             配置被核心拒绝（TestRealitySettingsAreReachableForTrojan 守着）。 -->
+        {{template "form/realitySettings"}}
     </template>
 
     <!-- 探测 -->

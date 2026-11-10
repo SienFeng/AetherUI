@@ -28,7 +28,7 @@ var defaultValueMap = map[string]string{
 	"webPort":                  "54321",
 	"webCertFile":              "",
 	"webKeyFile":               "",
-	"secret":                   random.Seq(32),
+	"secret":                   random.SecureSeq(32),
 	"webBasePath":              "/",
 	"timeLocation":             "Asia/Shanghai",
 	"subscriptionUpdateTime":   "04:00",
@@ -55,6 +55,23 @@ var defaultValueMap = map[string]string{
 	"autoTravelMonthlyDays":      "10",
 	"autoTravelWeeklyGrants":     "3",
 	"autoTravelCooldownDays":     "7",
+	"autoTravelRelocateDays":     "5",
+	// 自动设置地区限制。开关默认关：升级后行为零变化，由管理员打开。
+
+	// 防共享 / 防滥用（管理员 2026-11-09 选定：一个人一个网络在线、拦机房来源、拦 25 端口、补全流量识别、
+	// 流量暴涨限速，全部默认打开、设置里可关）。
+	"defaultConcurrencyLimit": "1",
+	"blockIdcSources":         "1",
+	"blockSmtp":               "1",
+	"forceSniffing":           "1",
+	"spikeThrottleEnable":     "1",
+	"spikeThrottleMultiplier": "10",
+	"spikeThrottleFloorGB":    "20",
+	"spikeThrottleMbps":       "5",
+
+	"autoRegionEnable":            "0",
+	"autoRegionObserveDays":       "1",
+	"autoRegionMaxBlockedPercent": "5",
 	"ipRuleResolveDomain":      "0",
 	"dnsServers":               "",
 	"tcInterface":              "",
@@ -577,6 +594,73 @@ func (s *SettingService) GetAutoTravelParams() autoTravelParams {
 	read("autoTravelMonthlyDays", 1, 31, func(v int) { p.MonthlyDays = v })
 	read("autoTravelWeeklyGrants", 1, 20, func(v int) { p.WeeklyGrants = v })
 	read("autoTravelCooldownDays", 0, 30, func(v int) { p.Cooldown = time.Duration(v) * 24 * time.Hour })
+	read("autoTravelRelocateDays", 0, 7, func(v int) { p.RelocateDays = v })
+	return p
+}
+
+// GetAutoRegionParams 读自动设置地区限制的开关与阈值。开关读不出时按关闭处理
+// （宁可不自动设置，也不在读设置出故障时去改用户的地区）；阈值读不出或越界时用默认值。
+func (s *SettingService) GetAutoRegionParams() (bool, autoRegionParams) {
+	p := defaultAutoRegionParams()
+	p.StableDays = s.GetAutoTravelParams().StableDays
+	enabled, err := s.getInt("autoRegionEnable")
+	if err != nil {
+		logger.Warning("读取设置 autoRegionEnable 失败，按关闭处理:", err)
+		return false, p
+	}
+	read := func(key string, min, max int, apply func(int)) {
+		v, err := s.getInt(key)
+		if err != nil || v < min || v > max {
+			logger.Warning("读取设置", key, "失败或越界，按默认值:", v, err)
+			return
+		}
+		apply(v)
+	}
+	read("autoRegionObserveDays", 1, 30, func(v int) { p.ObserveDays = v })
+	read("autoRegionMaxBlockedPercent", 0, 50, func(v int) { p.MaxBlockedPercent = v })
+	return enabled == 1, p
+}
+
+// GetDefaultConcurrencyLimit：入站没有单独设并发限制时的同时在用网络数上限，0 表示不限。读不出按 0（不限）：
+// 宁可少拦，也不能因为读配置失败就把所有人限成一个网络。
+func (s *SettingService) GetDefaultConcurrencyLimit() int {
+	v, err := s.getInt("defaultConcurrencyLimit")
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+// GetBlockIdcSources / GetBlockSmtp / GetForceSniffing：防滥用开关，读不出按关闭处理（不改变生成的配置）。
+func (s *SettingService) GetBlockIdcSources() bool { return s.flagOn("blockIdcSources") }
+func (s *SettingService) GetBlockSmtp() bool       { return s.flagOn("blockSmtp") }
+func (s *SettingService) GetForceSniffing() bool   { return s.flagOn("forceSniffing") }
+
+func (s *SettingService) flagOn(key string) bool {
+	v, err := s.getInt(key)
+	return err == nil && v == 1
+}
+
+// SpikeThrottleParams 是流量暴涨自动限速的阈值。
+type SpikeThrottleParams struct {
+	Enabled    bool
+	Multiplier int
+	FloorBytes int64
+	Mbps       int
+}
+
+// GetSpikeThrottleParams 读流量暴涨自动限速的阈值；单项读不出或越界时回落默认值，开关读不出按关闭。
+func (s *SettingService) GetSpikeThrottleParams() SpikeThrottleParams {
+	p := SpikeThrottleParams{Enabled: s.flagOn("spikeThrottleEnable"), Multiplier: 10, FloorBytes: 20 << 30, Mbps: 5}
+	if v, err := s.getInt("spikeThrottleMultiplier"); err == nil && v >= 2 && v <= 100 {
+		p.Multiplier = v
+	}
+	if v, err := s.getInt("spikeThrottleFloorGB"); err == nil && v >= 1 && v <= 10000 {
+		p.FloorBytes = int64(v) << 30
+	}
+	if v, err := s.getInt("spikeThrottleMbps"); err == nil && v >= 1 && v <= 1000 {
+		p.Mbps = v
+	}
 	return p
 }
 
@@ -651,6 +735,9 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 	if err := allSetting.CheckValid(); err != nil {
 		return err
 	}
+	if err := s.ValidatePanelAddrChange(allSetting.PanelAddr()); err != nil {
+		return err
+	}
 	// CheckValid 只查得了语法。会进入 xray 配置的设置项还要过一遍真实 xray：
 	// 语法合法而 xray 拒绝启动的值确实存在（dnsServers 写成 IP:端口 就是），
 	// 而那种错误在保存这一刻是唯一看得见的时刻——之后只剩一次静默的重启失败。
@@ -658,6 +745,8 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 	if err := ValidateSettings(allSetting); err != nil {
 		return err
 	}
+
+	oldLoc, oldLocErr := s.GetTimeLocation()
 
 	v := reflect.ValueOf(allSetting).Elem()
 	t := reflect.TypeOf(allSetting).Elem()
@@ -669,6 +758,13 @@ func (s *SettingService) UpdateAllSetting(allSetting *entity.AllSetting) error {
 		value := fmt.Sprint(fieldV.Interface())
 		err := s.saveSetting(key, value)
 		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// 面板时区换了：按周期重置的入站在新时区下「本周期」的时刻可能晚于上次清零（往西改），任务下一轮
+	// 就会计划外清一次。顶一下各入站的 LastResetAt（见 raisedResetFloor）。
+	if newLoc, err := s.GetTimeLocation(); err == nil && oldLocErr == nil && newLoc.String() != oldLoc.String() {
+		if err := (&InboundService{}).RaiseResetFloorsForTimeZone(time.Now(), oldLoc, newLoc); err != nil {
 			errs = append(errs, err)
 		}
 	}

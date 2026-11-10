@@ -435,7 +435,9 @@ func (r *ImportReport) say(format string, a ...any) {
 func (r *ImportReport) fail(format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
 	r.Messages = append(r.Messages, msg)
-	logger.Warning("导入分流配置：", msg)
+	// 报告原样给导入者本人看；日志那一份脱敏——订阅地址不合法时消息里带着原地址，
+	// 它的 userinfo / query 里可能是账号密码与访问令牌。
+	logger.Warning("导入分流配置：", redactURLsInText(msg))
 }
 
 // Import 逐条处理、逐条报告，**不用事务**。

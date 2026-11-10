@@ -51,7 +51,7 @@ go mod tidy && go vet ./...
 
 ### 发版
 
-打 tag 推送即触发 `.github/workflows/release.yml`：matrix 构建 amd64/arm64 → 打包中/英两个 tar.gz → `gh release create`。CI 会在编译前把 tag 名写入 `config/version`（该文件由 `//go:embed` 读入），因此**版本号不在代码里维护**。`workflow_dispatch` 可试构建但不建 release。
+打 tag 推送即触发 `.github/workflows/release.yml`：matrix 构建 amd64/arm64 → 打包中/英两个 tar.gz → 生成并自检 `SHA256SUMS` → `gh release create`（tar.gz 与 `SHA256SUMS` 一起上传）。安装脚本有 `SHA256SUMS` 就按文件名逐字核对，对不上或缺这一行就中止；早于它的版本只警告。重新上传某个资产必须重新生成 `SHA256SUMS`，否则那个版本装不上（有意如此）。`SHA256SUMS` 证明完整性、不证明来源（它和安装包在同一个 release 里）。CI 会在编译前把 tag 名写入 `config/version`（该文件由 `//go:embed` 读入），因此**版本号不在代码里维护**。`workflow_dispatch` 可试构建但不建 release。
 
 ## 架构要点
 
@@ -59,9 +59,11 @@ go mod tidy && go vet ./...
 
 `main.go` → `database.InitDB`（`AutoMigrate` User/Inbound/Setting，无 User 时创建 `admin/admin`）→ `web.NewServer().Start()`。
 
-`web.Server.Start()`（`web/web.go`）是理解整个系统的入口，它按序完成：从 settings 读时区并创建 cron → `initRouter`（session、basePath 中间件、i18n、模板与静态资源、注册三个顶层 controller）→ 读证书决定 HTTP/HTTPS 监听 → `startTask` 注册定时任务 → `httpServer.Serve`。
+`web.Server.Start()`（`web/web.go` + `web/lifecycle.go`）是理解整个系统的入口，它按序完成：从 settings 读时区（读不出用 `time.Local`）并创建 cron → `initRouterSafely`（session、basePath 中间件、i18n、模板与静态资源、注册三个顶层 controller；panic 转成 error）→ `startBackground`（IP 库、访问日志库与用量库、`startTask` 注册定时任务——**无论面板的 HTTP 监听起不起得来都执行**）→ `serveOrRetry`（读证书决定 HTTP/HTTPS 监听并 `Serve`）。
 
-`main.go` 监听 `SIGHUP` 时会 `Stop()` 旧 Server 并 `NewServer().Start()`——面板「重启」（`PanelService.RestartPanel`）就是给自己发 SIGHUP，配置变更无需重启进程。
+**面板起不来不能连累代理用户。** 改动前 `net.Listen` 排在 `startTask` 之前、xray 只在 `startTask` 里启动：根路径里有 `:` / `*`（gin 的 `StaticFS` 会 panic）、监听地址不在本机网卡上、端口被占、证书文件被删，任何一条都让面板退出码 0 退出——xray 跟着不起来或被 `Stop()` 停掉，`Restart=on-failure` 也不拉起。现在：路由初始化失败只记 Error（带救援命令）并注册一个兜底的 10 秒重启标志消费者（真正的那个在 `InboundController` 里）；监听或证书失败记 Error 后在后台重试（5 秒起、退避到 60 秒，每次重读设置与证书），**不退回 `0.0.0.0`、不退回明文**；`Start` 对面板侧失败一律返回 nil。`CheckValid` 拒绝根路径不在白名单 `^/([A-Za-z0-9._~-]+/)*$` 里（以及 `.` / `..` 段）、监听地址不在本机网卡上（读不出网卡时放行）；依赖当前存储值的检查（改端口时探测绑定、Caddy 拓扑下不准改端口与根路径）只放在 `ValidatePanelAddrChange`（`UpdateAllSetting` 与 CLI 调），**不放进 setter**——`bootstrap -force` 要能写。
+
+`main.go` 监听 `SIGHUP` 时会 `Stop()` 旧 Server 并 `NewServer().Start()`——面板「重启」（`PanelService.RestartPanel`）就是给自己发 SIGHUP，配置变更无需重启进程。重启失败只记日志、进程继续活着（xray 照常）；首次启动失败退出码 1。`Stop` 的顺序：取消 context → 等监听重试协程 → 用新的 5 秒 context `Shutdown`（超时强制 `Close`）→ 最多等 5 秒让 cron 跑完 → `StopXray`；改动前先取消 context 再拿它去 `Shutdown`，在途请求不被排空，每次重启都记一条错误。访问日志库与用量库的句柄是 `atomic.Pointer`，同一路径重复初始化时复用已打开的句柄（每次 SIGHUP 新开一份、旧的不关会泄漏；关掉又会让还拿着它的调用报 database is closed）。handler 的 panic 写进面板日志（method、path、panic 值与堆栈，不记 header 与查询串）。
 
 ### 分层
 
@@ -87,6 +89,17 @@ go mod tidy && go vet ./...
 
 对 `OutboundConfigs` / `RouterConfig` 这类 `json_util.RawMessage` 字段则不必改 `Equals`——它们按字节比较，内容变化天然被察觉。代价是**生成必须逐字节确定**，否则 `Equals` 恒为 false，上面那个 10 秒 cron 会不停重启 xray。
 
+**进程与下发的几条硬约束（2026-11-09 全项目检查后补上）：**
+
+- **默认 freedom 出站（及计量副本）带私网守卫**（`freedom_guard.go`）：`settings.finalRules` 末尾追加 `{"action":"block","ip":["geoip:private"]}`，判的是**解析之后**的地址。模板里那条 `geoip:private` 只匹配 IP 目标，而 xray freedom 自带的私网拦截只管 vless / vmess / trojan / shadowsocks / hysteria / wireguard 入站——改动前 socks / http 用户连 `localhost:<api 端口>` 就能调通 xray 未鉴权的 gRPC 控制面（增删入站、改路由），也能摸到面板、内网与云厂商元数据地址。管理员在模板默认出站的 `finalRules` 开头写 `{"action":"allow"}` 即关闭（守卫追加在管理员规则之后）。需要 xray ≥ 26.7.x，更老的核心静默忽略；升级后首次下发必然整进程重启一次。dokodemo-door 入站走不带守卫的副本 `a-ui-default.dokodemo`（`model.DokodemoDirectOutboundTag`，保留 tag）：兜底规则排在管理员、地区、防滥用、封禁、分流规则之后、计量规则之前，代价是 dokodemo 不再计量。实测：dokodemo → `127.0.0.1` 本来就被模板的 `geoip:private` 拦着。
+- **端口被别的程序占着不能拖垮整个核心**：保存时（`checkInboundPortUsable`）拒绝与模板自带入站（`api`）、面板端口重叠，并对新的 listen:port 做一次绑定探测（TCP / UDP 按协议与传输判断；我们自己运行中的核心占着的不算；只有 EADDRINUSE 拒绝，其余绑定错误放行并记日志）。运行时（Caddy 后装上、别的程序抢了端口）由内存登记表把冲突的入站在 `GetXrayConfig` 的最后一步摘掉（`api` 入站除外），热应用里 `AddInbound` 报端口占用就登记跳过、不再退回一次注定失败的整进程重启，`CheckInboundJob` 每 30 秒复查，空出来自动恢复；入站列表显示「端口被占用」，侧栏红点计入。
+- **热应用删除 / 修改入站之后按旧端口断开已建立的连接**（`hotDiffKillPorts` + `OnlineService.KillPort`）：xray 的 `RemoveHandler` 只关监听，改动前停用（到期、超额、手动）或删除的入站，已经连着的会话照样转发、照样计量到一个已经没有的 tag 上。平台没有 netdiag（macOS 开发机、无 root 的 Linux）或断开失败时退回整进程重启——开发机上增删改入站都会走重启。只断 TCP，UDP 监听由 `RemoveHandler` 自己关。
+- **`bin/config.json` 原子写入（0600）且在 `p.Stop()` 之前写**：改动前先杀健康的核心、再 `os.WriteFile`（原地截断），磁盘满或只读时全员断网；文件里有 UUID、密码与 REALITY 私钥，原来是 0755。`Stop` 有界等待旧进程退出（5 秒）。重启前先拉一次流量（`drainTraffic`），主库累加失败时入站增量暂存、下一轮补写（只重试主库那一份，历史与计量不重试以免重复）。
+- **下发失败把重启标志放回去**（`applyPendingXrayChange`，同一错误 5 分钟只记一条 Error），`CheckInboundJob` 部分成功也置标志。改动前标志在下发之前就被消费掉，一次读库失败让到期停用一直不生效。
+- **「切换版本」先用新核心 `run -test` 当前配置，fail closed**（`xray_version_check.go`）：新核心不认当前配置（例如 26.x 拒绝 mKCP 的 header / seed）时拒绝切换，而不是切过去全员断网。
+- **模板里 `xray.Config` 不认识的顶层段只告警、不保留**（`xray/config_keys.go`）：保留的话，被忽略了多年的段会在升级后突然生效，一个坏段就能拖垮整个核心。
+- **xray 以 `TZ=UTC` 启动**，访问日志按 UTC 解析、比读取时刻还晚的时间钳到读取时刻（升级那一轮旧核心按本地时间写的行，在东半球会落到未来、顶走游标）。代价：首页的 xray 错误提示与管理员自己配的 error.log 时间是 UTC。
+
 ### 定时任务（`web/job/`，均注册在 `Server.startTask`）
 
 - `CheckXrayRunningJob`（30s）— 连续 2 次检测到未运行才置重启标志，避开重启窗口。
@@ -95,6 +108,7 @@ go mod tidy && go vet ./...
 - `TrafficResetJob`（1h）— 见「流量自动重置」一节。
 - `MeterPoolJob`（1h）— 重算计量池（每个入站当前正在被计量的 Top-K 注册域名），只在池真的变了时才置重启标志。刻意不做延迟首次触发：池已经在库里，面板重启后生成期照常读得到。**还没量到过字节的域名要进池试用，窗口内必须有至少 `meterMinTrialConns`（3）次「落到规则表末尾」的连接**（`AccessLogService.MeterableConnCounts`：`no_rule_hit` 或已走计量出站），并按这个次数折算权重——计量规则排在最后，被分流规则送走的域名连接数再多也量不到；线上实测改动前一天 366 次进池只有 4 次量到过字节，其余每小时空转、整表热下发一次路由。访问日志关闭时退回只看域名统计连接数的旧口径。
 - `AutoTravelJob`（1m）— 自动出差放行，见「地区限制的降级、出差通行证与自动出差放行」。
+- `AutoRegionJob`（10m）— 自动管理地区限制（首次设置、接管存量入站），同一节。
 - `RouteAuditJob`（30s）与 `RouteAnomalyJob`（1m）— 分流规则的后台审计与访问日志异常扫描，见「域名分流管理 → 流量走向验证」的后台审计一段。
 - `SubscriptionJob`（`@every 10m`）— 自检是否到了配置的订阅更新时刻（settings 表的 `subscriptionUpdateTime`，在分流管理页单独读写：`/aui/routing/subscription-time[/update]` → `SettingService.Get/SetSubscriptionUpdateTime`；**刻意不在 `entity.AllSetting` 里**，否则开着没刷新的设置页整份保存时会把分流页刚改的值写回旧值，`TestUpdateAllSettingLeavesSubscriptionUpdateTimeAlone` 守着），到点则拉取该刷新的域名组订阅，成功后置重启标志（`XrayService.SetToNeedRestart`），交给 `InboundController` 那个 10 秒 cron 消费。管理员改「订阅更新时间」或等它自然触发，都**最多 10 分钟内生效**，不需要重启面板。
 
@@ -105,6 +119,13 @@ go mod tidy && go vet ./...
 无打包工具。`web/assets/` 下是本地化的第三方库，模板通过 `{{ .base_path }}assets/...?{{ .cur_ver }}` 引用；`cur_ver` 取自 `config.GetVersion()`，**改了 `web/assets/js|css` 而版本号没变，浏览器会命中 `max-age=31536000` 的强缓存**。
 
 模板用 `[[ ]]` 作为 Vue 插值分隔符以避开 Go 模板的 `{{ }}`。`web/html/xui/form/` 下按协议 / 传输方式拆分为局部模板，新增协议需要同时改 `xray.js`（模型与分享链接生成）和对应 `form/protocol/*.html`。
+
+- **分享链接**：VLESS 与 Trojan 共用 `genShareParams`（TLS 域名作地址、`sni`/`alpn`/`fp`/`ech`、`type`/`security`、ws / grpc 参数、REALITY 的 `pbk`/`sid`/`spx`），TCP + http 伪装要带 `headerType=http`、`path` 与逗号连接的全部 Host；IPv6 主机加方括号（`util/link` 解析 SS 时去掉方括号，`unbracketHost`）。`util/link/inbound_link_roundtrip_test.go` 用生成器的原样输出做往返测试，改链接生成时一起改。
+- **mKCP**：内置核心（26.x）拒绝 `header` 与字符串 `seed`（哪怕是 `none` / 空串）。新建的 KCP 入站不再写这两项；已有入站带着它们时由 `deprecatedFeatures` 标出、禁止保存，KCP 表单里有一行「清除」。没有迁到 `finalmask`：客户端对 `fm=` 链接的支持未核实。
+- **Trojan + REALITY** 的 REALITY 字段不再被 `canEnableStream()` 包住（它排除了 Trojan，改动前选了 REALITY 却永远保存不了）。
+- **侧栏高亮的当前路径在 `<script>` 里输出**（html/template 按 JS 转义，去掉查询串），不再把 `request_uri` 直接塞进 Vue 表达式。
+- **状态页轮询**直接用 axios：一次故障只提示一次，会话过期提示一次后跳回登录页，页面在后台时不请求。
+- **改了 `web/assets/js` 之后发版必须升 `config/version`**：`xray.js` 等按 `cur_ver` 强缓存一年，不升的话浏览器拿新模板配旧脚本。
 
 **给人看的时间一律按面板时区，走 `DateUtil`（`web/assets/js/util/date-util.js`）。** `moment(ms)` 按浏览器所在机器的时区格式化，而用量曲线刻度、「今日」这类窗口、定时任务都按面板时区（`timeLocation`）算——管理员电脑的时区与面板不同时，同一页上表格与曲线会差出整数个小时，哪边都不标时区。面板时区由 `html()` 注入（`web/controller/util.go` 的 `panelTimeZone`，经 `GetTimeLocation` 与服务端同口径回落），在 `common/js.html` 里先于 `date-util.js` 定义；浏览器不认的值（`Local` 能过 `time.LoadLocation`，过不了 `Intl`）回落浏览器本地时区。日期选择器要交给它 `DateUtil.toPanelMoment` 生成的 moment、取值走 `DateUtil.fromPanelMoment`，**不能直接 `valueOf()`**；还必须 `:show-today="false"`——「此刻」按钮给出的是浏览器本地的 `moment()`，会被当成面板时区的钟面时间，一点就差出时区差。`web/panel_time_zone_test.go` 守着这三条。唯一刻意保留浏览器本地时间的是分流导出的文件名（`routing.html`，那是管理员自己电脑上的下载时刻）。
 
@@ -164,7 +185,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 `Cidrs`（手工 IP 段）与 `SubscribedCidrs`（订阅 IP 段）是**第二对物理隔离、各自单写入方**的列，规则与上面那对完全相同。三条不变量：
 
 - **`updateFieldsFor` 必须列出 `cidrs`**，否则编辑接口对这个字段静默无效——`Get` 与展示完全正常，极易漏测（就是下一段说的那个代价）。
-- **订阅地址一变，`subscribed_domains` 与 `subscribed_cidrs` 一起清空**、`last_updated_at` 一起归零。只清一半会让旧地址拉来的 IP 继续参与分流。
+- **订阅地址一变，合并结果当场按仍在列表里的地址重建**（`remergeListedSubscriptions`，与地址变更同一次写入；`last_updated_at` 取参与合并的行里最近一次成功的时刻，`last_error` 按这些行各自的错误重建），只有它们都没有内容时才整体清空。删掉的地址的结果行当场删除（`pruneUnlistedSubscriptions`，每次比较后写入成功之后也再清一次）。改动前删掉或调换一个地址就把整组清空、`last_updated_at` 归零，而剩下的地址今天都已拉过、`RefreshDue` 一个都不判为到期：这个组的封禁 / 分流规则悄悄失效到第二天凌晨。`RefreshDue` 也会给 `last_updated_at = 0`、没有地址到期的组做一次只合并不拉取的刷新，治好被旧 bug 清空的组。
+- **部分地址失败、部分成功时，新内容照样下发**：`refreshLockedURLs` 写入成功后返回 `*PartialRefreshError`（`IsPartialRefresh`），`RefreshDue` 计入更新数，`SubscriptionJob` 与「立即更新」都置重启标志。改动前库里已是新内容，xray 却一直用旧的，规则列表一律显示「等待下发」。
 - **一次成功的拉取必须把两列都写掉，哪怕其中一列是空。** 这一条与上面那条「失败时绝不清空」方向相反，两条必须同时立住：那条约束的是**失败**路径；成功路径上上游真的不再列 IP 了，还留着上周的 IP 就是拿过期数据分流，比 IP 条件消失更危险，而且不会有任何一层报错。回归测试 `TestRefreshClearsSubscribedCidrsWhenUpstreamDropsThem`。
 
 `MergeDomains`（`web/service/routing_domain.go`）名字里只有 domain，实际两类值共用它——它就是个有序去重，与值的语义无关，别再照着名字复制一份 `MergeCidrs`。
@@ -190,6 +212,8 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 - **不含点也不含冒号的裸串归一成 `keyword:`。** 意图唯一（对应 Surge/Clash 的 `DOMAIN-KEYWORD`），显式存库让列表里的标签自己说清楚它在做什么，也让手工与订阅两条路径的存储形态一致。
 - **只对 `domain:` / `full:` / `keyword:` 的值转小写，绝不碰 `regexp:` / `dotless:`。** xray 只把目标域名转小写，不归一化配置里的模式（`app/router/condition.go:59`），所以 `domain:OpenAI.com` 是一条永不命中的哑规则且没有任何一层报错；而对正则转小写会把 `\D` 变成 `\d`——意义完全相反。`geosite:` / `ext:*` 的 code 由 xray 自己 `ToUpper`，同样不该在这里动。
 - **含点的裸串直接拒绝。** 同一段文本两种含义：在 routing 规则里裸串是**子串**匹配（`infra/conf/router.go` 传的 `defaultType` 是 `Domain_Substr`），在 geosite 数据文件里是**后缀**匹配。放行等于让从 geosite 列表复制来的 `openai.com` 静默变成能命中 `notopenai.com.evil.net` 的规则。报错里点名三种写法，补个前缀即可。
+
+**含非 ASCII 的域名逐个标签转成 punycode**（`domainToASCII`，只转含非 ASCII 字符的标签——`idna.Lookup` 会拒绝 `_`），手工的 `domain:` / `full:` 与订阅都走这一步；非 ASCII 的 `keyword:` / `regexp:` / `dotless:` 与裸关键词直接拒绝（订阅里的跳过并计数）。xray 建匹配器时不做 IDN 转换，真实流量里的 SNI 是 punycode，改动前 `domain:中文.com` 永远不命中，验证却显示通过。升级前存下的手工非 ASCII 条目要等该组下次保存才转换（订阅组下次拉取时转换），在那之前验证如实显示「不符」。
 
 订阅解析现在把 `DOMAIN-KEYWORD` 存成同样的显式 `keyword:` 形态，`MergeDomains` 才能把手工与订阅的同一个关键词去重掉。**代价是升级后第一次订阅刷新会重写每一个订阅组**——那次刷新必然改动配置字节，换来一次整进程重启。一次性的，但要知道它会发生。
 
@@ -229,7 +253,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
    - **`InboundIds` 为空数组的全局规则一个字节都不动。** 它不指向任何具体入站，往里摘只会让它从「覆盖所有人」降级成「覆盖剩下这些人」，其余用户当场失去它而没有任何一层报错。
    - **摘完为空时必须整条删除规则，绝不能把 `[]` 写回去。** `[]` 的语义是「对所有入站生效」，一条本来只管这一个人的规则会当场放大到全体，而 xray 返回 `Configuration OK`、面板显示 `running`。这是本子系统「照抄隔壁实现就会开洞」的同一处陷阱。
-   - **规则数据损坏时拒绝删除。** 无从判断这条规则引用了谁，放行的话 id 一复用它就绑到下一个新建的入站上。`DelInbound` 因此在动手清理访问日志/用量历史/封禁**之前**先跑一次 `PlanInboundDetach` 快速失败，否则会留下「那些都删了、入站却还在」的半成品。
+   - **规则数据损坏时拒绝删除。** 无从判断这条规则引用了谁，放行的话 id 一复用它就绑到下一个新建的入站上。`DelInbound` 因此在事务之前先跑一次 `PlanInboundDetach` 快速失败。规则引用、封禁、出差通行证、自动设置状态、暴涨限速单与入站本身在**同一个事务**里删；其他库（访问日志、用量历史、域名统计、计量池、按来源用量、风险快照）在事务**提交之后**再清（失败只告警，新建入站时 `clearInboundLeftovers` 与每小时的 `PruneOrphans` 兜底）——先清的话事务失败时入站还在、历史与封禁却没了，被封的 IP 直接又能连上（`TestDelInboundKeepsBansWhenTheDeleteFails`）。
 
    判定读出全部规则逐条解码，不能用 `WHERE inbound_id = ?` 交给 SQL 去数。删除前的预检接口 `POST /aui/inbound/delPreview/:id` 与真正执行**共用 `planInboundDetach` 这一次判定**：分成两份实现迟早漂移，而漂移之后确认框告诉管理员的和实际做的不是一回事，没有任何一层会报错。
 
@@ -256,7 +280,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 ### 域名分流依赖 sniffing
 
-路由要靠 xray 嗅探拿到 SNI/Host。入站若关掉 sniffing 或 `destOverride` 不含 `http`/`tls`，**域名规则永远不会命中且无任何报错**。新建入站默认 `enabled=true, destOverride=['http','tls']`（`web/assets/js/model/xray.js` 的 `Sniffing` 类），页面的规则列表会对不满足的入站打黄色警告图标。
+路由要靠 xray 嗅探拿到 SNI/Host。入站若关掉 sniffing 或 `destOverride` 不含 `http`/`tls`，**域名规则永远不会命中且无任何报错**。新建入站默认 `enabled=true, destOverride=['http','tls','quic']`（`web/assets/js/model/xray.js` 的 `Sniffing` 类；「补全流量识别」开着时生成配置也会给缺 `quic` 的入站补上，见「防共享 / 防滥用」），页面的规则列表会对不满足的入站打黄色警告图标。
 
 **socks / http 代理入站是例外，不报警告也不计入「未生效规则」**（`routing.html` 的 `ruleIssue` 排除它们，改走 `ruleNote` 给一条前提说明、状态仍是绿色）：客户端把域名交给代理（socks5h、HTTP 代理的 CONNECT）时，xray 不嗅探也拿得到域名，规则照常命中——在生产机上实测过，socks5h 命中、socks5（客户端先自行解析成 IP）不命中。对它们报「永远不会命中」是误报，会让管理员去改一条好好的规则。入站表单也给这两种协议露出了 sniffing 开关（`xray.js` 的 `canSniffing`），打开后客户端先解析成 IP 的情况也能靠嗅探认回域名；核心接受代理类入站上的 sniffing，`TestAddInboundAcceptsSniffingOnProxyInbounds` 守着。
 
@@ -274,7 +298,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 出站配置与域名列表在**落库之前**交给真实 xray 校验，因此不需要事务回滚。出站的两个入口都接了：`OutboundNodeService.persist`（新建）与 `Update`（编辑）——**只堵一条等于没堵**，用户可以先建合法节点再编辑成坏的；域名组的新建与编辑共用 `encodeDomainsFromForm` 这一个收口。
 
-**入站也走同一套校验**（`ValidateInboundReplacing`，接在 `InboundService.AddInbound` / `UpdateInbound`）。起因是一次真实事故：管理员在入站表单里开了 TLS 却没填证书路径，保存时一切正常，直到某次重启才发现——**xray 加载配置是全有或全无的**，这一个入站让整份 `bin/config.json` 加载失败，机器上所有用户一起断网，而面板首页只显示一个 `error`，看不出是哪个入站的问题。编辑时要传**旧** tag（改端口 tag 会变），否则候选对象会和库里那份自己撞名而被误拒；停用的入站同样校验，否则问题只是被推迟到它被启用的那一刻。
+**入站也走同一套校验**（`ValidateInboundReplacing`，接在 `InboundService.AddInbound` / `UpdateInbound`）。起因是一次真实事故：管理员在入站表单里开了 TLS 却没填证书路径，保存时一切正常，直到某次重启才发现——**xray 加载配置是全有或全无的**，这一个入站让整份 `bin/config.json` 加载失败，机器上所有用户一起断网，而面板首页只显示一个 `error`，看不出是哪个入站的问题。编辑时要传**旧** tag（改端口 tag 会变），否则候选对象会和库里那份自己撞名而被误拒；停用的入站同样校验，否则问题只是被推迟到它被启用的那一刻。**不经编辑表单的重新启用同样要校验**（`checkRevivable`：列表开关 `SetInboundEnable`、重置流量拉回、续期拉回在写入前拒绝；无人值守的周期重置 `ResetDueTraffic` 只清零、不拉回并告警）——停用期间核心可能升级过（26.x 拒绝 mKCP 的 header / seed），不校验就拉回等于让核心按一份它拒绝的配置整进程重启。
 
 策略是 **fail open**：只有 xray 明确判定配置非法才拒绝；二进制缺失、老版本不认 `run -test` 参数、执行超时，一律放行并记日志。校验是辅助手段，不能因它自身故障就把用户锁在门外。
 
@@ -282,7 +306,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 
 编辑出站走 `ValidateOutboundReplacing(ob, old.Tag)`，它会先把完整配置里那份旧的同 tag 出站摘掉，否则候选对象会和它自己撞名而被误拒；但**保留 tag 绝不摘**，否则一个 tag 为 `a-ui-block` 的脏数据节点会「校验通过」。
 
-fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二进制缺失/老版本/超时）、取不到完整配置时退回最小配置校验、以及**改动之前配置就已经不合法时放行**——那不是本次改动的错，拒绝会把管理员锁在门外，连修复用的操作都做不了。
+fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二进制缺失/起不来/老版本/超时——「起不来」（权限、架构不对）曾被当成「校验未通过」报一句空原因、拦下所有保存，`TestRunXrayTestFailsOpenWhenBinaryCannotStart`）、取不到完整配置时退回最小配置校验、以及**改动之前配置就已经不合法时放行**——那不是本次改动的错，拒绝会把管理员锁在门外，连修复用的操作都做不了。
 
 ### 配置导出 / 导入
 
@@ -318,6 +342,10 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 「流量走向」图上的绿/灰/红由 `POST /aui/routing/rule/verify/:id` 给出，服务是 `RoutingVerifyService.Verify`，设计文档在 `docs/superpowers/specs/2026-11-01-routing-flow-verification-design.md`。**验证严格只读**：只调 `XrayAPI.TestRoute`（`xray/api.go`，`PublishResult=false`，端口/网络固定 TCP/443），不重启、不写配置、不写库。
 
+- **IP 样例避开 `geoip:private`**（`publicSampleIP`，判据是 xray 自己的 `geodata.GetPrivateIPMatcher()`）：模板里那条私有地址封禁排在最前，`0.0.0.0/0` 取 `0.0.0.1`、`10.0.0.0/8` 取 `10.0.0.1` 的话，核心答「被拦」，好好的规则被判「不符」。整段都是私有地址时不取样，判 `unverifiable`（`reasonPrivateOnly`）。注意 RFC 5737 的文档地址也在 `geoip:private` 里，测试不能拿它们当「公网」样例。
+- **删除或新建规则时当场清掉这个 id 的异常与审计状态**（`forgetRuleAuditState`，在 `RoutingRuleService.Add` / `Del` 里调，并推进 `anomalyCursorEpoch` 让进行中的扫描丢掉这一批、下一轮重读）：SQLite 复用 id，改动前新规则会继承被删规则的异常计数与「不符」。
+- **出站探测的结果只在节点的 tag 与配置都没变时才缓存**（`Probe` 收尾时在 `probeMu` 下重读节点；`SetExitCountry` 比较后写入 `config`），`OutboundNodeService.Update` 先保存再 `Forget`：改动前编辑节点时还在跑的探测会把旧配置测出的绿灯和出口国家写回来。
+
 - **`ErrNoClue` = 没有规则命中 → 走默认出站。** 错误经 gRPC 跨进程后只剩 status 消息文本，`errors.Is` 已认不出 sentinel，`isNoClueErr` 比对消息文本是唯一可行的识别方式；`TestRoute` 此时返回 `noMatch=true` 而非 error。
 - **访问日志里「某条连接是否属于本规则」必须复用 xray 自己的匹配器**：域名走 `geodata.ParseDomainRules(…, Domain_Substr)` + `router.NewDomainMatcher`，IP 走 `geodata.ParseIPRules` + `router.NewIPMatcher`（`newGroupMatcher`）。**不许手写匹配**——面板与核心的语义一旦漂移，界面会在错误结论上亮绿灯。
 - **访问日志永远不能单独让用户变成 `verified`**，只能把结论推向 `mismatch` 或给 `verified` 补一个计数（`combineVerdict`）。日志读取失败（开关读不出、匹配器建不出、某用户查询失败）走 `AccessLogState.Error` / `LogEvidence.Error`，与「没有数据」区分开。
@@ -343,11 +371,20 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 ### 入站「需要留意」摘要（`web/service/inbound_attention.go`）
 
-`POST /aui/inbound/attention/summary` 只读，给出：停用入站的原因（`expired` / `traffic` / `manual`，到期优先，与 `DisableInvalidInbounds`、`ResetDueTraffic` 同口径）与超额停用的自动恢复时刻（下一个重置时刻，那之前就到期的为 0）；启用入站是否 7 天内到期；配了地区限制的启用入站近 24 小时被地区规则拦下的连接（复用 `geoBlockMatcher`，允许集内来源进黑洞不算；每个来源带多数票省份与 `coexist`/`travel` 标注）；地区规则降级状态 `geoDegraded`、活动通行证 `regionPass`、自动出差放行最近一次非空闲判定 `autoTravel`。前端 `web/assets/js/util/inbound-attention.js` 是给四个带侧栏页面共用的 mixin（5 分钟一轮、页面隐藏时暂停），侧栏「入站列表」的提醒点 = 7 天内到期或地区拦截的启用入站数；入站列表的「到期与风险」卡从「中」风险起算，并计入地区拦截。
+`POST /aui/inbound/attention/summary` 只读，给出：停用入站的原因（`expired` / `traffic` / `manual`，到期优先，与 `DisableInvalidInbounds`、`ResetDueTraffic` 同口径）与超额停用的自动恢复时刻（下一个重置时刻，那之前就到期的为 0）；启用入站是否 7 天内到期；配了地区限制的启用入站近 24 小时被地区规则拦下的连接（复用 `geoBlockMatcher`，允许集内来源进黑洞不算；每个来源带多数票省份与 `coexist`/`travel` 标注）；地区规则降级状态 `geoDegraded`、活动通行证 `regionPass`、自动出差放行最近一次非空闲判定 `autoTravel`、7 天内的自动设置 `autoRegion`（首次设置或长住改地区，带原来的地区 `prevRegions`；没有「待确认」）、生效中的暴涨限速 `throttle` 与端口冲突 `portConflict`。**地区拦截、自动设置、通行证这三部分是附属的**：某一块读不出（访问日志关闭、库出错）只缺那一块并记日志，读不出入站列表或时区才整体返回 error——曾经任何一块出错都让整个摘要失败，侧栏和列表上的提醒一起消失（`TestInboundAttentionDegradesWhenOptionalPartsFail`）。前端 `web/assets/js/util/inbound-attention.js` 是给四个带侧栏页面共用的 mixin（5 分钟一轮、页面隐藏时暂停），侧栏「入站列表」的提醒点 = 7 天内到期、地区拦截、地区规则降级或端口被占用的启用入站数（口径在 `alertCount`，`common_sider.html` 的文字不逐项列举，免得加了新原因又过时）；入站列表的「到期与风险」卡从「中」风险起算，并计入地区拦截、降级与端口被占用（`dueSummary`，与提醒点同口径：管理员顺着红点进来，卡片上要对得上数）。暴涨限速是系统已经自动处理的状态，两处都不算。
 
 ### 访问日志采集进度（`web/service/accesslog.go` 的 `Collect`）
 
 读取 `bin/access.log` 的偏移持久化在**访问日志库**的 `AccessLogCursor`（单行，带文件首行作为身份），与本批日志**同一个事务**提交，提交成功才推进 `Tailer`（`Peek` → `storeWithCursor` → `Commit`）。修复前偏移只在内存：面板每次重启（`a-ui.sh` 的 geo 定时更新每两天 04:00 `systemctl restart`）都把整份文件从 0 重导一遍，线上积了十几万重复行；且先推进再写库，`database is locked` 时那一批直接丢失。重启时首行对不上或文件比偏移短就从 0 读（宁可重复不丢）；进程内首次恢复失败则这一轮不读、下一轮重试。控制面入站（`xray.APIInboundTag`）的记录是面板自己的 gRPC 轮询，采集时直接丢弃。
+
+### 访问日志采集的两道上限与解析（2026-11-09）
+
+- **两道上限**：追平（读完所有完整行）之后才按 16 MB 常规截断；任何出口（含磁盘将满、库写失败、恢复进度失败）超过 64 MB 兜底截断并告警。落后时一次调用最多连读 16 轮。磁盘将满时读过即弃再截断。改动前这些失败路径都跳过截断，`bin/access.log` 能一直长到磁盘写满，连主库的流量累加也一起失败；而截断又不看有没有读完，积压的行被成批丢掉。
+- `ReadAfter` 用 `time >= ? AND (time > ? OR id > ?)`（绑定参数下 `OR` 的写法会让索引失效）；新增 `idx_access_logs_inbound_time (inbound_id, time)`，单列 `inbound_id` 索引保留给分页。
+- 解析：`rejected` 行（目标为空、没有 detour）一律丢弃；方括号必须紧跟在目标后面（原因里带方括号的 IPv6 地址曾被当成入站名）；http 代理入站的目标归一成 `host:port`（默认端口与核心一致），`Network` 留空。
+- **共享检测的小时行**：每小时第一次采样先读一次库里本小时已有的行打底（也占 50 行名额），写库成功 ack 之后才算落库，收尾写入保留一小时、每轮重发。改动前面板进程重启后同一小时的行被重启后的累计值覆盖（上午 59 分钟的用量只剩 30 秒），写库失败的那一轮再也不会重写。
+- **域名统计**每桶每类（域名 / IP 字面量）最多 200（小时桶）/ 500（日桶）个目标，已有的照常累加，超出部分并进 `domain = ""` 那一行（榜单不列、计量池不选）。不把 IP 折成网段：下钻按子串查访问日志、IP 计量规则按精确 IP，折了都会坏。
+- **IP 库源地址留空 = 不加载**（`Load` / `setDB` 守卫；`Enabled == nil` 只给测试替身用），设置保存时当场卸下或从磁盘装回，由 controller 置重启标志。改动前界面显示「未启用」的源照样参与地区允许集与多数票。`DB()` 刻意不读设置（每查一个 IP 都要走它）。
 
 ### `util/link` 包
 
@@ -361,14 +398,16 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 - `DisabledByTraffic` — 标记「这次停用是因超流量」，写入方只有 `DisableInvalidInbounds`（置 true）、`UpdateInbound`/`RenewInbound`/一次成功的重新启用（置 false）。`UpdateInbound` **只在启用状态被改动或保存后为启用时**才清它：只改备注、限速等其他字段时保留（修复前任何编辑都清掉它，入站悄悄失去下个周期自动恢复的资格）；要让超额停用的入站保持停用，先启用再停用一次。列表上的停用原因与自动恢复日期由只读接口 `POST /aui/inbound/attention/summary`（`InboundAttentionService`）给出，标记本身仍不下发、不可提交。
 - `LastResetAt` — 上一次清零对应的**周期时刻**，不是执行时刻。
 
-后两列 `json` 与 `form` 标签都是 `"-"`：**它们是服务端状态，既不下发给前端也不接受前端提交**。让浏览器能改 `DisabledByTraffic`，一个被管理员手动停用的入站就能被伪造成「因超流量停用」、下个周期自己活过来；能改 `LastResetAt`，把它置 0 就能让下一轮任务立刻清一次流量、绕过流量配额。两条绑定路径各有一条回归测试（`web/controller/inbound_traffic_reset_test.go`）。注意 `web/inbound_model_test.go` 的既有不变量要求 `model.Inbound` 的每个 json 字段在 `models.js` 的 `DBInbound` 里有同名属性——标成 `json:"-"` 正是让它跳过这两列的方式，**不要为了让那条测试通过而把它们加进前端模型**。
+后两列 `json` 与 `form` 标签都是 `"-"`：**它们是服务端状态，既不下发给前端也不接受前端提交**。让浏览器能改 `DisabledByTraffic`，一个被管理员手动停用的入站就能被伪造成「因超流量停用」、下个周期自己活过来；能改 `LastResetAt`，把它置 0 就能让下一轮任务立刻清一次流量、绕过流量配额。两条绑定路径各有一条回归测试（`web/controller/inbound_traffic_reset_test.go`）。
+
+**编辑表单从不写 `up`/`down`，`enable` 与 `autoTravel` 按页面打开时的值三方合并**（`InboundEditBase` / `UpdateInboundFrom`）。入站列表只在打开页面和自己操作之后刷新，而流量任务每 10 秒在累加用量、到期 / 超流量任务改 `enable`、总开关接管改 `autoTravel`：整行写回会把用量倒回去（超额被停的人被放回来、周期重置后又被旧用量停掉）、把接管悄悄撤销。前端在打开编辑框时记下 `enableBase` / `autoTravelBase` 一并提交，服务端只在提交值与它不同（管理员确实改了）时写入，否则保留库里此刻的值；没带 base 的请求（升级前打开的页面）按请求值写。列表上的启用开关走 `POST /aui/inbound/enable/:id`（只改 `enable`），「重置流量」走 `POST /aui/inbound/resetTraffic/:id`（只清用量；只因超流量停用、还没到期的随之拉回，与周期重置同口径，不碰 `LastResetAt`）。注意 `web/inbound_model_test.go` 的既有不变量要求 `model.Inbound` 的每个 json 字段在 `models.js` 的 `DBInbound` 里有同名属性——标成 `json:"-"` 正是让它跳过这两列的方式，**不要为了让那条测试通过而把它们加进前端模型**。
 
 四条不变量：
 
 - **判定用「上次重置时刻 vs 本周期重置时刻」，不是「今天是不是重置日」。** 任务每小时跑一次，重置日当天不会重复清零；面板停机几天后重启，第一次跑会把漏掉的那一次补上。
 - **订阅日在运行时从 `ExpiryTime` 推导，不存快照**（`resetDayFor`）。按 30 天续期会让到期日往后漂，存了快照的话重置日不会跟着变，而「订阅周期」这个名字要求它跟着变。代价是重置日与到期日绑定，分不开。
 - **日号超过当月天数时取当月最后一天**（`monthlyInstant`）。31 号订阅的用户在二月，`time.Date` 会把 2 月 31 日归一成 3 月 3 日，重置时刻悄悄跑到下个月，表征只是「某几个月不清零」，没有任何一层会报错。同理回退一个月**不能用 `AddDate(0,-1,0)`**：它作用在已经钳制过的 4 月 30 日上会回到 3 月 30 日，而正确答案是 3 月 31 日（`previousMonth` 显式回退）。
-- **切换模式时把 `LastResetAt` 顶到当前**（`UpdateInbound`）。否则从「按订阅周期(28 号)」改到「每月 1 号」会立刻触发一次计划外的清零：上次重置停在 8/28，而 9/1 这个新周期点已经过去。模式没变则不顶，否则每编辑一次入站就把周期往后推一次，重置永远轮不到。
+- **切换模式时把 `LastResetAt` 顶到当前**（`UpdateInbound`）。否则从「按订阅周期(28 号)」改到「每月 1 号」会立刻触发一次计划外的清零：上次重置停在 8/28，而 9/1 这个新周期点已经过去。模式没变则不顶，否则每编辑一次入站就把周期往后推一次，重置永远轮不到。日程的其他变化同样不能凭空造出一次清零（`raisedResetFloor`）：订阅周期的日号随到期时间变了（编辑、续期）、面板时区换了（`UpdateAllSetting` → `RaiseResetFloorsForTimeZone`）时，只要旧日程下本周期已经清过，就把 `LastResetAt` 顶到新日程的本周期时刻；日程没变、或旧日程下本周期的重置已经到期还没跑（每小时一轮，月初那一小时里）时不顶——那次是该清的（`TestEditWithoutScheduleChangeKeepsDueReset`）。
 
 「按订阅周期」+ 无到期时间是非法组合，`checkTrafficResetMode` 在 `AddInbound`/`UpdateInbound` 两处都拒绝——存下来静默地永不生效比报错难查得多。前端会在到期时间为空时禁掉那个选项并给出提示，但**那不是防线**，请求可以直接构造。执行期还有第二道：`resetDayFor` 返回 `false` 时整条跳过并记 `logger.Warning`，挡住直接改库或将来某条新写入路径留下的脏数据。
 
@@ -467,13 +506,36 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 设计见 `docs/superpowers/specs/2026-11-09-region-flexibility-auto-travel-design.md`。只记代码里看不出来的约束：
 
-- **地区规则从不让整份配置失败**（`web/service/geo_degrade.go`）。改动前任一入站的地区出问题（省名对不上、IP 库未加载、写 dat 失败）都让 `GetXrayConfig` 报错，而 10 秒 cron 已先消费了重启标志——整机的到期停用、增删入站全卡住，冷启动时全部入站起不来。现在按入站降级：沿用该 tag 上次成功的允许集（`stale`，冷启动时从现有 `bin/a-ui-geo.dat` 用 `geodat.Decode` 做种子），没有就只锁死这一个入站（`closed`，规则 `a-ui-geo-closed-<id>`，source `0.0.0.0/0`+`::/0`，不引用 dat）。降级状态经「需要留意」的 `geoDegraded` 下发。`buildGeoPlan`（返回 error 的那个）只是给旧测试的严格包装，生成配置走 `buildGeoPlanWith`。
-- **IP 库更新后置重启标志**（`IPDBUpdateJob` 与 `updateIPDB`，`updated > 0` 时）：允许集按库现算，不置标志的话核心一直用旧允许集。
+- **地区规则从不让整份配置失败**（`web/service/geo_degrade.go`）。改动前任一入站的地区出问题（省名对不上、IP 库未加载、写 dat 失败）都让 `GetXrayConfig` 报错，而 10 秒 cron 已先消费了重启标志——整机的到期停用、增删入站全卡住，冷启动时全部入站起不来。现在按入站降级：沿用该 tag 上次成功的允许集（`stale`，冷启动时从现有 `bin/a-ui-geo.dat` 用 `geodat.Decode` 做种子），没有就只锁死这一个入站（`closed`，规则 `a-ui-geo-closed-<id>`，source `0.0.0.0/0`+`::/0`，不引用 dat）。多省的允许集还要逐省对照 IP 库的省份列表（`provinceLister`）：缺了某个省时整组的 `CIDRsOfProvinces` 仍非空，只看是否为空会让放行范围悄悄缩小——有旧允许集就沿用（`stale`），没有就放行剩下的省（`partial`）。**残缺的允许集不能记成 last-known-good**（`plan.Complete`；dat 里它的代码用 `P` 标记，冷启动做种子时跳过），否则下一轮会把它当成「上一次的允许集」沿用。dat 先写同目录的临时文件再改名（`writeFileAtomic`），读也拿 `geoDatLock`：`os.WriteFile` 先截断原文件，磁盘满时留下半截的 dat，降级逻辑解不开它，所有地区入站一起锁死。`buildGeoPlan`（返回 error 的那个）只是给旧测试的严格包装，生成配置走 `buildGeoPlanWith`。**写 dat 失败时的降级原因是固定文字**（`geoWriteFailureReason`：磁盘空间不足 / 没有写入权限 / 见面板日志），原始错误只进日志、同一原因 10 分钟一条：原因进生成指纹，`writeFileAtomic` 的错误里又带着随机的临时文件名，原样带着的话同一个写入故障每一轮都像一次新的生成，每 10 秒置一次重启标志、重算整份配置。
+- **降级状态只认核心真的用上的那份配置。** 生成配置的不只是下发：保存时的校验、页面轮询的「待生效」判断、流量走向验证都会生成一份。`Inject` 把每次生成的地区结果（降级状态 + 每个入站的 dat 代码）按配置对象记下（`rememberGeoGeneration`；按 `weak.Pointer` 认配置，不让最近 8 份完整配置一直留在内存里），只有 `RestartXray` 的热应用成功、进程启动、**以及配置与运行中一致的空操作分支**才提交为已生效（`commitGeoApplied`；漏了空操作分支的话，字节相同、只有降级状态不同的生成每一轮都会再置一次重启标志）。`GeoDegradedInbounds()` 返回已生效的；生成结果与已生效的不同时置一次重启标志（同一份结果不重复置），原因消失后（IP 库加载好了、磁盘腾出来了）靠它把恢复后的配置下发下去——改动前生成即改写降级状态，界面上标记没了，核心却还锁着这个入站。`geoBlockMatcher` 按已生效的状态判断：锁死的入站所有来源都算被拦（改动前它建不出匹配器，这些连接全被算成「走错了出站」）；核心还没用上过某个入站的地区规则时退回按 dat 里同一组省份的条目。
+- **dat 代码按内容寻址**（`geoDatCode` = `regionTag` + `C` + 内容哈希）。xray 的 IP 集合按「文件:代码」缓存（`common/geodata/ip_matcher.go` 的 `IPSetFactory`），热应用时新规则在旧规则还被引用时建出来、命中缓存，IP 库更新后核心一直按旧段放行；代码随内容变化，缓存天然失效（`TestXrayIPSetCacheCannotServeStaleContent` 在面板进程里用 xray 的匹配器复现并验证）。ruleTag 因此不再嵌 dat 哈希（`a-ui-geo-<id>`），dat 里其它条目的增减不会让配置字节跟着变。写 dat 时保留正在运行的配置与最近 3 次写入引用的旧代码（`writeGeoDatRetaining`，读、合并、写在同一把锁里）：进程重启与校验读的都是这一个文件，一次页面轮询生成的新内容不能把另一份还没启动的配置引用的代码挤掉。写失败时：旧文件里正好是这份内容（同一代码）的入站不受影响，只有同一组省份旧内容的改用旧代码并标 `stale`，都没有的锁死。
+- **IP 库更新后置重启标志**（`IPDBUpdateJob` 与 `updateIPDB`，`updated > 0` 时）：允许集按库现算，不置标志的话核心一直用旧允许集。**哪怕别的源失败了也要置**（`afterIPDBUpdate`、`updateIPDB` 先置标志再报错）：前面的源已经换上新库。
 - **保存时校验省名**（`checkRegionsUsable`）：只在地区集合真的变了时才查，存量入站改个备注不会被卡住。
 - **通行证单独建表**（`model.InboundRegionPass`，主库），不在 Inbound 上：编辑表单整行写回会把它清零或复活。生成期只看 `ended_at = 0`，**不读时间**；到期由 `CheckInboundJob` 调 `ExpireDue` 改库后置重启标志。有效地区 = 存储的 `Regions` ∪ 活动通行证（`effectiveRegions`），`["*"]` 表示暂停地区规则；`model.GenXrayInboundConfig` 的 listen 逻辑只看存储的 `Regions`。删除入站时在 `DelInbound` 的事务里连带删除（SQLite 复用 id）。
-- **自动出差放行**（`AutoTravelJob`，1m；`Inbound.AutoTravel` 按入站开启）：判定是纯函数 `decideAutoTravel`，只**放宽**、永远有到期，绝不自动收紧或封禁（那是被否决过的 TOFU）。它与错峰共享数据同形，只靠频率上限压制：家里静默（小时行 ≥1MB 或在线表活跃都算在用）、近 7 天有家的天数、风险等级非 high/severe、每周次数、每月天数、并存结束或**管理员手动收回自动通行证**后的冷却（不冷却的话下一分钟会原样发回去，本地实测踩到过）。这六个阈值是设置项 `autoTravel*`（默认 2 小时 / 3 天 / 72 小时 / 10 天 / 3 次 / 7 天，「面板设置 → 连接限制」），由 `SettingService.GetAutoTravelParams` 读取，单项读不出或越界时回落默认值；`entity.CheckValid` 守着取值范围。被拦来源取自访问日志 `a-ui-block` 行——带路由结果说明已过协议鉴权，扫描器进不来；所以访问日志关闭时无法自动放行。候选省份按多数票取，再用执行同口径的 CIDR 集合（`cidrSet`/`allowedSetFor`）验证。
+- **自动出差放行**（`AutoTravelJob`，1m；`Inbound.AutoTravel` 按入站开启）：判定是纯函数 `decideAutoTravel`，只**放宽**、永远有到期，绝不自动收紧或封禁（那是被否决过的 TOFU）。它与错峰共享数据同形，只靠频率上限压制：家里静默（小时行 ≥1MB 或在线表活跃都算在用）、近 7 天有家的天数、风险等级非 high/severe、每周次数、每月天数、并存结束或**管理员手动收回自动通行证**后的冷却（不冷却的话下一分钟会原样发回去，本地实测踩到过）。这六个阈值与长住改地区天数是设置项 `autoTravel*`（默认 2 小时 / 3 天 / 72 小时 / 10 天 / 3 次 / 7 天，长住 5 天，「面板设置 → 连接限制」），由 `SettingService.GetAutoTravelParams` 读取，单项读不出或越界时回落默认值；`entity.CheckValid` 守着取值范围。被拦来源取自访问日志 `a-ui-block` 行——带路由结果说明已过协议鉴权，扫描器进不来；所以访问日志关闭时无法自动放行。候选省份按多数票取，再用执行同口径的 CIDR 集合（`cidrSet`/`allowedSetFor`）验证。 后来补上的几条：
+  - **「家里在用 / 外地在用」只认真的在用**（`liveSignals`）：本次在线已传过 ≥1 MB、且最近 `autoTravelLiveIdle`（2 分钟）内有流量。在线表对第一次见到的 IP 一律记为活跃，一条几百字节的探测连接落在家里的省就能收回出差中的人的通行证，落在两边还会暂停一周；窗口固定、不跟并发限制的闲置超时走（那个可以设成 0，一台常连的电视盒子就会永远算「家里在用」）。
+  - **每张通行证的时长不超过本月剩余额度**（`passDurationLeft`，发放与续期都是）：改动前「低于上限就再给一整张」，单张时长设成 30 天时一张就是一整个月。续期窗口不超过通行证时长的一半，短于一天的通行证不会每分钟续一次。
+  - **管理员收回任何通行证（不只是自动的）都触发冷却**；读不出共享风险时不发放、不续期，风险升到 high/severe 后不再续期。
+  - 关掉入站的自动出差放行时结束它的自动通行证（`auto_off`），在编辑里清空地区时结束所有通行证（`cleared`，撤销自动设置也是），都在 `UpdateInbound` / `Undo` 的事务里——留着的话以后再设地区它会接着放行。`RevokePass` / `Renew` 同时按通行证与入站 id 匹配（SQLite 复用 id），`Renew` 如实返回是否续上；`grant` 在事务里再确认入站还在、还有地区。
+  - 被拦来源的省份用 `enforceableProvince` 校验：多数票的省份在按多数判据合并时不一定包含这个 IP，那时一键或自动发的通行证放行不了它，宁可标成未知。
+  - **防共享门槛**（冷却天数为 0 时一起关闭）：共享风险评分对错峰最多给到「中」（`riskNoCoexistCeiling`），挡不住发放，所以发放前再看只有「两个人」才会留下的痕迹——冷却窗口内这个省的来源在家里有实质使用的同一小时或前一小时被拦过（`SuspectProvinces`，与「需要留意」的「疑似共享」同一判据，只在即将发放时按 IP×小时查访问日志）；这个省有 ≥2 张自动通行证发出不到 24 小时就因「家里恢复使用」收回（30 天内 ≥3 张则停 30 天）；30 天内第二次因同时在用而收回则整个入站停 30 天（自动到期，不需要管理员重新打开）。代价：手机流量显示家里省、笔记本连外地 Wi-Fi 的出差，以及一周两次当天往返同一个邻省的人，会在冷却期内拿不到这个省的自动通行证。通行证历史因此查 65 天。
+  - **无认证的入站不自动放行、不自动改地区**（`inboundRequiresAuth`：socks noauth、http 没有账号、dokodemo-door、shadowsocks 的 none/plain）：扫描器的连接在访问日志里同样是「已接受」，通行证会给扫描器所在的省开一个公开代理；上面已有的自动通行证收回（`auto_off`）。自动设置地区时也不替它们打开自动出差放行。
+  - **核心对这个入站的地区规则是锁死的（IP 库不可用）时不发放**（`GeoClosed`）：通行证放不进任何人，只白占次数与天数；锁死时家里的来源也会出现在「被拦」里，候选一律去掉存储地区里的来源（`dropStoredCandidates`）。
+  - **观测中断时不发放、不续期、不改地区**（`observationFresh`：`SharingService.Sample` 最近一次真的采到并写进库超过 3 分钟；库没打开不算成功）：采样断了，家里看起来就是「一直没在用」，「家里恢复使用就收回」也触发不了。成功路径在 Linux 才走得到（netdiag），单元测试只覆盖判定与时效。
+- **长住外地自动改地区**（`relocation.go`，在 `AutoTravelJob` 里判定，只在总开关 `autoRegionEnable` 开着时）：「家里连续 `autoTravelRelocateDays`（默认 5，0~7，0 = 不改）天没有实质使用、此刻也不在用，外地**恰好一个省**在单省通行证生效期间至少 min(3, 天数) 天有实质使用」（`servedAwayRows`：按执行同口径的 CIDR 集合、只认通行证生效期间被放行的行——被拦的连接只说明外地有人在敲门），且观测新鲜、共享风险读得出且低于「中」、入站需要认证，就在一个事务里把地区比较后写入为那个省、状态行无条件写成 `applied` 并记下 `PrevRegions`。**不要求此刻还有生效中的通行证**：额度先用完、通行证没撑到第 N 天的人，第 6 天起「近 7 天在家里用过」也不满足了，改动前从此一直被拦（出差超过 N 天先改过去、回家再改回来，两次就占掉 9 天额度，同月再搬家就会碰上）。生效中的自动通行证必须就是那个省（传进来就以 `relocated` 结束，比较后写入：管理员刚收回了就让路）；生效中的是手动通行证不改；这个省最近一张通行证被管理员收回过也不改。以 `relocated` 结束的、以及判定窗口里这个省到期后被改记成 `relocated` 的自动通行证**不占本月额度**（`autoDaysThisMonth` 不计）。**30 天内只自动改去一个新省**（状态行 `RelocatedAt`；搬回 `PrevRegions` 不刷新、不受限）：把账号一个接一个转给外省的人，每次在网络层都和搬家一样。改动前自动出差放行把搬家当成出差：额度用完后外地被一直拦着（重新发证要求近 7 天在家里用过），不看后台的管理员面前用户第 10 天起就再也用不了。代价（管理员选了全自动，知情接受）：搬家与「把账号转给外省的人」在网络层同形，改地区会把接手者的省合法化。`entity.CheckValid` 只在总开关开着时拒绝「长住天数 > 每月放行天数」（中间那几天会被拦）：不分开关一律拒绝的话，升级前把每月放行天数设成 1~4 的管理员连改个端口都保存不了。撤销恢复 `PrevRegions` 并关掉这个入站的自动出差放行。
+- **自动管理地区限制**（`AutoRegionJob`，10m；总开关 `autoRegionEnable` 默认关 → 升级后行为零变化；打开要求访问日志开着，`entity.CheckValid` 拒绝反过来的组合，设置页打开总开关时一并打开访问日志）：全部判断自动做，**没有「待确认」**——管理员不常看后台，待确认等于永远不设限制；升级前留下的 `pending` 行每轮开头清掉，确认 / 忽略的接口与弹窗已删除。两件事：
+  - **首次设置**：给**没有**地区限制的启用入站（新的与存量的）写入**一个省**并打开 `AutoTravel`（需要认证的入站）。判定是纯函数 `decideAutoRegion`（只有 wait / apply / unsure）：最早用量记录距今 ≥ `autoRegionObserveDays`（默认 1）、有实质流量的天数 ≥ min(`autoTravelStableDays`, 观察天数) 才判；建议（`suggestRegions`）只有一个省就设它；有多个省时数据不足 3 天先等，之后只设主省份（`dominantProvince`：实质使用的天数最多，平局比活跃时长，再平按省名）——一起写进允许集会把错峰共享者的省永久合法化，正常的第二个地方交给有防共享门槛的自动出差放行；设置后会被拦、而且自动出差放行也救不了的流量（来源没有中国省份：境外、IPv6、归属地不明，`unplaceableShare`）超过 `autoRegionMaxBlockedPercent` 时，没有共享迹象（异地同时使用、风险 ≥ 中）就继续观察，有就照样设置；访问日志关着则继续观察。
+  - **接管存量**（`adopt`）：已有地区限制、系统还没替它打开过自动出差放行的启用入站（没有状态行，或打开总开关之前管理员改地区留下的 `manual` 行且 `AdoptedAt` 为 0），需要认证的一次性打开 `AutoTravel` 并记下 `AdoptedAt`（没有行时写一行 `adopted`）；之后管理员关掉就不再改回来。自动设置地区时一并打开自动出差放行也记 `AdoptedAt`；`MarkManual` 不碰 `adopted_at` / `relocated_at`（抹掉了，接管会再打开一次管理员关掉的开关，「30 天只改一个新省」也会被一次手工编辑绕开）。v1.47.0 的地区都是手工设置、`AutoTravel` 默认关，不接管的话「全程自动」碰不到任何一个存量用户。
+  状态表 `inbound_auto_regions`（主库，每入站一行，`DelInbound` 事务内删除）：`applied`（首次设置或长住改地区，后者带 `PrevRegions`）、`manual`（管理员接手：撤销过，或在编辑里改过地区——`UpdateInbound` 发现地区变化时写入，此后永不再首次设置）、`adopted`。几条不能退回去的约束：
+  - **任务的写入一律是比较后写入**（`moveAutoRegionState`、`whereRegionsStill`）。一轮开头读的状态快照会过时，管理员这期间的撤销、表单改地区（都会变成 `manual`）优先，任务静默跳过；入站本轮开头之后被删了也静默跳过。撤销只对仍是 `applied` 的状态生效，否则报「状态刚刚变了」，前端随即关弹窗并刷新。`MarkManual` 是唯一无条件写入的——管理员亲手改地区。
+  - **过期页面的整行写回会被拒**（`checkStaleAutoRegionWrite`，在 `UpdateInbound` 的事务里读）。入站列表只在打开页面和自己操作后刷新，切换启用、重置流量、编辑保存都会把整行写回，带着自动写入之前的地区；放过去的话自动写入被悄悄改回去、入站还被当成「管理员改过」。所以自动写入后 7 天内（列表上有撤销入口的这段时间），写回「没有地区」或写回 `PrevRegions`（长住改地区之前的省）一律拒绝，提示刷新或撤销；改成别的省、或 7 天后，照常放行。启用开关被拒时前端会刷新列表让开关弹回。
+  - **`UpdatedAt` 是毫秒，模型上标了 `autoUpdateTime:milli`。** GORM 对名叫 `UpdatedAt` 的 int64 字段默认在 `Update`/`Updates` 没带这一列时按**秒**自动写入，曾让一行看上去是「很久以前」，7 天内的标签与上面那道防护同时失效（本版本这个 GORM 关不掉自动写入，只能统一单位）。
+  - `earliestHoursOf` 一轮一次查出所有候选入站的 `min(hour_start)`，用 `Rows().Scan` 自己读：GORM 的 `Scan` 往 `*int64` 写聚合值时什么都不写，曾让所有用户永远停在「观察中」（只在端到端运行里暴露，`TestEarliestHoursOf` 守着）。库里最早一条记录还不满观察期的入站不读明细（必要条件，省查询）；同一组省份的允许集一轮只建一次。单个入站读不出用量只记日志、继续下一个（`TestAutoRegionRunEndToEnd`）。IP 库没加载时 `Run` 返回 `ErrAutoRegionNoIPDB`，任务对一段持续的未加载只记一次日志。
+  - **观察期按 7 天窗口里的实质使用算**（`substantialSpan`）：第一次实质使用在观察期之前，**且**最近 `autoRegionRecent`（观察期的一半、最多 24 小时）内也在用。两头一起要求，一次会话不可能同时满足——否则管理员新建入站后自己测一会儿，24 小时后就按管理员所在的省设置，真正的用户一连上就被拦；库里几周前的旧记录也替不了这次的使用。
+  - 每轮开头清掉入站已不存在的残留行。「需要留意」里 7 天内的 `applied` 不论入站启用与否都下发（那段时间把地区改回去只能点它撤销）。新建入站（`AddInbound` / `AddInbounds`）拿到 id 后清掉其它库里这个 id 的残留（`clearInboundLeftovers`）：删除入站时这些库的清理失败只告警、由每小时的 `PruneOrphans` 兜底，而这一小时里 id 被复用的话残留就不再是孤儿，自动设置会拿上一个用户的省份来设置新用户。
+  - 已知局限：升级到这个版本之前清空过地区的入站没有记录，开启后会被纳入（设置页的开关说明写明了）。
 - `geoBlockMatcher` 对持有通行证的入站额外按**存储的**地区判断（`storedAllow`）：它的调用方回放过去 24 小时的日志，只按此刻的有效地区判断会把发证前的地区拦截算成「走错出站」，覆盖该用户的分流规则全部变红。自动放行的发放用 `GrantAuto`（已有任何活动通行证就放弃）、收回用 `RevokePass(id)`，不会碰到管理员同时发的手动通行证。
-- 预演（`/aui/inbound/regions/preview/:id`）与「需要留意」里被拦来源的「疑似共享 / 疑似出差」标注都用同一个 `cidrSet`，不用 `geoBlockMatcher`：后者只认 dat 里已有的 tag，候选集合与「存储的地区」（发了通行证后）都不在 dat 里。
+- 预演（`/aui/inbound/regions/preview/:id`）与「需要留意」里被拦来源的「疑似共享 / 疑似出差」标注都用同一个 `cidrSet`，不用 `geoBlockMatcher`：后者只认核心用上的 dat 代码，候选集合与「存储的地区」（发了通行证后）都不在里面。
 
 ### 界面显示的归属地按多数票，画像键仍按源顺序
 
@@ -527,6 +589,20 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 **纯真库对境外国家用中文名（`澳大利亚`），其余三源用英文名（`Australia`）**，所以每个境外 IP 在 `sameLocation` 下都会判成分歧。这在只有两个源时就存在。修它需要一张英文↔中文国家名的双向归一表，是独立的改动；新源选择跟 ip2region 对齐（英文），是因为无论选哪一边都会与另一半源不一致，跟多数一致代价更小。
 
+## 防共享 / 防滥用（全局开关，「面板设置 → 连接限制 → 防共享 / 防滥用」）
+
+管理员 2026-11-09 选定：共享时只拦多出来的连接（不自动限速、不停用账号）；**一个人一个网络在线**；用户都直连（没有中转与 CDN）；拦 25 端口、流量暴涨自动限速、关了嗅探的入站也拦 BT，全部做成开关、**默认打开**。这是对「升级后行为零变化」的一次明确例外——升级后所有没单独设并发限制的入站立刻按 1 个网络限制。五项都是设置系统里的普通键（`defaultConcurrencyLimit` / `blockIdcSources` / `blockSmtp` / `forceSniffing` / `spikeThrottle*`），校验在 `web/entity/anti_abuse.go`。
+
+- **默认同时在用的网络数**（`ConcurrencyService`）：入站自己设了 `ConcurrencyLimit` 用自己的，0 表示跟随默认（`effectiveConcurrencyLimit`）；默认为 0 时只管设了额度或有封禁的入站。按**网络**数而不是按 IP：IPv4 一个地址（同一个 Wi-Fi 共用出口），IPv6 按 /64（`networkKey`；一台手机轮换的隐私地址也在同一个 /64 里）。先来后到保留最早的网络，后到的整个网络被断开（与管理员早先确认的「拒绝后来的」同一语义）。**被地区规则或机房拦截挡在门外的来源不占名额**（`sourceBlocker`：按核心用上的地区规则 + 机房网段，30 秒重建一次）——额度为 1 时，一个先连上、一直被拦着重试的外省共享者会把本人挤掉。代价：手机流量与家里 Wi-Fi 同时在用时后连上的被断开；切换网络时旧网络闲置满「闲置超时」（默认 120 秒）后新网络才连得上；只在 Linux（内核连接表）上生效。
+- **拦截机房 / 云服务器来源**（`abuse.go`）：多数归属地库认定为知名 IDC / 云厂商的 IPv4 网段（`ipdb.Multi.MajorityCIDRsOfIDC`，判据与 `MajorityCIDRsOfProvinces` 同一套多数票：没有运营商信息的源不表态，单个源误标的家宽在别的源给出了运营商时不会被拦。**已知局限**：境外非机房运营商建库时被清空、投不出反对票，带运营商列的中国源也只有 ip2region 与纯真两个，所以境外段与纯真没收录的中国段实际是「任一源说是机房就拦」——没改成「至少 2 个源」，是因为旧格式的纯真库没有运营商列，那样会让默认打开的拦截在存量机器上整个失效，见 `util/ipdb/idc.go` 的注释）写进单独的 `bin/a-ui-idc.dat`（按内容寻址的代码 `IDCC<hash>`，留最近 3 份——运行中的配置还在引用旧代码），规则 `a-ui-idc` 作用于启用的、非 dokodemo-door 的入站（端口转发可能本来就来自服务器）。写 dat 失败时这一轮不拦（引用文件里没有的代码，xray 会整个起不来）。挡的是「在用户的省租台云服务器转发、绕过地区限制」与「用自己的服务器中转转卖」。自动出差放行与并发判定都把机房来源当成被拦的（`dropIDCCandidates`）。
+- **拦截 25 端口发信**：规则 `a-ui-smtp`（`port: 25`、tcp），同样只作用于非 dokodemo-door 入站。与机房规则一起排在地区规则之后、封禁与分流规则之前：排在分流之后的话，命中分流规则的流量会先走代理出站，拦截被静默绕过。
+- **补全流量识别**（`forcedSniffing`，在 `GetXrayConfig` 生成时补，不改库里的入站）：关了嗅探的入站打开只用于分流的嗅探（`routeOnly`，不改连接目标）——BT 拦截与域名规则才看得见这些连接；开着嗅探但没识别 QUIC 的补上 `quic`——否则 HTTP/3（UDP 443）只露出 IP，域名封禁与分流规则全部绕过。只对支持嗅探的协议（与 `xray.js` 的 `canSniffing` 同口径）。
+- **流量暴涨自动限速**（`SpikeThrottleService`，`SpikeThrottleJob` 10 分钟一轮）：当天（当地 0 点起，小时桶）用量 ≥ max(下限，「近 14 天有用量那些天的中位数」× 倍数) 时，写一行 `inbound_throttles`（主库，`DelInbound` 事务内删除），限速到当地当天结束；历史不足 7 天不判（新账号没有「平时」）。限速由 `ShapingService.desiredLimits` 并进 tc 计划（与手动限速取更低的），到期或关掉开关时删除，`ShapingJob` 10 秒内收敛。列表上显示「限速中」并说明原因。代价：正常的一次性大下载也可能被限速到当天结束。
+
+### 限速的自动撤销只在管理员在场时武装
+
+`ShapingService` 下发新的限速计划后，2 分钟内没有已登录的面板请求就整个撤掉（tc 配错会掐断 SSH）。**只有最近一次面板请求在 2 分钟之内（管理员此刻就在面板前）时才武装**：到期 / 超流量停用、月初自动恢复、流量暴涨限速这些后台改动多半发生在没人看面板的时候，武装了就会在 2 分钟后把所有人的限速拆掉。被撤销过的配置一小时后、且管理员此刻在面板前时，带着自动撤销再试一次（改动前它要等进程重启才再下发；没人在场时重试必然 2 分钟后再撤，限速变成每小时只生效 2 分钟）。**心跳不能被「页面隐藏时暂停轮询」饿死**：各页轮询在后台标签页都会停，`inbound-attention.js` 因此另有一个不看 `document.hidden` 的 30 秒心跳（`server/panelVersion`，只读内存缓存）——否则管理员保存限速后切去测速页，2 分钟后限速被整个拆掉。HTB 类号：入站 id 小于 9999 时就用 id（tc 按十六进制解析类号），更大的 id 从 9998 往下分配空闲号（`classSlots`），绝不分到默认类 9999——改动前一个 id ≥ 9999 的限速入站会让整份计划被拒、所有人的限速一起失效。
+
 ## 安装向导与 Caddy 拓扑
 
 `install.sh` 的向导（`setup_wizard`）在装好面板后问一次「有没有已解析到本机的域名」，答案决定面板此后的暴露方式；改这条链路前先读 `docs/superpowers/specs/2026-09-04-caddy-domain-bootstrap-design.md`，本节只讲落地后的约束和踩过的坑。
@@ -561,17 +637,17 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 安装脚本不直接碰 SQLite。所有落库动作（`webListen`/`webPort`/`webBasePath`/三个 `defaultXxx`/四项开箱默认 `ipRuleResolveDomain`+`dnsServers`+`accessLogEnable`+`ipdbUpdateTime`、REALITY 模式下的入站）都经 `bootstrap.Run`（`bootstrap/bootstrap.go`），理由和「域名分流管理」里入站必须走 `ValidateInboundReplacing` 是同一个：脚本手拼的 JSON 没有任何校验，写错只会在下次重启 xray 时静默失效，而 `bootstrap` 建 REALITY 入站时走的是 `InboundService.AddInbound`，能拿到真实 xray 的校验与「域名分流管理」同一套 fail-open 策略。**不打印节点分享链接**——链接生成逻辑只存在于前端 `xray.js` 的 `genVLESSLink`，Go 侧重新实现一份必然与之漂移，节点由管理员在面板里创建后随时可复制。
 
-`bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会 `rm -rf /usr/local/a-ui/` 重新解压，`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。**`-force` 是唯一不写那四项开箱默认（`ipRuleResolveDomain`/`dnsServers`/`accessLogEnable`/`ipdbUpdateTime`）的分支**：那条路径上面板此前已被配置过、多半跑了一段时间，这几项的当前值属于管理员的既有选择——他可能正是因为磁盘紧张才关掉访问日志、因为流量计费才关掉 IP 库自动更新，而向导问的是域名和伪装站，顺手改掉解析路径、重新打开日志记录都是静默的夹带修改。代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值——那和「存量部署零变化」是同一件事。
+`bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会用新解压的目录整个换掉 `/usr/local/a-ui/`（见「运维脚本」里的 `fetch_release`），`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。**`-force` 是唯一不写那四项开箱默认（`ipRuleResolveDomain`/`dnsServers`/`accessLogEnable`/`ipdbUpdateTime`）的分支**：那条路径上面板此前已被配置过、多半跑了一段时间，这几项的当前值属于管理员的既有选择——他可能正是因为磁盘紧张才关掉访问日志、因为流量计费才关掉 IP 库自动更新，而向导问的是域名和伪装站，顺手改掉解析路径、重新打开日志记录都是静默的夹带修改。代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值——那和「存量部署零变化」是同一件事。
 
 后两项各有一条不显然的尾巴。`accessLogEnable` 改的是 xray 的 `log` 段，在 `hot_diff` 的 static 名单里，必然触发一次整进程重启——新装时 xray 还没起来，无感；保留天数不由 bootstrap 写，`defaultValueMap` 里它本来就是 7 天，写第二遍只会在将来改默认值时漏掉一处。`ipdbUpdateTime`（`bootstrap.DefaultIPDBUpdateTime` = `05:00`，与域名组订阅的 04:00 错开，两者都在半夜拉外网数据）光写进设置则**不足以让新装的机器拿到库**：`RunScheduledUpdate` 只在当天的更新时刻之后才放行，而发版包带着 ip2region 的种子库（`bin/ipdb.dat`）、不带纯真库，凌晨装机的管理员会看到一份几个月前的 ip2region 加一个空的纯真库，一直等到 05:00，界面上没有任何东西说明它在等什么。所以 `Server.startTask` 里另有一条延迟 30 秒的 `IPDBUpdateJob.RunInitial()`（`web/service/ipdb.go` 的 `RunInitialUpdate`），按「**本机从未成功向上游确认过这个源**」——`ipdbCheckedAt` 为 0，它只在拉取成功或 304 之后前进——补一次。判据刻意不是「库很旧」：那对种子库恒为真，会让每次面板启动（管理员点一下「重启面板」就是一次）都重下几十 MB。这条路径与 `RunScheduledUpdate` 一样，更新时刻留空时一个字节都不下，存量部署因此完全无感。
 
 ### 失败不锁面板
 
-`bootstrap.Run` 里 `SetListen` **必须是最后一步**——改成 `127.0.0.1` 之后面板就只能经由 Caddy 访问，前面任何一步（Caddy 装失败、证书 60 秒未签发、伪装站预检全部不过、`a-ui bootstrap` 本身返回非零）失败都必须保持 `webListen` 原样，让面板继续监听所有 IP。真实吃过的亏：`mode=caddy` 分支一度没有清空面板自己的 `webCertFile`/`webKeyFile`——机器上若有历史遗留的证书路径，轻则 `AutoHttpsConn` 把 Caddy 转发来的明文连接误判成非 TLS、对每个请求回 307 造成死循环，重则证书文件已不存在导致 `tls.LoadX509KeyPair` 失败、`Server.Start()` 报错、`main.go` 只 `log` 一行就 `return`——进程以退出码 0 静默退出，而 `a-ui.service` 是 `Type=simple` 且没配 `Restart=`，面板从此彻底不再监听任何地址，且**当时唯一打印过的救援命令救不回来**（它只改 `webListen`，不碰这两个证书字段）。现在 `mode=caddy` 会在写 `webListen` 之前先清空这两项。
+`bootstrap.Run` 里 `SetListen` **必须是最后一步**——改成 `127.0.0.1` 之后面板就只能经由 Caddy 访问，前面任何一步（Caddy 装失败、证书 60 秒未签发、伪装站预检全部不过、`a-ui bootstrap` 本身返回非零）失败都必须保持 `webListen` 原样，让面板继续监听所有 IP。真实吃过的亏：`mode=caddy` 分支一度没有清空面板自己的 `webCertFile`/`webKeyFile`——机器上若有历史遗留的证书路径，轻则 `AutoHttpsConn` 把 Caddy 转发来的明文连接误判成非 TLS、对每个请求回 307 造成死循环，重则证书文件已不存在导致 `tls.LoadX509KeyPair` 失败、`Server.Start()` 报错、`main.go` 只 `log` 一行就 `return`——进程以退出码 0 静默退出，而 `a-ui.service` 当时是 `Type=simple` 且没配 `Restart=`（现在是 `Restart=on-failure`，但退出码 0 照样不会被拉起），面板从此彻底不再监听任何地址，且**当时唯一打印过的救援命令救不回来**（它只改 `webListen`，不碰这两个证书字段）。现在 `mode=caddy` 会在写 `webListen` 之前先清空这两项。
 
 清空只堵住了安装向导这一条路径——管理员事后在设置页把证书路径填回去，一样会掉进同一个 307 死循环，而且掉进去之后没有退路（面板打不开改不回来；重装因 `alreadyInitialized` 整体跳过 `bootstrap`，不会重新清空）。所以 `entity.CheckValid` 里还有一道硬校验：**`webListen` 是回环地址且 `webCertFile`/`webKeyFile` 任一非空时，直接拒绝保存**。这条必须排在 `tls.LoadX509KeyPair` **之前**——只填了公钥或只填了密钥时加载必定失败，报出来的 `open : no such file or directory` 指向一个空路径，完全看不出真正的问题是「这个拓扑下根本不该填」。判据只认回环地址（`isLoopbackListen`，空串不算——空串是「监听所有 IP」）：无域名安装的 REALITY 分支不装任何反代（`install.sh` 的 `reality_flow` 里 `caddy` 出现 0 次，`bootstrap` 也不传 `-listen`），面板是公网明文 HTTP，这两项是管理员给它加 HTTPS 的唯一手段，**扩大到全部就是砍掉那条分支唯一的补救途径**。回归测试在 `web/service/setting_panel_tls_test.go`，正反两面都守着。
 
-`install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——`Type=simple` 无 `Restart=` 意味着「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来）。
+`install.sh` 侧同样贯彻这条原则：`write_caddyfile`/`wait_for_cert` 失败都直接 `return 1`、不调用 `a-ui bootstrap`；`domain_flow` 里 `a-ui bootstrap` 写完配置后还有一次 `wait_for_panel_alive`（真的对 `127.0.0.1:<port><basepath>` 发请求探活，不只看 `systemctl restart` 的返回码——「进程起来了又立刻退出」从 systemctl 的返回码上完全看不出来，`Restart=on-failure` 也只管非零退出）。
 
 两条救援命令由 `print_rescue_hint` 统一打印。判据是「此刻 `webListen` 是否可能已经是 `127.0.0.1`」，落成两条：
 
@@ -583,8 +659,8 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 `--wizard-only` 的退出码必须如实透出（`setup_wizard force; exit $?`），`a-ui.sh`/`a-ui_en.sh` 的 `reconfig_domain` 也必须检查它——恒返回 0 会让上面整个状态一路静默回到主菜单：
 
 ```
-a-ui setting -listen ""                        # 恢复监听所有 IP
-ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>    # 或走 SSH 隧道，端口用 a-ui setting -show 查
+/usr/local/a-ui/a-ui setting -listen ""                        # 恢复监听所有 IP
+ssh -L <端口>:127.0.0.1:<端口> root@<本机IP>    # 或走 SSH 隧道，端口用 /usr/local/a-ui/a-ui setting -show 查
 ```
 
 ### 证书同步（`/root/cert/`）
@@ -601,6 +677,16 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 ## 登录与会话安全
 
 设计文档在 `docs/superpowers/specs/2026-10-11-security-baseline-design.md`。这条链路上每一项的失败模式都是「看起来正常、其实没保护」，改动前先读它。
+
+2026-11-09 全项目检查后补上的几条：
+
+- **登录限速按「检查 + 登记」一次完成**（`login_limiter.go` 的 `Begin` 返回票据：放行、已锁定或繁忙）：失败次数 + 进行中的尝试达到 5 就拒绝（繁忙不算失败），票据以 `Fail` / `Succeed` / `Abort` 结束（handler `defer Abort`，幂等）；`Succeed` 只清除这次尝试开始**之前**记下的失败，绝不解除生效中的锁定；有尝试在进行的记录不被淘汰。改动前检查与登记是两段临界区，中间隔着约 50 ms 的 bcrypt：同一个 IP 并发 40 个错误密码有 32 个被真的验证了，一次成功的登录还会把锁清掉。
+- **`/login` 请求体上限 64 KB**（`MaxBytesReader`），用户名 / 密码 / 验证码超过 256 字节（`service.MaxCredentialBytes`，与写入路径共用）在碰限速、库、bcrypt 与日志之前就拒绝；失败日志只记用户名前 32 个字符加长度。`http.Server` 设 `ReadHeaderTimeout` 10 秒、`IdleTimeout` 2 分钟，**刻意不设 Read/Write 超时**（10 MB 的导入、要跑几分钟的 handler）。
+- **新账号密码不能为空、首尾不能有空白**（`CheckNewCredential`，按 JS `trim` 的口径，含全角空格与 BOM）：登录页对用户名做 trim（密码不 trim），设置页与 CLI 改动前原样落库，一个带尾随空格的新密码保存成功后再也登不进来。
+- **会话 cookie 的 Path 是面板根路径**（**保留末尾斜杠** `/xxx/`，根路径为 `/` 时就是 `/`；去掉斜杠的话 Caddy 把不带斜杠的 `/xxx` 交给伪装站、浏览器却照样带上 `Path=/xxx` 的 cookie），会话里记 `LOGIN_COOKIE_PATH`，对不上就作废；登录与登出顺带让旧的 `Path=/` cookie 过期。改动前 cookie 跟着访问 Caddy 后面的第三方伪装站一起发出去。升级后要重新登录一次。
+- **会话密钥等任何当钥匙用的随机串走 `random.SecureSeq`**（crypto/rand，熵源失败就 panic），不用 `random.Seq`。
+- **IP 库更新串行**（`ipdbUpdateMu.TryLock`：手动更新返回「IP 库更新进行中」，定时与首次更新直接跳过）；下载错误经 `common.RedactURLError` 去掉查询串、片段与账号密码再进日志与回复；控制器统一出口 `jsonMsgObj` 写日志前同样去掉。
+- **`a-ui setting` 的退出码：0 成功，1 任何校验或写入失败（含 `-reset` 与打开数据库失败），2 参数解析失败**；先全部校验、再一次写入，只校验这次真要改的项（`-listen ""` 永远能用来救援），显式的 `-port 0` 拒绝；成功输出里不会出现 `failed`（安装脚本据此判断）。救援提示一律写全路径 `/usr/local/a-ui/a-ui setting …`。
 
 **`users.password` 只能经 `crypto.HashPassword`（`util/crypto`）写入。** 写入口有三个：设置页改密码（`UserService.UpdateUser`）、`a-ui setting -username -password`（`UpdateFirstUser`）、空库建默认账号（`database.initUser`）。`crypto.CheckPassword` 对「不是 bcrypt 哈希」的值按明文比对——那条分支只为一种数据存在（升级前设置的、超过 72 字节而哈希不了的旧密码），但它意味着**任何一条新写入路径漏掉哈希，那一行都照常能登录、界面上看不出任何异常**。
 
@@ -666,9 +752,16 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 
 脚本里硬编码了仓库地址 `SienFeng/AetherUI`，fork 后需一并修改。
 
+安装与更新（`fetch_release`）**先验证、后替换**：下载到 `/usr/local/a-ui-update-XXXXXX`（全程校验 TLS），核对 `SHA256SUMS`，`tar -tzf` 且每个条目都在 `a-ui/` 下、不含 `..`，`--no-same-owner` 解压，新二进制能跑 `a-ui -v`，**之后**才备份 xray、停面板、把旧目录挪开换上新的；换上之后到管理脚本装好之前任何一步失败都把旧目录放回去并重启面板。改动前先删旧安装再 `tar zxvf`，一个不是 tar 包的 200 响应就能让机器既没有面板也没有 xray。几条跨语言的契约，改 Go 代码时要守住：`a-ui -v` 不碰数据库、在任何初始化之前返回；`a-ui setting -show` 保留 `Port:` / `Listen:` 两行（`set_port`、`reset_config`、卸载都在解析）；`a-ui setting` 失败必须非零退出，成功时的输出里不能出现 `failed`（脚本两样都查——旧二进制失败也退出 0）。`systemctl daemon-reload` 紧跟在拷贝 unit 之后（安装、`a-ui update`、面板一键更新都走这条路）。
+- **定时任务**用 `cron_replace_lines` / `cron_drop_lines` 经管道写 `crontab -`，幂等、不落临时文件（改动前固定写 `/tmp/crontabTask.tmp`，本机任何用户都能预先放一个文件让它被装成 root 的 crontab）；`crontab -l` 因为「没有 crontab」以外的原因失败时拒绝改写。
+- **Caddyfile 里面板的站点块包在 `# BEGIN a-ui managed site: <域名>` … `# END a-ui managed site` 之间**（`write_caddyfile` 写、卸载按标记删，中英文完全一致）：这是 `install.sh` 与 `a-ui.sh` 之间的契约，改标记就要两边一起改。没有标记的旧安装，卸载只打印手动处理的说明。
+- **改面板端口**（菜单 `set_port`）要求 1~65535、端口空闲；面板在 Caddy 后面（Caddyfile 反代到当前端口，且面板只监听回环或 Caddy 在运行）时拒绝，指向「配置域名与伪装站」菜单——只改面板端口、不改 Caddyfile 就是把自己锁在门外。
+- **`update_geo` 换上新数据重启之后，等面板重新生成 `bin/config.json` 再用新数据校验一次**：热应用不写这个文件（只有 `Process.Start` 写），换数据之前那次校验用的可能是旧配置。新数据不过、旧数据过就换回旧数据再重启并返回 1。
+- **救援提示里的 `a-ui setting …` 要写全路径 `/usr/local/a-ui/a-ui setting …`**：`/usr/bin/a-ui` 是管理菜单脚本，没有 `setting` 子命令。
+
 ## 已知偏差与注意事项
 
-- **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制、无设备/IP 并发限制。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
+- **上游文档宣称的许多功能并不存在于本代码库**：无 Telegram bot（全仓库无任何相关代码）、无 Reality、无 `xtls-rprx-vision`、无客户端级流量统计与到期限制（并发限制、限速、地区限制等都是本仓库自己加的）。前端每个协议表单只编辑 `settings.xxxes[0]`，即**一个 inbound 一个用户**。README 已于本仓库删除，**判断功能是否存在一律以代码为准**。
 - 用户密码以 bcrypt 哈希存储，认证链路的全部约束见「登录与会话安全」一节，涉及认证的改动请提高审查标准。
 - `go.mod` 声明 `go 1.27.0`，CI（`.github/workflows/ci.yml`）用 `actions/setup-go` 的 `go-version-file: go.mod` 读同一个版本构建，不在工作流里另行硬编码。`xray-core` 锁定在 `v1.260327.1-0.20260728075948-5ca6f4b7d4dc`，与仓库里 `bin/xray-*` 那份种子核心的 26.7.28 同一个 commit。它不再只是 gRPC stats 客户端：`xray/api.go` 的控制面热应用还依赖它的 `infra/conf` 把面板发出的 JSON 编译成 typed message 再下发给 gRPC，用旧版本的解析器编译不出新协议/新字段的配置——但**这条耦合的另一端是用户机器上实际运行的核心，不再是 `bin/xray-*`**（`install.sh` 现在会保留机器上已有的核心，`bin/xray-*` 只是兜底种子），耦合方向与「仍然建议同版本」的确切含义见「运维脚本」一节。gin 仍是 1.7.1。代价是二进制体积从约 24 MB 增长到约 40 MB（darwin/arm64 本地实测约 39 MB）。
 - `bin/xray-darwin-arm64` 在 `.gitignore` 中，macOS 本地跑面板需自行下载对应 Xray 二进制放入 `bin/`，否则 `RestartXray` 必然失败（面板本身仍可访问）。
@@ -676,12 +769,14 @@ Caddy 的证书存储路径含 ACME CA 的目录名，签发机构一换就变�
 - **Vue 指令写在根元素之外是死代码，且完全静默。** Vue 2 只编译 `el` 指向的那棵子树。分流页的三个 `<a-modal>` 曾整块落在 `<a-layout id="app">` 之后——页面渲染完全正常、数据也照常加载，但所有「添加 / 编辑」按钮点了毫无反应（`visible = true` 改的是没有任何绑定的数据），控制台不报任何错。弹窗要么留在 `#app` 内，要么照 `inbound_modal.html` 的做法给它自己的根元素和 `new Vue({el:'#xxx'})`。`web/html_test.go` 的 `TestVueDirectivesLiveInsideAVueRoot` 对所有顶层页面守这条不变量（用 `golang.org/x/net/html` 解析渲染结果，比对 `v-*` / `@*` / `:*` 属性的位置）。
 - **ws 入站的「接收 PROXY protocol」（`acceptProxyProtocol`）开错方向是静默的。** 它让入站从连接开头读一段 PROXY protocol 头以拿到真实客户端 IP，只在本入站确实由 VLESS/Trojan 的 fallback（`xver=1/2`）或支持 PROXY protocol 的反代转发时才能开；直连的客户端不发这段头，核心会一直等、握手失败，而 `run -test` 照样 `Configuration OK`、面板照样 `running`。键名和层级同样没有保护——`infra/conf` 从不调用 `DisallowUnknownFields`，写错就是纯装饰。两条测试成对守着：`xray.TestWsAcceptProxyProtocolIsReadByCore` 钉「核心读得到」（`infra/conf.WebSocketConfig`，会在核心升级换掉解析器时变红），`web.TestWsStreamSettingsEmitsAcceptProxyProtocol` 钉「前端确实发出这个键」。
 - **`web/assets/ant-design-vue@1.7.2/antd.min.css` 是被改过的 vendored 文件，不要覆盖它。** antd 1.7.2 的主色编译在 Less 产物里，而本项目没有构建链，换主色的唯一办法就是直接改这份 CSS（302 处，见 `web/assets_theme_test.go` 的映射表）。出厂的 `#1890FF` 白字只有 3.24:1，够不上 AA；现在整体换成登录页那套已核算的 `#1266D6`（5.39:1）。**hover 档（`#40a9ff` → `#0f58bc`）方向是刻意反转的**——antd 出厂在 hover 时把蓝**调浅**，而 `.ant-btn:hover` / `a:hover` / `.ant-tabs-tab:hover` 这些都是白底上的**文字**色，调浅等于降到 2.52:1；调深之后是 6.68:1。重新下载一份 antd 覆盖上去，全站配色会整体退回且**没有任何一层会报错**，`TestAntdPrimaryPaletteIsRecolored` 就是为了把这个静默失效变成一次响亮的失败。同理，这份 CSS 的 `<link>` 现在**必须带 `?{{ .cur_ver }}`**（`TestStylesheetsAreCacheBusted` 守着）：assets 下一切都是 `max-age=31536000`，此前它从不带版本号是因为它从未变过，现在它会变了。
+- **in-DOM 模板里不要写 camelCase 的事件与 prop。** HTML 解析器把属性名一律转成小写：`@pressEnter` 变成 `@pressenter`，而 Vue 2.6 的 `$emit` 按原名精确匹配、antd 1.7.2 发的是 `pressEnter` / `visibleChange`（也不发连字符形式），于是监听器永远不触发、不报错。事件改用原生事件（`@keydown.enter.native`；Vue 的 `.enter` 按 `event.key` 判断，Safari 确认输入法候选的那次回车也报 `key="Enter"`（keyCode 229），要与 antd 同口径就再判 `$event.keyCode === 13 && !$event.isComposing`，见 `access_log_modal.html`）或 watch 组件的 v-model 状态，prop 写成 kebab-case。`web/html_test.go` 的 `TestNoCamelCaseAttributesInInDomTemplates`（SVG 属性除外）与 `web/routing_dom_attrs_test.go` 守着。
 - **绝不要自闭合 antd 组件（`<a-icon type="x"/>`），文字会被静默吞掉。** 四个内页是 **in-DOM 模板**：服务端吐 HTML，浏览器先按 HTML 规则解析成 DOM，Vue 再编译 `el` 指向的那棵子树。而 HTML **不支持**非 void 元素自闭合——`<a-icon type="stop"/>后面的文字` 会被解析成 `<a-icon>` **开标签**，那段文字于是变成它的子节点；而 `a-icon` 这类组件不渲染默认插槽，文字就此人间蒸发，**图标、背景、tooltip、点击却统统正常**。v1.29.0 的入站风险列就是这么坏的：页面上一排只有底色没有字的小药丸，hover 还能弹出正确的 tooltip，没有任何一层报错，v1.29.1 修复。注意这条只对 in-DOM 模板成立——Vue 自己的 `parseHTML` 认自闭合，所以写在 JS 字符串模板里（如 `component/inbound_info.html`）是合法的；但本仓库两种模板混用且最终渲进同一份 HTML，与其每次先判断自己改的是哪一种，不如**一律写显式闭合**。`web/html_test.go` 的 `TestNoSelfClosingAntdComponents` 守着这条。
 - **`a-tag` 的 `color` 只认那张预设色表，传别的字符串会渲染成白底白字。** ant-design-vue 1.7.2 的预设只有 `pink/red/yellow/orange/cyan/green/blue/purple/geekblue/magenta/volcano/gold/lime`；传 `'default'`（或任何不在表里的值）会被当成**自定义颜色**——`getTagClassName` 加上 `ant-tag-has-color`（该类强制 `color:#fff`、`border-color:transparent`），而 `getTagStyle` 吐出的 `background-color:default` 是无效 CSS 被浏览器丢弃、背景留在 `.ant-tag` 默认的 `#fafafa`。白底白字无边框，对比度 1.02:1，整个标签在页面上**隐形且不报错**。要中性样式就传 `undefined`（落回原生的 `rgba(0,0,0,.65) on #fafafa`，约 5.6:1）。v1.23.0 曾为了修另一个对比度问题把 `rgba(0,0,0,.25)`（1.84:1）换成 `'default'`，结果对比度反而更低。UI 重构之后全站已不再使用 `a-tag`（改用 `custom.css` 的 `.chip` / `.status-badge`），这条记在这里是因为它约束的是将来任何一处重新引入 `a-tag :color` 的写法。
 - **`a-tabs` 的非活动面板仍在 DOM 里**，只是被隐藏。写选择器或做页面自动化时必须限定到 `.ant-tabs-tabpane-active`，否则会命中隐藏面板里的同名元素。
 - **面板「切换版本」与 `a-ui xray -update` 只换核心，机器上已有的 `bin/geoip.dat` / `bin/geosite.dat` 一律保留**，只在目标不存在或为空时才从发布包里解出（`extractXrayFiles`，`TestExtractXrayFilesKeepsExistingGeoData` 守着）。改动前会一并覆盖：Xray 26.10.21 起发布包自带的 geosite.dat 从约 11MB 的增强版换成了约 2.3MB 的基础版，**不含 `china-list`**，引用它的配置在切换后加载失败、xray 起不来，降级回 26.9.9 又被那一版包里的增强版覆盖回来——表征像新核心有 bug，实际是数据被换了。geo 数据只由 `a-ui geo`（先校验再替换）更新。这两个文件也是仓库跟踪的发版种子：当前这份约 10.5MB、**含 OPENAI 与 CHINA-LIST 类别**，不要把它们还原成更旧或基础版的数据。
 - **测试的工作目录**：`xray.GetBinaryPath()` 返回相对路径 `bin/xray-<GOOS>-<GOARCH>`，而 `go test` 的 cwd 是包目录。`web/service` 的 `TestMain` 因此 `os.Chdir` 到仓库根（这也与生产一致，systemd 的 `WorkingDirectory=/usr/local/a-ui/`）。这是**进程级副作用**：若今后在该包新增依赖包内相对路径（如 `testdata/`）的测试，请改用 `t.TempDir()` 或绝对路径。
 - **面板报告的 xray 状态可能是假的，`bin/config.json` 现在也可能是假的。** `Process.Start()` 把 `cmd.Run()` 丢进 goroutine 后直接返回 nil，所以 xray 启动失败**不会**回传到面板。实测过一次配置冲突：xray 已经退出、全员断网，而 `/server/status` 仍返回 `state=running`、`errorMsg=""`。排查「面板说正常但用不了」这类问题时，**以 `pgrep` 为准，不要相信面板首页**。此前这里还建议「对 `bin/config.json` 跑一次 `xray run -test`」，热更新上线后这条不再可靠：`tryHotApply` 成功时只通过 gRPC 控制面把改动下发进正在跑的核心，**不会重写 `bin/config.json`**——该文件仍是上一次整进程重启（或面板启动）时写的那份，只有下一次真正触发重启才会被重新生成，中间这段时间它不反映核心的真实配置。确认核心当前真实状态，只能靠它的 gRPC 控制面：**路由决策**现在可以查——分流页「流量走向」的验证接口（`POST /aui/routing/rule/verify/:id`，见「域名分流管理 → 流量走向验证」）经 `RoutingService.TestRoute` 直接问正在跑的核心某个用户访问某个目标会走哪个出站；其余配置段（入站、出站内容、dns 等）仍没有现成的查询工具，只能靠重启换回一份准确的 `bin/config.json`，或读面板日志里 `热应用：` 开头的 Debug 行辅助判断。
+- **xray 进程的状态读写有锁，别绕开。** `xray.Process` 的 proc/exited/exitErr/version/apiPort/config 只能经它自己的 `mu` 读写，`exec.Cmd` 只在 `Start` 起的那个 goroutine 里碰（改动前 `IsRunning`/`Stop` 直接读 `cmd.Process`/`cmd.ProcessState`，而它们由后台的 `cmd.Run` 写入）；`Start` 同步占位（`starting`），同时到达的两次 `Start` 只会起一个进程。`web/service` 的包级 `p` 与 `result` 经 `procMu`：不持 `lock` 的读取方一律用 `currentProcess()`，换进程用 `swapProcess`。这些竞争只有 `go test -race` 看得出来（`TestProcessStateIsSafeForConcurrentUse`、`TestXrayServiceStateIsSafeForConcurrentUse` 等），`make verify` 不开 `-race`。
 - **`dns.servers` 认识的写法比它看起来的少得多。** 核心的分派表（`app/dns/nameserver.go:53-76`）只认 `localhost`（整串精确）、`https://` `h2c://` `https+local://` `h2c+local://` `quic+local://` `tcp://` `tcp+local://`、`fakedns` 与裸 IP 目标；**其余一律落进函数末尾那个 UDP 分支，把整个字符串当主机名去连**。所以 `udp://` `tls://` `quic://`（注意非 local 的 quic 不存在）看着天经地义，实测全部 `Configuration OK`，运行时却是一个指向不可解析主机名的 UDP 客户端——DNS 设置完全空转；而 `IP:端口` 是域名族地址，`url.Parse` 直接失败，xray **拒绝启动**（exit 23）。两侧的失败在面板上都看不见（`dns` 在 `hot_diff` 的 static 名单里必然触发整进程重启，而 `Process.Start()` 从不回传启动失败）。`entity.dnsServerSchemes` 的白名单因此必须与那张分派表一一对应，`web/service/setting_defaults_test.go` 每个形式一条用例，都在真实 xray 上 `run -test` 验证过。改动前的版本收 `udp://` `tls://` `quic://` 与 `IP:端口`，报错文案还在推荐 `IP:端口`。
 - **SQLite 的自增主键 id 会被复用。** GORM 的 sqlite 驱动对 `primaryKey;autoIncrement` 生成的是 rowid 别名而非 `AUTOINCREMENT`，删掉最大 id 的行后，新插入的行会拿到同一个 id。任何「存 id 外键 + 被引用方可删除」的组合都要考虑这一点——旧引用会静默绑到新记录上，而且因为引用不再悬空，生成期的跳过防线也拦不住。分流子系统堵住了这条路：域名组与出站用 `CheckDomainGroupRefs` / `CheckOutboundRefs` 拒绝删除，入站用 `planInboundDetach` / `DetachInbound` 级联清理（两种手段的取舍见「域名分流管理 → 两道防线」）。**新增任何存 id 外键的表都要照做**。
 - **cron 任务的 panic 现在会被截住，但不是所有 job 都有第二层。** `web/web.go` 的 `cron.New(...)` 已配 `cron.WithChain(cron.Recover(cronLogger{}))`：任何挂在这个 cron 实例上的任务（含每 10 秒的 xray 重启消费任务）发生 panic，都会被这层截住、由 `cronLogger` 带完整堆栈记进面板日志，不再杀掉整个面板进程。目前 `access_log_job.go` 的两个任务、`concurrency_job.go`、`shaping_job.go`、`traffic_cleanup_job.go` 在各自 `Run` 的首行加了 `defer common.Recover("<任务名>")`（`util/common/err.go`）作为更早的一层——它抢在 cron 那层之前拿到 panic，日志里能带上具体任务名，而不是只知道「某个 job 挂了」；`check_inbound_job.go`、`check_xray_running_job.go`、`ipdb_update_job.go` 的 `Run`、`subscription_job.go`、`xray_traffic_job.go` 还没有加这层，完全依赖 cron 那层通用兜底。**`ipdb_update_job.go` 的 `RunInitial` 是个不同的东西**：它由 `Server.startTask` 起的 goroutine 直接调用、根本不经过 cron，所以那层通用兜底覆盖不到，它首行的 `defer common.Recover` 不是「更早的一层」而是**唯一的一层**，去掉就是一个 panic 杀掉整个面板进程。`startTask` 里另一条同形的 goroutine（`PanelVersionJob` 的延迟首次触发）至今没有这层保护。**这不是「新 job 才有、旧 job 没有」的演进结果**——`ipdb_update_job.go`（没有这层）与 `concurrency_job.go`、`shaping_job.go`（都有）是同一个提交（`601a344`）加的，谁有谁没有只是各自实现时的疏漏，不代表任何时间线，不要据此推断「后来加的就补齐了」。**新增 job 一律照带 Recover 的写法办理**：`Run` 首行 `defer common.Recover("<任务名>")`。在这些路径上写代码仍要格外注意 nil map、越界等运行时 panic——多一层 recover 挡住的是「杀死整个进程」，挡不住「这一轮任务后续逻辑没跑完」。

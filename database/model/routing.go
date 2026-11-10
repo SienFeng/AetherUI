@@ -26,6 +26,9 @@ const (
 	// xray 只在出站带 tag 时才往访问日志写 "[入站 -> 出站]"，裸出站会让所有
 	// 走直连的记录不带方括号，被 accesslog.ParseLine 当作无法归属的行丢弃。
 	DefaultOutboundTag = "a-ui-default"
+	// DokodemoDirectOutboundTag 是给 dokodemo-door 入站用的、不带私网守卫的默认出站副本（见 service/freedom_guard.go）。
+	// 带一个点：allocTag 生成的 tag 不可能撞上，导入的节点靠 IsReservedTag 拦。
+	DokodemoDirectOutboundTag = "a-ui-default.dokodemo"
 )
 
 // IsReservedTag 判定一个 tag 是否由注入器自己发出，因而不能分配给出站节点。
@@ -42,7 +45,7 @@ const (
 // 校验端 removeOutboundByTag（校验时绝不把注入器的黑洞出站当成旧版本摘掉）、
 // 导入端 routing_portable.go（导入文件里的保留 tag 一律拒绝落库）。
 func IsReservedTag(tag string) bool {
-	return tag == BlockOutboundTag || tag == DefaultOutboundTag || IsMeterTag(tag)
+	return tag == BlockOutboundTag || tag == DefaultOutboundTag || tag == DokodemoDirectOutboundTag || IsMeterTag(tag)
 }
 
 // DomainGroup 是一批可复用的域名集合。

@@ -11,6 +11,11 @@ import (
 	"a-ui/web/session"
 )
 
+// loginMaxBodyBytes 是 /login 请求体的上限。登录表单只有用户名、密码、验证码
+// 三个短字段，64 KB 绰绰有余；/login 不需要登录就能访问，不设上限的话一个
+// 64 MiB 的用户名就能让面板多吃掉几百 MB 内存。
+const loginMaxBodyBytes = 64 << 10
+
 type LoginForm struct {
 	Username string `json:"username" form:"username"`
 	Password string `json:"password" form:"password"`
@@ -50,6 +55,9 @@ func (a *IndexController) index(c *gin.Context) {
 }
 
 func (a *IndexController) login(c *gin.Context) {
+	// 先给请求体设上限再解析：gin 的 JSON 绑定没有任何上限，urlencoded 也要读满
+	// 10 MB 才报错。超出时绑定报错，落进下面的「数据格式错误」。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, loginMaxBodyBytes)
 	var form LoginForm
 	err := c.ShouldBind(&form)
 	if err != nil {
@@ -64,12 +72,29 @@ func (a *IndexController) login(c *gin.Context) {
 		pureJsonMsg(c, false, "请输入密码")
 		return
 	}
-
-	ip := getRemoteIp(c)
-	if remain, blocked := loginGuard.Blocked(ip); blocked {
-		pureJsonMsg(c, false, lockedMsg(remain))
+	// 超长输入不可能是正确的凭据（写入路径不允许存这么长的用户名，bcrypt 只认
+	// 72 字节的密码），在查库、跑 bcrypt、记日志之前就拒绝，也不计入限速。
+	if len(form.Username) > service.MaxCredentialBytes || len(form.Password) > service.MaxCredentialBytes ||
+		len(form.Code) > service.MaxCredentialBytes {
+		pureJsonMsg(c, false, "用户名、密码或验证码过长")
 		return
 	}
+
+	ip := getRemoteIp(c)
+	attempt, remain, gate := loginGuard.Begin(ip)
+	switch gate {
+	case loginGateLocked:
+		pureJsonMsg(c, false, lockedMsg(remain))
+		return
+	case loginGateBusy:
+		// 同一来源同时在校验的请求已经够凑满一次锁定了，再放行就等于让并发绕过
+		// 限速。不计为失败：真正的结论要等在途的那几个出结果。
+		pureJsonMsg(c, false, "登录尝试过于频繁，请稍后再试")
+		return
+	}
+	// 没走到 Fail/Succeed 的出口（读不出两步验证状态、中途 panic）都要把名额还回去，
+	// 否则这个来源会永久少一个名额。
+	defer attempt.Abort()
 
 	twoFactor, err := a.twoFactorService.Enabled()
 	if err != nil {
@@ -89,8 +114,8 @@ func (a *IndexController) login(c *gin.Context) {
 	if !ok {
 		// 只记用户名与来源，绝不记提交上来的密码：登录失败最常见的原因
 		// 是输错了一两个字符，日志里的「错误密码」离真密码往往只差一点。
-		logger.Infof("login failed: username %q from %s", form.Username, ip)
-		if loginGuard.Fail(ip) {
+		logger.Infof("login failed: username %q from %s", truncateForLog(form.Username), ip)
+		if attempt.Fail() {
 			logger.Warningf("login locked for %s after %d failures", ip, loginMaxFailures)
 			pureJsonMsg(c, false, lockedMsg(loginLockDuration))
 			return
@@ -102,11 +127,24 @@ func (a *IndexController) login(c *gin.Context) {
 		}
 		return
 	}
-	loginGuard.Reset(ip)
+	attempt.Succeed()
 
 	err = session.SetLoginUser(c, user)
 	logger.Info("user", user.Id, "login success from", ip)
 	jsonMsg(c, "登录", err)
+}
+
+// logUsernameMaxRunes 是登录失败日志里用户名最多保留的字符数。
+const logUsernameMaxRunes = 32
+
+// truncateForLog 截短写进日志的用户名。登录失败时它是攻击者可控的任意内容，
+// 只留开头一截足够辨认，再注明原长度。
+func truncateForLog(s string) string {
+	r := []rune(s)
+	if len(r) <= logUsernameMaxRunes {
+		return s
+	}
+	return fmt.Sprintf("%s…(共 %d 字节)", string(r[:logUsernameMaxRunes]), len(s))
 }
 
 func lockedMsg(remain time.Duration) string {

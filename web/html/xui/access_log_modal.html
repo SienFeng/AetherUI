@@ -17,14 +17,18 @@
     </a-alert>
     <a-tabs :active-key="accessLogModal.tab" @change="k => accessLogModal.switchTab(k)">
         <a-tab-pane key="detail" tab="明细">
+            <!-- 回车查询用原生 keydown：in-DOM 模板里 @pressEnter 会被 HTML 解析器转成
+                 @pressenter，而 antd 发的是 pressEnter，监听器永远不触发。Vue 的 .enter 按 event.key
+                 判断，Safari 确认输入法候选的那次回车也报 key="Enter"（keyCode 229），所以再按
+                 keyCode === 13 且不在组字中判一次，与 antd 自己判回车的口径一致。 -->
             <a-row :gutter="8" style="margin-bottom: 12px">
                 <a-col :span="8">
                     <a-input v-model.trim="accessLogModal.ip" placeholder="按来源 IP 过滤" allow-clear
-                             @pressEnter="accessLogModal.search()"></a-input>
+                             @keydown.enter.native="$event.keyCode === 13 && !$event.isComposing && accessLogModal.search()"></a-input>
                 </a-col>
                 <a-col :span="8">
                     <a-input v-model.trim="accessLogModal.key" placeholder="按目标关键字过滤，如 google" allow-clear
-                             @pressEnter="accessLogModal.search()"></a-input>
+                             @keydown.enter.native="$event.keyCode === 13 && !$event.isComposing && accessLogModal.search()"></a-input>
                 </a-col>
                 <a-col :span="8">
                     <a-button type="primary" icon="search" @click="accessLogModal.search()">查询</a-button>
@@ -215,6 +219,10 @@
         // 结果变了。
         appliedIp: '',
         appliedKey: '',
+        // 请求序号：每次 load 领一个号，回来时已不是最新的那次就丢弃（与 sharingModal /
+        // passModal 同一套做法）。自动刷新是静默的，它回来之前管理员可能已经改了过滤条件、
+        // 翻了页或换了入站——旧结果再盖到列表上，看到的就是别的条件、别的入站的记录。
+        reqSeq: 0,
         columns: [{
             title: "时间", align: 'center', width: 160,
             scopedSlots: { customRender: 'time' },
@@ -294,8 +302,10 @@
             }
         },
         async loadSources() {
-            const msg = await HttpUtil.post(`/aui/inbound/recentSources/${this.inboundId}`);
-            if (msg.success) {
+            const id = this.inboundId;
+            const msg = await HttpUtil.post(`/aui/inbound/recentSources/${id}`);
+            // 弹窗已换成别的入站：结果作废，否则上一个入站的 IP 会成为这个入站的过滤标签
+            if (msg.success && id === this.inboundId) {
                 this.sources = msg.obj || [];
             }
         },
@@ -315,6 +325,7 @@
         // silent 为真时这是一次自动刷新：不转 loading 圈（每 5 秒闪一次很烦）、
         // 不弹全局错误提示、不动分页总数。
         async load({ silent = false } = {}) {
+            const seq = ++this.reqSeq;
             const url = `/aui/inbound/accessLogs/${this.inboundId}`;
             if (!silent) {
                 // 手工查询这一刻，输入框里的值才成为「生效条件」。
@@ -337,22 +348,29 @@
                 // 不走 HttpUtil：它每次失败都会弹一条全局提示，5 秒一条很快
                 // 就能把屏幕刷满。错误就地显示在开关旁边，与 inbounds.html 的
                 // loadOnlineCounts 同一套做法。
+                let data;
                 try {
                     const resp = await axios.post(url, body);
-                    const data = resp.data;
-                    if (!data || !data.success) {
-                        this.refreshError = (data && data.msg) || '刷新失败';
-                        return;
-                    }
-                    this.refreshError = '';
-                    obj = data.obj;
+                    data = resp.data;
                 } catch (e) {
-                    this.refreshError = e.toString();
+                    data = { success: false, msg: e.toString() };
+                }
+                if (seq !== this.reqSeq) {
                     return;
                 }
+                if (!data || !data.success) {
+                    this.refreshError = (data && data.msg) || '刷新失败';
+                    return;
+                }
+                this.refreshError = '';
+                obj = data.obj;
             } else {
                 this.loading = true;
                 const msg = await HttpUtil.post(url, body);
+                if (seq !== this.reqSeq) {
+                    // 更新的一次查询已经发出，loading 由它收尾
+                    return;
+                }
                 this.loading = false;
                 if (!msg.success) {
                     return;
@@ -427,12 +445,18 @@
                 + `${sizeFormat(coverage.meteredBytes)} / ${sizeFormat(coverage.totalBytes)}）。`;
         },
         async loadTop() {
+            const id = this.inboundId;
             this.topLoading = true;
-            const msg = await HttpUtil.post(`/aui/inbound/topDomains/${this.inboundId}`, {
+            const msg = await HttpUtil.post(`/aui/inbound/topDomains/${id}`, {
                 range: this.topRange,
                 orderBy: this.topOrder,
                 limit: 20,
             });
+            // 弹窗已换成别的入站：结果作废。不能落到这里——topLoaded 一旦被旧结果置真，
+            // 新入站切到榜单时就不会再拉，显示的是上一个入站的榜单。
+            if (id !== this.inboundId) {
+                return;
+            }
             this.topLoading = false;
             if (!msg.success) {
                 return;
@@ -489,6 +513,11 @@
             // 只在第一页刷新。翻页时新记录会不断把列表往下顶，正在看的那行
             // 会漂走；回到第一页自动恢复，界面上有对应提示。
             if (this.page !== 1) {
+                return;
+            }
+            // 手工查询还没回来时不叠一轮：它会领走更新的序号，让那次查询的结果（连同新的
+            // 总数与 loading 收尾）整个作废。
+            if (this.loading) {
                 return;
             }
             this.load({ silent: true });

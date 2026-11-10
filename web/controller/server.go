@@ -2,6 +2,7 @@ package controller
 
 import (
 	"github.com/gin-gonic/gin"
+	"sync"
 	"time"
 	"a-ui/logger"
 	"a-ui/web/global"
@@ -12,6 +13,11 @@ type ServerController struct {
 	BaseController
 
 	serverService service.ServerService
+
+	// mu 保护下面这几个缓存字段：它们同时被每 2 秒一次的 cron 任务和各个请求
+	// 各自的 goroutine 读写。只在读写字段时持锁，查状态、联网查版本都在锁外做——
+	// 持锁去等 GitHub 会把前端每 2 秒一次的状态轮询一起卡住。
+	mu sync.Mutex
 
 	lastStatus        *service.Status
 	lastGetStatusTime time.Time
@@ -49,32 +55,51 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.POST("/upgradeLog", a.upgradeLog)
 }
 
+// refreshStatus 重新采集一次系统状态。GetStatus 每次返回一个新的 *Status、
+// 只读上一份，所以发布出去的那一份此后不会再被改动，handler 拿到指针后在锁外
+// 序列化是安全的。
 func (a *ServerController) refreshStatus() {
-	a.lastStatus = a.serverService.GetStatus(a.lastStatus)
+	a.mu.Lock()
+	last := a.lastStatus
+	a.mu.Unlock()
+	status := a.serverService.GetStatus(last)
+	a.mu.Lock()
+	a.lastStatus = status
+	a.mu.Unlock()
+}
+
+// refreshIfWatched 是那个 2 秒任务的本体：前端 3 分钟没来要过状态就不采集。
+func (a *ServerController) refreshIfWatched() {
+	a.mu.Lock()
+	idle := time.Since(a.lastGetStatusTime) > time.Minute*3
+	a.mu.Unlock()
+	if idle {
+		return
+	}
+	a.refreshStatus()
 }
 
 func (a *ServerController) startTask() {
 	webServer := global.GetWebServer()
 	c := webServer.GetCron()
-	c.AddFunc("@every 2s", func() {
-		now := time.Now()
-		if now.Sub(a.lastGetStatusTime) > time.Minute*3 {
-			return
-		}
-		a.refreshStatus()
-	})
+	c.AddFunc("@every 2s", a.refreshIfWatched)
 }
 
 func (a *ServerController) status(c *gin.Context) {
+	a.mu.Lock()
 	a.lastGetStatusTime = time.Now()
+	status := a.lastStatus
+	a.mu.Unlock()
 
-	jsonObj(c, a.lastStatus, nil)
+	jsonObj(c, status, nil)
 }
 
 func (a *ServerController) getXrayVersion(c *gin.Context) {
-	now := time.Now()
-	if now.Sub(a.lastGetVersionsTime) <= time.Minute {
-		jsonObj(c, a.lastVersions, nil)
+	a.mu.Lock()
+	cached, fresh := a.lastVersions, time.Since(a.lastGetVersionsTime) <= time.Minute
+	a.mu.Unlock()
+	if fresh {
+		jsonObj(c, cached, nil)
 		return
 	}
 
@@ -84,8 +109,10 @@ func (a *ServerController) getXrayVersion(c *gin.Context) {
 		return
 	}
 
+	a.mu.Lock()
 	a.lastVersions = versions
 	a.lastGetVersionsTime = time.Now()
+	a.mu.Unlock()
 
 	jsonObj(c, versions, nil)
 }
@@ -133,11 +160,17 @@ func (a *ServerController) panelVersion(c *gin.Context) {
 // 撞到节流时返回缓存而不是报错：管理员点刷新看到的是「版本信息」，
 // 一个红色的「太频繁」提示既没用又像出了故障。
 func (a *ServerController) refreshPanelVersion(c *gin.Context) {
-	if time.Since(a.lastRefreshPanelVersionTime) <= time.Minute {
+	// 判断与占位在同一次持锁里完成：连点两下时只有一次真的去查 GitHub。
+	a.mu.Lock()
+	throttled := time.Since(a.lastRefreshPanelVersionTime) <= time.Minute
+	if !throttled {
+		a.lastRefreshPanelVersionTime = time.Now()
+	}
+	a.mu.Unlock()
+	if throttled {
 		jsonObj(c, a.panelVersionService.Get(), nil)
 		return
 	}
-	a.lastRefreshPanelVersionTime = time.Now()
 	if err := a.panelVersionService.Refresh(); err != nil {
 		// 不返回错误：Refresh 失败时上一次成功的数据仍在缓存里，且失败
 		// 原因已经写进 LastError，前端会显示。这里再报一次错会让界面同时

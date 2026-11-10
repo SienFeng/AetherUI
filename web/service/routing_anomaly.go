@@ -220,6 +220,31 @@ func (s *RoutingAuditService) ResetAnomalies(ruleId int, now time.Time) {
 	anomalyIgnore[ruleId] = now.UnixMilli()
 }
 
+// forgetRuleAuditState 丢掉一条规则在内存里的全部审计状态：异常摘要、水位、忽略时刻
+// 与验证缓存。规则删除时、以及新插入的规则拿到 id 时调用（RoutingRuleService.Del / Add）。
+//
+// SQLite 会复用被删除的自增 id（CLAUDE.md「已知偏差」）。这些状态平时由下一轮扫描
+// （pruneAnomaliesLocked）与审计（replaceAuditResults）按「规则已不在」清理；但删掉
+// 最新那条规则后紧接着新建一条，新规则在清理之前就占住了同一个 id，清理从此不会
+// 发生——新规则一出生就顶着旧规则最多 24 小时的「不符」、旧的忽略时刻与旧的验证结论。
+// 新建时也清一次，是因为删除不一定走 Del（DetachInbound 在删入站的事务里整条删规则、
+// 手工改库）：一个刚插入的 id，此前的任何状态都只可能属于一条已经不存在的规则。
+//
+// 推进 anomalyCursorEpoch：正在进行的扫描可能是按旧规则的计划算出的增量，合并时
+// 因代次变化整批作废、游标不前进，下一轮按新计划重读这一批，不丢其他规则的数据。
+func forgetRuleAuditState(ruleId int) {
+	anomalyMu.Lock()
+	delete(anomalySummaries, ruleId)
+	delete(anomalyWatermarks, ruleId)
+	delete(anomalyIgnore, ruleId)
+	anomalyCursorEpoch++
+	anomalyMu.Unlock()
+
+	auditMu.Lock()
+	delete(auditResults, ruleId)
+	auditMu.Unlock()
+}
+
 func anomalyCutoffKey(now time.Time) int64 {
 	return now.Add(-anomalyWindow).UnixMilli() / anomalyBucketMs
 }

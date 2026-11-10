@@ -29,17 +29,9 @@ func NewIPDBUpdateJob() *IPDBUpdateJob {
 
 func (j *IPDBUpdateJob) Run() {
 	updated, err := j.ipdbService.RunScheduledUpdate(time.Now())
-	if err != nil {
-		// 更新失败时旧库仍在生效，功能不受影响，所以只告警不中断。
-		logger.Warning("update ip database err:", err)
-		return
-	}
-	if updated > 0 {
-		logger.Info("ip database updated, 数据源个数:", updated)
-		// 地区限制的允许集按库现算：不置重启标志的话，核心手里一直是旧的允许集，
-		// 要等某次无关改动才一次性推下去。配置其实没变时 Config.Equals 会把它过滤掉。
-		j.xrayService.SetToNeedRestart()
-	}
+	// 地区限制的允许集按库现算：不置重启标志的话，核心手里一直是旧的允许集，
+	// 要等某次无关改动才一次性推下去。
+	afterIPDBUpdate(&j.xrayService, "IP 库定时更新", updated, err)
 }
 
 // RunInitial 供面板启动后触发一次：把这台机器从未拉取过的库立刻补上。
@@ -51,13 +43,18 @@ func (j *IPDBUpdateJob) RunInitial() {
 	defer common.Recover("IP 库首次更新任务")
 
 	updated, err := j.ipdbService.RunInitialUpdate()
+	afterIPDBUpdate(&j.xrayService, "IP 库首次更新", updated, err) // 理由同 Run
+}
+
+// afterIPDBUpdate 记日志，并在有源换了新库时置重启标志——哪怕别的源失败了：前面的源已经换上
+// 新库，允许集按库现算，不置标志的话核心一直用旧允许集。配置其实没变时 Config.Equals 会过滤掉。
+func afterIPDBUpdate(xs *service.XrayService, what string, updated int, err error) {
 	if err != nil {
-		// 与 Run 同理：更新失败时旧库（或种子库）仍在生效，只告警。
-		logger.Warning("首次更新 ip database err:", err)
-		return
+		// 失败的源旧库仍在生效，功能不受影响，所以只告警。
+		logger.Warning(what, "失败:", err)
 	}
 	if updated > 0 {
-		logger.Info("ip database initial update done, 数据源个数:", updated)
-		j.xrayService.SetToNeedRestart() // 理由同 Run
+		logger.Info(what, "完成，换了新库的数据源个数:", updated)
+		xs.SetToNeedRestart()
 	}
 }

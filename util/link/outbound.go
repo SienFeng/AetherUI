@@ -371,7 +371,7 @@ func parseShadowsocks(link string) (*ParseResult, error) {
 		if colon < 0 {
 			return nil, fmt.Errorf("bad ss host:port")
 		}
-		host := hp[:colon]
+		host := unbracketHost(hp[:colon])
 		port, err := strconv.Atoi(hp[colon+1:])
 		if err != nil {
 			return nil, fmt.Errorf("bad ss port %q: %w", hp[colon+1:], err)
@@ -404,7 +404,7 @@ func parseShadowsocks(link string) (*ParseResult, error) {
 	if colon < 0 {
 		return nil, fmt.Errorf("bad legacy ss hp")
 	}
-	host := hp[:colon]
+	host := unbracketHost(hp[:colon])
 	port, err := strconv.Atoi(hp[colon+1:])
 	if err != nil {
 		return nil, fmt.Errorf("bad legacy ss port %q: %w", hp[colon+1:], err)
@@ -421,6 +421,17 @@ func parseShadowsocks(link string) (*ParseResult, error) {
 		},
 	}
 	return &ParseResult{Outbound: ob, Identity: identity}, nil
+}
+
+// unbracketHost strips the brackets an IPv6 literal carries in a host:port
+// pair ("[2001:db8::1]:8388"). The URL-based parsers get this from
+// url.Hostname(); the ss parser splits host:port by hand and would otherwise
+// keep the brackets in the outbound address.
+func unbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 func splitMethodPass(userInfo string) (string, string) {

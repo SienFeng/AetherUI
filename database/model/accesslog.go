@@ -7,13 +7,20 @@ package model
 // 也会拖住主库。
 type AccessLog struct {
 	Id   int64 `json:"id" gorm:"primaryKey;autoIncrement"`
-	Time int64 `json:"time" gorm:"index"` // 毫秒
+	Time int64 `json:"time" gorm:"index;index:idx_access_logs_inbound_time,priority:2"` // 毫秒
 
 	// InboundId 在写入时由 tag 解析得到，0 表示当时找不到对应入站。
 	// 查询按 id 而不是 tag：入站改端口会让 tag 变化，按 tag 查会丢历史。
 	// 相应地，删除入站时必须连带删掉它的日志——SQLite 会复用自增 id，
 	// 不删的话新建的入站会看到上一个用户的访问记录。
-	InboundId  int    `json:"inboundId" gorm:"index"`
+	//
+	// idx_access_logs_inbound_time (inbound_id, time) 供「某入站自某时刻以来」这一类查询：
+	// 分流验证与后台审计（GroupByTargetRoute）、计量池（MeterableConnCounts）、差额分解
+	// （CountByRoute）、自动出差放行与「需要留意」的被拦来源。只有单列索引时它们要把该入站
+	// 保留期内的全部行扫一遍再按时间过滤。单列的 inbound_id 索引照旧保留：明细分页是
+	// inbound_id = ? ORDER BY id DESC LIMIT，单列索引的顺序恰好就是 id 序，不用排序。
+	// 代价：老库升级后第一次启动要建一次索引（实测 100 万行约 0.3 秒、约 16 MB）。
+	InboundId  int    `json:"inboundId" gorm:"index;index:idx_access_logs_inbound_time,priority:1"`
 	InboundTag string `json:"inboundTag"`
 
 	SourceIP string `json:"sourceIp" gorm:"index"`

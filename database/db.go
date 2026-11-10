@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"sync"
+	"sync/atomic"
 	"a-ui/config"
 	"a-ui/database/model"
 	"a-ui/util/crypto"
@@ -14,11 +16,31 @@ import (
 
 var db *gorm.DB
 
+// dbDirPerm 是面板自己创建库目录（/etc/<name>/）时用的权限。
+//
+// 0700 而不是 0750/0755：目录里有 bcrypt 哈希、会话签名密钥（settings 表的
+// secret）和 IP2Location 的 token，除面板进程自己（root）之外没有任何进程需要
+// 进入它。改动前传的是 fs.ModeDir——权限位为 0，建出来的是 d---------，只因
+// root 无视权限位才一直没出事，换成非 root 运行就连库文件都建不出来。
+// MkdirAll 只管新建的目录，已经存在的目录保持原样。
+const dbDirPerm fs.FileMode = 0o700
+
 // accessDB 是访问日志专用的库，与主库物理分开，原因见 model.AccessLog。
-var accessDB *gorm.DB
+var accessDB atomic.Pointer[gorm.DB]
 
 // trafficDB 是用量历史专用的库，与主库物理分开，原因见 model.TrafficBucket。
-var trafficDB *gorm.DB
+var trafficDB atomic.Pointer[gorm.DB]
+
+// sideDBMu 串行化两个独立库的初始化；accessDBPath / trafficDBPath 记着当前句柄
+// 打开的是哪个文件，只在持锁时读写。
+//
+// 句柄本身用 atomic.Pointer：读取方是各个定时任务与请求，与初始化方不在同一个
+// goroutine 上，裸的包级变量是数据竞争。
+var (
+	sideDBMu      sync.Mutex
+	accessDBPath  string
+	trafficDBPath string
+)
 
 func initUser() error {
 	err := db.AutoMigrate(&model.User{})
@@ -119,6 +141,12 @@ func initRouting() error {
 	if err := db.AutoMigrate(&model.InboundRegionPass{}); err != nil {
 		return err
 	}
+	if err := db.AutoMigrate(&model.InboundAutoRegion{}); err != nil {
+		return err
+	}
+	if err := db.AutoMigrate(&model.InboundThrottle{}); err != nil {
+		return err
+	}
 	if err := migrateRoutingRuleInboundIds(); err != nil {
 		return err
 	}
@@ -127,7 +155,7 @@ func initRouting() error {
 
 func InitDB(dbPath string) error {
 	dir := path.Dir(dbPath)
-	err := os.MkdirAll(dir, fs.ModeDir)
+	err := os.MkdirAll(dir, dbDirPerm)
 	if err != nil {
 		return err
 	}
@@ -172,9 +200,21 @@ func InitDB(dbPath string) error {
 //
 // 独立于 InitDB：即使这里失败，面板其余功能也必须照常可用——访问日志坏了
 // 不该让人登不上面板。
+//
+// 同一个文件已经打开时直接复用：面板「重启」是 SIGHUP 重建 Server，每次
+// Server.Start 都会再调一遍这里。改动前每次都新开一个连接池覆盖掉旧的，旧池
+// 从不关闭，点一次重启漏一个池；而换成「开新的、关旧的」也不行——旧 Server
+// 还在收尾的定时任务（采集访问日志、共享检测……）在函数开头取了句柄、要用到
+// 函数结束，关掉它们手里的句柄只会换来 "database is closed"。复用则谁都不受
+// 影响。上次没打开成功（句柄为空）时照常重试打开。
 func InitAccessLogDB(dbPath string) error {
+	sideDBMu.Lock()
+	defer sideDBMu.Unlock()
+	if accessDB.Load() != nil && accessDBPath == dbPath {
+		return nil
+	}
 	dir := path.Dir(dbPath)
-	if err := os.MkdirAll(dir, fs.ModeDir); err != nil {
+	if err := os.MkdirAll(dir, dbDirPerm); err != nil {
 		return err
 	}
 	var gormLogger logger.Interface
@@ -190,7 +230,8 @@ func InitAccessLogDB(dbPath string) error {
 	if err := adb.AutoMigrate(&model.AccessLog{}, &model.AccessLogCursor{}); err != nil {
 		return err
 	}
-	accessDB = adb
+	accessDB.Store(adb)
+	accessDBPath = dbPath
 	return nil
 }
 
@@ -198,9 +239,16 @@ func InitAccessLogDB(dbPath string) error {
 //
 // 独立于 InitDB：即使这里失败，面板其余功能也必须照常可用——图表坏了不该
 // 让人登不上面板，更不该影响计费用的累计流量。
+//
+// 同一个文件已经打开时直接复用，理由见 InitAccessLogDB。
 func InitTrafficDB(dbPath string) error {
+	sideDBMu.Lock()
+	defer sideDBMu.Unlock()
+	if trafficDB.Load() != nil && trafficDBPath == dbPath {
+		return nil
+	}
 	dir := path.Dir(dbPath)
-	if err := os.MkdirAll(dir, fs.ModeDir); err != nil {
+	if err := os.MkdirAll(dir, dbDirPerm); err != nil {
 		return err
 	}
 	var gormLogger logger.Interface
@@ -239,7 +287,8 @@ func InitTrafficDB(dbPath string) error {
 	if err := tdb.AutoMigrate(&model.MeterDomain{}); err != nil {
 		return err
 	}
-	trafficDB = tdb
+	trafficDB.Store(tdb)
+	trafficDBPath = dbPath
 	return nil
 }
 
@@ -249,12 +298,12 @@ func GetDB() *gorm.DB {
 
 // GetAccessLogDB 返回访问日志库；未初始化成功时为 nil，调用方必须判空。
 func GetAccessLogDB() *gorm.DB {
-	return accessDB
+	return accessDB.Load()
 }
 
 // GetTrafficDB 返回用量历史库；未初始化成功时为 nil，调用方必须判空。
 func GetTrafficDB() *gorm.DB {
-	return trafficDB
+	return trafficDB.Load()
 }
 
 func IsNotFound(err error) bool {
@@ -264,6 +313,12 @@ func IsNotFound(err error) bool {
 // ResetTrafficDBForTest 把用量库句柄清空，用于测试「库没打开」这条分支。
 // 生产代码不调用它——面板启动时 InitTrafficDB 失败就是这个状态，而那条
 // 分支上的每一个调用方都必须判空，不能靠运气。
+//
+// 记着的路径一并清掉：测试会在「清空」之后对同一个文件再 Init 一次，模拟升级后
+// 重新跑 AutoMigrate（sharing_index_test.go），那一次必须真的重新打开。
 func ResetTrafficDBForTest() {
-	trafficDB = nil
+	sideDBMu.Lock()
+	defer sideDBMu.Unlock()
+	trafficDB.Store(nil)
+	trafficDBPath = ""
 }

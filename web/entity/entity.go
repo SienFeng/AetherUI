@@ -3,6 +3,7 @@ package entity
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
@@ -58,8 +59,30 @@ type AllSetting struct {
 	AutoTravelMonthlyDays      int `json:"autoTravelMonthlyDays" form:"autoTravelMonthlyDays"`
 	AutoTravelWeeklyGrants     int `json:"autoTravelWeeklyGrants" form:"autoTravelWeeklyGrants"`
 	AutoTravelCooldownDays     int `json:"autoTravelCooldownDays" form:"autoTravelCooldownDays"`
+	// AutoTravelRelocateDays：家里连续这么多天没用、外地一直在用，就把地区改成外地（总开关开着时）。0 表示不自动改。
+	AutoTravelRelocateDays int `json:"autoTravelRelocateDays" form:"autoTravelRelocateDays"`
+
+	// 自动设置地区限制，见 service.AutoRegionService。
+	AutoRegionEnable            int `json:"autoRegionEnable" form:"autoRegionEnable"`
+	AutoRegionObserveDays       int `json:"autoRegionObserveDays" form:"autoRegionObserveDays"`
+	AutoRegionMaxBlockedPercent int `json:"autoRegionMaxBlockedPercent" form:"autoRegionMaxBlockedPercent"`
 
 	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
+
+	// 防共享 / 防滥用（全局生效）。
+	// DefaultConcurrencyLimit：入站没有单独设并发限制时，同时在用的网络数上限（同一个 Wi-Fi 算一个，IPv6 按 /64）；0 表示不限。
+	DefaultConcurrencyLimit int `json:"defaultConcurrencyLimit" form:"defaultConcurrencyLimit"`
+	// BlockIdcSources：拦下来自机房 / 云服务器的来源（多数 IP 库认定的知名 IDC），防止借云服务器转发绕过地区限制、用中转转卖。
+	BlockIdcSources int `json:"blockIdcSources" form:"blockIdcSources"`
+	// BlockSmtp：拦下发往 25 端口的连接（群发垃圾邮件会让服务器 IP 被拉黑）。
+	BlockSmtp int `json:"blockSmtp" form:"blockSmtp"`
+	// ForceSniffing：补全流量识别——关了嗅探的入站也识别 BT 与域名（只用于分流，不改连接目标），QUIC 里的域名也识别。
+	ForceSniffing int `json:"forceSniffing" form:"forceSniffing"`
+	// 流量暴涨自动限速：某个入站当天的流量超过「近 14 天日常用量中位数 × 倍数」且不少于下限时，限速到当天结束。
+	SpikeThrottleEnable     int `json:"spikeThrottleEnable" form:"spikeThrottleEnable"`
+	SpikeThrottleMultiplier int `json:"spikeThrottleMultiplier" form:"spikeThrottleMultiplier"`
+	SpikeThrottleFloorGB    int `json:"spikeThrottleFloorGB" form:"spikeThrottleFloorGB"`
+	SpikeThrottleMbps       int `json:"spikeThrottleMbps" form:"spikeThrottleMbps"`
 
 	DNSServers string `json:"dnsServers" form:"dnsServers"`
 
@@ -77,7 +100,8 @@ func checkIPDBSourceUrl(label, raw string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return common.NewError(label+"必须是 http 或 https 开头的完整地址:", raw)
+		// 不回显原值：地址里可能带着 token（IP2Location），而失败消息会被控制器写进日志。
+		return common.NewError(label + "必须是 http 或 https 开头的完整地址")
 	}
 	return nil
 }
@@ -195,6 +219,9 @@ func (s *AllSetting) CheckValid() error {
 			return common.NewError("web listen is not valid ip:", s.WebListen)
 		}
 	}
+	if err := CheckWebListenIsLocal(s.WebListen); err != nil {
+		return err
+	}
 
 	if s.WebPort <= 0 || s.WebPort > 65535 {
 		return common.NewError("web port is not a valid port:", s.WebPort)
@@ -252,12 +279,16 @@ func (s *AllSetting) CheckValid() error {
 	if !strings.HasSuffix(s.WebBasePath, "/") {
 		s.WebBasePath += "/"
 	}
+	if err := CheckWebBasePath(s.WebBasePath); err != nil {
+		return err
+	}
 
 	xrayConfig := &xray.Config{}
 	err := json.Unmarshal([]byte(s.XrayTemplateConfig), xrayConfig)
 	if err != nil {
 		return common.NewError("xray template config invalid:", err)
 	}
+	xray.WarnDroppedTemplateKeys([]byte(s.XrayTemplateConfig))
 
 	_, err = time.LoadLocation(s.TimeLocation)
 	if err != nil {
@@ -338,11 +369,29 @@ func (s *AllSetting) CheckValid() error {
 		{"自动出差：每月天数上限", s.AutoTravelMonthlyDays, 1, 31},
 		{"自动出差：每周次数上限", s.AutoTravelWeeklyGrants, 1, 20},
 		{"自动出差：暂停天数", s.AutoTravelCooldownDays, 0, 30},
+		{"自动出差：长住改地区天数", s.AutoTravelRelocateDays, 0, 7},
+		{"自动设置地区：开关", s.AutoRegionEnable, 0, 1},
+		{"自动设置地区：观察天数", s.AutoRegionObserveDays, 1, 30},
+		{"自动设置地区：误拦流量上限（%）", s.AutoRegionMaxBlockedPercent, 0, 50},
 	}
 	for _, r := range autoTravelRanges {
 		if r.v < r.min || r.v > r.max {
 			return common.NewError(r.name, "应在", r.min, "~", r.max, "之间:", r.v)
 		}
+	}
+	// 长住改地区靠自动通行证撑到那一天；每月放行天数更少的话，通行证先到期，中间那几天人被拦着。
+	// 只在总开关开着时检查——长住改地区只在那时运行。不分开关一律拒绝的话，升级前把每月放行天数
+	// 设成 1~4 的管理员（长住天数是新加的、默认 5）连改个端口都保存不了。
+	if s.AutoRegionEnable == 1 && s.AutoTravelRelocateDays > 0 && s.AutoTravelRelocateDays > s.AutoTravelMonthlyDays {
+		return common.NewError(fmt.Sprintf("自动出差：长住改地区天数（%d）不能超过每月放行天数（%d）：通行证撑不到那一天",
+			s.AutoTravelRelocateDays, s.AutoTravelMonthlyDays))
+	}
+	// 自动管理地区靠访问日志发现被拦的人：没有它，自动设置之后用户一出省就被一直拦着，没人知道。
+	if s.AutoRegionEnable == 1 && s.AccessLogEnable != 1 {
+		return common.NewError("开启「自动管理地区限制」需要同时开启访问日志：没有访问日志，被拦的用户发现不了，也没法自动放行")
+	}
+	if err := s.checkAntiAbuse(); err != nil {
+		return err
 	}
 	if s.AccessLogRetentionDays < 1 || s.AccessLogRetentionDays > 365 {
 		return common.NewError("访问日志保留天数应在 1 ~ 365 天之间:", s.AccessLogRetentionDays)

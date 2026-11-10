@@ -67,5 +67,8 @@ func (a *XUIController) setting(c *gin.Context) {
 }
 
 func (a *XUIController) routing(c *gin.Context) {
-	html(c, "routing.html", "分流管理", nil)
+	// 「补全流量识别」开着时，生成配置会替关了嗅探的入站打开嗅探，规则列表的「永远不会命中」
+	// 警告要按同一口径判断（routing.html 的 sniffingOff，镜像 service.sniffingBlind）。
+	settingService := service.SettingService{}
+	html(c, "routing.html", "分流管理", gin.H{"force_sniffing": settingService.GetForceSniffing()})
 }

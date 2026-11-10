@@ -249,6 +249,10 @@ func TestHotReloadEndToEndAgainstRealXray(t *testing.T) {
 	requirePgrep(t)
 	requireXrayAPIPortFree(t)
 	setupDB(t)
+	// 探测目标是本机的 httptest 服务器，经 socks5h localhost 走默认 freedom 出站；默认出站现在带
+	// 私网守卫（freedom_guard.go）。本测试验证的是热应用链路而不是守卫，所以用管理员关掉守卫的
+	// 写法把它关掉；守卫本身由 TestFreedomPrivateGuardAgainstRealXray 守着。
+	useTemplateWithAPIPort(t, hotReloadAPIPort, allowPrivateInDefaultOutbound)
 
 	// p / lock 是包级变量，本测试是本包第一个真正驱动 XrayService.RestartXray
 	// 起真实进程的测试；无论测试通过与否都必须把它停干净，否则会残留一个

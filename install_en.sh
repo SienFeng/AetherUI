@@ -23,12 +23,33 @@ panel_port=""
 stopped_web_svc=""
 
 # Whether this install/update has already stopped the panel. Any failure
-# exit after that point must bring it back up first: a-ui.service is
-# Type=simple with no Restart=, so bailing out here leaves the machine with
-# a stopped panel that will never come back on its own — while the user
-# assumes "the update failed, so nothing changed", and only finds out when
-# someone reports the nodes are down.
+# exit after that point must bring it back up first: a-ui.service's
+# Restart=on-failure only covers the process dying on its own — a unit
+# stopped with systemctl stop stays stopped — so bailing out here leaves the
+# machine with a stopped panel that will never come back on its own — while
+# the user assumes "the update failed, so nothing changed", and only finds
+# out when someone reports the nodes are down.
 a_ui_stopped=0
+
+# Staging directory created by fetch_release (under /usr/local, next to a-ui,
+# not /tmp for the same reason as xray_backup_dir below): the downloaded
+# package, its checksum file and the extracted tree all land here first, and
+# the existing install is only touched once all of it has been verified.
+# Empty means not created yet, or already cleaned up.
+stage_dir=""
+
+# The old install directory once it has been moved aside (inside stage_dir).
+# Any failure exit after the new directory is in place and before the
+# management script is installed makes die_restoring_panel move it back
+# before restarting the panel: the machine ends up as it was before the
+# update instead of on a half-installed new version. Cleared once the
+# management script is installed; there is no rollback after that.
+old_install_dir=""
+
+# Set to 1 when config_after_install could not move the credentials off the
+# default admin/admin; the end of the install repeats the warning, since the
+# first one has usually scrolled away behind the wizard's output by then.
+default_credentials_active=0
 
 # Path written by backup_xray_assets and consumed by restore_or_install_xray;
 # empty means there is no usable backup for this run (a fresh install, or
@@ -42,8 +63,30 @@ xray_backup_dir=""
 # Only touch systemctl when we really did stop it: on a fresh install,
 # starting a service that isn't configured yet just adds a failure log line
 # unrelated to the actual problem, sending troubleshooting down a dead end.
+#
+# If the new directory is already in place, move the old install back first
+# (see old_install_dir). If that fails, keep the staging directory and print
+# its path: it holds the only remaining copy of the old version.
 die_restoring_panel() {
+    trap - INT TERM HUP
     echo -e "${red}$1${plain}"
+    local keep_stage=0
+    if [[ -n "${old_install_dir}" ]]; then
+        echo -e "${yellow}Restoring the install directory from before the update...${plain}"
+        # the current directory is most likely the new one we are about to delete
+        cd /usr/local || cd /
+        if rm -rf /usr/local/a-ui && mv "${old_install_dir}" /usr/local/a-ui; then
+            echo -e "${green}Restored the install directory from before the update${plain}"
+        else
+            keep_stage=1
+            echo -e "${red}Restore failed, the old install directory is kept at ${old_install_dir}, move it back to /usr/local/a-ui by hand${plain}"
+        fi
+        old_install_dir=""
+    fi
+    if [[ -n "${stage_dir}" && ${keep_stage} -eq 0 ]]; then
+        rm -rf "${stage_dir}"
+        stage_dir=""
+    fi
     if [[ ${a_ui_stopped} -eq 1 ]]; then
         echo -e "${yellow}The panel was stopped by this install, restarting it...${plain}"
         if systemctl start a-ui; then
@@ -133,49 +176,206 @@ install_base() {
     fi
 }
 
+# Run /usr/local/a-ui/a-ui setting and report honestly whether it worked;
+# on failure print its output and return 1.
+#
+# The exit code is the primary signal; but this script always comes from the
+# main branch while the binary may be an older, rolled-back version, and old
+# binaries exit 0 even when the database write fails, printing only a
+# "... failed: ..." line — so look at the output too. Arguments must be
+# passed through one by one: unquoted, an empty username makes -password the
+# username's value and a value with a space gets split into several words —
+# either way the script used to say "set down!" while nothing had changed.
+a_ui_setting() {
+    local out rc
+    out=$(/usr/local/a-ui/a-ui setting "$@" 2>&1)
+    rc=$?
+    if [[ ${rc} -ne 0 || "${out}" == *failed* ]]; then
+        echo -e "${red}${out}${plain}"
+        return 1
+    fi
+    return 0
+}
+
+# Read the username and password the admin wants. On success store them in
+# cred_user / cred_pass and return 0; on EOF (no terminal, SSH dropped) or
+# after 3 invalid attempts in a row return 1. Every read's return code is
+# checked, otherwise after EOF the loop would spin with no I/O to wait on.
+#
+# The checks match what the panel actually accepts: not empty; no leading or
+# trailing whitespace (IFS= keeps read from silently trimming it — trimmed,
+# the admin could not log in with what he typed); a password of at most 72
+# bytes, bcrypt's limit (util/crypto.MaxPasswordBytes), counted in bytes, not
+# characters — one Chinese character is 3 bytes. The password is not echoed
+# and has to be typed twice.
+read_panel_credentials() {
+    local attempt user pass pass2 pass_bytes
+    cred_user=""
+    cred_pass=""
+    for attempt in 1 2 3; do
+        if ! IFS= read -r -p "please set up your username:" user; then
+            echo -e "\n${red}input ended, giving up${plain}"
+            return 1
+        fi
+        if [[ -z "${user}" ]]; then
+            echo -e "${red}the username cannot be empty${plain}"
+            continue
+        fi
+        if [[ "${user}" =~ ^[[:space:]] || "${user}" =~ [[:space:]]$ ]]; then
+            echo -e "${red}the username cannot start or end with a space or other whitespace${plain}"
+            continue
+        fi
+        if ! IFS= read -r -s -p "please set up your password (not shown while typing):" pass; then
+            echo -e "\n${red}input ended, giving up${plain}"
+            return 1
+        fi
+        echo ""
+        if [[ -z "${pass}" ]]; then
+            echo -e "${red}the password cannot be empty${plain}"
+            continue
+        fi
+        if [[ "${pass}" =~ ^[[:space:]] || "${pass}" =~ [[:space:]]$ ]]; then
+            echo -e "${red}the password cannot start or end with a space or other whitespace${plain}"
+            continue
+        fi
+        pass_bytes=$(printf '%s' "${pass}" | wc -c | tr -d ' ')
+        if [[ ${pass_bytes} -gt 72 ]]; then
+            echo -e "${red}the password cannot be longer than 72 bytes (about 24 Chinese characters), this one is ${pass_bytes} bytes${plain}"
+            continue
+        fi
+        if ! IFS= read -r -s -p "please type the password again:" pass2; then
+            echo -e "\n${red}input ended, giving up${plain}"
+            return 1
+        fi
+        echo ""
+        if [[ "${pass}" != "${pass2}" ]]; then
+            echo -e "${red}the two passwords do not match${plain}"
+            continue
+        fi
+        cred_user="${user}"
+        cred_pass="${pass}"
+        return 0
+    done
+    echo -e "${red}3 invalid attempts in a row, giving up${plain}"
+    return 1
+}
+
+print_credentials_hint() {
+    echo -e "${yellow}to change them: log in and use Panel Settings -> account, or run on this machine${plain}"
+    echo -e "${yellow}  /usr/local/a-ui/a-ui setting -username '<username>' -password '<password>'${plain}"
+}
+
+# Whether something is already listening on the TCP port. ss first, netstat
+# on old systems without ss (no ss -H: CentOS 7's iproute does not know it).
+# Only the port after the last colon of the local-address column is
+# compared, so the header line never matches. With neither tool there is no
+# way to tell and the port is treated as free — a random port hitting a
+# busy one is unlikely, and such a system is outside the supported range.
+port_in_use() {
+    local port="$1" listeners
+    if command -v ss >/dev/null 2>&1; then
+        listeners=$(ss -ltn 2>/dev/null)
+    elif command -v netstat >/dev/null 2>&1; then
+        listeners=$(netstat -ltn 2>/dev/null)
+    else
+        return 1
+    fi
+    echo "${listeners}" | awk -v p="${port}" '{ n = split($4, a, ":"); if (a[n] == p) found = 1 } END { exit !found }'
+}
+
+# Pick a random panel port that is free right now; return 1 if none found.
+# Range 10000-32767: $RANDOM alone can be 0 or a privileged port below 1024;
+# it also stays out of Linux's default ephemeral range (32768-60999), where
+# outgoing connections grab ports at any time and the panel might fail to
+# bind on its next restart.
+pick_free_port() {
+    local i port
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        port=$((10000 + RANDOM % 22768))
+        if ! port_in_use "${port}"; then
+            echo "${port}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 #This function will be called when user installed a-ui out of sercurity
 config_after_install() {
     # Under the new topology the panel port is an internal implementation
     # detail and is no longer asked about here (see the security setup
     # wizard below). But the wizard needs to know the port actually in
-    # effect after this run in order to build the panel URL: a fresh
-    # install can always determine it via the two branches below; on an
-    # upgrade where the user chooses to keep existing settings, the port
-    # was never touched here, so the value is unknown and the global
-    # panel_port is left unset (leaving it to the caller to probe for the
-    # port itself, or simply omit it from the URL).
+    # effect after this run in order to build the panel URL: on a fresh
+    # install it is the default 54321, rewritten below if the random branch
+    # changes it; on an upgrade the port was never touched here, so the
+    # value is unknown and the global panel_port is left unset (leaving it
+    # to the caller to probe for the port itself, or simply omit it from the
+    # URL).
     local is_fresh_install=1
     [[ -f "/etc/a-ui/a-ui.db" ]] && is_fresh_install=0
+    [[ ${is_fresh_install} -eq 1 ]] && panel_port=54321
 
+    # read_panel_credentials writes these two; local here keeps the password out of the globals
+    local creds_set=0 cred_user="" cred_pass=""
     echo -e "${yellow}Install/update finished, need to modify the account and password out of security${plain}"
     read -p "are you continue,if you type n will skip this at this time[y/n]": config_confirm
     if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        read -p "please set up your username:" config_account
-        echo -e "${yellow}your username will be:${config_account}${plain}"
-        read -p "please set up your password:" config_password
-        echo -e "${yellow}your password will be:${config_password}${plain}"
-        echo -e "${yellow}initializing,wait some time here...${plain}"
-        /usr/local/a-ui/a-ui setting -username ${config_account} -password ${config_password}
-        echo -e "${yellow}account name and password set down!${plain}"
-        [[ ${is_fresh_install} -eq 1 ]] && panel_port=54321
+        if read_panel_credentials; then
+            echo -e "${yellow}your username will be:${cred_user}${plain}"
+            echo -e "${yellow}initializing,wait some time here...${plain}"
+            if a_ui_setting -username "${cred_user}" -password "${cred_pass}"; then
+                creds_set=1
+                echo -e "${green}account name and password set down!${plain}"
+            fi
+        fi
+        cred_pass=""
+        if [[ ${creds_set} -eq 0 ]]; then
+            if [[ ${is_fresh_install} -eq 1 ]]; then
+                # A fresh install landing here still has the public default
+                # admin/admin on 0.0.0.0:54321, and an aborted wizard would
+                # leave it that way. Fall back to random credentials, as for n.
+                echo -e "${red}the username and password could not be set from your input. so the panel does not run with the public default admin/admin, random ones are generated below${plain}"
+            else
+                echo -e "${red}the username and password could not be set, the panel keeps the credentials it had before the update${plain}"
+                print_credentials_hint
+            fi
+        fi
     else
         echo -e "${red}cancel...${plain}"
-        if [[ ${is_fresh_install} -eq 1 ]]; then
-            local usernameTemp=$(head -c 6 /dev/urandom | base64)
-            local passwordTemp=$(head -c 6 /dev/urandom | base64)
-            local portTemp=$(echo $RANDOM)
-            /usr/local/a-ui/a-ui setting -username ${usernameTemp} -password ${passwordTemp}
-            /usr/local/a-ui/a-ui setting -port ${portTemp}
+        if [[ ${is_fresh_install} -eq 0 ]]; then
+            echo -e "${red} this is your upgrade,will keep old settings. type a-ui then 7 for port/path/username; the password is stored hashed and cannot be shown,type 4 to reset it${plain}"
+        fi
+    fi
+
+    if [[ ${is_fresh_install} -eq 1 && ${creds_set} -eq 0 ]]; then
+        local usernameTemp passwordTemp portTemp random_creds_set=0
+        usernameTemp=$(head -c 6 /dev/urandom | base64)
+        passwordTemp=$(head -c 6 /dev/urandom | base64)
+        a_ui_setting -username "${usernameTemp}" -password "${passwordTemp}" && random_creds_set=1
+        if portTemp=$(pick_free_port) && a_ui_setting -port "${portTemp}"; then
             panel_port=${portTemp}
-            echo -e "this is a fresh installation,will generate random login info for security concerns:"
-            echo -e "###############################################"
+        else
+            portTemp=""
+        fi
+        echo -e "this is a fresh installation,will generate random login info for security concerns:"
+        echo -e "###############################################"
+        if [[ ${random_creds_set} -eq 1 ]]; then
             echo -e "${green}user name:${usernameTemp}${plain}"
             echo -e "${green}user password:${passwordTemp}${plain}"
+        else
+            default_credentials_active=1
+            echo -e "${red}setting random credentials failed: the panel still uses the public default username admin / password admin!${plain}"
+        fi
+        if [[ -n "${portTemp}" ]]; then
             echo -e "${red}web port:${portTemp}${plain}"
-            echo -e "###############################################"
+        else
+            echo -e "${red}could not set a random port, the panel still uses the default port 54321${plain}"
+        fi
+        echo -e "###############################################"
+        if [[ ${random_creds_set} -eq 1 ]]; then
             echo -e "${red}write the password above down now: it is stored hashed and cannot be shown again. type a-ui then 7 for port/path/username, or 4 to reset a forgotten password${plain}"
         else
-            echo -e "${red} this is your upgrade,will keep old settings. type a-ui then 7 for port/path/username; the password is stored hashed and cannot be shown,type 4 to reset it${plain}"
+            print_credentials_hint
         fi
     fi
 }
@@ -403,7 +603,7 @@ print_rescue_hint() {
     local port="$1"
     echo -e ""
     echo -e "${yellow}If the panel is unreachable, recover with either:${plain}"
-    echo -e "  a-ui setting -listen \"\"                       # restore listening on all interfaces"
+    echo -e "  /usr/local/a-ui/a-ui setting -listen \"\"       # restore listening on all interfaces"
     if [[ -n "${port}" ]]; then
         echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<server-IP>     # or an SSH tunnel"
     else
@@ -884,6 +1084,12 @@ choose_mask_site() {
 # Caddy occupies 80/443 directly; the certificate and the 80→443 redirect
 # both rely on its automatic HTTPS, so https_port / bind aren't needed —
 # verified by Task 0.
+#
+# The BEGIN/END lines around the site block are what a-ui.sh's uninstall
+# looks for: it removes only what lies between them, so other sites the admin
+# adds to this file later are left alone. The marker lines are identical in
+# the Chinese and English scripts; change them together with the strings
+# a-ui.sh / a-ui_en.sh match on.
 write_caddyfile() {
     local domain="$1" basepath="$2" panel_port="$3" mask_url="$4"
     local mask_block
@@ -922,6 +1128,8 @@ write_caddyfile() {
     fi
 
     cat > /etc/caddy/Caddyfile <<EOF
+# BEGIN a-ui managed site: ${domain}
+# Generated by the a-ui setup wizard. Uninstalling a-ui removes only what lies between the BEGIN/END lines; re-running the wizard (a-ui menu "configure domain and decoy site") rewrites this whole file, sites outside the markers included (the wizard backs up /etc/caddy to /root before stopping Caddy).
 ${domain} {
     handle ${basepath}* {
         reverse_proxy 127.0.0.1:${panel_port}
@@ -931,6 +1139,7 @@ ${domain} {
 ${mask_block}
     }
 }
+# END a-ui managed site
 EOF
 
     if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
@@ -960,13 +1169,14 @@ wait_for_cert() {
     return 1
 }
 
-# a-ui.service is Type=simple with no Restart= configured: a successful
-# `systemctl restart` only means the process was forked, not that it
-# didn't immediately exit (e.g. leftover webCertFile/webKeyFile pointing
-# at a certificate file that no longer exists — tls.LoadX509KeyPair fails,
-# Server.Start() returns an error, and main.go just logs a line and
-# returns). This "came up and immediately died" case can't be seen from
-# systemctl's return code, so it must be probed for real.
+# a-ui.service is Type=simple: a successful `systemctl restart` only means
+# the process was forked, not that it didn't immediately exit (e.g. leftover
+# webCertFile/webKeyFile pointing at a certificate file that no longer
+# exists — tls.LoadX509KeyPair fails, Server.Start() returns an error, and
+# older main.go just logs a line and returns with exit code 0, which
+# Restart=on-failure does not restart). This "came up and immediately died"
+# case can't be seen from systemctl's return code, so it must be probed for
+# real.
 wait_for_panel_alive() {
     local panel_port="$1" basepath="$2"
     local i
@@ -1290,8 +1500,9 @@ domain_flow() {
 # Back up the xray core and geo data so they can be restored after
 # extraction. An empty xray_backup_dir means there is no backup.
 #
-# Why this exists: this script does rm -rf on the whole install directory and
-# then unpacks the release tarball, and the tarball bundles the xray copy
+# Why this exists: this script replaces the whole install directory with the
+# one unpacked from the release tarball (the old one is deleted afterwards),
+# and the tarball bundles the xray copy
 # checked into this repo (see the packaging step in release.yml). Any core
 # the admin upgraded from the panel, and the Loyalsoldier-enhanced geo data
 # a-ui geo replaced it with, would otherwise be silently rolled back.
@@ -1309,9 +1520,9 @@ domain_flow() {
 # low-memory VPS, /tmp running out of space is this function's only fail
 # close path, and it would leave the admin permanently unable to update the
 # panel. Put it under /usr/local instead, as a sibling directory next to
-# a-ui but with a different name: the `rm /usr/local/a-ui/ -rf` below (note
-# the trailing /, which only deletes the a-ui tree) cannot reach it, and it
-# does not eat into the tmpfs memory budget either.
+# a-ui but with a different name: install_a-ui() below only swaps out and
+# deletes the /usr/local/a-ui tree, which cannot reach it, and it does not
+# eat into the tmpfs memory budget either.
 backup_xray_assets() {
     xray_backup_dir=""
     [[ ! -d /usr/local/a-ui/bin ]] && return 0
@@ -1352,19 +1563,19 @@ backup_xray_assets() {
 # first, copy it back on failure); it does not hold by itself, because
 # extraction replaces the target file in place.
 restore_or_install_xray() {
-    # This cd basically only fails for one reason: the unchecked tar zxvf
-    # above failed to extract. At this point the panel is stopped and
-    # /usr/local/a-ui/ has been rm -rf'd, so the core in the backup
-    # directory is the only remaining copy of the version the admin pinned
-    # -- delete it and re-running the installer will just take the fetch
-    # branch below, and he can never get that version back. So this path
-    # must keep the backup, and put its path in the error message so he
-    # knows where it is.
+    # The release was already verified and unpacked in fetch_release and the
+    # new directory is in place, so this cd only fails in extreme cases. At
+    # this point the panel is stopped, and the core in the backup directory
+    # is one more copy of the version the admin pinned -- delete it, and if
+    # the old directory could not be moved back either, re-running the
+    # installer will just take the fetch branch below and he can never get
+    # that version back. So this path must keep the backup, and put its path
+    # in the error message so he knows where it is.
     if ! cd /usr/local/a-ui; then
         if [[ -n "${xray_backup_dir}" ]]; then
-            die_restoring_panel "Failed to enter the install directory (extraction probably failed); the existing xray core and geo data were kept in ${xray_backup_dir}, you can copy them back into /usr/local/a-ui/bin/ after reinstalling"
+            die_restoring_panel "Failed to enter the install directory; the existing xray core and geo data were kept in ${xray_backup_dir}, you can copy them back into /usr/local/a-ui/bin/ after reinstalling"
         fi
-        die_restoring_panel "Failed to enter the install directory (extraction probably failed)"
+        die_restoring_panel "Failed to enter the install directory"
     fi
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
@@ -1479,6 +1690,108 @@ restore_or_install_xray() {
     xray_backup_dir=""
 }
 
+# Download and verify the release package and unpack it into
+# ${stage_dir}/a-ui. Nothing about the existing install is touched until all
+# of this succeeds: the panel keeps running, and any failure simply exits
+# (the panel has not been stopped yet, so die_restoring_panel only cleans up
+# the staging directory). Must be called directly, never inside $(...) —
+# there die_restoring_panel's exit would only leave the subshell.
+#
+# These files are executed as root afterwards, so there are three layers:
+#   1. TLS: curl/wget always verify certificates, no -k /
+#      --no-check-certificate.
+#   2. SHA256SUMS: the checksum file release.yml attaches to every release.
+#      It is another asset of the same release, so it guards against
+#      corruption, truncation and substitution in transit and storage, not
+#      against the repository itself being compromised. Releases older than
+#      this mechanism have no such file (HTTP 404): warn and keep going (TLS
+#      is still verified). Any other failure (network error, 5xx) must not be
+#      treated as "there is none", or one induced download failure would skip
+#      verification entirely — abort.
+#   3. Contents: tar -tzf lists the whole archive, every entry is under
+#      a-ui/, the key files are present; after unpacking, the new binary is
+#      actually run with -v (prints the version, never touches the database).
+#      A 200 error page from GitHub, a truncated archive or a binary for the
+#      wrong architecture is stopped here — it used to surface only after the
+#      old install had been rm -rf'd, leaving a machine with neither panel
+#      nor xray.
+#
+# Unpacking uses --no-same-owner: as root, tar keeps the owner recorded in
+# the archive by default, i.e. the uid of the CI packaging user (1001 on
+# GitHub runners). If a regular user with that uid exists on this machine,
+# he would own this root-run binary and could simply replace it.
+fetch_release() {
+    local version="$1" pkg="$2" download_fail_msg="$3"
+    local base="https://github.com/SienFeng/AetherUI/releases/download/${version}"
+
+    stage_dir=$(mktemp -d /usr/local/a-ui-update-XXXXXX) || {
+        stage_dir=""
+        die_restoring_panel "failed to create the download staging directory, aborted (existing install untouched)"
+    }
+    local archive="${stage_dir}/${pkg}"
+
+    if ! wget -O "${archive}" "${base}/${pkg}"; then
+        die_restoring_panel "${download_fail_msg}"
+    fi
+
+    local sums="${stage_dir}/SHA256SUMS" code
+    code=$(curl -sSL --retry 2 -o "${sums}" -w '%{http_code}' "${base}/SHA256SUMS") || code="000"
+    case "${code}" in
+    200)
+        local want got
+        # Match the exact file name: the Chinese and English (-english)
+        # packages differ only by a suffix. A "*" prefix is how sha256sum
+        # marks binary mode.
+        want=$(awk -v f="${pkg}" '$2 == f || $2 == "*" f { print $1; exit }' "${sums}" | tr 'A-F' 'a-f')
+        if [[ ! "${want}" =~ ^[0-9a-f]{64}$ ]]; then
+            die_restoring_panel "the SHA256SUMS of ${version} has no checksum for ${pkg}, cannot verify the download, aborted (existing install untouched)"
+        fi
+        got=$(sha256sum "${archive}" 2>/dev/null | awk '{print $1}')
+        if [[ "${got}" != "${want}" ]]; then
+            die_restoring_panel "SHA256 check of ${pkg} failed (expected ${want}, got ${got:-nothing}), the download may be corrupted or tampered with, aborted (existing install untouched)"
+        fi
+        echo -e "${green}SHA256 check of ${pkg} passed${plain}"
+        ;;
+    404)
+        echo -e "${yellow}Warning: ${version} was released before SHA256SUMS checksum files were attached, the integrity of ${pkg} cannot be checked${plain}"
+        echo -e "${yellow}         the download was still TLS-verified, and the package layout is checked and the new binary test-run below before anything is installed${plain}"
+        ;;
+    *)
+        die_restoring_panel "failed to download the SHA256SUMS of ${version} (HTTP ${code}), cannot verify ${pkg}, aborted (existing install untouched), please try again later"
+        ;;
+    esac
+
+    local listing
+    if ! listing=$(tar -tzf "${archive}" 2>/dev/null); then
+        die_restoring_panel "the downloaded ${pkg} is not a valid tar.gz archive (probably an error page or an incomplete download), aborted (existing install untouched)"
+    fi
+    # Hand-made packages may carry a ./ prefix, which unpacks the same; normalize it before checking
+    listing=$(echo "${listing}" | sed -e 's#^\./##' -e '/^$/d')
+    if [[ -z "${listing}" ]] || echo "${listing}" | grep -qvE '^a-ui(/|$)' ||
+        echo "${listing}" | grep -qE '(^|/)\.\.(/|$)'; then
+        die_restoring_panel "${pkg} does not have the expected a-ui/ layout, refusing to unpack it, aborted (existing install untouched)"
+    fi
+    local f
+    for f in a-ui/a-ui a-ui/a-ui.service "a-ui/bin/xray-linux-${arch}"; do
+        if ! echo "${listing}" | grep -qxF "${f}"; then
+            die_restoring_panel "${pkg} is missing ${f}, aborted (existing install untouched)"
+        fi
+    done
+
+    if ! tar --no-same-owner -xzf "${archive}" -C "${stage_dir}"; then
+        die_restoring_panel "failed to unpack ${pkg}, aborted (existing install untouched)"
+    fi
+    rm -f "${archive}"
+    chmod +x "${stage_dir}/a-ui/a-ui" "${stage_dir}/a-ui/bin/xray-linux-${arch}"
+
+    local reported probe=("${stage_dir}/a-ui/a-ui" -v)
+    command -v timeout >/dev/null 2>&1 && probe=(timeout 30 "${probe[@]}")
+    if ! reported=$("${probe[@]}" 2>/dev/null) || [[ -z "${reported}" ]]; then
+        die_restoring_panel "the new a-ui binary cannot run (the package may be corrupted, or not built for this machine's architecture ${arch}), aborted (existing install untouched)"
+    fi
+    echo -e "${green}the new version passed a test run (a-ui -v printed: $(echo "${reported}" | head -n 1))${plain}"
+}
+
 install_a-ui() {
     # The port probe must happen before stop: current_panel_port()'s probe
     # branch relies on systemctl show -p MainPID to find the running a-ui
@@ -1495,48 +1808,69 @@ install_a-ui() {
 
     cd /usr/local/
 
+    local pkg="a-ui-linux-${arch}-english.tar.gz" download_fail_msg
     if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -fsSL "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             die_restoring_panel "refresh a-ui version failed,it may due to Github API restriction,please try it later"
         fi
         echo -e "get a-ui latest version succeed:${last_version},begin to install..."
-        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}-english.tar.gz
-        if [[ $? -ne 0 ]]; then
-            die_restoring_panel "download a-ui failed,please be sure that your server can access Github"
-        fi
+        download_fail_msg="download a-ui failed,please be sure that your server can access Github"
     else
         last_version=$1
-        url="https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}-english.tar.gz"
         echo -e "begin to install a-ui $1 ..."
-        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}-english.tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            die_restoring_panel "download a-ui $1 failed,please check the verison exists"
-        fi
+        download_fail_msg="download a-ui $1 failed,please check the verison exists"
+    fi
+    # The version goes into the download URL and local paths; same rule as
+    # the panel's one-click update tag allowlist
+    if [[ ! "${last_version}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+        die_restoring_panel "invalid version ${last_version} (only letters, digits, dots, underscores and dashes are allowed)"
     fi
 
-    # Stopping the panel happens only after the download succeeded. Stopping
-    # first means that any failure in version detection or download (flaky
-    # network, GitHub API rate limit, a version that does not exist) exits the
-    # script and leaves a machine whose panel is stopped and will not come back
-    # on its own — and those two steps are precisely the ones that depend on
-    # external network and fail most often. The port probe must still run before
-    # the stop; the block above already did that, so reordering is safe.
+    # Stopping the panel happens only after the download and every check
+    # succeeded. Stopping first means that any failure in version detection
+    # or download (flaky network, GitHub API rate limit, a version that does
+    # not exist, a broken package) exits the script and leaves a machine whose
+    # panel is stopped and will not come back on its own — and those are
+    # precisely the steps that depend on external network and fail most often.
+    # The port probe must still run before the stop; the block above already
+    # did that, so reordering is safe.
+    fetch_release "${last_version}" "${pkg}" "${download_fail_msg}"
     backup_xray_assets
 
+    # Only record "stopped by this install" if the panel was actually running: on a fresh install, or a
+    # panel the admin stopped on purpose, die_restoring_panel must not start it -- on a fresh install
+    # config_after_install hasn't run yet, so it would come up as admin/admin on 0.0.0.0:54321.
+    if systemctl is-active --quiet a-ui; then
+        a_ui_stopped=1
+    fi
     systemctl stop a-ui
-    a_ui_stopped=1
+    # From here to the commit point the panel is stopped: Ctrl-C, an SSH drop (SIGHUP) or kill all go
+    # through the restore path instead of leaving the panel stopped and the old tree parked in staging.
+    trap 'die_restoring_panel "installation interrupted, restoring the previous state"' INT TERM HUP
 
-    if [[ -e /usr/local/a-ui/ ]]; then
-        rm /usr/local/a-ui/ -rf
+    # Swap directories: move the old one aside into the staging directory,
+    # then move the new one in. Both are renames inside /usr/local, so after
+    # either step the old directory can still be put back exactly as it was
+    # (see die_restoring_panel).
+    if [[ -e /usr/local/a-ui ]]; then
+        if ! mv /usr/local/a-ui "${stage_dir}/old-a-ui"; then
+            die_restoring_panel "failed to move the old install directory aside, update aborted"
+        fi
+        old_install_dir="${stage_dir}/old-a-ui"
+    fi
+    if ! mv "${stage_dir}/a-ui" /usr/local/a-ui; then
+        die_restoring_panel "failed to move the new version into /usr/local/a-ui, update aborted"
     fi
 
-    tar zxvf a-ui-linux-${arch}-english.tar.gz
-    rm a-ui-linux-${arch}-english.tar.gz -f
-    cd a-ui
-    chmod +x a-ui bin/xray-linux-${arch}
+    cd /usr/local/a-ui
     restore_or_install_xray
     cp -f a-ui.service /etc/systemd/system/
+    # The unit file may have changed with the version (e.g. a new Restart=).
+    # setup_wizard's domain branch runs systemctl restart a-ui before the
+    # daemon-reload further down; without reloading here that restart would
+    # still use the old unit, with only a "changed on disk" hint from systemd.
+    systemctl daemon-reload
     # Download the management script to a temp file first, confirm it
     # succeeded and is non-empty, then move it into /usr/bin/a-ui.
     # wget -O truncates the target before writing: downloading straight into
@@ -1546,7 +1880,8 @@ install_a-ui() {
     # diagnose from the symptom.
     local mgr_tmp
     mgr_tmp=$(mktemp) || die_restoring_panel "failed to create a temp file"
-    if ! wget --no-check-certificate -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui_en.sh; then
+    # The panel is stopped; do not let wget hang on its defaults (20 tries, 900 s timeout).
+    if ! wget --timeout=30 --tries=3 -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui_en.sh; then
         rm -f "${mgr_tmp}"
         die_restoring_panel "download of the a-ui management script failed, please be sure your server can reach raw.githubusercontent.com"
     fi
@@ -1554,8 +1889,22 @@ install_a-ui() {
         rm -f "${mgr_tmp}"
         die_restoring_panel "the downloaded a-ui management script is empty, the connection was probably cut"
     fi
-    install -m 755 "${mgr_tmp}" /usr/bin/a-ui
+    # Non-empty is not enough: GitHub's error pages and truncated downloads are non-empty too
+    if ! head -n 1 "${mgr_tmp}" | grep -qE '^#!.*bash' || ! bash -n "${mgr_tmp}" 2>/dev/null; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "the downloaded a-ui management script is not a complete bash script, the connection was probably cut"
+    fi
+    if ! install -m 755 "${mgr_tmp}" /usr/bin/a-ui; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "failed to install the a-ui management script to /usr/bin/a-ui"
+    fi
     rm -f "${mgr_tmp}"
+    # The new version is fully in place; no rollback from here on: delete the
+    # staging directory (and the old directory swapped out into it)
+    old_install_dir=""
+    rm -rf "${stage_dir}"
+    stage_dir=""
+    trap - INT TERM HUP
     chmod +x /usr/local/a-ui/a-ui_en.sh
     config_after_install
     setup_wizard
@@ -1579,6 +1928,11 @@ install_a-ui() {
     echo -e "a-ui uninstall    - Uninstall a-ui "
     echo -e "a-ui geo          - Update    geo  data"
     echo -e "----------------------------------------------"
+    if [[ ${default_credentials_active} -eq 1 ]]; then
+        echo -e ""
+        echo -e "${red}NOTE: the panel still uses the public default username admin / password admin, change it now!${plain}"
+        print_credentials_hint
+    fi
 }
 
 # Trigger the security setup wizard on its own, without doing the whole

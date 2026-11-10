@@ -6,6 +6,7 @@ import (
 
 	"a-ui/database"
 	"a-ui/database/model"
+	"a-ui/logger"
 )
 
 // 入站列表上「需要管理员留意」的只读汇总：停用原因与自动恢复时刻、近 24 小时的地区拦截。
@@ -25,6 +26,16 @@ const geoBlockedWindow = 24 * time.Hour
 
 // expiringSoonWindow 是「即将到期」的提前量，与入站列表的到期过滤、汇总卡同口径。
 const expiringSoonWindow = 7 * 24 * time.Hour
+
+// AutoRegionAttention 是「需要留意」里的自动设置地区状态。
+type AutoRegionAttention struct {
+	State   string   `json:"state"`
+	Regions []string `json:"regions"`
+	// PrevRegions 是自动写入之前的地区：首次自动设置时为空，长住外地自动改地区时是原来的省（撤销会恢复它）。
+	PrevRegions []string `json:"prevRegions"`
+	Reason      string   `json:"reason"`
+	At          int64    `json:"at"`
+}
 
 // 被拦来源的标注（GeoBlockedIP.Kind）。只做提示，不自动放行——自动放行由
 // AutoTravelService 按更严的条件单独负责。
@@ -70,6 +81,12 @@ type InboundAttention struct {
 	RegionPass *model.InboundRegionPass `json:"regionPass,omitempty"`
 	// AutoTravel 是自动出差放行最近一次的判定结果（只对开了自动出差的入站）。
 	AutoTravel *AutoTravelStatus `json:"autoTravel,omitempty"`
+	// AutoRegion 是 7 天内的自动设置（首次设置，或长住外地改地区）；不再有「待确认」。
+	AutoRegion *AutoRegionAttention `json:"autoRegion,omitempty"`
+	// Throttle 是生效中的流量暴涨自动限速（见 SpikeThrottleService）。
+	Throttle *model.InboundThrottle `json:"throttle,omitempty"`
+	// PortConflict：端口被别的程序占着，这个入站被临时摘出了核心配置（每 30 秒复查，端口空出来自动恢复）。
+	PortConflict *PortConflict `json:"portConflict,omitempty"`
 }
 
 // GeoBlockedSummary 是一个入站近 24 小时的地区拦截统计。
@@ -96,8 +113,11 @@ type InboundAttentionService struct {
 	settingService SettingService
 }
 
-// Summary 返回需要留意的入站（入站 id → 状态）。地区拦截读不出（访问日志关闭、库不可用）
-// 时只是没有那一部分，停用原因照常给出；读库出错则返回 error。
+// Summary 返回需要留意的入站（入站 id → 状态）。读不出入站列表或时区才返回 error。
+//
+// 地区拦截、自动设置、通行证这几部分是附属的：其中某一块读不出（访问日志关闭、库出错）
+// 时只是没有那一部分并记日志，到期提醒、停用原因和侧栏提醒点照常给出——曾经任何一块
+// 出错都让整个摘要失败，侧栏和列表上的提醒一起消失。
 func (s *InboundAttentionService) Summary(now time.Time) (map[int]*InboundAttention, error) {
 	inbounds, err := (&InboundService{}).GetAllInbounds()
 	if err != nil {
@@ -127,7 +147,7 @@ func (s *InboundAttentionService) Summary(now time.Time) (map[int]*InboundAttent
 
 	geo, err := geoBlockedByInbound(inbounds, now)
 	if err != nil {
-		return nil, err
+		logger.Warning("需要留意：读取地区拦截失败，本次不显示这一部分:", err)
 	}
 	for id, g := range geo {
 		get(id).GeoBlocked = g
@@ -148,13 +168,62 @@ func (s *InboundAttentionService) Summary(now time.Time) (map[int]*InboundAttent
 			get(id).AutoTravel = &st
 		}
 	}
+	states, err := (&AutoRegionService{}).States()
+	if err != nil {
+		logger.Warning("需要留意：读取自动设置地区状态失败，本次不显示这一部分:", err)
+	}
+	regionsOf := map[int]string{}
+	for _, in := range inbounds {
+		regionsOf[in.Id] = in.Regions
+	}
+	for id, st := range states {
+		// 7 天内的自动设置（首次设置或长住改地区）不论启用与否都给出：那段时间里把地区改回去只能点它
+		// 撤销（见 checkStaleAutoRegionWrite），停用的入站也一样。全部判断都自动做，没有「待确认」。
+		if st.State != model.AutoRegionApplied || now.UnixMilli()-st.UpdatedAt > autoRegionAppliedVisible.Milliseconds() {
+			continue
+		}
+		if _, ok := regionsOf[id]; !ok {
+			continue
+		}
+		regions, _ := DecodeRegions(st.Regions)
+		if regions == nil {
+			regions = []string{}
+		}
+		prev, _ := DecodeRegions(st.PrevRegions)
+		if prev == nil {
+			prev = []string{}
+		}
+		get(id).AutoRegion = &AutoRegionAttention{State: st.State, Regions: regions, PrevRegions: prev,
+			Reason: st.Reason, At: st.UpdatedAt}
+	}
 	passes, err := (&RegionPassService{}).Active()
 	if err != nil {
-		return nil, err
+		logger.Warning("需要留意：读取出差通行证失败，本次不显示这一部分:", err)
 	}
 	for id, p := range passes {
 		if enabled[id] {
 			get(id).RegionPass = p
+		}
+	}
+	var throttles []model.InboundThrottle
+	if err := database.GetDB().Where("until > ?", now.UnixMilli()).Find(&throttles).Error; err != nil {
+		logger.Warning("需要留意：读取流量暴涨限速失败，本次不显示这一部分:", err)
+	}
+	for i := range throttles {
+		if enabled[throttles[i].InboundId] {
+			get(throttles[i].InboundId).Throttle = &throttles[i]
+		}
+	}
+	conflicts := (&XrayService{}).PortConflicts()
+	if len(conflicts) > 0 {
+		idByTag := make(map[string]int, len(inbounds))
+		for _, in := range inbounds {
+			idByTag[in.Tag] = in.Id
+		}
+		for i := range conflicts {
+			if id, ok := idByTag[conflicts[i].Tag]; ok && enabled[id] {
+				get(id).PortConflict = &conflicts[i]
+			}
 		}
 	}
 	return out, nil
@@ -274,6 +343,27 @@ func geoBlockedByInbound(inbounds []*model.Inbound, now time.Time) (map[int]*Geo
 	return out, nil
 }
 
+// enforceableProvince 返回 province，前提是按执行口径放行这个省确实放得进 ip；否则返回空。
+// 多数票选出的省份（界面上显示的那个）在按多数判据合并时不一定包含这个 IP（各库平票），那时
+// 一键发的通行证放行不了它，宁可标成未知、不给按钮。cache 让同一个省的允许集只建一次。
+func enforceableProvince(ip, province string, allowed func([]string) (*cidrSet, error), cache map[string]*cidrSet) string {
+	if province == "" {
+		return ""
+	}
+	set, ok := cache[province]
+	if !ok {
+		var err error
+		if set, err = allowed([]string{province}); err != nil {
+			set = nil
+		}
+		cache[province] = set
+	}
+	if set == nil || !set.Contains(ip) {
+		return ""
+	}
+	return province
+}
+
 // annotateBlocked 给被拦来源补上省份与「疑似共享 / 疑似出差」标注。家里按**存储的**
 // 地区判断（不含通行证）：通行证放进来的省份不是「家」。IP 库未加载时不标注。
 func annotateBlocked(list []GeoBlockedIP, inboundId int, storedRegions string, now time.Time) {
@@ -289,8 +379,9 @@ func annotateBlocked(list []GeoBlockedIP, inboundId int, storedRegions string, n
 	if err != nil {
 		return
 	}
+	sets := map[string]*cidrSet{}
 	for i := range list {
-		list[i].Province = provinceOfIP(list[i].IP)
+		list[i].Province = enforceableProvince(list[i].IP, provinceOfIP(list[i].IP), allowedSetFor, sets)
 		list[i].Kind = classifyBlocked(list[i].LastAt, rows, home)
 	}
 }

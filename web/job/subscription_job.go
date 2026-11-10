@@ -7,9 +7,8 @@ import (
 
 // SubscriptionJob 每 10 分钟检查一次有没有到点该更新的订阅域名组。
 //
-// 注意：cron 没有 panic 恢复（Server.Start 里的 cron.New 未配 cron.Recover），
-// 这个 Run 里的任何 panic 都会杀掉整个面板进程。所有可能失败的操作都必须
-// 走 error 返回，不能依赖 recover 兜底。
+// cron 配了 cron.Recover（web/web.go）作为通用兜底，panic 不会杀掉面板进程，但这一轮之后的逻辑
+// 就不跑了。可能失败的操作仍然走 error 返回，不依赖 recover。
 type SubscriptionJob struct {
 	domainGroupService service.DomainGroupService
 	xrayService        service.XrayService

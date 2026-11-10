@@ -119,12 +119,22 @@ jobs:
           pattern: a-ui-*
           merge-multiple: true
 
+      # install.sh 的 fetch_release 用 SHA256SUMS 核验下载到的包：没有这个文件的
+      # 发布只能退回"仅 TLS 校验 + 警告"。校验和在这里对即将上传的最终产物现算，
+      # 不在 build 作业里分开算，保证与 release 里的文件逐字节对应。文件名不带 ./
+      # 前缀——脚本按完整文件名精确匹配那一行。
+      - name: 生成 SHA256SUMS
+        run: |
+          sha256sum -- *.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
       - name: 创建 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -lh ./*.tar.gz
-          gh release create "$GITHUB_REF_NAME" ./*.tar.gz \
+          ls -lh ./*.tar.gz SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./*.tar.gz SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

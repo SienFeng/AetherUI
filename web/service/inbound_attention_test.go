@@ -156,3 +156,34 @@ func TestClassifyBlocked(t *testing.T) {
 		}
 	}
 }
+
+// 附属部分读不出来（这里删表模拟库出错）时，其余部分照常给出：到期提醒、停用原因和
+// 侧栏提醒点，不能因为自动设置、通行证或地区拦截某一块的故障一起消失。
+func TestInboundAttentionDegradesWhenOptionalPartsFail(t *testing.T) {
+	setupAccessLogDB(t)
+	now := time.Now()
+	soon := mkInbound(t, 50044)
+	mkRegionInbound(t, 50045, true, []string{"江苏省"})
+	db := database.GetDB()
+	if err := db.Model(soon).Update("expiry_time", now.Add(3*24*time.Hour).UnixMilli()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := (&SettingService{}).SetAccessLogEnable(true); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"inbound_auto_regions", "inbound_region_passes"} {
+		if err := db.Exec("DROP TABLE " + table).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.GetAccessLogDB().Exec("DROP TABLE access_logs").Error; err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&InboundAttentionService{}).Summary(now)
+	if err != nil {
+		t.Fatalf("附属部分读不出来时不该整体失败: %v", err)
+	}
+	if a := got[soon.Id]; a == nil || !a.ExpiresSoon {
+		t.Errorf("到期提醒应照常给出: %+v", a)
+	}
+}

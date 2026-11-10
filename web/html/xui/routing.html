@@ -510,6 +510,19 @@
     .rv-alert.is-info   { background: #EFF6FF; color: #1E40AF; }  /* 8.0:1 */
     .rv-alert.is-danger { background: #FEF2F2; color: #991B1B; }  /* 7.6:1 */
 
+    /* 页面级的加载失败提示：沿用 .rv-alert.is-danger 的配色，重试按钮放在同一行，窄屏换到下一行 */
+    .rv-alert.load-error {
+        margin: 0 0 16px;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+
+    .load-error-text {
+        flex: 1 1 240px;
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
     .rv-edit {
         margin-top: 14px;
         padding: 12px 16px 4px;
@@ -1449,6 +1462,14 @@
                     <a-button icon="upload" @click="pickImportFile()">导入全部</a-button>
                 </div>
             </div>
+            <!-- 加载失败与「真的没有数据」必须分开：把失败当成空列表，页面会说「还没有分流规则」，
+                 随后打开、保存、启停规则还会把它当成「该规则已被删除」。手里有上一次成功加载的
+                 数据时照常显示它，并说明它可能已过期。 -->
+            <div v-if="loadError" class="rv-alert is-danger load-error" role="alert">
+                <a-icon type="close-circle"></a-icon>
+                <span class="load-error-text">加载分流数据失败：[[ loadError ]]<template v-if="loadedOnce">。下面显示的是上一次成功加载的内容，可能已不是最新</template></span>
+                <a-button size="small" icon="reload" :loading="reloading" @click="retryLoad">重试</a-button>
+            </div>
             <a-spin :spinning="spinning" :delay="500" tip="加载中">
                 <transition name="list" appear>
                     <a-tabs id="routing-tabs" default-active-key="1" @change="onRoutingTabChange">
@@ -1472,7 +1493,7 @@
                                     <span class="toolbar-group">
                                         <label for="sub-time-input" class="toolbar-label">订阅每日更新</label>
                                         <a-input id="sub-time-input" v-model.trim="subTime.value" placeholder="HH:MM"
-                                                 style="width: 88px" @press-enter="saveSubTime"></a-input>
+                                                 style="width: 88px" @keydown.enter.native="saveSubTime"></a-input>
                                         <a-button :disabled="!subTimeDirty" :loading="subTime.saving"
                                                   @click="saveSubTime">保存</a-button>
                                         <a-tooltip placement="topRight" overlay-class-name="setting-hint-tip"
@@ -1487,10 +1508,10 @@
                                 </div>
                                 <!-- 卡片网格。每张卡用到的字段与原来的表格完全相同，按钮也都接回
                                      原有方法（refreshGroup / clickGroupAction），没有新增后端能力。 -->
-                                <div v-if="!groups.length" class="empty-block">
+                                <div v-if="!groups.length && !loadError" class="empty-block">
                                     还没有域名组。域名组是一批域名或 IP 段的集合，分流规则引用它来决定哪些流量走哪个出站。
                                 </div>
-                                <div v-else class="gcards">
+                                <div v-else-if="groups.length" class="gcards">
                                     <div v-for="group in groups" :key="group.id" class="gcard"
                                          :class="{ 'is-error': group.broken || group.subscribeState === 'error' }">
                                         <div class="gcard-top">
@@ -1576,7 +1597,7 @@
                                 </div>
                                 <a-table :columns="nodeColumns" :data-source="nodes"
                                          :row-key="r => r.id" :loading="spinning" :pagination="false"
-                                         :locale="{ emptyText: '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }">
+                                         :locale="{ emptyText: loadError ? '加载失败，见页面上方的提示' : '还没有出站节点。出站节点是流量的落地去处，可以从分享链接导入。' }">
                                     <template slot="node" slot-scope="text, node">
                                         <div class="who">
                                             <!-- 测到过出口国家就画国旗（最近一次成功探测时 Cloudflare 判定的出口），
@@ -1739,7 +1760,7 @@
 {{template "routingRuleRow" .}}
                                             </li>
                                         </ul>
-                                        <p v-else class="rv-empty">还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。</p>
+                                        <p v-else-if="!loadError" class="rv-empty">还没有分流规则。一条规则把「哪些用户」访问「哪批域名」的流量送到「哪个出站」。</p>
                                     </template>
                                     <p v-if="ruleFiltering && !visibleRuleCount" class="rv-empty">没有符合条件的规则</p>
                                 </section>
@@ -1988,7 +2009,7 @@
                                                             以后新增的用户自动应用这条规则
                                                         </a-checkbox>
                                                     </div>
-                                                    <div v-if="!inbounds.length" class="rule-pick-empty">还没有任何入站</div>
+                                                    <div v-if="!inbounds.length && !loadError" class="rule-pick-empty">还没有任何入站</div>
                                                     <a-select v-else mode="multiple" class="rule-pick" :value="ruleEditor.rule.inboundIds"
                                                               aria-labelledby="rv-users-label"
                                                               placeholder="选择用户" option-filter-prop="title" option-label-prop="title" :max-tag-count="12"
@@ -2028,7 +2049,7 @@
                                                                     @click="removeRuleGroup(g.id)"><a-icon type="close"></a-icon></button>
                                                         </span>
                                                         <a-popover v-if="addableGroupCount" v-model="groupAdd.open" trigger="click" placement="bottomLeft"
-                                                                   overlay-class-name="rv-gadd-pop" @visibleChange="onGroupAddVisible">
+                                                                   overlay-class-name="rv-gadd-pop">
                                                             <template slot="content">
                                                                 <input v-if="addableGroupCount > 8" ref="groupAddSearch" v-model="groupAdd.q" type="search"
                                                                        class="rv-gadd-search" placeholder="搜索域名组" aria-label="搜索域名组">
@@ -2054,7 +2075,7 @@
                                                             </button>
                                                         </a-popover>
                                                     </div>
-                                                    <div v-if="!groups.length" class="rv-help">还没有域名组，先到「域名组」页签添加</div>
+                                                    <div v-if="!groups.length && !loadError" class="rv-help">还没有域名组，先到「域名组」页签添加</div>
                                                     <div v-if="ruleEditor.tried && !ruleEditor.rule.domainGroupIds.length"
                                                          class="rv-err">至少选择一个域名组</div>
                                                 </div>
@@ -2091,7 +2112,7 @@
                                                                 <span class="rv-node-sub">[[ nodeSubLabel(n) ]]</span>
                                                             </span>
                                                         </button>
-                                                        <div v-if="!nodes.length" class="rv-help">还没有出站节点，先到「出站节点」页签添加</div>
+                                                        <div v-if="!nodes.length && !loadError" class="rv-help">还没有出站节点，先到「出站节点」页签添加</div>
                                                     </div>
                                                     <div v-if="ruleEditor.tried && ruleEditor.rule.action === 'proxy' && !ruleEditor.rule.outboundId"
                                                          class="rv-err">请选择一个出站节点</div>
@@ -2371,6 +2392,10 @@
 <script>
     // 自动探测时，这么近之内测过的节点跳过（与系统状态页同一口径）
     const PROBE_FRESH_MS = 60 * 1000;
+    // 「补全流量识别」开关（面板设置 → 防共享 / 防滥用），见 sniffingOff。
+    const FORCE_SNIFFING = {{ .force_sniffing }};
+    // 补全流量识别覆盖的协议，与 service.forcedSniffing 同一张表。
+    const FORCE_SNIFFING_PROTOCOLS = ['vmess', 'vless', 'trojan', 'shadowsocks', 'socks', 'http'];
 
     const app = new Vue({
         mixins: [panelVersionMixin, routingAuditMixin, inboundAttentionMixin],
@@ -2385,6 +2410,12 @@
             nodes: [],
             rules: [],
             inbounds: [],
+            // 最近一次 loadAll 失败的原因，成功后清空；非空时空列表不能被说成「还没有」，
+            // 列表里找不到某条规则也不能被说成「已被删除」。
+            loadError: '',
+            // 是否至少成功加载过一次：失败时手里的是不是上一次成功的数据，提示语据此措辞。
+            loadedOnce: false,
+            reloading: false,
             // saved 是服务端当前的值，value 是输入框里的；两者不同才能点保存。
             subTime: { value: '', saved: '', saving: false },
             // 列宽按比例分：固定像素宽 + 一列不设宽时，那一列会吃掉所有剩余宽度，
@@ -2750,17 +2781,50 @@
                     this.subTime.saving = false;
                 }
             },
+            // 四份数据要么一起换成服务端的新值，要么一份都不动：任何一份失败（success:false、
+            // 网络错误、非 2xx）都抛出，并把原因留在 loadError 里。改动前把 success:false
+            // 的 obj（null）当成空列表，页面会显示「还没有分流规则」，随后打开、保存、启停
+            // 规则都会报「该规则已被删除」，保存还会顺手丢掉没保存的草稿。
             async loadAll() {
-                const [g, n, r, i] = await Promise.all([
-                    axios.post('aui/routing/domain-group/list'),
-                    axios.post('aui/routing/outbound/list'),
-                    axios.post('aui/routing/rule/list'),
-                    axios.post('aui/inbound/list'),
-                ]);
+                let res;
+                try {
+                    res = await Promise.all([
+                        axios.post('aui/routing/domain-group/list'),
+                        axios.post('aui/routing/outbound/list'),
+                        axios.post('aui/routing/rule/list'),
+                        axios.post('aui/inbound/list'),
+                    ]);
+                } catch (e) {
+                    this.loadError = (e && e.message) || '网络请求失败';
+                    throw e;
+                }
+                const failed = res.find(x => !x || !x.data || !x.data.success);
+                if (failed) {
+                    this.loadError = (failed && failed.data && failed.data.msg) || '服务端没有返回原因';
+                    throw new Error(this.loadError);
+                }
+                const [g, n, r, i] = res;
                 this.groups = (g.data.obj || []).map(DomainGroup.fromJson);
                 this.nodes = (n.data.obj || []).map(OutboundNode.fromJson);
                 this.rules = (r.data.obj || []).map(RoutingRule.fromJson);
                 this.inbounds = i.data.obj || [];
+                this.loadError = '';
+                this.loadedOnce = true;
+            },
+            // 页面顶部那条加载失败提示上的「重试」
+            async retryLoad() {
+                if (this.reloading) return;
+                this.reloading = true;
+                try {
+                    await this.loadAll();
+                } catch (e) {
+                    return; // 新的原因已经写进 loadError，提示照常显示
+                } finally {
+                    this.reloading = false;
+                }
+                if (!this.subTime.saved) this.loadSubTime();
+                // 首次加载就失败时编辑区是空的：重试成功后与刚打开页面时一样选中第一条
+                if (!this.ruleEditor.active) this.selectFirstRule();
             },
             // 段由动作决定，不额外传参：section 本来就是 action 的函数，
             // 让调用方各自传一遍只会多出一处可以写错的地方。
@@ -3065,7 +3129,7 @@
                     cidrs: this.groupModal.cidrs,
                     // 空行在这里就滤掉：后端的 ParseSubscribeURLs 同样会滤，
                     // 但提交体里带着空行会让 updateFieldsFor 的字符串比较判成
-                    // 「地址变了」，白白清空一次订阅内容、触发一次重新拉取。
+                    // 「地址变了」，白走一遍按地址重新合并与清理结果行。
                     subscribeUrl: this.groupModal.subscribeUrls
                         .map(u => u.trim()).filter(Boolean).join('\n'),
                 };
@@ -3091,7 +3155,9 @@
                     onOk: async () => {
                         const msg = await this.post('aui/routing/domain-group/del/' + group.id);
                         if (msg.success) {
-                            await this.loadAll();
+                            // 删除已经成功：重新加载失败时（原因见页面顶部）不能抛出——确认框会以为
+                            // 删除没做成而停在那里；也从旧列表里拿掉它，免得还显示一个已删除的组。
+                            if (!(await this.refreshRulesQuiet())) this.groups = this.groups.filter(g => g.id !== group.id);
                             this.reverifyIfAffected({ groupId: group.id });
                         }
                     },
@@ -3147,7 +3213,8 @@
                     cancelText: '取消',
                     onOk: async () => {
                         const msg = await this.post('aui/routing/outbound/del/' + node.id);
-                        if (msg.success) await this.loadAll();
+                        // 同 delGroup：删除成功后重新加载失败，不让确认框停住，旧列表里也拿掉它
+                        if (msg.success && !(await this.refreshRulesQuiet())) this.nodes = this.nodes.filter(n => n.id !== node.id);
                     },
                 });
             },
@@ -3165,12 +3232,16 @@
                     outboundId: rule.action === 'proxy' ? (rule.outboundId || 0) : 0,
                 });
             },
-            // 不带页面遮罩的刷新：点一行就整页转圈会让人以为卡住了
+            // 不带页面遮罩的刷新：点一行就整页转圈会让人以为卡住了。
+            // 返回这次是否拿到了服务端的最新数据：失败时手里的数据原样保留（loadAll 不会
+            // 只换一半），调用方据此决定能不能把「列表里没有」当成「已被删除」。
             async refreshRulesQuiet() {
                 try {
                     await this.loadAll();
+                    return true;
                 } catch (e) {
-                    // 网络失败时沿用手里的数据；保存前还会再核对一次
+                    // 沿用手里的数据；保存前还会再核对一次
+                    return false;
                 }
             },
             loadEditor(rule) {
@@ -3222,10 +3293,11 @@
                 // 轮询也不在获得焦点时刷新。另一个标签页刚建的入站可能已经被
                 // AttachInbound 加进了这条规则的 inboundIds，拿旧快照编辑后保存，
                 // 会把它静默覆盖掉，它的流量因此退回默认出站。
-                await this.refreshRulesQuiet();
+                const refreshed = await this.refreshRulesQuiet();
                 const fresh = this.rules.find(r => r.id === rule.id);
                 if (!fresh) {
-                    this.$message.error('该规则已被删除');
+                    // 刷新失败时列表是旧的：找不到只说明没能核对，不能说成「已被删除」
+                    this.$message.error(refreshed ? '该规则已被删除' : '刷新规则列表失败：' + this.loadError + '，请稍后重试');
                     return;
                 }
                 this.loadEditor(fresh);
@@ -3467,7 +3539,19 @@
                         // 草稿可能在这里停留了很久。保存前与服务端现值比对，别处改过
                         // （AttachInbound 自动加入新入站、另一个标签页编辑过）就停下，
                         // 绝不拿旧草稿整体覆盖。
-                        const res = await axios.post('aui/routing/rule/list');
+                        let res = null;
+                        try {
+                            res = await axios.post('aui/routing/rule/list');
+                        } catch (e) {
+                            // 下面按「没拿到列表」处理
+                        }
+                        if (!res || !res.data || !res.data.success) {
+                            // 核对不了服务端现值就不保存，草稿原样留着。改动前把没拿到的列表
+                            // 当成空列表，报「该规则已被删除」再 selectFirstRule()，草稿就此丢失。
+                            const why = (res && res.data && res.data.msg) || '网络请求失败';
+                            this.$message.error('无法核对服务端的规则（' + why + '），修改尚未保存，请稍后重试');
+                            return;
+                        }
                         const server = (res.data.obj || []).map(RoutingRule.fromJson).find(x => x.id === r.id);
                         if (!server) {
                             this.$message.error('该规则已被删除');
@@ -3486,7 +3570,15 @@
                     const url = r.id ? 'aui/routing/rule/update/' + r.id : 'aui/routing/rule/add';
                     const msg = await HttpUtil.post(url, Object.assign({}, r, { inboundIds }));
                     if (!msg || !msg.success) return;
-                    await this.refreshRulesQuiet();
+                    if (!(await this.refreshRulesQuiet())) {
+                        // 已经保存成功，只是刷新失败：手里的列表还是保存前的，拿它载入编辑区会把
+                        // 刚保存的内容显示回旧值。修改规则时把当前内容记成已保存；新建的规则还
+                        // 不知道 id，收起编辑区，免得再点一次保存建出第二条。
+                        if (r.id) this.ruleEditor.base = this.ruleSnapshot(r);
+                        else this.ruleEditor.active = false;
+                        this.$message.warning('已保存，但刷新列表失败：' + this.loadError + '。请点页面上方的「重试」查看最新内容');
+                        return;
+                    }
                     const saved = r.id
                         ? this.rules.find(x => x.id === r.id)
                         : this.rules.find(x => !before.includes(x.id));
@@ -3514,7 +3606,12 @@
                 }
                 this.ruleToggling = rule.id;
                 try {
-                    await this.refreshRulesQuiet();
+                    // 刷新失败就不提交：整条更新必须基于服务端最新的那份，手里的旧快照可能
+                    // 盖掉别处刚做的修改；列表里找不到也只说明没能核对，不是「已被删除」。
+                    if (!(await this.refreshRulesQuiet())) {
+                        this.$message.error('刷新规则列表失败：' + this.loadError + '，请稍后重试');
+                        return;
+                    }
                     const fresh = this.rules.find(x => x.id === rule.id);
                     if (!fresh) {
                         this.$message.error('该规则已被删除');
@@ -4001,7 +4098,9 @@
                     onOk: async () => {
                         const msg = await this.post('aui/routing/rule/del/' + rule.id);
                         if (!msg.success) return;
-                        await this.loadAll();
+                        // 同 delGroup：重新加载失败时从旧列表里拿掉它，下面的 selectFirstRule 才不会
+                        // 把刚删掉的这条又载回编辑区。
+                        if (!(await this.refreshRulesQuiet())) this.rules = this.rules.filter(r => r.id !== rule.id);
                         if (this.ruleEditor.active && this.ruleEditor.rule.id === rule.id) this.selectFirstRule();
                     },
                 });
@@ -4205,16 +4304,20 @@
 
             // 域名分流依赖 sniffing 拿到 SNI/Host。入站关掉 sniffing 或
             // destOverride 不含 http/tls 时，域名规则永远不会命中。
+            // 「补全流量识别」开着时，生成配置会给关了嗅探的入站打开嗅探（http/tls/quic），
+            // 这类入站不算；开着嗅探的只补 quic，http/tls 仍按原样判断。逐条镜像
+            // service.sniffingBlind 与 forcedSniffing，两边一起改。
             sniffingOff(inboundId) {
                 const inbound = this.inbounds.find(x => x.id === inboundId);
                 if (!inbound) return false;
+                const forced = FORCE_SNIFFING && FORCE_SNIFFING_PROTOCOLS.includes(String(inbound.protocol).toLowerCase());
                 let sniffing;
                 try {
                     sniffing = JSON.parse(inbound.sniffing || '{}');
                 } catch (e) {
                     return true;
                 }
-                if (!sniffing.enabled) return true;
+                if (!sniffing.enabled) return !forced;
                 const dest = sniffing.destOverride || [];
                 return !dest.includes('http') && !dest.includes('tls');
             },
@@ -4320,6 +4423,13 @@
             },
         },
         watch: {
+            // 「＋ 添加」弹层的开合。不能写 @visibleChange 监听：分流页是 in-DOM 模板，HTML
+            // 解析器把属性名转成小写，Vue 拿到的是 visiblechange，antd 发出的却是 visibleChange，
+            // 永远对不上（弹层从不自动聚焦搜索框、关上也不清空搜索词）。v-model 走组件自己声明的
+            // model 事件，不受影响，所以盯它绑定的状态。
+            'groupAdd.open'(open) {
+                this.onGroupAddVisible(open);
+            },
             // 草稿一变，走向图的三列尺寸就可能变，连线跟着重画
             editorPreview: {
                 deep: true,
@@ -4368,6 +4478,8 @@
             this.spinning = true;
             try {
                 await this.loadAll();
+            } catch (e) {
+                // 原因已在 loadError 里，页面顶部给出重试入口；不能让异常打断下面的初始化
             } finally {
                 this.spinning = false;
             }

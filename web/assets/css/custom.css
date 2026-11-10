@@ -4606,3 +4606,23 @@ button.chip.is-degraded:hover {
 
 .pass-kind.is-coexist { background: #FEF2F2; color: var(--aui-danger); }
 .pass-kind.is-travel  { background: #F0FDF4; color: var(--aui-success); }
+
+.auto-region-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.auto-region-row {
+    display: grid;
+    grid-template-columns: 112px 1fr;
+    gap: 8px;
+}
+
+.auto-region-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}

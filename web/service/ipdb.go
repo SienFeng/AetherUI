@@ -71,8 +71,21 @@ type ipdbSource struct {
 	CheckedAtKey string
 	MinSegments  int
 	// URL 为空表示该源未启用。
-	URL   func(s *SettingService) (string, error)
-	Build func(r io.Reader, w io.Writer, builtAt time.Time) error
+	URL func(s *SettingService) (string, error)
+	// Enabled 判定管理员是否启用了这个源。停用的源不加载、不装回内存（Load、setDB、
+	// ApplySourceToggles），于是也不参与归属地判定、多数票、画像键与地区限制的允许集。
+	// 四个正式的源都由「URL 是否为空」推出（enabledByURL）。为 nil 表示不受开关控制、
+	// 文件在就加载——只有测试替身这样用：它们没有下载地址，却要能装进库里。
+	Enabled func(s *SettingService) (bool, error)
+	Build   func(r io.Reader, w io.Writer, builtAt time.Time) error
+}
+
+// enabledByURL 把「源地址留空表示不启用」落成启用判定。
+func enabledByURL(url func(s *SettingService) (string, error)) func(s *SettingService) (bool, error) {
+	return func(s *SettingService) (bool, error) {
+		u, err := url(s)
+		return u != "", err
+	}
 }
 
 // ipdbSourceList 的顺序是固定的，它决定 Lookup 的返回顺序与界面展示顺序。
@@ -81,7 +94,7 @@ type ipdbSource struct {
 // （到点判断、单源失败不拖累另一源）必须能测，而真实的源指向 bin/ 下的固定
 // 路径和几十 MB 的外部地址，测试里必须能换掉。
 var ipdbSourceList = func() []ipdbSource {
-	return []ipdbSource{
+	list := []ipdbSource{
 		{
 			Key: ip2regionKey, Name: "ip2region", Path: config.GetIPDBPath(),
 			LegacyPath:   legacyIP2RegionPath,
@@ -123,6 +136,10 @@ var ipdbSourceList = func() []ipdbSource {
 			Build:        buildDBIP,
 		},
 	}
+	for i := range list {
+		list[i].Enabled = enabledByURL(list[i].URL)
+	}
+	return list
 }
 
 // buildIP2Location 把 IP2Location LITE DB3 的 CSV 发行包转成本项目的紧凑格式。
@@ -213,9 +230,33 @@ func (s *IPDBService) dbOf(key string) *ipdb.DB {
 }
 
 func (s *IPDBService) setDB(key string, db *ipdb.DB) {
+	// 下载一个源可能要几分钟，期间管理员清空了它的源地址的话，下载完不能再把它装回去——
+	// 界面上它已经是「未启用」。只有真的要装库时才读这一次设置，查询路径（DB）不读。
+	if db != nil && !s.sourceEnabled(key) {
+		return
+	}
 	ipdbLock.Lock()
 	defer ipdbLock.Unlock()
 	ipdbDBs[key] = db
+}
+
+// sourceEnabled 报告 key 这个源是否启用，见 ipdbSource.Enabled。
+//
+// 读不出设置时按启用处理：地区限制的允许集按已加载的库合并，少装一个启用着的源会让
+// 允许集变窄、正常用户连不上；多留一个停用的源只是判定多了一份旁证。
+func (s *IPDBService) sourceEnabled(key string) bool {
+	for _, src := range ipdbSourceList() {
+		if src.Key != key || src.Enabled == nil {
+			continue
+		}
+		on, err := src.Enabled(&s.settingService)
+		if err != nil {
+			logger.Warning("读取 IP 库启用状态失败，按启用处理, 源:", src.Name, "err:", err)
+			return true
+		}
+		return on
+	}
+	return true
 }
 
 // MigrateLegacyFiles 把旧位置（安装目录 bin/ 下）的库文件搬到新位置。
@@ -324,14 +365,20 @@ func (s *IPDBService) lastCheckedAt(src ipdbSource) int64 {
 	return v
 }
 
-// Load 从磁盘加载全部数据源。
+// Load 从磁盘加载全部启用的数据源。
 //
 // 只有一个源都加载不上才算失败：某个源缺失（比如纯真库还没下载过）不影响
 // 另一个源继续工作。
+//
+// 管理员清空了源地址的源不加载，哪怕文件还在磁盘上：界面上它是「未启用」，面板每次启动
+// 都把它装回来的话，它会一直参与归属地判定、多数票、画像键与地区限制的允许集。
 func (s *IPDBService) Load() error {
 	var lastErr error
 	loaded := 0
 	for _, src := range ipdbSourceList() {
+		if !s.sourceEnabled(src.Key) {
+			continue
+		}
 		db, err := ipdb.Load(src.Path)
 		if err != nil {
 			lastErr = err
@@ -346,6 +393,58 @@ func (s *IPDBService) Load() error {
 	return nil
 }
 
+// EnabledSources 返回各数据源此刻是否启用（见 ipdbSource.Enabled），供保存设置前后比对。
+func (s *IPDBService) EnabledSources() (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, src := range ipdbSourceList() {
+		if src.Enabled == nil {
+			out[src.Key] = true
+			continue
+		}
+		on, err := src.Enabled(&s.settingService)
+		if err != nil {
+			return nil, err
+		}
+		out[src.Key] = on
+	}
+	return out, nil
+}
+
+// ApplySourceToggles 在保存设置成功之后调用，before 是保存之前的 EnabledSources。
+// 刚停用的源立刻从内存卸下；刚重新启用的源从磁盘装回（文件在的话），不必为此重新下载——
+// IP2Location 每 24 小时只放行 5 次。
+//
+// 返回是否有源的启用状态变了。变了就要重新下发核心配置（地区限制的允许集按已加载的库现算），
+// 置重启标志由调用方做：service 保持无状态，与 updateIPDB 同一个出口。
+func (s *IPDBService) ApplySourceToggles(before map[string]bool) bool {
+	after, err := s.EnabledSources()
+	if err != nil {
+		logger.Warning("读取 IP 库启用状态失败，本次不装卸数据源:", err)
+		return false
+	}
+	toggled := false
+	for _, src := range ipdbSourceList() {
+		on := after[src.Key]
+		if before[src.Key] == on {
+			continue
+		}
+		toggled = true
+		if !on {
+			s.setDB(src.Key, nil)
+			logger.Info("IP 库数据源已停用并从内存卸下, 源:", src.Name)
+			continue
+		}
+		db, err := ipdb.Load(src.Path)
+		if err != nil {
+			// 还没下载过是常态，等定时任务或管理员点「更新」。
+			continue
+		}
+		s.setDB(src.Key, db)
+		logger.Info("IP 库数据源重新启用，已从磁盘装回, 源:", src.Name)
+	}
+	return toggled
+}
+
 // UpdateNow 立刻重建数据源，返回 (实际更新的个数, 上游未变更的个数)。
 //
 // key 为空表示更新全部；指定 key 只更新那一个——不必为了刷新 2.5 MB 的纯真库
@@ -357,6 +456,11 @@ func (s *IPDBService) Load() error {
 // 更新全部时，单个源失败不影响其余源：返回 error 会让一个坏掉的地址把整批
 // 更新都挡住。
 func (s *IPDBService) UpdateNow(key string) (int, int, error) {
+	end, ok := beginIPDBUpdate()
+	if !ok {
+		return 0, 0, errIPDBUpdateInProgress
+	}
+	defer end()
 	sources := ipdbSourceList()
 	if key != "" {
 		matched := make([]ipdbSource, 0, 1)
@@ -409,7 +513,9 @@ func (s *IPDBService) UpdateNow(key string) (int, int, error) {
 func (s *IPDBService) fetchAndBuild(src ipdbSource, url, dstPath string) (*ipdb.DB, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, common.NewError("下载 IP 库源数据失败:", err)
+		// 解析错误与下面 client.Do 的错误都是 *url.Error，带着完整地址——IP2Location
+		// 的 token 就在查询串里。这条错误随后会写进日志、经 jsonMsg 回传给前端。
+		return nil, common.NewError("下载 IP 库源数据失败:", common.RedactURLError(err))
 	}
 	// 只有本地那份确实在用、且已经是当前格式时才带条件头。
 	//
@@ -433,7 +539,7 @@ func (s *IPDBService) fetchAndBuild(src ipdbSource, url, dstPath string) (*ipdb.
 	client := &http.Client{Timeout: ipdbDownloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, common.NewError("下载 IP 库源数据失败:", err)
+		return nil, common.NewError("下载 IP 库源数据失败:", common.RedactURLError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
@@ -504,6 +610,12 @@ func (s *IPDBService) RunScheduledUpdate(now time.Time) (int, error) {
 	}
 	now = now.In(loc)
 
+	end, ok := beginIPDBUpdate()
+	if !ok {
+		logger.Debug("IP 库定时更新：另一次更新正在进行，跳过本轮")
+		return 0, nil
+	}
+	defer end()
 	updated := 0
 	for _, src := range ipdbSourceList() {
 		url, err := src.URL(&s.settingService)
@@ -601,6 +713,12 @@ func (s *IPDBService) RunInitialUpdate() (int, error) {
 		return 0, nil
 	}
 
+	end, ok := beginIPDBUpdate()
+	if !ok {
+		logger.Debug("IP 库首次更新：另一次更新正在进行，跳过")
+		return 0, nil
+	}
+	defer end()
 	now := time.Now()
 	updated := 0
 	for _, src := range ipdbSourceList() {

@@ -27,6 +27,20 @@ type Multi struct {
 	sources []Named
 }
 
+// SameSources 报告两个 Multi 是否由同一组（同序、同一份）库组成。调用方每次都新建 Multi 包装，
+// 想按「IP 库换没换」做缓存就只能比底层的库，不能比包装的指针。
+func (m *Multi) SameSources(o *Multi) bool {
+	if m == nil || o == nil || len(m.sources) != len(o.sources) {
+		return false
+	}
+	for i := range m.sources {
+		if m.sources[i].Key != o.sources[i].Key || m.sources[i].DB != o.sources[i].DB {
+			return false
+		}
+	}
+	return true
+}
+
 // NewMulti 按给定顺序组合数据源。顺序决定 Lookup 的返回顺序，
 // 也决定并集结果的稳定性，调用方必须传入固定顺序。
 func NewMulti(sources []Named) *Multi {
@@ -106,6 +120,21 @@ func (m *Multi) MajorityCIDRsOfProvinces(provinces []string) []string {
 		want[p] = true
 	}
 
+	return m.majorityCIDRs(func(loc Location) int {
+		// 沉默：境外段与没有省份的段都不表态，既不支持也不反对。
+		if loc.Country != chinaCountry || loc.Region == "" {
+			return 0
+		}
+		if want[loc.Region] {
+			return 1
+		}
+		return -1
+	})
+}
+
+// majorityCIDRs 是多数票的通用扫描：classify 对每个源的每一段表态（1 支持、-1 反对、0 沉默），
+// 返回支持数严格大于反对数的地址区间，升序且逐字节确定。
+func (m *Multi) majorityCIDRs(classify func(Location) int) []string {
 	// 事件点用 uint64：段的末地址是 0xFFFFFFFF 时，结束点 end+1 会溢出 uint32。
 	type event struct {
 		at       uint64
@@ -115,13 +144,12 @@ func (m *Multi) MajorityCIDRsOfProvinces(provinces []string) []string {
 	events := make([]event, 0, 1024)
 	for _, s := range m.sources {
 		for _, seg := range s.DB.segments {
-			loc := s.DB.locations[seg.loc]
-			// 沉默：境外段与没有省份的段都不表态，既不支持也不反对。
-			if loc.Country != chinaCountry || loc.Region == "" {
+			vote := classify(s.DB.locations[seg.loc])
+			if vote == 0 {
 				continue
 			}
 			lo, hi := uint64(seg.start), uint64(seg.end)+1
-			if want[loc.Region] {
+			if vote > 0 {
 				events = append(events, event{lo, 1, 0}, event{hi, -1, 0})
 			} else {
 				events = append(events, event{lo, 0, 1}, event{hi, 0, -1})

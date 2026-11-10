@@ -156,25 +156,26 @@ func (t *Tailer) Resume(offset int64, head string) (bool, error) {
 	return true, nil
 }
 
-// TruncateIfLargerThan 在文件超过 maxSize 时把它清空并把偏移归零。
+// TruncateIfLargerThan 在文件超过 maxSize 时把它清空并把偏移归零，返回是否截断了。
 //
 // xray 以 O_APPEND 打开日志文件，截断后它会继续从 0 追加，不需要重启。
 // 代价是可能丢掉正在写入的那一行——比让日志无限增长把磁盘写满划算。
-// 调用方应当在成功消费完全部内容之后再调用它。
-func (t *Tailer) TruncateIfLargerThan(maxSize int64) error {
+// 调用方应当在成功消费完全部内容之后再调用它；没消费完就截断（兜底上限）的调用方要自己
+// 记一条告警，那等于丢掉了没读的积压。
+func (t *Tailer) TruncateIfLargerThan(maxSize int64) (bool, error) {
 	st, err := os.Stat(t.Path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	if st.Size() <= maxSize {
-		return nil
+		return false, nil
 	}
 	if err := os.Truncate(t.Path, 0); err != nil {
-		return err
+		return false, err
 	}
 	t.offset = 0
-	return nil
+	return true, nil
 }

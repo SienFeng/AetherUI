@@ -361,8 +361,16 @@ func TestProbeRecoversInflightSlotAfterPanic(t *testing.T) {
 
 	node := newProbeNode(t, "a-ui-panic", freedomOutbound())
 	old := probeRunner
+	// 只装这一次：第一次调用 panic，之后立刻返回成功（这条用例验证的是 inflight 槽位有没有
+	// 被释放，不该顺带去真实出网一次——慢，且在没有外网的 CI 上会不稳定）。改动前是在本体
+	// panic 之后再把 probeRunner 换掉，而等待者的 goroutine 可能正在读它：包级变量上的并发
+	// 读写，-race 下这条用例必然失败。
+	var calls atomic.Int32
 	probeRunner = func(*ProbeService, *model.OutboundNode) *ProbeResult {
-		panic("boom")
+		if calls.Add(1) == 1 {
+			panic("boom")
+		}
+		return &ProbeResult{Status: ProbeOK, CheckedAt: time.Now().Unix(), tag: node.Tag}
 	}
 	t.Cleanup(func() { probeRunner = old })
 
@@ -376,7 +384,7 @@ func TestProbeRecoversInflightSlotAfterPanic(t *testing.T) {
 		}()
 		go func() {
 			// 给上面的调用留出注册 inflight 的时间；晚到也无妨，那时
-			// inflight 已清理，这一次会自己重新跑（下面的 restore 保证不再 panic）。
+			// inflight 已清理，这一次会自己重新跑（第二次调用不再 panic）。
 			time.Sleep(20 * time.Millisecond)
 			res, err := (&ProbeService{}).Probe(node.Id)
 			if err != nil {
@@ -387,11 +395,6 @@ func TestProbeRecoversInflightSlotAfterPanic(t *testing.T) {
 		(&ProbeService{}).Probe(node.Id)
 	}()
 
-	// 换成一个立刻返回的假 runner：这条用例验证的是 inflight 槽位有没有被
-	// 释放，不该顺带去真实出网一次（慢，且在没有外网的 CI 上会不稳定）。
-	probeRunner = func(*ProbeService, *model.OutboundNode) *ProbeResult {
-		return &ProbeResult{Status: ProbeOK, CheckedAt: time.Now().Unix(), tag: node.Tag}
-	}
 	select {
 	case res := <-waiterDone:
 		if res == nil {
@@ -480,7 +483,7 @@ func TestUpdateOutboundExitCountry(t *testing.T) {
 			"servers": []any{map[string]any{"address": "1.2.3.4", "port": 1080}},
 		},
 	})
-	if err := svc.SetExitCountry(node.Id, node.Tag, "JP"); err != nil {
+	if err := svc.SetExitCountry(node.Id, node.Tag, node.Config, "JP"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -508,10 +511,64 @@ func TestSetExitCountryRequiresMatchingTag(t *testing.T) {
 	setupDB(t)
 	svc := &OutboundNodeService{}
 	node := newProbeNode(t, "a-ui-now", freedomOutbound())
-	if err := svc.SetExitCountry(node.Id, "a-ui-gone", "US"); err != nil {
+	if err := svc.SetExitCountry(node.Id, "a-ui-gone", node.Config, "US"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := svc.Get(node.Id); got.ExitCountry != "" {
 		t.Errorf("ExitCountry = %q written through a stale tag", got.ExitCountry)
+	}
+}
+
+// 探测进行到一半时管理员编辑了节点配置：Update 清掉了缓存与出口国家，但那次探测
+// 测的是旧配置，它迟到的结果不能再写回——否则刚改过（可能改坏了）的节点会顶着
+// 旧配置的绿灯与旧落地的国旗，直到 30 分钟后过期或下一次探测。
+//
+// 用真实链路复现：出口国家那一跳的 trace 服务器在应答前先执行一次编辑，正好落在
+// 「探测已经开始、结果尚未写回」的窗口里。
+func TestProbeDiscardsResultWhenNodeEditedMidProbe(t *testing.T) {
+	requireXrayBinary(t)
+	setupDB(t)
+	resetProbeState(t)
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	node := newProbeNode(t, "a-ui-midedit", freedomOutbound())
+	edited := make(chan error, 1)
+	trace := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		changed := *node
+		changed.Config = `{"protocol":"freedom","settings":{"domainStrategy":"UseIP"}}`
+		edited <- (&OutboundNodeService{}).Update(&changed)
+		w.Write([]byte("fl=1\nloc=US\n"))
+	}))
+	defer trace.Close()
+	useProbeTarget(t, target.URL)
+	probeTraceURL = trace.URL
+
+	if _, err := (&ProbeService{}).Probe(node.Id); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	select {
+	case err := <-edited:
+		if err != nil {
+			t.Fatalf("探测期间编辑节点失败：%v", err)
+		}
+	default:
+		t.Fatal("前提不成立：trace 那一跳没有被请求到，编辑没有落在探测窗口里")
+	}
+
+	got, err := (&OutboundNodeService{}).Get(node.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Config == node.Config {
+		t.Fatal("前提不成立：节点配置没有被改掉")
+	}
+	if got.ExitCountry != "" {
+		t.Errorf("编辑后的节点被写上了旧配置测出的出口国家 %q", got.ExitCountry)
+	}
+	if res := (&ProbeService{}).ResultsFor([]*model.OutboundNode{got}); res[got.Id] != nil {
+		t.Errorf("旧配置的探测结果进了缓存，会显示在改过的节点上：%+v", res[got.Id])
 	}
 }

@@ -229,8 +229,17 @@ func (s *RoutingRuleService) Add(rule *model.RoutingRule) error {
 	if err := s.checkConflict(rule); err != nil {
 		return err
 	}
+	isNew := rule.Id == 0
 	db := database.GetDB()
-	return db.Save(rule).Error
+	if err := db.Save(rule).Error; err != nil {
+		return err
+	}
+	if isNew {
+		// SQLite 可能把刚删掉的那条规则的 id 分给它：那条规则若不是经 Del 删的，
+		// 它留在内存里的异常摘要与验证缓存会被这条新规则继承，见 forgetRuleAuditState。
+		forgetRuleAuditState(rule.Id)
+	}
+	return nil
 }
 
 func (s *RoutingRuleService) Update(rule *model.RoutingRule) error {
@@ -388,7 +397,13 @@ func (s *RoutingRuleService) AttachInbound(tx *gorm.DB, inboundId int) error {
 
 func (s *RoutingRuleService) Del(id int) error {
 	db := database.GetDB()
-	return db.Delete(model.RoutingRule{}, id).Error
+	if err := db.Delete(model.RoutingRule{}, id).Error; err != nil {
+		return err
+	}
+	// 同步清掉这条规则的异常摘要与验证缓存：SQLite 会复用 id，等下一轮扫描再清的话，
+	// 紧接着新建的规则会先一步占住这个 id 并继承它们（见 forgetRuleAuditState）。
+	forgetRuleAuditState(id)
+	return nil
 }
 
 // CheckDomainGroupRefs 在删除域名组前调用。

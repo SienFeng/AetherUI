@@ -116,7 +116,8 @@ class DBInbound {
 
     get address() {
         let address = location.hostname;
-        if (!ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0") {
+        // 监听在通配地址（0.0.0.0 / ::）时客户端不能拿它去连：用面板地址。改动前 :: 原样进了分享链接（[::]）。
+        if (!ObjectUtil.isEmpty(this.listen) && this.listen !== "0.0.0.0" && this.listen !== "::") {
             address = this.listen;
         }
         return address;
@@ -217,7 +218,19 @@ class AllSetting {
         this.autoTravelMonthlyDays = 10;
         this.autoTravelWeeklyGrants = 3;
         this.autoTravelCooldownDays = 7;
+        this.autoTravelRelocateDays = 5;
+        this.autoRegionEnable = 0;
+        this.autoRegionObserveDays = 1;
+        this.autoRegionMaxBlockedPercent = 5;
         this.ipRuleResolveDomain = 0;
+        this.defaultConcurrencyLimit = 1;
+        this.blockIdcSources = 1;
+        this.blockSmtp = 1;
+        this.forceSniffing = 1;
+        this.spikeThrottleEnable = 1;
+        this.spikeThrottleMultiplier = 10;
+        this.spikeThrottleFloorGB = 20;
+        this.spikeThrottleMbps = 5;
         this.dnsServers = "";
         this.tcInterface = "";
 

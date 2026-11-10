@@ -377,3 +377,45 @@ func TestParseDomainsReportsZeroWhenNothingDuplicated(t *testing.T) {
 		t.Errorf("got = %v, removed = %d, want 2 条且 removed 为 0", got, removed)
 	}
 }
+
+// 国际化域名必须转成 punycode 存库：xray 建匹配器时不做 IDN 转换，而嗅探出的
+// SNI/Host 永远是 xn-- 形态。写成「例子.example.com」的规则能加载、run -test 照样
+// Configuration OK，却永远命中不了任何连接；流量走向验证拿同一个字符串去 TestRoute
+// 还会亮绿灯。全角句点（。）按 IDNA 映射成普通的点。
+func TestParseDomainsConvertsIDNToPunycode(t *testing.T) {
+	got, _, err := ParseDomains("domain:例子.example.com\nfull:Bücher.example.com\ndomain:例子。example.com\ndomain:xn--fsqu00a.example.com")
+	if err != nil {
+		t.Fatalf("ParseDomains: %v", err)
+	}
+	want := []string{"domain:xn--fsqu00a.example.com", "full:xn--bcher-kva.example.com"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v，期望 %v（转换后与已是 punycode 的那条去重）", got, want)
+	}
+}
+
+// 只转含非 ASCII 字符的标签：idna 的 STD3 规则拒绝下划线，整串交给它会让
+// _dmarc.example.com 这类既有的合法写法变成保存失败。
+func TestParseDomainsLeavesASCIILabelsAlone(t *testing.T) {
+	got, _, err := ParseDomains("domain:_dmarc.example.com\nfull:a_b.例子.example.com")
+	if err != nil {
+		t.Fatalf("ParseDomains: %v", err)
+	}
+	if len(got) != 2 || got[0] != "domain:_dmarc.example.com" || got[1] != "full:a_b.xn--fsqu00a.example.com" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// 关键词、正则与 dotless 是拿嗅探出的 ASCII 域名去做子串/正则匹配，里面带非 ASCII
+// 字符就永远匹配不到：直接拒绝并说明，不能让它当一条看似正常的哑规则存进去。
+func TestParseDomainsRejectsNonASCIIPatterns(t *testing.T) {
+	for _, raw := range []string{"keyword:例子", "regexp:^例子\\.example\\.com$", "dotless:例子", "例子"} {
+		_, _, err := ParseDomains(raw)
+		if err == nil {
+			t.Errorf("%q 应被拒绝：非 ASCII 的关键词/正则永远匹配不到真实流量", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), "xn--") {
+			t.Errorf("%q 的报错应说明域名在流量里是 xn-- 形态，实际 %q", raw, err.Error())
+		}
+	}
+}

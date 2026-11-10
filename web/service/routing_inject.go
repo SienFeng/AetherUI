@@ -83,10 +83,12 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	if rules == nil {
 		rules = make([]any, 0)
 	}
-	geoRules, err := s.buildGeoRules()
+	geoRules, geoGen, err := s.buildGeoRules()
 	if err != nil {
 		return err
 	}
+	// 记下这一份的地区规则结果：只有核心真的用上它（RestartXray 成功）才算「已生效」，与核心不同则置重启标志。
+	rememberGeoGeneration(cfg, geoGen)
 
 	// 开关为 0 时【不碰】domainStrategy：模板里管理员可能手写过它，
 	// 覆盖成默认值是在他不知情时改变分流行为。升级后行为零变化也靠这一条。
@@ -111,6 +113,9 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 	// 计量规则永远在最末：只有「本来会走默认出站」的流量才进计量，已被管理员
 	// 规则命中的流量完全不受影响。
 	rules = append(rules, geoRules...)
+	// 防滥用（25 端口、机房来源）与地区规则同属准入判定，排在封禁与分流之前：排在分流之后的话，
+	// 命中分流规则的流量会先走代理出站，拦截被静默绕过。
+	rules = append(rules, s.buildAbuseRules(inbounds)...)
 	rules = append(rules, blockRules...)
 	rules = append(rules, routeRules...)
 	rules = append(rules, meterRules...)
@@ -365,6 +370,8 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 		}
 	}
 	defaultTag := tagDefaultOutbound(outbounds)
+	// 私网守卫必须在计量出站复制默认出站之前加上，见 freedom_guard.go。
+	guardFreedomPrivate(outbounds)
 
 	nodes, err := s.outboundService.GetEnabled()
 	if err != nil {
@@ -375,7 +382,7 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 		// C1 修复之前分配出去的保留 tag 节点可能还躺在库里。放行它就会输出
 		// 两个 a-ui-block，xray 报 "existing tag found" 并拒绝启动——全员断网，
 		// 而面板首页照样显示 running。宁可这一个节点不生效。
-		if model.IsReservedTag(node.Tag) {
+		if model.IsReservedTag(node.Tag) || isInjectorOnlyTag(node.Tag) {
 			logger.Warning("skip outbound node whose tag collides with a reserved tag, id:",
 				node.Id, "tag:", node.Tag)
 			continue
@@ -643,17 +650,16 @@ func (s *RoutingInjector) buildRule(
 
 // buildGeoRules 生成地区限制规则，并把允许集写进 bin/a-ui-geo.dat。
 //
-// 不因地区数据出问题让整份配置失败：按入站降级（沿用旧允许集或只锁死该入站），
-// 降级状态经 GeoDegradedInbounds 下发到「需要留意」。理由见 geo_degrade.go。
+// 不因地区数据出问题让整份配置失败：按入站降级（沿用旧允许集或只锁死该入站）。降级状态随生成结果返回，
+// 核心用上之后才经 GeoDegradedInbounds 下发到「需要留意」。理由见 geo_degrade.go。
 // 只有读入站列表这类与地区无关的故障才返回错误。
-func (s *RoutingInjector) buildGeoRules() ([]any, error) {
+func (s *RoutingInjector) buildGeoRules() ([]any, geoGeneration, error) {
 	inbounds, err := s.inboundService.GetAllInbounds()
 	if err != nil {
-		return nil, err
+		return nil, geoGeneration{}, err
 	}
 	if !AnyInboundUsesRegions(inbounds) {
-		setGeoDegraded(map[int]GeoDegradation{})
-		return nil, nil
+		return nil, geoGeneration{}, nil
 	}
 
 	var src provinceCIDRSource
@@ -662,17 +668,14 @@ func (s *RoutingInjector) buildGeoRules() ([]any, error) {
 	}
 	plan := buildGeoPlanWith(inbounds, src, activePassesOrNil(), lastGoodSnapshot())
 
-	hash := ""
 	if len(plan.Entries) > 0 {
-		hash, err = writeGeoDat(geoDatPath, plan.Entries)
-		if err != nil {
-			hash = fallbackToExistingDat(plan, err)
+		if err := writeGeoDatRetaining(plan); err != nil {
+			fallbackToExistingDat(plan, err)
 		} else {
-			rememberLastGood(plan.Entries)
+			rememberLastGood(plan)
 		}
 	}
-	setGeoDegraded(plan.Degraded)
-	return rulesFromGeoPlan(inbounds, plan, hash), nil
+	return rulesFromGeoPlan(inbounds, plan), geoGenerationOf(plan), nil
 }
 
 // droppedInboundsLogged 记着每条规则上一次告警过的失效入站名单。

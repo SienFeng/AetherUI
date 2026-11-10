@@ -2,10 +2,13 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/idna"
 
 	"a-ui/database"
 	"a-ui/database/model"
@@ -34,6 +37,56 @@ var domainPrefixes = []string{
 // （rule_parser.go:211），同样不该在这里动。
 var lowercaseValuePrefixes = map[string]bool{
 	"domain:": true, "full:": true, "keyword:": true,
+}
+
+// asciiOnlyValuePrefixes 里的前缀拿嗅探出的域名做子串/正则匹配，而真实流量里的域名
+// 一律是 ASCII（国际化域名是 punycode 的 xn-- 形态）：值里带非 ASCII 字符就永远
+// 匹配不到，Configuration OK、没有任何一层报错。domain:/full: 不在此列——它们的值
+// 是一个确定的域名，能转换（见 domainToASCII），所以转换而不是拒绝。
+var asciiOnlyValuePrefixes = map[string]bool{
+	"keyword:": true, "regexp:": true, "dotless:": true,
+}
+
+// nonASCIIPatternHint 是拒绝非 ASCII 关键词/正则时的说明。
+const nonASCIIPatternHint = "——真实流量里的域名一律是 ASCII，中文等国际化域名是 punycode（xn-- 开头）形态，" +
+	"含非 ASCII 字符的关键词/正则永远匹配不到。中文域名请写成 domain:例子.cn 或 full:例子.cn" +
+	"（保存时自动转成 xn-- 形态），或直接写 xn-- 形态"
+
+// domainToASCII 把含非 ASCII 字符的域名逐个标签转成 punycode（xn--）形态，纯 ASCII
+// 的标签原样保留。
+//
+// xray 构建域名匹配器时不做 IDN 转换，只比较字节；而嗅探出的 SNI/Host 永远是
+// punycode。写成「例子.cn」的规则能加载、run -test 照样 Configuration OK，却永远
+// 命中不了任何连接——流量走向验证拿同一个字符串去 TestRoute 还会亮绿灯。
+//
+// 只转含非 ASCII 字符的标签：idna.Lookup 按 STD3 规则拒绝下划线，整串交给它会让
+// _dmarc.example.com 这类既有的合法写法变成保存失败。Lookup 同时做 UTS #46 映射
+// （大小写、全角句点「。」等），与浏览器把地址栏里的中文域名转成 SNI 的口径一致。
+func domainToASCII(value string) (string, error) {
+	if isASCII(value) {
+		return value, nil
+	}
+	labels := strings.Split(value, ".")
+	for i, label := range labels {
+		if isASCII(label) {
+			continue
+		}
+		ascii, err := idna.Lookup.ToASCII(label)
+		if err != nil {
+			return "", err
+		}
+		labels[i] = ascii
+	}
+	return strings.Join(labels, "."), nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseDomains 把用户在 textarea 中一行一条录入的域名解析成入库列表，
@@ -83,10 +136,19 @@ func normalizeDomainRule(item string) (string, error) {
 		if value == "" {
 			return "", common.NewError("域名格式不支持，前缀后面没有内容:", item)
 		}
+		if p == "domain:" || p == "full:" {
+			ascii, err := domainToASCII(value)
+			if err != nil {
+				return "", common.NewError("国际化域名无法转换成 punycode（xn-- 形态）:", item, "err:", err)
+			}
+			value = ascii
+		} else if asciiOnlyValuePrefixes[p] && !isASCII(value) {
+			return "", common.NewError("不支持含非 ASCII 字符的写法:", item+nonASCIIPatternHint)
+		}
 		if lowercaseValuePrefixes[p] {
 			return p + strings.ToLower(value), nil
 		}
-		return item, nil
+		return p + value, nil
 	}
 
 	// 带冒号却没匹配上任何前缀：几乎必然是前缀拼错。放行的话 xray 会把整串
@@ -112,6 +174,9 @@ func normalizeDomainRule(item string) (string, error) {
 	// 不含点也不含冒号：不可能是域名，意图唯一是关键词（对应 Surge/Clash 的
 	// DOMAIN-KEYWORD）。归一成显式的 keyword: 存库，让域名组列表里的标签
 	// 自己说清楚它在做什么，也让手工与订阅两条路径的存储形态一致。
+	if !isASCII(item) {
+		return "", common.NewError("不支持含非 ASCII 字符的关键词:", item+nonASCIIPatternHint)
+	}
 	if !isValidKeyword(item) {
 		return "", common.NewError("关键词含有非法字符:", item)
 	}
@@ -181,8 +246,97 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 		return err
 	}
 
-	return database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
-		Updates(updateFieldsFor(old, group)).Error
+	fields := updateFieldsFor(old, group)
+	urlsChanged := old.SubscribeUrl != group.SubscribeUrl
+	if urlsChanged {
+		// 地址串变了不等于内容全都作废：仍在列表里的地址，它们的历史结果本来就是
+		// 从这些地址拉来的，按新顺序立刻重新合并，盖掉 updateFieldsFor 的清空。
+		// 只清空不重合并的话，删掉多个地址中的一个、或者只是调了顺序，这个组就会
+		// 空到剩下的地址下一次到期（多半是明天）——引用它的封禁/分流规则被
+		// buildRule 整条跳过，流量静默退回直连。
+		//
+		// 不取 subscriptionMu：Update 本来就不取它（拉取可达分钟级），写回仍是
+		// 下面这一条 Updates。与并发刷新交错时，那次刷新带的是旧地址串，比对
+		// subscribe_url 必然失败、整次作废；这里合并的又只有仍列出的地址自己的
+		// 结果——最坏是用了某个地址早一次拉到的内容，不会混进别的来源。
+		remerged, err := s.remergeListedSubscriptions(group)
+		if err != nil {
+			// 合并不出来就退回只清空：这次编辑照样生效，RefreshDue 下一轮看到
+			// last_updated_at=0 会按历史结果补一次合并（最多 10 分钟）。
+			logger.Warning("按保留的订阅地址重新合并失败，先清空等下一轮补上, group:", group.Id, "err:", err)
+		}
+		for k, v := range remerged {
+			fields[k] = v
+		}
+	}
+
+	if err := database.GetDB().Model(model.DomainGroup{}).Where("id = ?", group.Id).
+		Updates(fields).Error; err != nil {
+		return err
+	}
+	if urlsChanged {
+		// 被移除的地址的结果行一并删掉：单行可达数 MB，留着既占库，地址重新加回来
+		// 又恰好拉取失败时，它删除前的旧内容还会被当成「上一次的结果」合并回来。
+		// 删不掉不算这次编辑失败——下一次成功刷新时 refreshLockedURLs 还会再清。
+		if err := s.pruneUnlistedSubscriptions(group.Id, ParseSubscribeURLs(group.SubscribeUrl)); err != nil {
+			logger.Warning("删除已移除订阅地址的结果行失败, group:", group.Id, "err:", err)
+		}
+	}
+	return nil
+}
+
+// remergeListedSubscriptions 用 group.SubscribeUrl 里仍列出的地址各自的历史结果
+// 重新合成合并结果，返回要盖到 updateFieldsFor 结果上的列。没有任何地址贡献
+// 内容时返回 nil，保持 updateFieldsFor 的清空（等 RefreshDue 去拉）。
+//
+// last_updated_at 取参与合并的地址里最近一次成功拉取的时刻，不取当前时刻：这次
+// 没有拉取任何东西，写「刚刚更新」是在骗人。last_error 按各地址自己记下的失败
+// 原因重新拼，口径与 refreshLockedURLs 相同——仍在列表里的地址若上次就失败了，
+// 组卡片不能因为一次编辑就变回绿色。
+func (s *DomainGroupService) remergeListedSubscriptions(group *model.DomainGroup) (map[string]any, error) {
+	urls := ParseSubscribeURLs(group.SubscribeUrl)
+	if len(urls) == 0 {
+		return nil, nil
+	}
+	states, err := s.subscriptionStates(group.Id)
+	if err != nil {
+		return nil, err
+	}
+	merged := mergeSubscriptionStates(group.Id, urls, states)
+	if len(merged.domains) == 0 && len(merged.cidrs) == 0 {
+		return nil, nil
+	}
+	encodedDomains, err := EncodeDomains(merged.domains)
+	if err != nil {
+		return nil, err
+	}
+	encodedCidrs, err := EncodeCidrs(merged.cidrs)
+	if err != nil {
+		return nil, err
+	}
+	failures := make([]string, 0)
+	for _, u := range urls {
+		if st := states[u]; st != nil && st.LastError != "" {
+			failures = append(failures, u+"（"+st.LastError+"）")
+		}
+	}
+	return map[string]any{
+		"subscribed_domains": encodedDomains,
+		"subscribed_cidrs":   encodedCidrs,
+		"last_updated_at":    merged.latest,
+		"last_error":         partialFailureText(failures),
+		"last_skipped":       merged.skipped,
+	}, nil
+}
+
+// pruneUnlistedSubscriptions 删掉该组里地址已不在 urls 中的订阅结果行；urls 为空
+// （取消订阅）时删掉该组全部的行。
+func (s *DomainGroupService) pruneUnlistedSubscriptions(groupId int, urls []string) error {
+	q := database.GetDB().Where("group_id = ?", groupId)
+	if len(urls) > 0 {
+		q = q.Where("url NOT IN ?", urls)
+	}
+	return q.Delete(model.DomainGroupSubscription{}).Error
 }
 
 // updateFieldsFor 返回 DomainGroupService.Update 要写的列。
@@ -195,6 +349,10 @@ func (s *DomainGroupService) Update(group *model.DomainGroup) error {
 //
 // 抽成纯函数是为了能直接断言「订阅地址没变时不碰订阅列」这条不变量——
 // Update 现在是单条原子语句，没有窗口可供行为测试插入验证。
+//
+// 地址变了时这里给出的是「清空」；Update 随后会用 remergeListedSubscriptions
+// 按仍列出的地址重新合并、盖掉这几列（同一条 Updates 写入），只有一个地址
+// 都贡献不了内容时清空才真正落库。
 func updateFieldsFor(old, next *model.DomainGroup) map[string]any {
 	fields := map[string]any{
 		"remark":  next.Remark,
@@ -221,7 +379,8 @@ func updateFieldsFor(old, next *model.DomainGroup) map[string]any {
 // 发生。更新是分钟级的低频操作，不值得做更细的按组加锁。
 var subscriptionMu sync.Mutex
 
-// Refresh 立即更新一个域名组的订阅内容。
+// Refresh 立即更新一个域名组的订阅内容。部分地址失败时返回 *PartialRefreshError：
+// 内容已经写进库，调用方照样要下发配置（见 IsPartialRefresh）。
 func (s *DomainGroupService) Refresh(id int) error {
 	subscriptionMu.Lock()
 	defer subscriptionMu.Unlock()
@@ -377,7 +536,7 @@ func (s *DomainGroupService) recordURLFailure(groupId int, url string, cause err
 		Where("group_id = ? AND url = ?", groupId, url).
 		Update("last_error", cause.Error())
 	if res.Error != nil {
-		logger.Warning("记录订阅地址失败原因时出错, group:", groupId, "url:", url, "err:", res.Error)
+		logger.Warning("记录订阅地址失败原因时出错, group:", groupId, "url:", redactURL(url), "err:", res.Error)
 		return
 	}
 	if res.RowsAffected > 0 {
@@ -388,7 +547,7 @@ func (s *DomainGroupService) recordURLFailure(groupId int, url string, cause err
 		LastUpdatedAt: 0, LastError: cause.Error(),
 	}
 	if err := db.Create(row).Error; err != nil {
-		logger.Warning("新建订阅地址状态行失败, group:", groupId, "url:", url, "err:", err)
+		logger.Warning("新建订阅地址状态行失败, group:", groupId, "url:", redactURL(url), "err:", err)
 	}
 }
 
@@ -408,6 +567,12 @@ func (s *DomainGroupService) refreshLocked(group *model.DomainGroup) error {
 // 唯一一处「整次不写」的例外在末尾：合并结果两侧都空时绝不写回。那会清空上
 // 一次的合并结果，buildRule 因「域名组为空」跳过整条规则，本该走指定节点或被
 // 封禁的流量静默退回直连。
+//
+// targets 为空时不拉取任何地址，只按历史结果重新合并、写回（RefreshDue 用它
+// 修复合并结果被清空、而各地址今天都已拉过的组）。
+//
+// 写回成功但有地址失败时返回 *PartialRefreshError：合并结果已经变了，调用方
+// 必须当作「更新了」去下发配置；其余非 nil 的 error 表示这次什么都没写。
 func (s *DomainGroupService) refreshLockedURLs(group *model.DomainGroup, targets []string) error {
 	urls := ParseSubscribeURLs(group.SubscribeUrl)
 	if len(urls) == 0 {
@@ -423,45 +588,22 @@ func (s *DomainGroupService) refreshLockedURLs(group *model.DomainGroup, targets
 	}
 
 	failures := make([]string, 0)
-	// 按 urls 的顺序合并，不是按表里的行序：顺序确定是「生成逐字节确定」的
-	// 一部分，换个顺序会让 Config.Equals 恒为 false，那个 10 秒的 cron 会不停
-	// 重启 xray。
-	domainLists := make([][]string, 0, len(urls))
-	cidrLists := make([][]string, 0, len(urls))
-	skipped := 0
-
 	for _, u := range urls {
-		st := states[u]
-		if wanted[u] {
-			fresh, fetchErr := s.fetchOne(group.Id, u)
-			if fetchErr != nil {
-				failures = append(failures, u+"（"+fetchErr.Error()+"）")
-				s.recordURLFailure(group.Id, u, fetchErr)
-			} else {
-				st = fresh
-			}
-		}
-		if st == nil {
-			// 这个地址从未成功过、这次也没成功，它不贡献任何内容。
+		if !wanted[u] {
 			continue
 		}
-		d, decodeErr := DecodeSubscribedDomains(st.Domains)
-		if decodeErr != nil {
-			logger.Warning("订阅结果域名列解码失败，本次跳过该地址, group:", group.Id, "url:", u, "err:", decodeErr)
+		fresh, fetchErr := s.fetchOne(group.Id, u)
+		if fetchErr != nil {
+			// 失败的地址保留它上一次的结果（states 里那一行原样不动）参与合并。
+			failures = append(failures, u+"（"+fetchErr.Error()+"）")
+			s.recordURLFailure(group.Id, u, fetchErr)
 			continue
 		}
-		c, decodeErr := DecodeSubscribedCidrs(st.Cidrs)
-		if decodeErr != nil {
-			logger.Warning("订阅结果 IP 段列解码失败，本次跳过该地址, group:", group.Id, "url:", u, "err:", decodeErr)
-			continue
-		}
-		domainLists = append(domainLists, d)
-		cidrLists = append(cidrLists, c)
-		skipped += st.LastSkipped
+		states[u] = fresh
 	}
 
-	domains := MergeDomains(domainLists...)
-	cidrs := MergeDomains(cidrLists...)
+	merged := mergeSubscriptionStates(group.Id, urls, states)
+	domains, cidrs, skipped := merged.domains, merged.cidrs, merged.skipped
 	if len(domains) == 0 && len(cidrs) == 0 {
 		cause := common.NewError("所有订阅地址都没有可用内容")
 		if len(failures) > 0 {
@@ -479,11 +621,7 @@ func (s *DomainGroupService) refreshLockedURLs(group *model.DomainGroup, targets
 		return s.recordFailure(group, err)
 	}
 
-	lastError := ""
-	if len(failures) > 0 {
-		lastError = strconv.Itoa(len(failures)) + " 个订阅地址失败（已保留它们上一次的内容）：" +
-			strings.Join(failures, "；")
-	}
+	lastError := partialFailureText(failures)
 
 	// 用 map 而不是 struct：GORM 的 struct 更新会跳过零值，
 	// LastError 与 LastSkipped 清不掉。
@@ -514,12 +652,92 @@ func (s *DomainGroupService) refreshLockedURLs(group *model.DomainGroup, targets
 			group.Id, "remark:", group.Remark)
 		return common.NewError("订阅地址在拉取期间已变化或该组已被删除，本次结果已作废, id:", group.Id)
 	}
+	// 写回成功，说明 urls 就是这一刻库里的地址列表：顺手删掉不在其中的结果行
+	// （升级前删地址留下的、拉取期间被改掉地址后又被写回的）。删不掉只记日志，
+	// 合并已经只认列表里的地址，残留行不会参与分流。
+	if err := s.pruneUnlistedSubscriptions(group.Id, urls); err != nil {
+		logger.Warning("删除已移除订阅地址的结果行失败, group:", group.Id, "err:", err)
+	}
 	// 部分失败要如实返回：内容确实更新了一部分，但管理员必须知道有地址没拉到，
 	// 否则他会以为这次刷新完全成功。文案里已说明失败地址保留了上次的内容。
+	// 用 PartialRefreshError 而不是普通 error：成功的那部分已经改了配置，调用方
+	// 据此仍要置重启标志。日志里的地址脱敏（见 redactURL）。
 	if lastError != "" {
-		return common.NewError(lastError)
+		logger.Warning("refresh subscription partially failed, id:", group.Id,
+			"remark:", group.Remark, "err:", redactURLsInText(lastError))
+		return &PartialRefreshError{msg: common.NewError(lastError).Error()}
 	}
 	return nil
+}
+
+// PartialRefreshError 表示这次刷新已经把合并结果写进了库，但有订阅地址失败
+// （失败的地址保留了上一次的内容）。
+//
+// 它首先是一个成功：配置已经变了。只看 err == nil 的调用方会漏掉这一种——
+// 改动前「立即更新」与 SubscriptionJob 都是这样，结果是成功那一半的新内容一直
+// 停在库里不下发，规则列表因为库与核心不一致，每条规则都挂着「等待下发」。
+type PartialRefreshError struct {
+	msg string
+}
+
+func (e *PartialRefreshError) Error() string { return e.msg }
+
+// IsPartialRefresh 报告 err 是不是「内容已写入、但有地址失败」。
+func IsPartialRefresh(err error) bool {
+	var partial *PartialRefreshError
+	return errors.As(err, &partial)
+}
+
+// partialFailureText 把失败地址拼成组级 LastError 的文案，没有失败时为空串。
+func partialFailureText(failures []string) string {
+	if len(failures) == 0 {
+		return ""
+	}
+	return strconv.Itoa(len(failures)) + " 个订阅地址失败（已保留它们上一次的内容）：" +
+		strings.Join(failures, "；")
+}
+
+// subscriptionMerge 是把一个组各地址的结果按地址顺序合并后的产物。
+type subscriptionMerge struct {
+	domains, cidrs []string
+	skipped        int
+	// latest 是参与合并的地址里最近一次成功拉取的时刻（毫秒）。
+	latest int64
+}
+
+// mergeSubscriptionStates 按 urls 的顺序合并各地址在 states 里的结果。
+//
+// 按 urls 的顺序合并，不是按表里的行序：顺序确定是「生成逐字节确定」的一部分，
+// 换个顺序会让 Config.Equals 恒为 false，那个 10 秒的 cron 会不停重启 xray。
+// 只认 urls 里的地址：表里残留的、已不在列表里的行绝不参与合并。
+func mergeSubscriptionStates(groupId int, urls []string, states map[string]*model.DomainGroupSubscription) subscriptionMerge {
+	domainLists := make([][]string, 0, len(urls))
+	cidrLists := make([][]string, 0, len(urls))
+	out := subscriptionMerge{}
+	for _, u := range urls {
+		st := states[u]
+		if st == nil {
+			// 这个地址从未成功过、这次也没成功，它不贡献任何内容。
+			continue
+		}
+		d, decodeErr := DecodeSubscribedDomains(st.Domains)
+		if decodeErr != nil {
+			logger.Warning("订阅结果域名列解码失败，本次跳过该地址, group:", groupId, "url:", redactURL(u), "err:", decodeErr)
+			continue
+		}
+		c, decodeErr := DecodeSubscribedCidrs(st.Cidrs)
+		if decodeErr != nil {
+			logger.Warning("订阅结果 IP 段列解码失败，本次跳过该地址, group:", groupId, "url:", redactURL(u), "err:", decodeErr)
+			continue
+		}
+		domainLists = append(domainLists, d)
+		cidrLists = append(cidrLists, c)
+		out.skipped += st.LastSkipped
+		out.latest = max(out.latest, st.LastUpdatedAt)
+	}
+	out.domains = MergeDomains(domainLists...)
+	out.cidrs = MergeDomains(cidrLists...)
+	return out
 }
 
 // recordFailure 只写失败原因，绝不动 SubscribedDomains 与 LastUpdatedAt。
@@ -540,8 +758,9 @@ func (s *DomainGroupService) recordFailure(group *model.DomainGroup, cause error
 		logger.Warning("subscribe url changed or group deleted during failed fetch, not pinning stale error, id:",
 			group.Id, "remark:", group.Remark)
 	}
+	// 失败原因里嵌着订阅地址（net/http 的错误更是带着整串 query），日志只留脱敏后的。
 	logger.Warning("refresh subscription failed, id:", group.Id,
-		"remark:", group.Remark, "err:", cause)
+		"remark:", group.Remark, "err:", redactURLsInText(cause.Error()))
 	return cause
 }
 
@@ -575,7 +794,8 @@ func (s *DomainGroupService) PruneSubscriptionOrphans() (int64, error) {
 	return res.RowsAffected, res.Error
 }
 
-// RefreshDue 更新所有到点的订阅域名组，返回成功更新的个数。
+// RefreshDue 更新所有到点的订阅域名组，返回合并结果被写回的组数——含部分地址
+// 失败、但成功的那部分已经写进库的组（调用方据此置重启标志，见 PartialRefreshError）。
 //
 // 单个组失败不影响其余组：失败原因已由 recordFailure 落库，返回 error 会让
 // 一个坏掉的订阅地址把整批更新都挡住。只有取配置这种全局性失败才返回 error。
@@ -629,10 +849,13 @@ func (s *DomainGroupService) RefreshDue() (int, error) {
 				due = append(due, u)
 			}
 		}
-		if len(due) == 0 {
+		// 没有到期的地址时，只有合并结果被清空过（last_updated_at=0）的组还要处理：
+		// 按各地址的历史结果重新合并一次，不拉取。升级前「改订阅地址就清空」留下
+		// 的组、Update 当时没合并出来的组都靠这一步补上，否则要空到明天。
+		if len(due) == 0 && group.LastUpdatedAt != 0 {
 			continue
 		}
-		if err := s.refreshLockedURLs(group, due); err != nil {
+		if err := s.refreshLockedURLs(group, due); err != nil && !IsPartialRefresh(err) {
 			continue // 失败原因已落库并记日志
 		}
 		updated++

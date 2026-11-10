@@ -7,6 +7,7 @@ import (
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"a-ui/database/model"
@@ -543,7 +544,8 @@ var (
 	onlineTrackerInstance = newOnlineTracker()
 	onlineSampleLock      sync.Mutex
 	// IPv6 查询失败（内核没编译 IPv6）只需要提示一次，否则每次采样都刷日志。
-	onlineIPv6Warned bool
+	// 原子量而不是普通 bool：sample() 持 onlineSampleLock 走到它，Kick 读连接表时不持这把锁。
+	onlineIPv6Warned atomic.Bool
 
 	// closeWatchOnce 保证整个进程只有一个销毁通知订阅：面板「重启」是 SIGHUP
 	// 重建 Server、再跑一遍 startTask，订阅若跟着再起一个，每条关闭的连接
@@ -954,13 +956,17 @@ func dumpAllConns() ([]netdiag.Conn, error) {
 	v6, err := netdiag.Dump(netdiag.FamilyIPv6)
 	if err != nil {
 		// IPv4 已经拿到了，IPv6 失败（内核关了 IPv6）不该让整个功能不可用。
-		if !onlineIPv6Warned {
-			onlineIPv6Warned = true
-			logger.Warning("读取 IPv6 连接表失败，在线明细将只统计 IPv4:", err)
-		}
+		warnIPv6DumpOnce(err)
 		return conns, nil
 	}
 	return append(conns, v6...), nil
+}
+
+// warnIPv6DumpOnce 只在第一次读不到 IPv6 连接表时告警。
+func warnIPv6DumpOnce(err error) {
+	if onlineIPv6Warned.CompareAndSwap(false, true) {
+		logger.Warning("读取 IPv6 连接表失败，在线明细将只统计 IPv4:", err)
+	}
 }
 
 // sample 采一次内核连接表。距上次采样不足 onlineMinSampleInterval 时直接跳过，
@@ -1213,4 +1219,33 @@ func (s *OnlineService) Kick(inboundId int, ipStr string) (int, error) {
 		logger.Warning("踢下线时部分连接关闭失败:", firstErr)
 	}
 	return killed, nil
+}
+
+// KillPort 断开本地端口为 port 的全部已建立 TCP 连接（不分来源 IP，也不看入站是否还启用），
+// 返回断开的条数。热应用删除或修改入站之后用它结束旧连接（见 xray_conn_kill.go）。
+//
+// 与 Kick 不同，只要有一条没断掉就返回错误：这里要的是「一条不剩」，调用方拿到错误会退回整进程重启。
+func (s *OnlineService) KillPort(port int) (int, error) {
+	if !netdiag.Supported {
+		return 0, netdiag.ErrUnsupported
+	}
+	conns, err := dumpAllConns()
+	if err != nil {
+		return 0, err
+	}
+	killed := 0
+	var firstErr error
+	for _, c := range conns {
+		if int(c.LocalPort) != port {
+			continue
+		}
+		if err := netdiag.Destroy(c); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		killed++
+	}
+	return killed, firstErr
 }

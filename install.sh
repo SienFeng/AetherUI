@@ -19,10 +19,26 @@ panel_port=""
 stopped_web_svc=""
 
 # 面板是否已被本次安装/更新停掉。停掉之后的任何失败退出都必须先把它拉回来：
-# a-ui.service 是 Type=simple 且没有配 Restart=，脚本就这么 exit 的话，机器上
-# 会留下一个已经停止、且永远不会自己起来的面板——而用户多半以为"更新失败了，
-# 那就还是原来的样子"，直到有人来报节点不通才发现。
+# a-ui.service 的 Restart=on-failure 只管进程异常退出，被 systemctl stop 停掉的
+# 服务不会自己起来，脚本就这么 exit 的话，机器上会留下一个已经停止、且永远不会
+# 自己起来的面板——而用户多半以为"更新失败了，那就还是原来的样子"，直到有人来
+# 报节点不通才发现。
 a_ui_stopped=0
+
+# fetch_release 建的暂存目录（/usr/local 下、与 a-ui 同级，不用 /tmp 的理由同下面
+# 的 xray_backup_dir）：下载的包、校验和与解压结果都先落在这里，全部核验通过之后
+# 才去动现有安装。为空表示还没建或已清理。
+stage_dir=""
+
+# 被换下来的旧安装目录（在 stage_dir 里）。新目录换上之后、管理脚本装好之前的
+# 任何失败退出，die_restoring_panel 都先把它原样换回去再拉起面板：机器回到更新
+# 前的样子，而不是停在一个装了一半的新版本上。管理脚本装好之后清空，此后就不再
+# 回退。
+old_install_dir=""
+
+# config_after_install 没能把账号密码从默认的 admin/admin 改掉时置 1，安装结束时
+# 再提醒一次——中间的向导输出很长，第一次的警告多半已经翻过去了。
+default_credentials_active=0
 
 # backup_xray_assets 写入、restore_or_install_xray 消费的备份目录路径；
 # 为空表示这次没有可用的备份（全新安装，或 /usr/local/a-ui/bin 本就不存在）。
@@ -34,8 +50,29 @@ xray_backup_dir=""
 # 打印错误并退出，退出前把被本脚本停掉的面板重新拉起来。
 # 只在确实停过时才动 systemctl：全新安装时去 start 一个还没配好的服务，
 # 只会多出一条与真正病因无关的失败日志，把排查带偏。
+#
+# 新目录已经换上时，先把旧安装目录换回去再拉起面板（见 old_install_dir）。
+# 换不回去就保留暂存目录并打出路径，那是旧版本在这台机器上仅存的一份。
 die_restoring_panel() {
+    trap - INT TERM HUP
     echo -e "${red}$1${plain}"
+    local keep_stage=0
+    if [[ -n "${old_install_dir}" ]]; then
+        echo -e "${yellow}正在恢复更新前的安装目录...${plain}"
+        # 当前目录多半就是要删掉的新目录，先离开它
+        cd /usr/local || cd /
+        if rm -rf /usr/local/a-ui && mv "${old_install_dir}" /usr/local/a-ui; then
+            echo -e "${green}已恢复更新前的安装目录${plain}"
+        else
+            keep_stage=1
+            echo -e "${red}恢复失败，更新前的安装目录保留在 ${old_install_dir}，请手动移回 /usr/local/a-ui${plain}"
+        fi
+        old_install_dir=""
+    fi
+    if [[ -n "${stage_dir}" && ${keep_stage} -eq 0 ]]; then
+        rm -rf "${stage_dir}"
+        stage_dir=""
+    fi
     if [[ ${a_ui_stopped} -eq 1 ]]; then
         echo -e "${yellow}面板已被本次安装停止，正在重新启动...${plain}"
         if systemctl start a-ui; then
@@ -123,45 +160,190 @@ install_base() {
     fi
 }
 
+# 执行 /usr/local/a-ui/a-ui setting 并如实判断成败，失败时打印它的输出、返回 1。
+#
+# 退出码是主判据；但本脚本永远来自 main 分支，而二进制可能是回退后的旧版本，
+# 旧版本写库失败也照样退出 0、只打印一行 "... failed: ..."，所以再看一眼输出。
+# 参数必须原样逐个透传：不加引号时空用户名会让 -password 被当成用户名的值，
+# 带空格的值会被拆成几段，结果都是「设定完成」而账号密码根本没改。
+a_ui_setting() {
+    local out rc
+    out=$(/usr/local/a-ui/a-ui setting "$@" 2>&1)
+    rc=$?
+    if [[ ${rc} -ne 0 || "${out}" == *failed* ]]; then
+        echo -e "${red}${out}${plain}"
+        return 1
+    fi
+    return 0
+}
+
+# 读取管理员要设的账号密码。校验通过时写入 cred_user / cred_pass 并返回 0；
+# 读到 EOF（没有终端、SSH 断线）或连续 3 次输入不合格返回 1。每个 read 都要
+# 检查返回码，否则 EOF 之后循环会在没有任何 I/O 等待的情况下空转。
+#
+# 校验与面板的实际限制对齐：不能为空；首尾不能有空白（IFS= 保证 read 原样
+# 读入，不替用户悄悄削掉——削掉了他就拿自己输入的那一串登录不上）；密码不超过
+# 72 字节，那是 bcrypt 的上限（util/crypto.MaxPasswordBytes），按字节数而不是
+# 字符数算，一个汉字占 3 字节。密码不回显，并要求再输一遍确认。
+read_panel_credentials() {
+    local attempt user pass pass2 pass_bytes
+    cred_user=""
+    cred_pass=""
+    for attempt in 1 2 3; do
+        if ! IFS= read -r -p "请设置您的账户名:" user; then
+            echo -e "\n${red}输入已结束，放弃设定${plain}"
+            return 1
+        fi
+        if [[ -z "${user}" ]]; then
+            echo -e "${red}账户名不能为空${plain}"
+            continue
+        fi
+        if [[ "${user}" =~ ^[[:space:]] || "${user}" =~ [[:space:]]$ ]]; then
+            echo -e "${red}账户名首尾不能有空格或其它空白字符${plain}"
+            continue
+        fi
+        if ! IFS= read -r -s -p "请设置您的账户密码（输入时不显示）:" pass; then
+            echo -e "\n${red}输入已结束，放弃设定${plain}"
+            return 1
+        fi
+        echo ""
+        if [[ -z "${pass}" ]]; then
+            echo -e "${red}密码不能为空${plain}"
+            continue
+        fi
+        if [[ "${pass}" =~ ^[[:space:]] || "${pass}" =~ [[:space:]]$ ]]; then
+            echo -e "${red}密码首尾不能有空格或其它空白字符${plain}"
+            continue
+        fi
+        pass_bytes=$(printf '%s' "${pass}" | wc -c | tr -d ' ')
+        if [[ ${pass_bytes} -gt 72 ]]; then
+            echo -e "${red}密码不能超过 72 个字节（约 24 个汉字），当前是 ${pass_bytes} 个字节${plain}"
+            continue
+        fi
+        if ! IFS= read -r -s -p "请再次输入账户密码:" pass2; then
+            echo -e "\n${red}输入已结束，放弃设定${plain}"
+            return 1
+        fi
+        echo ""
+        if [[ "${pass}" != "${pass2}" ]]; then
+            echo -e "${red}两次输入的密码不一致${plain}"
+            continue
+        fi
+        cred_user="${user}"
+        cred_pass="${pass}"
+        return 0
+    done
+    echo -e "${red}连续 3 次输入不合格，放弃设定${plain}"
+    return 1
+}
+
+print_credentials_hint() {
+    echo -e "${yellow}修改方法：登录面板后在「面板设置 → 账号与密码」里修改，或在本机执行${plain}"
+    echo -e "${yellow}  /usr/local/a-ui/a-ui setting -username '<账户名>' -password '<密码>'${plain}"
+}
+
+# 端口上是否已有 TCP 监听。ss 优先，没有 ss 的老系统退回 netstat（不用 ss -H：
+# CentOS 7 的 iproute 不认识它）。只比对本地地址一栏冒号后的端口号，表头那行
+# 自然比对不上。两个工具都没有时无从判断，按空闲处理——随机端口撞上占用端口的
+# 概率很低，那样的系统也不在支持范围内。
+port_in_use() {
+    local port="$1" listeners
+    if command -v ss >/dev/null 2>&1; then
+        listeners=$(ss -ltn 2>/dev/null)
+    elif command -v netstat >/dev/null 2>&1; then
+        listeners=$(netstat -ltn 2>/dev/null)
+    else
+        return 1
+    fi
+    echo "${listeners}" | awk -v p="${port}" '{ n = split($4, a, ":"); if (a[n] == p) found = 1 } END { exit !found }'
+}
+
+# 随机挑一个当前空闲的面板端口，挑不到返回 1。范围 10000-32767：$RANDOM 本身
+# 可能是 0 或 1024 以下的特权端口；也避开 Linux 默认的临时端口段（32768-60999），
+# 出站连接随时会占用那一段的端口，面板下次重启时可能就绑不上了。
+pick_free_port() {
+    local i port
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        port=$((10000 + RANDOM % 22768))
+        if ! port_in_use "${port}"; then
+            echo "${port}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 #This function will be called when user installed a-ui out of sercurity
 config_after_install() {
     # 新拓扑下面板端口是内部实现细节，不再问用户（见下方安全配置向导），
-    # 但向导拼面板 URL 需要知道本次实际生效的端口：全新安装时下面两条
-    # 分支都能确定；版本升级且用户选择保留原设置时，端口本来就没被
+    # 但向导拼面板 URL 需要知道本次实际生效的端口：全新安装时端口就是默认的
+    # 54321，下面的随机分支改了端口会再改写它；版本升级时端口本来就没被
     # 这里改过，不确定实际值，不写入全局的 panel_port（留给调用方
     # 自行探测或干脆不在 URL 里带端口）。
     local is_fresh_install=1
     [[ -f "/etc/a-ui/a-ui.db" ]] && is_fresh_install=0
+    [[ ${is_fresh_install} -eq 1 ]] && panel_port=54321
 
+    # read_panel_credentials 写的是这两个变量；在这里声明成 local，密码不会留在全局
+    local creds_set=0 cred_user="" cred_pass=""
     echo -e "${yellow}出于安全考虑，安装/更新完成后需要强制修改账户密码${plain}"
     read -p "确认是否继续,如选择n则跳过本次账户密码设定[y/n]": config_confirm
     if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        read -p "请设置您的账户名:" config_account
-        echo -e "${yellow}您的账户名将设定为:${config_account}${plain}"
-        read -p "请设置您的账户密码:" config_password
-        echo -e "${yellow}您的账户密码将设定为:${config_password}${plain}"
-        echo -e "${yellow}确认设定,设定中${plain}"
-        /usr/local/a-ui/a-ui setting -username ${config_account} -password ${config_password}
-        echo -e "${yellow}账户密码设定完成${plain}"
-        [[ ${is_fresh_install} -eq 1 ]] && panel_port=54321
+        if read_panel_credentials; then
+            echo -e "${yellow}您的账户名将设定为:${cred_user}${plain}"
+            echo -e "${yellow}确认设定,设定中${plain}"
+            if a_ui_setting -username "${cred_user}" -password "${cred_pass}"; then
+                creds_set=1
+                echo -e "${green}账户密码设定完成${plain}"
+            fi
+        fi
+        cred_pass=""
+        if [[ ${creds_set} -eq 0 ]]; then
+            if [[ ${is_fresh_install} -eq 1 ]]; then
+                # 全新安装落到这里，面板还是公开的默认账户 admin/admin、监听所有 IP 的
+                # 54321，向导再中途放弃就这样对外了。与选 n 时一样改用随机账户密码。
+                echo -e "${red}账户密码未能按你的输入设定。为避免面板以公开的默认账户 admin/admin 运行，下面改为随机生成${plain}"
+            else
+                echo -e "${red}账户密码未能设定，面板的账户密码保持更新前的设置，未做改动${plain}"
+                print_credentials_hint
+            fi
+        fi
     else
         echo -e "${red}已取消设定...${plain}"
-        if [[ ${is_fresh_install} -eq 1 ]]; then
-            local usernameTemp=$(head -c 6 /dev/urandom | base64)
-            local passwordTemp=$(head -c 6 /dev/urandom | base64)
-            local portTemp=$(echo $RANDOM)
-            /usr/local/a-ui/a-ui setting -username ${usernameTemp} -password ${passwordTemp}
-            /usr/local/a-ui/a-ui setting -port ${portTemp}
+        if [[ ${is_fresh_install} -eq 0 ]]; then
+            echo -e "${red}当前属于版本升级,保留之前设置项,登录方式保持不变。端口、路径与用户名可输入a-ui后选7查看;密码以加密形式存储无法查看,忘记请选4重置${plain}"
+        fi
+    fi
+
+    if [[ ${is_fresh_install} -eq 1 && ${creds_set} -eq 0 ]]; then
+        local usernameTemp passwordTemp portTemp random_creds_set=0
+        usernameTemp=$(head -c 6 /dev/urandom | base64)
+        passwordTemp=$(head -c 6 /dev/urandom | base64)
+        a_ui_setting -username "${usernameTemp}" -password "${passwordTemp}" && random_creds_set=1
+        if portTemp=$(pick_free_port) && a_ui_setting -port "${portTemp}"; then
             panel_port=${portTemp}
-            echo -e "检测到您属于全新安装,出于安全考虑已自动为您生成随机用户与端口:"
-            echo -e "###############################################"
+        else
+            portTemp=""
+        fi
+        echo -e "检测到您属于全新安装,出于安全考虑已自动为您生成随机用户与端口:"
+        echo -e "###############################################"
+        if [[ ${random_creds_set} -eq 1 ]]; then
             echo -e "${green}面板登录用户名:${usernameTemp}${plain}"
             echo -e "${green}面板登录用户密码:${passwordTemp}${plain}"
+        else
+            default_credentials_active=1
+            echo -e "${red}随机账户密码设定失败：面板目前仍使用公开的默认账户 admin / 密码 admin！${plain}"
+        fi
+        if [[ -n "${portTemp}" ]]; then
             echo -e "${red}面板登录端口:${portTemp}${plain}"
-            echo -e "###############################################"
+        else
+            echo -e "${red}未能设定随机端口，面板仍使用默认端口 54321${plain}"
+        fi
+        echo -e "###############################################"
+        if [[ ${random_creds_set} -eq 1 ]]; then
             echo -e "${red}请现在就记下上面的密码:它以加密形式存储,之后无法再查看。端口、路径与用户名可输入a-ui后选7查看,忘记密码请选4重置${plain}"
         else
-            echo -e "${red}当前属于版本升级,保留之前设置项,登录方式保持不变。端口、路径与用户名可输入a-ui后选7查看;密码以加密形式存储无法查看,忘记请选4重置${plain}"
+            print_credentials_hint
         fi
     fi
 }
@@ -361,7 +543,7 @@ print_rescue_hint() {
     local port="$1"
     echo -e ""
     echo -e "${yellow}如果面板打不开，用以下任一方式恢复：${plain}"
-    echo -e "  a-ui setting -listen \"\"                       # 恢复监听所有 IP"
+    echo -e "  /usr/local/a-ui/a-ui setting -listen \"\"       # 恢复监听所有 IP"
     if [[ -n "${port}" ]]; then
         echo -e "  ssh -L ${port}:127.0.0.1:${port} root@<本机IP>     # 或走 SSH 隧道"
     else
@@ -778,6 +960,10 @@ choose_mask_site() {
 #   2. 伪装站放在最后的 handle，作为兜底
 # Caddy 直接占 80/443，证书与 80→443 跳转都靠它的自动 HTTPS，
 # 不需要 https_port / bind——这一点由 Task 0 验证过。
+#
+# 站点块前后的 BEGIN/END 两行是给 a-ui.sh 的 uninstall 认的：卸载时只删这两行
+# 之间的内容，管理员事后加进这个文件的其它站点不受影响。标记行中英文脚本完全
+# 相同，改动时两边与 a-ui.sh / a-ui_en.sh 的匹配串要一起改。
 write_caddyfile() {
     local domain="$1" basepath="$2" panel_port="$3" mask_url="$4"
     local mask_block
@@ -807,6 +993,8 @@ write_caddyfile() {
     fi
 
     cat > /etc/caddy/Caddyfile <<EOF
+# BEGIN a-ui managed site: ${domain}
+# 由 a-ui 安装向导生成。卸载 a-ui 只删除 BEGIN/END 两行之间的内容；但重跑向导（a-ui 菜单「配置域名与伪装站」）会整个重写本文件，写在外面的站点也会被覆盖（向导停用 Caddy 前会把 /etc/caddy 备份到 /root）。
 ${domain} {
     handle ${basepath}* {
         reverse_proxy 127.0.0.1:${panel_port}
@@ -816,6 +1004,7 @@ ${domain} {
 ${mask_block}
     }
 }
+# END a-ui managed site
 EOF
 
     if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
@@ -844,11 +1033,12 @@ wait_for_cert() {
     return 1
 }
 
-# a-ui.service 是 Type=simple 且没有配 Restart=：`systemctl restart` 返回
-# 成功只代表进程被 fork 出来了，不代表它没有立刻退出（比如遗留的
-# webCertFile/webKeyFile 指向一个已经不存在的证书文件，tls.LoadX509KeyPair
-# 失败、Server.Start() 返回 error，main.go 只 log 一行就 return）。这种
-# "起来了又立刻死了"从 systemctl 的返回码看不出来，必须真的探活。
+# a-ui.service 是 Type=simple：`systemctl restart` 返回成功只代表进程被
+# fork 出来了，不代表它没有立刻退出（比如遗留的 webCertFile/webKeyFile 指向
+# 一个已经不存在的证书文件，tls.LoadX509KeyPair 失败、Server.Start() 返回
+# error，旧版 main.go 只 log 一行就以退出码 0 return——Restart=on-failure 对
+# 退出码 0 不重启）。这种"起来了又立刻死了"从 systemctl 的返回码看不出来，
+# 必须真的探活。
 wait_for_panel_alive() {
     local panel_port="$1" basepath="$2"
     local i
@@ -1136,9 +1326,10 @@ domain_flow() {
 
 # 备份 xray 核心与 geo 数据，供解压后恢复。xray_backup_dir 为空表示没有备份。
 #
-# 存在的理由：install.sh 会 rm -rf 整个安装目录再铺开发版包，而发版包里带着
-# 仓库中那份 xray（见 release.yml 打包步骤）。管理员在面板里升级过的核心，
-# 以及 a-ui geo 换成的 Loyalsoldier 增强版 geo 数据，都会被静默打回。
+# 存在的理由：install.sh 会把整个安装目录换成新发版包解出的目录（旧目录随后
+# 删除），而发版包里带着仓库中那份 xray（见 release.yml 打包步骤）。管理员在
+# 面板里升级过的核心，以及 a-ui geo 换成的 Loyalsoldier 增强版 geo 数据，都会
+# 被静默打回。
 #
 # 放在 systemctl stop 之前：这一步要写磁盘、可能失败，而失败必须能在面板
 # 尚未停机时干净退出。复制正在被 xray 使用的可执行文件是安全的——cp 读的是
@@ -1149,9 +1340,9 @@ domain_flow() {
 # 60~70MB，这次拷贝还发生在 systemctl stop 之前——面板与 xray 都在正常
 # 提供服务，正是这台机器内存占用的峰值时刻。小内存 VPS 上 /tmp 装不下就是
 # 本函数唯一的 fail close 路径，会让管理员从此彻底无法更新面板。改落到
-# /usr/local 下、与 a-ui 同级但不同名的兄弟目录：下面 install_a-ui() 里
-# `rm /usr/local/a-ui/ -rf`（注意结尾的 /，只删 a-ui 这一棵目录树）删不到
-# 它，也不占用 tmpfs 的内存配额。
+# /usr/local 下、与 a-ui 同级但不同名的兄弟目录：下面 install_a-ui() 换下、
+# 删除的只是 /usr/local/a-ui 这一棵目录树，碰不到它，它也不占用 tmpfs 的
+# 内存配额。
 backup_xray_assets() {
     xray_backup_dir=""
     [[ ! -d /usr/local/a-ui/bin ]] && return 0
@@ -1184,16 +1375,16 @@ backup_xray_assets() {
 # 不该为了「装到最新」而让整个安装失败。这个「退回」在拉取分支上是要动手做的
 # （先存种子、失败时拷回来），不是自动成立的：解包是原地替换目标文件。
 restore_or_install_xray() {
-    # 这条 cd 失败基本只有一个来由：上面那个未检查返回值的 tar zxvf 解压失败了。
-    # 此刻面板已停、/usr/local/a-ui/ 已被 rm -rf，备份目录里那份核心是管理员
-    # 钉住的版本在这台机器上仅存的副本——删掉它，他重跑安装就只会走下面的拉取
-    # 分支，再也拿不回原来的版本。所以这条路径上备份必须保留，并把路径打进
-    # 错误信息里，让他知道东西还在哪。
+    # 发版包在 fetch_release 里已经核验并解压过，新目录也已经换上，这条 cd 只在
+    # 极端情况下才会失败。此刻面板已停，备份目录里那份核心是管理员钉住的版本
+    # 在这台机器上的又一份副本——删掉它，万一旧目录也没能换回来，他重跑安装就
+    # 只会走下面的拉取分支，再也拿不回原来的版本。所以这条路径上备份必须保留，
+    # 并把路径打进错误信息里，让他知道东西还在哪。
     if ! cd /usr/local/a-ui; then
         if [[ -n "${xray_backup_dir}" ]]; then
-            die_restoring_panel "进入安装目录失败（解压很可能没成功）；原有的 xray 核心与 geo 数据已保留在 ${xray_backup_dir}，重装完成后可手工拷回 /usr/local/a-ui/bin/"
+            die_restoring_panel "进入安装目录失败；原有的 xray 核心与 geo 数据已保留在 ${xray_backup_dir}，重装完成后可手工拷回 /usr/local/a-ui/bin/"
         fi
-        die_restoring_panel "进入安装目录失败（解压很可能没成功）"
+        die_restoring_panel "进入安装目录失败"
     fi
 
     if [[ -n "${xray_backup_dir}" && -f "${xray_backup_dir}/xray-linux-${arch}" ]]; then
@@ -1289,6 +1480,97 @@ restore_or_install_xray() {
     xray_backup_dir=""
 }
 
+# 下载并核验发布包，解压到 ${stage_dir}/a-ui。这一步全部完成之前不碰现有
+# 安装：面板照常运行，任何一步失败都直接退出（此时面板还没被停过，
+# die_restoring_panel 只清理暂存目录）。必须直接调用，不能放进 $(...)——
+# 那样 die_restoring_panel 的 exit 只会退出子 shell。
+#
+# 这些文件随后以 root 身份执行，所以核验分三层：
+#   1. TLS：curl/wget 一律校验证书，不带 -k / --no-check-certificate。
+#   2. SHA256SUMS：release.yml 给每个发布附带的校验和。它与发布包是同一个
+#      release 的两个资产，防的是传输与存储环节的损坏、截断、替换，不防仓库
+#      本身被攻破。早于这一机制的发布没有这个文件（HTTP 404）：只警告、继续
+#      安装（TLS 仍然校验）。其它失败（网络错误、5xx）不能当成"没有"，否则
+#      一次诱发出来的下载失败就能把校验整个跳过——直接中止。
+#   3. 内容：tar -tzf 能完整列出、所有条目都在 a-ui/ 下、关键文件都在；解压
+#      后真的跑一次新二进制的 -v（只打印版本号，不碰数据库）。GitHub 偶发返回
+#      的 200 错误页、截断的压缩包、架构不对的二进制都在这里拦下——过去它们
+#      要等旧安装已经 rm -rf 之后才暴露，留下一台既没有面板也没有 xray 的机器。
+#
+# 解压带 --no-same-owner：root 解压默认沿用包里的属主，也就是 CI 打包用户的
+# uid（GitHub runner 是 1001）。本机恰好有同 uid 的普通用户时，他就成了这个以
+# root 运行的二进制的属主，能直接替换它。
+fetch_release() {
+    local version="$1" pkg="$2" download_fail_msg="$3"
+    local base="https://github.com/SienFeng/AetherUI/releases/download/${version}"
+
+    stage_dir=$(mktemp -d /usr/local/a-ui-update-XXXXXX) || {
+        stage_dir=""
+        die_restoring_panel "创建下载暂存目录失败，已中止（现有安装未改动）"
+    }
+    local archive="${stage_dir}/${pkg}"
+
+    if ! wget -O "${archive}" "${base}/${pkg}"; then
+        die_restoring_panel "${download_fail_msg}"
+    fi
+
+    local sums="${stage_dir}/SHA256SUMS" code
+    code=$(curl -sSL --retry 2 -o "${sums}" -w '%{http_code}' "${base}/SHA256SUMS") || code="000"
+    case "${code}" in
+    200)
+        local want got
+        # 按完整文件名精确匹配：中文包与英文包（-english）的文件名只差一个后缀。
+        # "*" 前缀是 sha256sum 二进制模式的写法。
+        want=$(awk -v f="${pkg}" '$2 == f || $2 == "*" f { print $1; exit }' "${sums}" | tr 'A-F' 'a-f')
+        if [[ ! "${want}" =~ ^[0-9a-f]{64}$ ]]; then
+            die_restoring_panel "${version} 的 SHA256SUMS 里没有 ${pkg} 的校验和，无法确认下载内容，已中止（现有安装未改动）"
+        fi
+        got=$(sha256sum "${archive}" 2>/dev/null | awk '{print $1}')
+        if [[ "${got}" != "${want}" ]]; then
+            die_restoring_panel "${pkg} 的 SHA256 校验失败（期望 ${want}，实际 ${got:-无法计算}），下载内容可能损坏或被篡改，已中止（现有安装未改动）"
+        fi
+        echo -e "${green}${pkg} 的 SHA256 校验通过${plain}"
+        ;;
+    404)
+        echo -e "${yellow}警告：${version} 发布时还没有附带 SHA256SUMS 校验和文件，无法核对 ${pkg} 的完整性${plain}"
+        echo -e "${yellow}      下载已经过 HTTPS 证书校验，下面仍会检查包结构并试运行新二进制，通过后才安装${plain}"
+        ;;
+    *)
+        die_restoring_panel "下载 ${version} 的 SHA256SUMS 失败（HTTP ${code}），无法校验 ${pkg}，已中止（现有安装未改动），请稍后重试"
+        ;;
+    esac
+
+    local listing
+    if ! listing=$(tar -tzf "${archive}" 2>/dev/null); then
+        die_restoring_panel "下载到的 ${pkg} 不是有效的 tar.gz 压缩包（可能是错误页或下载不完整），已中止（现有安装未改动）"
+    fi
+    # 手工打的包可能带 ./ 前缀，解压结果一样，先规范掉再查
+    listing=$(echo "${listing}" | sed -e 's#^\./##' -e '/^$/d')
+    if [[ -z "${listing}" ]] || echo "${listing}" | grep -qvE '^a-ui(/|$)' ||
+        echo "${listing}" | grep -qE '(^|/)\.\.(/|$)'; then
+        die_restoring_panel "${pkg} 的内容不是预期的 a-ui/ 目录结构，拒绝解压，已中止（现有安装未改动）"
+    fi
+    local f
+    for f in a-ui/a-ui a-ui/a-ui.service "a-ui/bin/xray-linux-${arch}"; do
+        if ! echo "${listing}" | grep -qxF "${f}"; then
+            die_restoring_panel "${pkg} 里缺少 ${f}，已中止（现有安装未改动）"
+        fi
+    done
+
+    if ! tar --no-same-owner -xzf "${archive}" -C "${stage_dir}"; then
+        die_restoring_panel "解压 ${pkg} 失败，已中止（现有安装未改动）"
+    fi
+    rm -f "${archive}"
+    chmod +x "${stage_dir}/a-ui/a-ui" "${stage_dir}/a-ui/bin/xray-linux-${arch}"
+
+    local reported probe=("${stage_dir}/a-ui/a-ui" -v)
+    command -v timeout >/dev/null 2>&1 && probe=(timeout 30 "${probe[@]}")
+    if ! reported=$("${probe[@]}" 2>/dev/null) || [[ -z "${reported}" ]]; then
+        die_restoring_panel "新版本的 a-ui 无法运行（发布包可能损坏，或与本机架构 ${arch} 不匹配），已中止（现有安装未改动）"
+    fi
+    echo -e "${green}新版本已通过试运行（a-ui -v 输出：$(echo "${reported}" | head -n 1)）${plain}"
+}
+
 install_a-ui() {
     # 端口探测必须在 stop 之前做：current_panel_port() 的探测分支靠
     # systemctl show -p MainPID 找正在跑的 a-ui 进程，服务一旦被下面这行
@@ -1302,53 +1584,69 @@ install_a-ui() {
 
     cd /usr/local/
 
+    local pkg="a-ui-linux-${arch}.tar.gz" download_fail_msg
     if [ $# == 0 ]; then
-        last_version=$(curl -Lsk "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(curl -fsSL "https://api.github.com/repos/SienFeng/AetherUI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ ! -n "$last_version" ]]; then
             die_restoring_panel "检测 a-ui 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 a-ui 版本安装"
         fi
         echo -e "检测到 a-ui 最新版本：${last_version}，开始安装"
-        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}.tar.gz
-        if [[ $? -ne 0 ]]; then
-            die_restoring_panel "下载 a-ui 失败，请确保你的服务器能够下载 Github 的文件"
-        fi
+        download_fail_msg="下载 a-ui 失败，请确保你的服务器能够下载 Github 的文件"
     else
         last_version=$1
-        url="https://github.com/SienFeng/AetherUI/releases/download/${last_version}/a-ui-linux-${arch}.tar.gz"
         echo -e "开始安装 a-ui $1"
-        wget -N --no-check-certificate -O /usr/local/a-ui-linux-${arch}.tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            die_restoring_panel "下载 a-ui $1 失败，请确保此版本存在"
-        fi
+        download_fail_msg="下载 a-ui $1 失败，请确保此版本存在"
+    fi
+    # 版本号会拼进下载地址与本地路径，口径与面板一键更新的 tag 白名单一致
+    if [[ ! "${last_version}" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+        die_restoring_panel "版本号 ${last_version} 不合法（只允许字母、数字、点、下划线与连字符）"
     fi
 
-    # 停面板放在下载成功之后。先停再下载的话，版本探测或下载只要一失败
-    # （网络抖动、超出 GitHub API 限制、指定的版本不存在），脚本就直接 exit
-    # 了，留下一台面板已停止、且不会自己起来的机器——而这两步恰恰是整个
-    # 安装流程里最依赖外部网络、最容易失败的两步。端口探测必须在 stop 之前
-    # 完成，上面那段已经做过了，这里改动顺序不影响它。
+    # 停面板放在下载与核验全部成功之后。先停再下载的话，版本探测或下载只要
+    # 一失败（网络抖动、超出 GitHub API 限制、指定的版本不存在、包是坏的），
+    # 脚本就直接 exit 了，留下一台面板已停止、且不会自己起来的机器——而这几步
+    # 恰恰是整个安装流程里最依赖外部网络、最容易失败的。端口探测必须在 stop
+    # 之前完成，上面那段已经做过了，这里改动顺序不影响它。
+    fetch_release "${last_version}" "${pkg}" "${download_fail_msg}"
     backup_xray_assets
 
+    # 只有面板本来在运行才记「被本次安装停止」：全新安装、或管理员自己停着的面板，失败时 die_restoring_panel
+    # 不能把它拉起来——全新安装那时还没跑过 config_after_install，起来的是 0.0.0.0:54321 上的 admin/admin。
+    if systemctl is-active --quiet a-ui; then
+        a_ui_stopped=1
+    fi
     systemctl stop a-ui
-    a_ui_stopped=1
+    # 从这里到提交点，面板是停着的：Ctrl-C、SSH 断开（SIGHUP）、kill 都走恢复流程，不能把机器留在
+    # 「面板停着、旧目录挪在暂存目录里」的状态。
+    trap 'die_restoring_panel "安装被中断，正在恢复更新前的状态"' INT TERM HUP
 
-    if [[ -e /usr/local/a-ui/ ]]; then
-        rm /usr/local/a-ui/ -rf
+    # 换目录：先把旧目录挪进暂存目录，再把新目录挪进来。两步都是 /usr/local 内
+    # 的 rename，任何一步失败都还能把旧目录原样换回去（见 die_restoring_panel）。
+    if [[ -e /usr/local/a-ui ]]; then
+        if ! mv /usr/local/a-ui "${stage_dir}/old-a-ui"; then
+            die_restoring_panel "移走旧的安装目录失败，已中止更新"
+        fi
+        old_install_dir="${stage_dir}/old-a-ui"
+    fi
+    if ! mv "${stage_dir}/a-ui" /usr/local/a-ui; then
+        die_restoring_panel "把新版本移入 /usr/local/a-ui 失败，已中止更新"
     fi
 
-    tar zxvf a-ui-linux-${arch}.tar.gz
-    rm a-ui-linux-${arch}.tar.gz -f
-    cd a-ui
-    chmod +x a-ui bin/xray-linux-${arch}
+    cd /usr/local/a-ui
     restore_or_install_xray
     cp -f a-ui.service /etc/systemd/system/
+    # 单元文件可能随版本变了（比如新加的 Restart=）。setup_wizard 的有域名分支
+    # 会在下面那次 daemon-reload 之前就 systemctl restart a-ui，不在这里重载的话
+    # 那次重启用的还是旧单元，systemd 只会提示一句 "changed on disk"。
+    systemctl daemon-reload
     # 管理脚本先下到临时文件，确认下载成功且非空，再落到 /usr/bin/a-ui。
     # wget -O 会先把目标文件清空再写：直接对着 /usr/bin/a-ui 下载，一旦失败
     # 就留下一个空文件，而紧接着的 chmod +x 照样成功——用户此后每敲一次
     # a-ui 都是静默无输出，和"根本没装"完全无法区分，却又查不出哪里坏了。
     local mgr_tmp
     mgr_tmp=$(mktemp) || die_restoring_panel "创建临时文件失败"
-    if ! wget --no-check-certificate -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui.sh; then
+    # 面板停着，不能让 wget 按默认的 20 次重试、900 秒超时一直挂着。
+    if ! wget --timeout=30 --tries=3 -O "${mgr_tmp}" https://raw.githubusercontent.com/SienFeng/AetherUI/main/a-ui.sh; then
         rm -f "${mgr_tmp}"
         die_restoring_panel "下载 a-ui 管理脚本失败，请确保你的服务器能够访问 raw.githubusercontent.com"
     fi
@@ -1356,8 +1654,21 @@ install_a-ui() {
         rm -f "${mgr_tmp}"
         die_restoring_panel "下载到的 a-ui 管理脚本是空文件，可能是网络中途被切断"
     fi
-    install -m 755 "${mgr_tmp}" /usr/bin/a-ui
+    # 非空还不够：GitHub 的错误页、中途截断的下载都是非空的
+    if ! head -n 1 "${mgr_tmp}" | grep -qE '^#!.*bash' || ! bash -n "${mgr_tmp}" 2>/dev/null; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "下载到的 a-ui 管理脚本不是完整的 bash 脚本，可能是网络中途被切断"
+    fi
+    if ! install -m 755 "${mgr_tmp}" /usr/bin/a-ui; then
+        rm -f "${mgr_tmp}"
+        die_restoring_panel "安装 a-ui 管理脚本到 /usr/bin/a-ui 失败"
+    fi
     rm -f "${mgr_tmp}"
+    # 新版本已完整就位，从这里起不再回退：删掉暂存目录（连同换下来的旧目录）
+    old_install_dir=""
+    rm -rf "${stage_dir}"
+    stage_dir=""
+    trap - INT TERM HUP
     chmod +x /usr/local/a-ui/a-ui.sh
     config_after_install
     #echo -e "如果是全新安装，默认网页端口为 ${green}54321${plain}，用户名和密码默认都是 ${green}admin${plain}"
@@ -1388,6 +1699,11 @@ install_a-ui() {
     echo -e "a-ui uninstall    - 卸载 a-ui 面板"
     echo -e "a-ui geo          - 更新 geo  数据"
     echo -e "----------------------------------------------"
+    if [[ ${default_credentials_active} -eq 1 ]]; then
+        echo -e ""
+        echo -e "${red}注意：面板仍在使用公开的默认账户 admin / 密码 admin，请立即修改！${plain}"
+        print_credentials_hint
+    fi
 }
 
 # 单独触发安全配置向导，不做下载/解压/装 systemd 服务那一整套安装流程。

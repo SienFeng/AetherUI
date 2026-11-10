@@ -7,6 +7,7 @@ import (
 	"strings"
 	"a-ui/config"
 	"a-ui/logger"
+	"a-ui/util/common"
 	"a-ui/web/entity"
 	"a-ui/web/service"
 )
@@ -66,7 +67,8 @@ func jsonMsgObj(c *gin.Context, msg string, obj interface{}, err error) {
 	} else {
 		m.Success = false
 		m.Msg = msg + "失败: " + err.Error()
-		logger.Warning(msg+"失败: ", err)
+		// 日志里去掉 URL 的查询串与账号密码：订阅地址、IP 库下载地址的 token 都在查询串里。回复给管理员的保持完整。
+		logger.Warning(msg+"失败: ", common.RedactURLs(err.Error()))
 	}
 	c.JSON(http.StatusOK, m)
 }

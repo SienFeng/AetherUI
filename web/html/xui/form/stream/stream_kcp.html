@@ -1,39 +1,32 @@
 {{define "form/streamKCP"}}
-<a-col :span="12">
-    <a-form-item label="伪装">
-        <a-select v-model="inbound.stream.kcp.type" style="width: 280px;">
-            <a-select-option value="none">none（not camouflage）</a-select-option>
-            <a-select-option value="srtp">srtp（camouflage video call）</a-select-option>
-            <a-select-option value="utp">utp（camouflage BT download）</a-select-option>
-            <a-select-option value="wechat-video">wechat-video（camouflage WeChat video）</a-select-option>
-            <a-select-option value="dtls">dtls（camouflage DTLS 1.2 packages）</a-select-option>
-            <a-select-option value="wireguard">wireguard（camouflage wireguard packages）</a-select-option>
-        </a-select>
-    </a-form-item>
-</a-col>
-<a-col :span="12">
-    <a-form-item label="密码">
-        <a-input v-model.number="inbound.stream.kcp.seed"></a-input>
+<!-- 伪装（header）与密码（seed）已从核心移除，新建入站不再提供这两项（见 xray.js 的
+     KcpStreamSettings）。存量入站带着它们时核心会拒绝整份配置，表单顶部会报出来并挡住
+     保存；这里给出唯一的修正入口。 -->
+<a-col :span="24" v-if="inbound.stream.kcp.legacyObfs">
+    <a-form-item label="伪装 / 密码">
+        <span class="kv-mono">[[ inbound.stream.kcp.type ]][[ inbound.stream.kcp.seed ? ' / ' + inbound.stream.kcp.seed : '' ]]</span>
+        <a-button size="small" style="margin-left: 8px;"
+                  @click="inbound.stream.kcp.clearLegacyObfs()">清除</a-button>
     </a-form-item>
 </a-col>
 <a-col :span="12">
     <a-form-item label="mtu">
-        <a-input type="number" v-model.number="inbound.stream.kcp.mtu"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.mtu" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 <a-col :span="12">
     <a-form-item label="tti (ms)">
-        <a-input type="number" v-model.number="inbound.stream.kcp.tti"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.tti" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 <a-col :span="12">
     <a-form-item label="uplink capacity (MB/S)">
-        <a-input type="number" v-model.number="inbound.stream.kcp.upCap"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.upCap" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 <a-col :span="12">
     <a-form-item label="downlink capacity (MB/S)">
-        <a-input type="number" v-model.number="inbound.stream.kcp.downCap"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.downCap" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 <a-col :span="12">
@@ -43,12 +36,12 @@
 </a-col>
 <a-col :span="12">
     <a-form-item label="read buffer size (MB)">
-        <a-input type="number" v-model.number="inbound.stream.kcp.readBuffer"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.readBuffer" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 <a-col :span="12">
     <a-form-item label="write buffer size (MB)">
-        <a-input type="number" v-model.number="inbound.stream.kcp.writeBuffer"></a-input>
+        <a-input-number v-model="inbound.stream.kcp.writeBuffer" :precision="0" style="width: 100%;"></a-input-number>
     </a-form-item>
 </a-col>
 {{end}}

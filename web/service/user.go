@@ -64,6 +64,9 @@ func (s *UserService) VerifyPassword(id int, password string) bool {
 
 // UpdateUser 修改用户名与密码，返回更新后的用户（调用方要据此刷新会话）。
 func (s *UserService) UpdateUser(id int, username string, password string) (*model.User, error) {
+	if err := CheckNewCredential(username, password); err != nil {
+		return nil, err
+	}
 	hash, err := crypto.HashPassword(password)
 	if err != nil {
 		return nil, err
@@ -84,6 +87,9 @@ func (s *UserService) UpdateFirstUser(username string, password string) error {
 		return errors.New("username can not be empty")
 	} else if password == "" {
 		return errors.New("password can not be empty")
+	}
+	if err := CheckNewCredential(username, password); err != nil {
+		return err
 	}
 	hash, err := crypto.HashPassword(password)
 	if err != nil {

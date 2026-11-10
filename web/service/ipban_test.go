@@ -171,6 +171,10 @@ func TestPlanRejectionsIgnoresBanned(t *testing.T) {
 // 没设并发额度、但有活跃封禁的入站也必须进入判定，否则封禁对它永远不会执行。
 func TestLimitedInboundsIncludesBannedOnlyInbound(t *testing.T) {
 	setupDB(t)
+	// 这里验证的是「默认不限」时只管设了额度 / 有封禁的入站；默认额度见 TestLimitedInboundsAppliesDefaultLimit。
+	if err := (&SettingService{}).saveSetting("defaultConcurrencyLimit", "0"); err != nil {
+		t.Fatal(err)
+	}
 	db := database.GetDB()
 	in := &model.Inbound{
 		UserId: 1, Port: 31001, Protocol: model.VLESS, Enable: true,

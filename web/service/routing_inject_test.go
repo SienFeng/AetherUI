@@ -261,6 +261,7 @@ func TestInjectSkipsRuleWhenDomainListEmpty(t *testing.T) {
 // InboundService 没有引用检查，管理员通过正常界面就能删掉被规则引用的入站。
 func TestInjectSkipsRuleWhenInboundDeleted(t *testing.T) {
 	setupDB(t)
+	disableAbuseRules(t) // 这里数的是其他功能的规则条数
 	g := newTestGroup(t, "ChatGPT")
 	in := newTestInbound(t, 10001)
 	if err := (&RoutingRuleService{}).Add(&model.RoutingRule{
@@ -841,6 +842,7 @@ func TestBuildRuleDropsEmptyGroupButKeepsTheRest(t *testing.T) {
 
 func TestBuildRuleDropsWholeRuleWhenAllGroupsEmpty(t *testing.T) {
 	setupDB(t)
+	disableAbuseRules(t) // 这里数的是其他功能的规则条数
 	// 先用非空域名建组并加规则（validate 只校验组存在，不校验组非空），
 	// 再把组清空，造出「规则引用的唯一一组变空了」这个真实状态。
 	empty := newTestGroupWithDomains(t, "空组", []string{"domain:placeholder.example"})
@@ -888,6 +890,7 @@ func TestBuildRuleDropsWholeRuleWhenAllGroupsEmpty(t *testing.T) {
 // 与「组存在但域名为空」是 buildRule 里两道不同的检查，必须各测各的。
 func TestBuildRuleDropsRuleWithEmptyDomainGroupIds(t *testing.T) {
 	setupDB(t)
+	disableAbuseRules(t) // 这里数的是其他功能的规则条数
 	in := newTestInbound(t, 10001)
 	// 绕过 service 直接写库：Add 的 validate 会拒绝空的域名组集合，
 	// 而这里要造的正是「绕过了 validate 的脏数据」。

@@ -466,10 +466,10 @@ func TestAccumulatorTracksSplitBytesAndSurvivesReconnect(t *testing.T) {
 	obs := func(up, down int64) []sharingObservation {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Up: up, Down: down}}
 	}
-	a.observe(base, obs(500, 900), 30)
-	a.observe(base.Add(30*time.Second), obs(1000, 2000), 30)
-	a.observe(base.Add(60*time.Second), obs(100, 200), 30)
-	flushes := a.observe(base.Add(90*time.Second), obs(0, 0), 30)
+	observeAcked(a, base, obs(500, 900), 30)
+	observeAcked(a, base.Add(30*time.Second), obs(1000, 2000), 30)
+	observeAcked(a, base.Add(60*time.Second), obs(100, 200), 30)
+	flushes := observeAcked(a, base.Add(90*time.Second), obs(0, 0), 30)
 
 	if len(flushes) != 1 {
 		t.Fatalf("落库条数 = %d，期望 1（第 4 轮累计 120 秒，距上次落库又满 60 秒）", len(flushes))
@@ -574,7 +574,7 @@ func newUsageSim() *usageSim {
 
 func (s *usageSim) observe(now time.Time) {
 	obs := collectSharingObservations(s.tk, s.inbounds, now, func(string) NetworkMeta { return provinceMeta("江苏") })
-	for _, f := range s.acc.observe(now, obs, sharingSampleStep) {
+	for _, f := range observeAcked(s.acc, now, obs, sharingSampleStep) {
 		s.rows[fmt.Sprintf("%s@%d", f.IP, f.HourStart)] = f
 	}
 }

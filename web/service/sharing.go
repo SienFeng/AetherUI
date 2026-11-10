@@ -78,8 +78,30 @@ func (s *SharingService) Sample(now time.Time) error {
 		return err
 	}
 
-	obs := collectSharingObservations(onlineTrackerInstance, inbounds, now, s.networkMetaOf)
-	flushes := sharingAccumulatorInstance.observe(now, obs, sharingSampleStep)
+	err = recordSharing(db, sharingAccumulatorInstance, now, func() []sharingObservation {
+		return collectSharingObservations(onlineTrackerInstance, inbounds, now, s.networkMetaOf)
+	})
+	if err == nil {
+		// 只有真的采到、也写进库了才算观测正常：自动出差放行靠它判断「家里没在用」是真的没在用。
+		markObserved(now)
+	}
+	return err
+}
+
+// recordSharing 是 Sample 读完连接表之后的那一半：给本小时打底、记一轮、落库、确认。
+// 拆出来是为了在没有 netdiag 的平台上也能测。
+func recordSharing(db *gorm.DB, acc *sharingAccumulator, now time.Time, collect func() []sharingObservation) error {
+	// 每个小时第一次采样时读一次库里本小时已有的行（走 idx_iph_hour），给重启之后才出现的
+	// cell 打底，见 sharingAccumulator。必须在 collect 之前读：collect 会取走 tracker 里
+	// 待记账的字节，读库失败时这一轮直接返回，那些字节还留在 tracker 里，下一轮照样记上。
+	if hour := model.AlignHourUTC(now); acc.needsSeed(hour) {
+		var rows []model.InboundIPHour
+		if err := db.Where("hour_start = ?", hour).Find(&rows).Error; err != nil {
+			return err
+		}
+		acc.seed(hour, rows)
+	}
+	flushes := acc.observe(now, collect(), sharingSampleStep)
 	if len(flushes) == 0 {
 		return nil
 	}
@@ -87,7 +109,7 @@ func (s *SharingService) Sample(now time.Time) error {
 	// SkipDefaultTransaction 默认为 false，不包的话每次 Create 自带一个
 	// BEGIN...COMMIT，一轮就是 N 次独立提交，而这块盘还要同时服务主库
 	// 和访问日志库。
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		for _, f := range flushes {
 			if err := upsertIPHour(tx, f); err != nil {
 				return err
@@ -95,6 +117,11 @@ func (s *SharingService) Sample(now time.Time) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	acc.ack(flushes, now)
+	return nil
 }
 
 // collectSharingObservations 取走 tracker 自上一轮以来的待记账字节，组装成
