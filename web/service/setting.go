@@ -47,7 +47,7 @@ var defaultValueMap = map[string]string{
 	"accessLogRetentionDays":   "7",
 	"trafficHourRetentionDays": "30",
 	"trafficDayRetentionDays":  "365",
-	"concurrencyIdleTimeout":   "120",
+	"concurrencyIdleTimeout":   "60",
 	// 自动出差放行的阈值，含义见 autoTravelParams；与 defaultAutoTravelParams 一致。
 	"autoTravelHomeSilenceHours": "2",
 	"autoTravelStableDays":       "3",
@@ -574,6 +574,19 @@ func (s *SettingService) SetAccessLogEnable(v bool) error {
 		n = 1
 	}
 	return s.setInt("accessLogEnable", n)
+}
+
+// SetAutoRegionEnable 写入「自动管理地区限制」总开关。
+//
+// defaultValueMap 里它仍是 0：存量部署升级后不该突然开始替所有用户设地区限制。新装由向导
+// （bootstrap.Run）显式打开，与访问日志一起——它靠访问日志发现被拦的人，CheckValid 拒绝
+// 「开着它却关着访问日志」的组合，所以调用方必须先打开访问日志。
+func (s *SettingService) SetAutoRegionEnable(v bool) error {
+	n := 0
+	if v {
+		n = 1
+	}
+	return s.setInt("autoRegionEnable", n)
 }
 
 // GetAutoTravelParams 读自动出差放行的阈值。某一项读不出或越界时用默认值并告警：

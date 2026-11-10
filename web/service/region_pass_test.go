@@ -371,8 +371,38 @@ func TestConcurrencyCountsNetworksDuringSingleProvincePass(t *testing.T) {
 		{IP: "192.0.2.21", Conns: 1, FirstSeen: 100},
 		{IP: "198.51.100.21", Conns: 1, FirstSeen: 200},
 	}
-	if got := planNetworkRejections(list, 1, blocked); !reflect.DeepEqual(got, []string{"198.51.100.21"}) {
+	if got := planNetworkRejections(list, 1, blocked, nil); !reflect.DeepEqual(got, []string{"198.51.100.21"}) {
 		t.Errorf("通行证期间两个网络同时在用、额度 1，应当断开后到的那个，实际 %v", got)
+	}
+}
+
+// 接到判定入口：存储江苏、通行证上海。上海的来源先连上、一直连着，本人后回到江苏的家里、已经在用——
+// 额度 1 时断开上海的那个，而不是本人。改动前按先来后到断开本人，直到通行证被收回。
+func TestConcurrencyPrefersHomeNetworkDuringPass(t *testing.T) {
+	in := setupPassInbound(t, 60333, []string{"江苏省"})
+	isolateLiveGeo(t)
+	orig := concurrencyHomeSetOf
+	concurrencyHomeSetOf = func([]string) (*cidrSet, error) { return newCIDRSet([]string{"192.0.2.0/24"}), nil }
+	t.Cleanup(func() { concurrencyHomeSetOf = orig })
+	if _, err := (&RegionPassService{}).Grant(in.Id, []string{"上海市"}, time.Now().Add(time.Hour).UnixMilli(), true, time.Now()); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	concurrencyBlockMu.Lock()
+	concurrencyBlockGeo = nil
+	concurrencyBlockMu.Unlock()
+	t.Cleanup(func() {
+		concurrencyBlockMu.Lock()
+		concurrencyBlockGeo, concurrencyHome = nil, nil
+		concurrencyBlockMu.Unlock()
+	})
+	s := &ConcurrencyService{}
+	blocked := s.sourceBlocker([]*model.Inbound{in}, time.Now())(in)
+	list := []OnlineIP{
+		{IP: "198.51.100.21", Conns: 1, FirstSeen: 100, Down: coexistMinActiveBytes},
+		{IP: "192.0.2.21", Conns: 1, FirstSeen: 200, Down: coexistMinActiveBytes},
+	}
+	if got := planNetworkRejections(list, 1, blocked, s.homeFor(in)); !reflect.DeepEqual(got, []string{"198.51.100.21"}) {
+		t.Errorf("通行证期间本人回到家里省，应当断开通行证省份那边，实际 %v", got)
 	}
 }
 

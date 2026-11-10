@@ -107,17 +107,27 @@ func networkKey(ip string) string {
 }
 
 // planNetworkRejections 决定某入站本轮应当拒绝哪些来源 IP：按网络（networkKey）数同时在用的来源，
-// 先来后到保留最早的 limit 个网络，其余网络的全部 IP 拒绝。
+// 先保留本人常住省（home 为真）的网络，同一档里先来后到保留最早的，凑满 limit 个网络，其余网络的全部 IP 拒绝。
 //
 // blocked 为真的来源不计入：被地区规则、机房拦截挡在门外的连接本来就用不了这个入站，让它占名额的话，
 // 额度为 1 时一个先连上、一直被拦着重试的外省共享者会把本人挤掉。
-func planNetworkRejections(list []OnlineIP, limit int, blocked func(ip string) bool) []string {
+//
+// home 为 nil 时只按先来后到（见 homeNetworks：只在持有通行证的入站上才有）。不按 home 排序的话，名额归
+// 连接一直没断的那一方：外省通行证生效期间本人回到家里，只要通行证省份那边一直连着，本人每秒被断一次，
+// 要等自动出差放行看到「家里恢复使用」收回通行证（家里攒够 1 MB 之后最多再一分多钟），这段时间只能断续使用。
+//
+// 家里的来源要**真的在用**才排到前面：本次在线已传过 coexistMinActiveBytes，与 liveSignals 判「家里在用」
+// 同一口径。在线表对第一次见到的 IP 一律记为活跃、也不看鉴权，不设门槛的话，出差中的本人会被家里省一条
+// 几百字节的连接（设备客户端的测速、主动探测）挤掉；有了门槛，被挤掉的时刻恰好是自动出差放行也会认定
+// 「家里恢复使用」、收回通行证的时刻，两边结论一致。
+func planNetworkRejections(list []OnlineIP, limit int, blocked, home func(ip string) bool) []string {
 	if limit <= 0 {
 		return nil
 	}
 	type network struct {
 		key       string
 		firstSeen int64
+		home      bool
 		ips       []string
 	}
 	byKey := map[string]*network{}
@@ -134,6 +144,7 @@ func planNetworkRejections(list []OnlineIP, limit int, blocked func(ip string) b
 			nets = append(nets, n)
 		}
 		n.firstSeen = min(n.firstSeen, e.FirstSeen)
+		n.home = n.home || (home != nil && e.Up+e.Down >= coexistMinActiveBytes && home(e.IP))
 		n.ips = append(n.ips, e.IP)
 	}
 	if len(nets) <= limit {
@@ -141,6 +152,9 @@ func planNetworkRejections(list []OnlineIP, limit int, blocked func(ip string) b
 	}
 	// 次序必须确定（理由见 selectOverQuota）：首次观测时间相同时按网络身份排序。
 	sort.Slice(nets, func(i, j int) bool {
+		if nets[i].home != nets[j].home {
+			return nets[i].home
+		}
 		if nets[i].firstSeen != nets[j].firstSeen {
 			return nets[i].firstSeen < nets[j].firstSeen
 		}
@@ -159,7 +173,56 @@ var (
 	concurrencyBlockAt    time.Time
 	concurrencyBlockGeo   *geoBlockMatcher
 	concurrencyBlockCount int
+	// concurrencyHome 是持有通行证的入站 → 它**存储的**地区（本人常住省）的允许集，与 concurrencyBlockGeo
+	// 同一时刻重建。只放建得出来的：IP 库没加载时这个入站退回只按先来后到。
+	concurrencyHome map[int]*cidrSet
 )
+
+// concurrencyHomeSetOf 构造存储地区的允许集；测试里替换，免得依赖真实 IP 库。
+var concurrencyHomeSetOf = allowedSetFor
+
+// homeNetworks 构造持有通行证的入站的「本人常住省」允许集，按存储的地区（管理员设的或自动设置的那个省）。
+//
+// 只给持有通行证的入站：没有通行证时，存储地区之外的来源已经被核心挡在门外、不占名额（sourceBlocker），
+// 剩下的全在家里省，再排一次序不改变任何结果；而允许集每 30 秒建一次，不值得为它们付这份开销。
+// 同一组省份只建一次。
+func homeNetworks(inbounds []*model.Inbound, passes map[int]*model.InboundRegionPass) map[int]*cidrSet {
+	out := map[int]*cidrSet{}
+	byKey := map[string]*cidrSet{}
+	for _, in := range inbounds {
+		if passes[in.Id] == nil {
+			continue
+		}
+		stored, err := DecodeRegions(in.Regions)
+		if err != nil || len(stored) == 0 {
+			continue
+		}
+		key := strings.Join(stored, ",")
+		set, ok := byKey[key]
+		if !ok {
+			set, err = concurrencyHomeSetOf(stored)
+			if err != nil {
+				set = nil
+			}
+			byKey[key] = set
+		}
+		if set != nil {
+			out[in.Id] = set
+		}
+	}
+	return out
+}
+
+// homeFor 返回某入站的「来源在本人常住省」判断；没有就返回 nil（只按先来后到）。
+func (s *ConcurrencyService) homeFor(in *model.Inbound) func(ip string) bool {
+	concurrencyBlockMu.Lock()
+	set := concurrencyHome[in.Id]
+	concurrencyBlockMu.Unlock()
+	if set == nil {
+		return nil
+	}
+	return set.Contains
+}
 
 // sourceBlocker 返回「这个来源会被核心挡在门外」的判断：地区规则（按核心用上的那一份）与机房拦截。
 // 匹配器 30 秒重建一次——判定每秒一轮，每轮读 dat、建集合太贵；通行证的增减最多晚 30 秒反映到这里。
@@ -167,7 +230,9 @@ func (s *ConcurrencyService) sourceBlocker(inbounds []*model.Inbound, now time.T
 	concurrencyBlockMu.Lock()
 	if concurrencyBlockGeo == nil || now.Sub(concurrencyBlockAt) > 30*time.Second || concurrencyBlockCount != len(inbounds) {
 		// 只看核心此刻生效的规则（不回放存储地区）：持有通行证的入站，通行证省份的网络照样占名额。
-		concurrencyBlockGeo = newLiveGeoBlockMatcher(inbounds)
+		passes := activePassesOrNil()
+		concurrencyBlockGeo = newLiveGeoBlockMatcher(inbounds, passes)
+		concurrencyHome = homeNetworks(inbounds, passes)
 		concurrencyBlockAt, concurrencyBlockCount = now, len(inbounds)
 	}
 	geo := concurrencyBlockGeo
@@ -251,7 +316,7 @@ func (s *ConcurrencyService) Enforce() error {
 			s.disconnectBanned(inbound, list)
 		}
 
-		over := planNetworkRejections(list, effectiveConcurrencyLimit(inbound, def), blockerFor(inbound))
+		over := planNetworkRejections(list, effectiveConcurrencyLimit(inbound, def), blockerFor(inbound), s.homeFor(inbound))
 		onlineTrackerInstance.setRejected(inbound.Port, over, now)
 		s.disconnect(inbound, over)
 	}

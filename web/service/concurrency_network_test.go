@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -21,10 +22,10 @@ func TestPlanNetworkRejectionsCountsIPv6PerSlash64(t *testing.T) {
 		liveIP("2001:db8:1:1::20", 300),
 		liveIP("192.0.2.7", 200),
 	}
-	if got := planNetworkRejections(list, 2, nil); len(got) != 0 {
+	if got := planNetworkRejections(list, 2, nil, nil); len(got) != 0 {
 		t.Errorf("一个 /64 加一个 IPv4 是两个网络，额度 2 不该断: %v", got)
 	}
-	got := planNetworkRejections(list, 1, nil)
+	got := planNetworkRejections(list, 1, nil, nil)
 	if !reflect.DeepEqual(got, []string{"192.0.2.7"}) {
 		t.Errorf("额度 1：先到的 /64 留下，后到的 192.0.2.7 断开，实际 %v", got)
 	}
@@ -38,13 +39,101 @@ func TestPlanNetworkRejectionsIgnoresBlockedSources(t *testing.T) {
 		liveIP("192.0.2.9", 200),    // 本人
 	}
 	blocked := func(ip string) bool { return ip == "198.51.100.7" }
-	if got := planNetworkRejections(list, 1, blocked); len(got) != 0 {
+	if got := planNetworkRejections(list, 1, blocked, nil); len(got) != 0 {
 		t.Errorf("被拦的来源占了名额，本人被断开: %v", got)
 	}
-	if got := planNetworkRejections(list, 1, nil); !reflect.DeepEqual(got, []string{"192.0.2.9"}) {
+	if got := planNetworkRejections(list, 1, nil, nil); !reflect.DeepEqual(got, []string{"192.0.2.9"}) {
 		t.Errorf("对照：不剔除被拦来源时本人会被断开，实际 %v", got)
 	}
 }
+
+// 名额冲突时本人常住省、真的在用的网络优先，不论谁先连上：外省通行证生效期间本人回到家里，通行证省份
+// 那边一直连着的话，按先来后到本人每秒被断一次，要等通行证被收回才能连续使用。
+func TestPlanNetworkRejectionsPrefersHomeNetworks(t *testing.T) {
+	inUse := func(ip string, firstSeen int64) OnlineIP {
+		e := liveIP(ip, firstSeen)
+		e.Down = coexistMinActiveBytes
+		return e
+	}
+	list := []OnlineIP{
+		inUse("198.51.100.7", 100), // 通行证省份的来源，先连上、一直连着
+		inUse("192.0.2.9", 200),    // 本人回到家里，已经在用
+	}
+	home := func(ip string) bool { return ip == "192.0.2.9" }
+	if got := planNetworkRejections(list, 1, nil, home); !reflect.DeepEqual(got, []string{"198.51.100.7"}) {
+		t.Errorf("家里省的网络应当留下、外省的断开，实际 %v", got)
+	}
+	if got := planNetworkRejections(list, 1, nil, nil); !reflect.DeepEqual(got, []string{"192.0.2.9"}) {
+		t.Errorf("对照：没有常住省信息时按先来后到，本人被断开，实际 %v", got)
+	}
+	// 同一档里仍按先来后到：两个都在家里省（手机流量 + 家里 Wi-Fi），后到的断开。
+	both := func(ip string) bool { return true }
+	if got := planNetworkRejections(list, 1, nil, both); !reflect.DeepEqual(got, []string{"192.0.2.9"}) {
+		t.Errorf("都在家里省时应按先来后到，实际 %v", got)
+	}
+	// 被拦的来源仍然不占名额，也不因为在家里省就被留下来占位。
+	blocked := func(ip string) bool { return ip == "192.0.2.9" }
+	if got := planNetworkRejections(list, 1, blocked, home); len(got) != 0 {
+		t.Errorf("被拦来源不计入，剩一个网络不该断，实际 %v", got)
+	}
+}
+
+// 家里省一条刚连上、只传了几 KB 的连接（设备客户端测速、主动探测）不能把出差中正在用的本人挤掉：
+// 门槛与 liveSignals 判「家里在用」相同。
+func TestPlanNetworkRejectionsIgnoresHomeProbes(t *testing.T) {
+	traveler := liveIP("198.51.100.7", 100)
+	traveler.Down = 50 * coexistMinActiveBytes
+	probe := liveIP("192.0.2.9", 200)
+	probe.Down = 4096
+	home := func(ip string) bool { return ip == "192.0.2.9" }
+	if got := planNetworkRejections([]OnlineIP{traveler, probe}, 1, nil, home); !reflect.DeepEqual(got, []string{"192.0.2.9"}) {
+		t.Errorf("家里省的小连接不该挤掉出差中的本人，实际 %v", got)
+	}
+	probe.Down = coexistMinActiveBytes
+	if got := planNetworkRejections([]OnlineIP{traveler, probe}, 1, nil, home); !reflect.DeepEqual(got, []string{"198.51.100.7"}) {
+		t.Errorf("家里真的在用（≥1 MB）时应当优先，实际 %v", got)
+	}
+}
+
+// homeNetworks 只给持有通行证、存储了地区的入站建允许集；同一组省份只建一次；建不出来的入站不放进去
+// （退回先来后到），而不是放一个空集合把所有来源都判成「不在家里」。
+func TestHomeNetworksOnlyForInboundsWithPass(t *testing.T) {
+	calls := 0
+	orig := concurrencyHomeSetOf
+	concurrencyHomeSetOf = func(p []string) (*cidrSet, error) {
+		calls++
+		if p[0] == "坏省份" {
+			return nil, errTestHomeSet
+		}
+		return newCIDRSet([]string{"192.0.2.0/24"}), nil
+	}
+	t.Cleanup(func() { concurrencyHomeSetOf = orig })
+
+	inbounds := []*model.Inbound{
+		{Id: 1, Regions: `["江苏省"]`}, // 有通行证
+		{Id: 2, Regions: `["江苏省"]`}, // 有通行证，同一组省份
+		{Id: 3, Regions: `["江苏省"]`}, // 没有通行证
+		{Id: 4, Regions: ``},        // 有通行证但没有存储地区
+		{Id: 5, Regions: `["坏省份"]`}, // 有通行证，允许集建不出来
+	}
+	pass := &model.InboundRegionPass{}
+	passes := map[int]*model.InboundRegionPass{1: pass, 2: pass, 4: pass, 5: pass}
+	got := homeNetworks(inbounds, passes)
+	if got[1] == nil || got[2] == nil {
+		t.Fatalf("持有通行证的入站应有常住省允许集: %v", got)
+	}
+	if got[3] != nil || got[4] != nil || got[5] != nil {
+		t.Errorf("没有通行证、没有存储地区、允许集建不出的入站都不该有: %v", got)
+	}
+	if calls != 2 {
+		t.Errorf("同一组省份只建一次（江苏 + 坏省份 = 2 次），实际 %d 次", calls)
+	}
+	if !got[1].Contains("192.0.2.9") || got[1].Contains("198.51.100.7") {
+		t.Error("允许集内容不对")
+	}
+}
+
+var errTestHomeSet = errors.New("IP 归属地库未加载")
 
 // 默认同时在用网络数：入站自己没设（0）就按默认；自己设了按自己的；默认为 0 时只管设了额度或有封禁的。
 func TestLimitedInboundsAppliesDefaultLimit(t *testing.T) {
