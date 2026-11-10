@@ -460,3 +460,62 @@ func TestRunForceKeepsExistingObservabilityDefaults(t *testing.T) {
 		t.Error("autoRegionEnable 被向导覆盖了")
 	}
 }
+
+// mode=defaults 是安装脚本给每台全新安装先写一遍的开箱默认（与向导成败无关）：向导中途失败（443 被占、
+// 证书没签下来）时 caddy / reality 两条路径都不会走到写默认值那一步，新装的机器就拿不到自动管理地区
+// 限制、访问日志这些默认。它只写这五项，不碰根路径——根路径仍是 "/"，之后的向导照常判定为未配置。
+func TestRunDefaultsModeWritesOnlyOpenBoxDefaults(t *testing.T) {
+	setupDB(t)
+	s := service.SettingService{}
+	res, err := Run(Options{Mode: "defaults"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Skipped {
+		t.Fatal("全新的库不该跳过")
+	}
+	if on, _ := s.GetAutoRegionParams(); !on {
+		t.Error("应打开自动管理地区限制")
+	}
+	if v, _ := s.GetAccessLogEnable(); !v {
+		t.Error("应打开访问日志")
+	}
+	if v, _ := s.GetIPDBUpdateTime(); v != DefaultIPDBUpdateTime {
+		t.Errorf("ipdbUpdateTime = %q", v)
+	}
+	if v, _ := s.GetDNSServers(); v != DefaultDNSServers {
+		t.Errorf("dnsServers = %q", v)
+	}
+	if v, _ := s.GetIPRuleResolveDomain(); !v {
+		t.Error("应打开 IP 规则匹配域名目标")
+	}
+	if done, _ := alreadyInitialized(); done {
+		t.Error("defaults 不能改根路径，否则之后的向导会被当成已配置而整个跳过")
+	}
+	all, err := s.GetAllSetting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := all.CheckValid(); err != nil {
+		t.Errorf("写完默认值后的设置通不过保存校验: %v", err)
+	}
+}
+
+// 已经配置过的面板（根路径不是 "/"）上 defaults 一个字节都不写：管理员可能已经关掉了其中某几项。
+func TestRunDefaultsModeSkipsConfiguredPanel(t *testing.T) {
+	setupDB(t)
+	s := service.SettingService{}
+	if err := s.SetBasePath("/Ab3xK9pQ/"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(Options{Mode: "defaults", Force: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Skipped {
+		t.Error("已配置的面板应跳过（-force 也不例外）")
+	}
+	if on, _ := s.GetAutoRegionParams(); on {
+		t.Error("已配置的面板不该被改动")
+	}
+}

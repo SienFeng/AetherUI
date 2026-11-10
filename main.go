@@ -471,7 +471,7 @@ func main() {
 func runBootstrap(args []string) {
 	cmd := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	var opts bootstrap.Options
-	cmd.StringVar(&opts.Mode, "mode", "", "caddy | reality")
+	cmd.StringVar(&opts.Mode, "mode", "", "caddy | reality | defaults（全新安装只写开箱默认）")
 	cmd.StringVar(&opts.Domain, "domain", "", "域名（mode=caddy 必填）")
 	cmd.StringVar(&opts.BasePath, "basepath", "", "面板 url 根路径")
 	cmd.StringVar(&opts.Listen, "listen", "", "面板监听地址，留空为所有 IP")

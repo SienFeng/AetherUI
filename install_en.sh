@@ -374,6 +374,16 @@ config_after_install() {
         echo -e "${red}admin / 123456 is a public default that scanners try first, change it soon after login (every panel page also shows a reminder)${plain}"
         print_credentials_hint
     fi
+    # Write the out-of-the-box defaults for a fresh install (auto region management, access log,
+    # encrypted DNS, daily IP database update, IP rules matching domain targets) up front, regardless
+    # of whether the setup wizard below succeeds: when the wizard fails midway (port 443 taken, cert
+    # not issued) it never reaches these. bootstrap itself skips an already configured panel. Older
+    # binaries installed by a rollback do not know -mode defaults; only warn, never abort.
+    if [[ ${is_fresh_install} -eq 1 ]]; then
+        if ! /usr/local/a-ui/a-ui bootstrap -mode defaults >/dev/null 2>&1; then
+            echo -e "${yellow}Failed to write the fresh-install defaults; turn on auto region management in Panel Settings -> Connection Limits (it also turns on the access log)${plain}"
+        fi
+    fi
 }
 
 # Generate the random string used for the panel's URL base path. This

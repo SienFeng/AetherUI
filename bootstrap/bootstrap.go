@@ -19,7 +19,7 @@ import (
 )
 
 type Options struct {
-	Mode        string // caddy | reality
+	Mode        string // caddy | reality | defaults（只写开箱默认，见 writeOpenBoxDefaults）
 	Domain      string // mode=caddy 必填
 	BasePath    string
 	Listen      string
@@ -84,6 +84,23 @@ func Run(opts Options) (*Result, error) {
 
 	if err := validate(opts); err != nil {
 		return nil, err
+	}
+
+	// mode=defaults：安装脚本对每台全新安装先调一次，与随后的向导成败无关——向导中途失败（443 被占、
+	// 证书没签下来）时下面两条路径都走不到写默认值那一步。只写开箱默认、不碰根路径，所以之后的向导仍判定
+	// 为未配置。已配置过的面板一律跳过，-force 也不例外：那上面这几项是管理员的既有选择。
+	if opts.Mode == "defaults" {
+		done, err := alreadyInitialized()
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return &Result{Mode: opts.Mode, Skipped: true, Reason: "面板已配置过，不写入新装默认设置"}, nil
+		}
+		if err := writeOpenBoxDefaults(service.SettingService{}); err != nil {
+			return nil, err
+		}
+		return &Result{Mode: opts.Mode}, nil
 	}
 
 	if !opts.Force {
@@ -157,23 +174,8 @@ func Run(opts Options) (*Result, error) {
 	// 代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值，那和
 	// 「存量部署零变化」是同一件事，管理员去设置页打开即可。
 	if !opts.Force {
-		if err := s.SetIPRuleResolveDomain(true); err != nil {
-			return nil, fmt.Errorf("写入 IP 规则匹配域名目标开关失败: %w", err)
-		}
-		if err := s.SetDNSServers(DefaultDNSServers); err != nil {
-			return nil, fmt.Errorf("写入默认 DNS 服务器失败: %w", err)
-		}
-		if err := s.SetAccessLogEnable(true); err != nil {
-			return nil, fmt.Errorf("写入访问日志开关失败: %w", err)
-		}
-		if err := s.SetIPDBUpdateTime(DefaultIPDBUpdateTime); err != nil {
-			return nil, fmt.Errorf("写入 IP 库更新时刻失败: %w", err)
-		}
-		// 自动管理地区限制：用户观察期满后自动设为最常用的一个省、打开出差放行，外省共享者从此
-		// 在核心里就被挡在门外。必须排在访问日志之后——它靠访问日志发现被拦的人，开着它却关着
-		// 访问日志是 CheckValid 拒绝的组合，管理员之后在设置页什么都保存不了。
-		if err := s.SetAutoRegionEnable(true); err != nil {
-			return nil, fmt.Errorf("写入自动管理地区限制开关失败: %w", err)
+		if err := writeOpenBoxDefaults(s); err != nil {
+			return nil, err
 		}
 	}
 
@@ -209,6 +211,30 @@ func Run(opts Options) (*Result, error) {
 	}
 
 	return &Result{Mode: opts.Mode, PanelURL: panelURL(opts)}, nil
+}
+
+// writeOpenBoxDefaults 写新装的五项开箱默认（说明见 Run 里调用处的注释）。caddy / reality 两条路径与
+// mode=defaults 共用这一份，免得改默认值时漏掉一处。
+func writeOpenBoxDefaults(s service.SettingService) error {
+	if err := s.SetIPRuleResolveDomain(true); err != nil {
+		return fmt.Errorf("写入 IP 规则匹配域名目标开关失败: %w", err)
+	}
+	if err := s.SetDNSServers(DefaultDNSServers); err != nil {
+		return fmt.Errorf("写入默认 DNS 服务器失败: %w", err)
+	}
+	if err := s.SetAccessLogEnable(true); err != nil {
+		return fmt.Errorf("写入访问日志开关失败: %w", err)
+	}
+	if err := s.SetIPDBUpdateTime(DefaultIPDBUpdateTime); err != nil {
+		return fmt.Errorf("写入 IP 库更新时刻失败: %w", err)
+	}
+	// 自动管理地区限制：用户观察期满后自动设为最常用的一个省、打开出差放行，外省共享者从此
+	// 在核心里就被挡在门外。必须排在访问日志之后——它靠访问日志发现被拦的人，开着它却关着
+	// 访问日志是 CheckValid 拒绝的组合，管理员之后在设置页什么都保存不了。
+	if err := s.SetAutoRegionEnable(true); err != nil {
+		return fmt.Errorf("写入自动管理地区限制开关失败: %w", err)
+	}
+	return nil
 }
 
 // createRealityInbound 走 InboundService.AddInbound 而不是直接写库：
@@ -288,8 +314,10 @@ func validate(opts Options) error {
 		if opts.RealityDest == "" {
 			return fmt.Errorf("mode=reality 需要 -reality-dest")
 		}
+	case "defaults":
+		return nil
 	default:
-		return fmt.Errorf("未知的 -mode: %v（应为 caddy 或 reality）", opts.Mode)
+		return fmt.Errorf("未知的 -mode: %v（应为 caddy、reality 或 defaults）", opts.Mode)
 	}
 	if opts.BasePath == "" {
 		return fmt.Errorf("需要 -basepath")
@@ -330,6 +358,10 @@ func (r *Result) Print(asJSON bool) {
 	}
 	if r.Skipped {
 		fmt.Println("跳过:", r.Reason)
+		return
+	}
+	if r.Mode == "defaults" {
+		fmt.Println("已写入新装默认设置")
 		return
 	}
 	fmt.Println("面板地址:", r.PanelURL)

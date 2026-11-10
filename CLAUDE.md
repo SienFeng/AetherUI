@@ -639,6 +639,8 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 `bootstrap` 靠 `webBasePath != "/"` 判断「是否已配置过」（`alreadyInitialized`，`bootstrap.go`），不靠 `webListen`——空字符串既是它的零值又是「监听所有 IP」的合法配置，两者区分不开。`a-ui update` 会用新解压的目录整个换掉 `/usr/local/a-ui/`（见「运维脚本」里的 `fetch_release`），`install.sh` 每次都会调 `setup_wizard`，全靠这条幂等判断防止升级把管理员已经配好的域名/basePath 覆盖回默认值；主动想重新配置（`a-ui` 菜单「配置域名与伪装站」，即 `install.sh --wizard-only`）才传 `-force` 绕开它。**`-force` 是唯一不写那五项开箱默认（`ipRuleResolveDomain`/`dnsServers`/`accessLogEnable`/`ipdbUpdateTime`/`autoRegionEnable`）的分支**：那条路径上面板此前已被配置过、多半跑了一段时间，这几项的当前值属于管理员的既有选择——他可能正是因为磁盘紧张才关掉访问日志、因为流量计费才关掉 IP 库自动更新，而向导问的是域名和伪装站，顺手改掉解析路径、重新打开日志记录都是静默的夹带修改。代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值——那和「存量部署零变化」是同一件事。
 
+**全新安装在向导之前先跑一次 `a-ui bootstrap -mode defaults`**（`config_after_install` 末尾，只在 `/etc/a-ui/a-ui.db` 原本不存在时）：只写这五项（`writeOpenBoxDefaults`，与 caddy / reality 两条路径共用），不碰根路径——之后的向导照常判定为未配置；已配置过的面板一律跳过，`-force` 也不例外。起因：向导中途失败（443 被占、证书没签下来）时两条路径都走不到写默认值那一步，管理员要求新装默认打开的「自动管理地区限制」就落空了。回退安装的旧二进制不认识这个 mode，脚本只提示、不中止。
+
 后两项各有一条不显然的尾巴。`accessLogEnable` 改的是 xray 的 `log` 段，在 `hot_diff` 的 static 名单里，必然触发一次整进程重启——新装时 xray 还没起来，无感；保留天数不由 bootstrap 写，`defaultValueMap` 里它本来就是 7 天，写第二遍只会在将来改默认值时漏掉一处。`ipdbUpdateTime`（`bootstrap.DefaultIPDBUpdateTime` = `05:00`，与域名组订阅的 04:00 错开，两者都在半夜拉外网数据）光写进设置则**不足以让新装的机器拿到库**：`RunScheduledUpdate` 只在当天的更新时刻之后才放行，而发版包带着 ip2region 的种子库（`bin/ipdb.dat`）、不带纯真库，凌晨装机的管理员会看到一份几个月前的 ip2region 加一个空的纯真库，一直等到 05:00，界面上没有任何东西说明它在等什么。所以 `Server.startTask` 里另有一条延迟 30 秒的 `IPDBUpdateJob.RunInitial()`（`web/service/ipdb.go` 的 `RunInitialUpdate`），按「**本机从未成功向上游确认过这个源**」——`ipdbCheckedAt` 为 0，它只在拉取成功或 304 之后前进——补一次。判据刻意不是「库很旧」：那对种子库恒为真，会让每次面板启动（管理员点一下「重启面板」就是一次）都重下几十 MB。这条路径与 `RunScheduledUpdate` 一样，更新时刻留空时一个字节都不下，存量部署因此完全无感。
 
 ### 失败不锁面板
