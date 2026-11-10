@@ -70,8 +70,6 @@ type AllSetting struct {
 	IPRuleResolveDomain int `json:"ipRuleResolveDomain" form:"ipRuleResolveDomain"`
 
 	// 防共享 / 防滥用（全局生效）。
-	// DefaultConcurrencyLimit：入站没有单独设并发限制时，同时在用的网络数上限（同一个 Wi-Fi 算一个，IPv6 按 /64）；0 表示不限。
-	DefaultConcurrencyLimit int `json:"defaultConcurrencyLimit" form:"defaultConcurrencyLimit"`
 	// BlockIdcSources：拦下来自机房 / 云服务器的来源（多数 IP 库认定的知名 IDC），防止借云服务器转发绕过地区限制、用中转转卖。
 	BlockIdcSources int `json:"blockIdcSources" form:"blockIdcSources"`
 	// BlockSmtp：拦下发往 25 端口的连接（群发垃圾邮件会让服务器 IP 被拉黑）。

@@ -460,3 +460,110 @@ func TestRunForceKeepsExistingObservabilityDefaults(t *testing.T) {
 		t.Error("autoRegionEnable 被向导覆盖了")
 	}
 }
+
+// mode=defaults 是安装脚本给每台全新安装先写一遍的开箱默认（与向导成败无关）：向导中途失败（443 被占、
+// 证书没签下来）时 caddy / reality 两条路径都不会走到写默认值那一步，新装的机器就拿不到自动管理地区
+// 限制、访问日志这些默认。它只写这五项，不碰根路径——根路径仍是 "/"，之后的向导照常判定为未配置。
+func TestRunDefaultsModeWritesOnlyOpenBoxDefaults(t *testing.T) {
+	setupDB(t)
+	s := service.SettingService{}
+	res, err := Run(Options{Mode: "defaults"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Skipped {
+		t.Fatal("全新的库不该跳过")
+	}
+	if on, _ := s.GetAutoRegionParams(); !on {
+		t.Error("应打开自动管理地区限制")
+	}
+	if v, _ := s.GetAccessLogEnable(); !v {
+		t.Error("应打开访问日志")
+	}
+	if v, _ := s.GetIPDBUpdateTime(); v != DefaultIPDBUpdateTime {
+		t.Errorf("ipdbUpdateTime = %q", v)
+	}
+	if v, _ := s.GetDNSServers(); v != DefaultDNSServers {
+		t.Errorf("dnsServers = %q", v)
+	}
+	if v, _ := s.GetIPRuleResolveDomain(); !v {
+		t.Error("应打开 IP 规则匹配域名目标")
+	}
+	if done, _ := alreadyInitialized(); done {
+		t.Error("defaults 不能改根路径，否则之后的向导会被当成已配置而整个跳过")
+	}
+	all, err := s.GetAllSetting()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := all.CheckValid(); err != nil {
+		t.Errorf("写完默认值后的设置通不过保存校验: %v", err)
+	}
+}
+
+// 已经配置过的面板（根路径不是 "/"）上 defaults 一个字节都不写：管理员可能已经关掉了其中某几项。
+func TestRunDefaultsModeSkipsConfiguredPanel(t *testing.T) {
+	setupDB(t)
+	s := service.SettingService{}
+	if err := s.SetBasePath("/Ab3xK9pQ/"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(Options{Mode: "defaults", Force: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.Skipped {
+		t.Error("已配置的面板应跳过（-force 也不例外）")
+	}
+	if on, _ := s.GetAutoRegionParams(); on {
+		t.Error("已配置的面板不该被改动")
+	}
+}
+
+// 每台全新安装实际走的顺序：config_after_install 先跑 defaults，随后向导再跑 caddy / reality。defaults
+// 不能让向导被当成「已配置」而跳过，也不能让向导之后的整份设置通不过保存校验；reality 建入站时生成配置
+// 已经带着 DoH、IPIfNonMatch 与访问日志，入站照样要建得起来。
+func TestRunDefaultsThenWizard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"caddy", Options{Mode: "caddy", Domain: "example.com", BasePath: "/Ab3xK9pQ/",
+			Listen: "127.0.0.1", Port: 54321}},
+		{"reality", Options{Mode: "reality", RealityDest: "www.tesla.com:443", BasePath: "/Zz9Yy8/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDB(t)
+			if _, err := Run(Options{Mode: "defaults"}); err != nil {
+				t.Fatalf("defaults: %v", err)
+			}
+			res, err := Run(tc.opts)
+			if err != nil {
+				t.Fatalf("向导: %v", err)
+			}
+			if res.Skipped {
+				t.Fatal("defaults 之后的向导被跳过了")
+			}
+			s := service.SettingService{}
+			if bp, _ := s.GetBasePath(); bp != tc.opts.BasePath {
+				t.Errorf("根路径 = %q，期望 %q", bp, tc.opts.BasePath)
+			}
+			if on, _ := s.GetAutoRegionParams(); !on {
+				t.Error("自动管理地区限制应保持打开")
+			}
+			if tc.opts.Mode == "reality" {
+				inbounds, err := (&service.InboundService{}).GetAllInbounds()
+				if err != nil || len(inbounds) != 1 || inbounds[0].Port != 443 {
+					t.Errorf("REALITY 入站没建起来: %v %v", inbounds, err)
+				}
+			}
+			all, err := s.GetAllSetting()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := all.CheckValid(); err != nil {
+				t.Errorf("整份设置通不过保存校验: %v", err)
+			}
+		})
+	}
+}

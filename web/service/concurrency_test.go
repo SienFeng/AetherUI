@@ -191,10 +191,6 @@ func TestConcurrencyLimitedInboundsOnlyReturnsEnabledOnesWithLimit(t *testing.T)
 	if err := database.InitDB(filepath.Join(t.TempDir(), "test.db")); err != nil {
 		t.Fatalf("InitDB: %v", err)
 	}
-	// 这里验证的是「默认不限」时只管设了额度 / 有封禁的入站；默认额度见 TestLimitedInboundsAppliesDefaultLimit。
-	if err := (&SettingService{}).saveSetting("defaultConcurrencyLimit", "0"); err != nil {
-		t.Fatal(err)
-	}
 	db := database.GetDB()
 	mk := func(port, limit int, enable bool) {
 		in := &model.Inbound{
@@ -226,10 +222,6 @@ func TestConcurrencyLimitedInboundsOnlyReturnsEnabledOnesWithLimit(t *testing.T)
 func TestEnforceDoesNothingWithoutAnyLimitedInbound(t *testing.T) {
 	if err := database.InitDB(filepath.Join(t.TempDir(), "test.db")); err != nil {
 		t.Fatalf("InitDB: %v", err)
-	}
-	// 前提是「没有任何受限入站」：默认同时在用网络数设成 0（不限）。
-	if err := (&SettingService{}).saveSetting("defaultConcurrencyLimit", "0"); err != nil {
-		t.Fatal(err)
 	}
 	db := database.GetDB()
 	in := &model.Inbound{

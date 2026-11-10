@@ -1168,7 +1168,7 @@
                     out.push({
                         key: 'conc',
                         text: `并发 ${dbInbound.concurrencyLimit}`,
-                        title: `最多同时 ${dbInbound.concurrencyLimit} 个网络在用（同一个 Wi-Fi 算一个，IPv6 按 /64）；没单独设的入站按面板设置里的默认值`,
+                        title: `最多同时 ${dbInbound.concurrencyLimit} 个网络在用（同一个 Wi-Fi 算一个，IPv6 按 /64）`,
                     });
                 }
                 if (dbInbound.allowServerSources && dbInbound.protocol !== Protocols.DOKODEMO) {

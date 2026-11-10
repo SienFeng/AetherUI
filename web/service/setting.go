@@ -58,9 +58,8 @@ var defaultValueMap = map[string]string{
 	"autoTravelRelocateDays":     "5",
 	// 自动设置地区限制。开关默认关：升级后行为零变化，由管理员打开。
 
-	// 防共享 / 防滥用（管理员 2026-11-09 选定：一个人一个网络在线、拦机房来源、拦 25 端口、补全流量识别、
-	// 流量暴涨限速，全部默认打开、设置里可关）。
-	"defaultConcurrencyLimit": "1",
+	// 防共享 / 防滥用（管理员 2026-11-09 选定：拦机房来源、拦 25 端口、补全流量识别、流量暴涨限速，全部默认
+	// 打开、设置里可关）。并发数不再有全局默认（2026-11-10 去掉），只按入站手动设。
 	"blockIdcSources":         "1",
 	"blockSmtp":               "1",
 	"forceSniffing":           "1",
@@ -632,16 +631,6 @@ func (s *SettingService) GetAutoRegionParams() (bool, autoRegionParams) {
 	read("autoRegionObserveDays", 1, 30, func(v int) { p.ObserveDays = v })
 	read("autoRegionMaxBlockedPercent", 0, 50, func(v int) { p.MaxBlockedPercent = v })
 	return enabled == 1, p
-}
-
-// GetDefaultConcurrencyLimit：入站没有单独设并发限制时的同时在用网络数上限，0 表示不限。读不出按 0（不限）：
-// 宁可少拦，也不能因为读配置失败就把所有人限成一个网络。
-func (s *SettingService) GetDefaultConcurrencyLimit() int {
-	v, err := s.getInt("defaultConcurrencyLimit")
-	if err != nil || v < 0 {
-		return 0
-	}
-	return v
 }
 
 // GetBlockIdcSources / GetBlockSmtp / GetForceSniffing：防滥用开关，读不出按关闭处理（不改变生成的配置）。

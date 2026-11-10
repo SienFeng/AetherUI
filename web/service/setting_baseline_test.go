@@ -32,7 +32,6 @@ func validBaseSetting() *entity.AllSetting {
 		AutoRegionEnable:            0,
 		AutoRegionObserveDays:       1,
 		AutoRegionMaxBlockedPercent: 5,
-		DefaultConcurrencyLimit:     1,
 		BlockIdcSources:             1,
 		BlockSmtp:                   1,
 		ForceSniffing:               1,

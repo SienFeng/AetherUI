@@ -341,6 +341,14 @@ config_after_install() {
         echo -e "${red}admin / 123456 是公开的默认密码，扫描器会优先试它，登录后请尽快修改（面板每一页顶部也会提示）${plain}"
         print_credentials_hint
     fi
+    # 新装的开箱默认（自动管理地区限制、访问日志、加密 DNS、IP 库每日更新、IP 规则匹配域名）先写一遍，
+    # 与随后的配置向导成败无关：向导中途失败（443 被占、证书没签下来）时它写不到这几项。已配置过的面板
+    # bootstrap 自己会跳过。回退安装的旧二进制不认识 -mode defaults，只提示、不中止。
+    if [[ ${is_fresh_install} -eq 1 ]]; then
+        if ! /usr/local/a-ui/a-ui bootstrap -mode defaults >/dev/null 2>&1; then
+            echo -e "${yellow}写入新装默认设置失败，可在「面板设置 → 连接限制」打开自动管理地区限制（会一并打开访问日志）${plain}"
+        fi
+    fi
 }
 
 # 生成面板 url 根路径用的随机串。防的是全网扫描器按 /xui/ 这个 x-ui 系

@@ -353,10 +353,6 @@
                         <!-- 防共享 / 防滥用：全局开关，对所有入站生效。管理员 2026-11-09 选定全部默认打开。 -->
                         <h3 class="setting-group-title is-first">防共享 / 防滥用</h3>
                         <a-list item-layout="horizontal" class="setting-list">
-                            <setting-list-item type="number" title="默认同时在用的网络数"
-                                               desc="每个用户同时能用几个网络，同一 Wi-Fi 算一个。0 不限，默认 1"
-                                               hint="入站没有单独设并发限制时，同一时间最多几个网络在用：同一个 Wi-Fi 下的多台设备算一个，手机流量、公司网络各算一个，IPv6 按 /64 算。超出的后来者会被断开；被地区规则或机房拦截挡在门外的来源不占名额。0 表示不限，默认 1（一人一个网络）。在入站里单独设的并发限制优先"
-                                               :changed="isChanged('defaultConcurrencyLimit')" v-model.number="allSetting.defaultConcurrencyLimit"></setting-list-item>
                             <setting-list-item type="switch" title="拦截机房 / 云服务器来源"
                                                desc="拦下云服务器来的连接，防止转发绕过地区限制或转卖"
                                                hint="拦下来自知名机房、云服务器的连接（多数 IP 归属地库认定才算），防止有人在你的省租一台云服务器转发、绕过地区限制，或用自己的服务器中转转卖。普通家庭宽带和手机网络不受影响；端口转发（dokodemo-door）入站不受影响。给自己的服务器做中转的入站，在入站编辑里打开「允许服务器来源（中转）」单独放行，不必关掉这一项"
@@ -515,7 +511,7 @@
                 '4': ['dbipSourceUrl', 'ip2locationSourceUrl', 'ipdbSourceUrl', 'ipdbUpdateTime', 'qqwrySourceUrl', 'regionMatchMode'],
                 '5': ['accessLogEnable', 'accessLogRetentionDays', 'trafficDayRetentionDays', 'trafficHourRetentionDays'],
                 '6': ['autoRegionEnable', 'autoRegionMaxBlockedPercent', 'autoRegionObserveDays', 'autoTravelCooldownDays', 'autoTravelHomeSilenceHours', 'autoTravelMonthlyDays', 'autoTravelPassHours',
-                      'autoTravelRelocateDays', 'autoTravelStableDays', 'autoTravelWeeklyGrants', 'blockIdcSources', 'blockSmtp', 'concurrencyIdleTimeout', 'defaultConcurrencyLimit',
+                      'autoTravelRelocateDays', 'autoTravelStableDays', 'autoTravelWeeklyGrants', 'blockIdcSources', 'blockSmtp', 'concurrencyIdleTimeout',
                       'forceSniffing', 'spikeThrottleEnable', 'spikeThrottleFloorGB', 'spikeThrottleMbps', 'spikeThrottleMultiplier', 'tcInterface'],
                 '7': ['defaultCertFile', 'defaultDomain', 'defaultKeyFile', 'timeLocation']
     };
@@ -590,7 +586,7 @@
             },
             async updateAllSetting() {
                 // 清空的数字框（a-input-number 失焦后给 null）会以空串提交，gin 把它绑成 0。对多数字段只是
-                // 一句范围报错，但「默认同时在用的网络数」的 0 表示不限制——保存成功、防共享整个悄悄关掉。
+                // 一句范围报错，但 0 有特殊含义的项（如「长住改地区天数」的 0 = 不改）会保存成功、功能悄悄关掉。
                 // 所以清空的数字一律拦在提交之前。
                 const emptied = Object.keys(this.allSetting).filter(k =>
                     typeof this.oldAllSetting[k] === 'number' &&
