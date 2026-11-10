@@ -395,7 +395,7 @@
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="switch" title="自动管理地区限制"
                                                desc="自动把用户限定在常用省份，出差、搬家也自动处理"
-                                               hint="打开后全程自动，不需要你确认：没有地区限制的用户观察期满后自动设为最常用的一个省；已有地区限制的用户自动打开出差放行；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、或撤销过的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
+                                               hint="打开后全程自动，不需要你确认：没有地区限制的用户观察期满后自动设为最常用的一个省；已有地区限制、需要认证的用户自动打开出差放行（免认证的入站不会）；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、撤销过、或打开了「不自动设置地区限制」的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
                                                :changed="isChanged('autoRegionEnable')" :value="allSetting.autoRegionEnable" @input="setAutoRegionEnable"></setting-list-item>
                             <setting-list-item type="number" title="观察天数"
                                                desc="用满几天后再判断常用省份。可填 1 ~ 30，默认 1"
@@ -436,7 +436,7 @@
                                                :changed="isChanged('autoTravelCooldownDays')" v-model.number="allSetting.autoTravelCooldownDays"></setting-list-item>
                             <setting-list-item type="number" title="长住改地区天数"
                                                desc="在外地连续用满几天，就把地区改过去。0 不改，可填 0 ~ 7，默认 5"
-                                               hint="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地一直在用（至少 3 天有实质流量），就把地区直接改成外地，不再按出差处理。不能超过每月放行天数。0 表示不自动改。可填 0 ~ 7，默认 5"
+                                               hint="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地一直在用（至少 3 天有实质流量，这里设得更小时按这里的天数），就把地区直接改成外地，不再按出差处理。不能超过每月放行天数。0 表示不自动改。可填 0 ~ 7，默认 5"
                                                :changed="isChanged('autoTravelRelocateDays')" v-model.number="allSetting.autoTravelRelocateDays"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">端口限速</h3>
@@ -502,6 +502,8 @@
 
     // 当前这一页所在的根路径（服务端在 script 上下文里输出，html/template 会按 JS 转义）。
     const PANEL_BASE_PATH = '{{ .base_path }}';
+    // 这次请求实际连到的面板端口（controller.localPort），重启后换地址时判断是不是直连。
+    const PANEL_LOCAL_PORT = '{{ .panel_local_port }}';
 
     // 每个分类包含的设置字段，与上面模板里各 a-tab-pane 的 v-model 一一对应
     const SETTING_PANE_KEYS = {
@@ -787,12 +789,13 @@
                     location.href = this.panelUrlAfterRestart();
                 }
             },
-            // panelUrlAfterRestart：直接访问面板端口时（地址里带端口）按已保存的端口与证书换端口与协议；
-            // 经域名反代访问时（地址里没有端口）外面的端口与协议不随面板变，只换根路径。
+            // panelUrlAfterRestart：直接访问面板端口时（地址里的端口就是这次连接实际到达的面板端口）按已保存的端口与
+            // 证书换端口与协议；经域名反代访问（地址里没有端口），或经 SSH 隧道、端口映射、非标准端口的反代访问
+            // （地址里的端口不是面板的）时，外面的端口与协议不随面板变，只换根路径——换成面板端口就打不开了。
             panelUrlAfterRestart() {
                 const saved = this.oldAllSetting;
                 const url = new URL(location.href);
-                if (url.port) {
+                if (url.port && url.port === PANEL_LOCAL_PORT) {
                     url.port = String(saved.webPort);
                     url.protocol = saved.webCertFile && saved.webKeyFile ? 'https:' : 'http:';
                 }

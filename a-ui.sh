@@ -243,7 +243,13 @@ reset_user() {
         fi
         return 0
     fi
-    /usr/local/a-ui/a-ui setting -username admin -password admin
+    if ! a_ui_setting -username admin -password admin; then
+        LOGE "重置用户名和密码失败，面板账号保持原样"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     # 单独一条命令，并且容忍失败：本脚本永远来自 main 分支，而二进制可能
     # 是回退后的旧版本，不认识 -disable2fa。与上一条合并的话，旧二进制会
     # 因一个未知参数整条报错，连账号密码都重置不了。
@@ -311,7 +317,13 @@ reset_config() {
         fi
         return 0
     fi
-    /usr/local/a-ui/a-ui setting -reset
+    if ! a_ui_setting -reset; then
+        LOGE "重置面板设置失败，设置保持原样"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     echo -e "所有面板设置已重置为默认值，现在请重启面板，并使用默认的 ${green}54321${plain} 端口访问面板"
     confirm_restart
 }
@@ -1155,6 +1167,16 @@ reconfig_domain() {
     fi
 }
 
+# show_listens_all 判断 `a-ui setting -show` 的输出是否表示面板监听所有 IP。监听地址为空时现在的二进制打印
+# `Listen: all interfaces`，更早的打印 `Listen: `（空），两种都算；只取第二列会把前者读成 `all`、永远判失败。
+show_listens_all() {
+    local line listen
+    line=$(echo "$1" | grep '^Listen:' | head -1)
+    [[ -n "${line}" ]] || return 1
+    listen=$(echo "${line}" | sed -e 's/^Listen:[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [[ -z "${listen}" || "${listen}" == "all interfaces" ]]
+}
+
 # 停用 Caddy 并把面板恢复为直连访问。只停用不卸载软件包——用户可能拿
 # Caddy 跑其它站点。顺序不能颠倒：必须先把面板监听地址改回来、用真实
 # 探活确认面板直连真的可用，再停 Caddy；反过来会出现一段时间两边都
@@ -1204,8 +1226,8 @@ restore_direct_panel() {
     fi
     port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
     basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
-    # 再确认一次真的写进去了（旧二进制写失败也退出 0）：监听地址必须是空的。
-    if [[ -n "$(echo "${show_out}" | grep '^Listen:' | awk '{print $2}')" ]]; then
+    # 再确认一次真的写进去了（旧二进制写失败也退出 0）：监听地址必须是「所有 IP」。
+    if ! show_listens_all "${show_out}"; then
         LOGE "面板仍未监听所有 IP，本次不会停用 Caddy"
         if [[ $# == 0 ]]; then
             before_show_menu

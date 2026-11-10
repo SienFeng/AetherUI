@@ -84,6 +84,27 @@ die_restoring_panel() {
     exit 1
 }
 
+# 提交点之后（新版本已经就位、不再回退）到最后 systemctl start 之前被中断：Ctrl-C、SSH 断线（SIGHUP）都会
+# 落在 config_after_install / setup_wizard 的交互提问上。面板这时停着，Restart=on-failure 不管被 stop 掉的
+# 服务，不拉起来的话全部节点一直断着，直到有人手动 start。只拉起本来在跑的面板（a_ui_stopped）：全新安装
+# 时账户与端口还没设好，起来的是 0.0.0.0:54321 上的默认账户。
+interrupted_after_commit() {
+    trap - INT TERM HUP
+    echo -e "${red}安装被中断，新版本已经装好${plain}"
+    restore_caddyfile_on_interrupt
+    if [[ ${a_ui_stopped} -eq 1 ]]; then
+        systemctl daemon-reload
+        if systemctl start a-ui; then
+            echo -e "${green}面板已重新启动，账户与配置保持更新前的设置${plain}"
+        else
+            echo -e "${red}面板启动失败，请手动执行: systemctl start a-ui${plain}"
+        fi
+    else
+        echo -e "${yellow}面板没有启动，请重新运行安装脚本完成配置${plain}"
+    fi
+    exit 1
+}
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
 
@@ -108,7 +129,7 @@ fi
 
 arch=$(arch)
 
-if [[ $arch == "x86_64" || $arch == "x64" || $arch == "s390x" || $arch == "amd64" ]]; then
+if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
     arch="amd64"
 elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
     arch="arm64"
@@ -363,7 +384,7 @@ gen_random_path() {
 # ss 的最后一列是对端地址（如 0.0.0.0:*），永远不含进程名，会让所有
 # 基于进程名的判断（nginx/apache/caddy）失效，一律落进"未知进程"分支。
 port_user() {
-    ss -ltnHp "sport = :$1" 2>/dev/null | grep -oP '(?<=users:\(\(")[^"]+' | head -1
+    ss -ltnp "sport = :$1" 2>/dev/null | grep -oP '(?<=users:\(\(")[^"]+' | head -1
 }
 
 # 本机公网 IP。取不到返回空串，调用方必须容忍这种情况——机器可能在
@@ -958,6 +979,53 @@ choose_mask_site() {
     done
 }
 
+# write_caddyfile 覆盖前的那份 Caddyfile（同目录的临时文件）；空表示没有可换回的。
+caddyfile_backup=""
+
+drop_caddyfile_backup() {
+    [[ -n "${caddyfile_backup}" ]] && rm -f "${caddyfile_backup}"
+    caddyfile_backup=""
+    pending_caddy_basepath=""
+}
+
+# restore_caddyfile_if_panel_unchanged：write_caddyfile 之后、面板还没换到新的根路径时失败（证书没签下来、
+# bootstrap 没写进去），把 Caddyfile 换回上一份并重启 Caddy。不换的话 Caddy 按这次新生成的随机根路径转发，
+# 面板还在旧的根路径上：旧地址落到伪装站、新地址 404，重跑向导的机器从外网进不去面板。面板已经在新根路径
+# 上（bootstrap 成功了）时新配置才是对的，留着。换回了返回 0。
+restore_caddyfile_if_panel_unchanged() {
+    local new_basepath="$1" current
+    [[ -n "${caddyfile_backup}" ]] || return 1
+    current=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null | grep '^BasePath:' | awk '{print $2}')
+    if [[ "${current}" == "${new_basepath}" ]]; then
+        drop_caddyfile_backup
+        return 1
+    fi
+    if mv -f "${caddyfile_backup}" /etc/caddy/Caddyfile; then
+        caddyfile_backup=""
+        if systemctl restart caddy; then
+            echo -e "${yellow}Caddy 已换回这次之前的配置${plain}"
+            return 0
+        fi
+        echo -e "${red}Caddy 配置已换回，但重启 Caddy 失败，请手动执行: systemctl restart caddy${plain}"
+        return 1
+    fi
+    echo -e "${red}换回这次之前的 Caddy 配置失败，备份在 ${caddyfile_backup}${plain}"
+    caddyfile_backup=""
+    return 1
+}
+
+# write_caddyfile 成功之后、bootstrap 把面板换到新根路径之前，这里记着新根路径；这段时间被中断（等证书的 60 秒
+# 最可能按 Ctrl-C、SSH 断线）时，中断处理据此把 Caddyfile 换回上一份——否则 Caddy 按新根路径转发、面板还在
+# 旧根路径上，重跑向导的机器从外网进不去面板。
+pending_caddy_basepath=""
+
+restore_caddyfile_on_interrupt() {
+    if [[ -n "${pending_caddy_basepath}" ]]; then
+        restore_caddyfile_if_panel_unchanged "${pending_caddy_basepath}"
+        pending_caddy_basepath=""
+    fi
+}
+
 # Caddyfile 结构见 spec §7。两处关键点：
 #   1. 面板反代路径必须与写进面板的 webBasePath 完全一致，否则静态资源 404
 #   2. 伪装站放在最后的 handle，作为兜底
@@ -995,6 +1063,13 @@ write_caddyfile() {
         file_server"
     fi
 
+    # 覆盖前留一份：后面的步骤失败、面板没换到新根路径时要换回去（restore_caddyfile_if_panel_unchanged）。
+    drop_caddyfile_backup
+    if [[ -s /etc/caddy/Caddyfile ]]; then
+        caddyfile_backup=$(mktemp /etc/caddy/Caddyfile.a-ui-prev.XXXXXX) &&
+            cp -p /etc/caddy/Caddyfile "${caddyfile_backup}" || caddyfile_backup=""
+    fi
+
     cat > /etc/caddy/Caddyfile <<EOF
 # BEGIN a-ui managed site: ${domain}
 # 由 a-ui 安装向导生成。卸载 a-ui 只删除 BEGIN/END 两行之间的内容；但重跑向导（a-ui 菜单「配置域名与伪装站」）会整个重写本文件，写在外面的站点也会被覆盖（向导停用 Caddy 前会把 /etc/caddy 备份到 /root）。
@@ -1012,6 +1087,11 @@ EOF
 
     if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
         echo -e "${red}生成的 Caddyfile 未通过校验${plain}"
+        # Caddy 还没重启，跑的仍是上一份；文件也换回去，免得下次重启 Caddy 时读到这份坏的。
+        if [[ -n "${caddyfile_backup}" ]]; then
+            mv -f "${caddyfile_backup}" /etc/caddy/Caddyfile
+            caddyfile_backup=""
+        fi
         return 1
     fi
     systemctl restart caddy || return 1
@@ -1233,6 +1313,8 @@ domain_flow() {
     panel_port=54321
 
     if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
+        # 校验没过时 write_caddyfile 自己已经换回；校验过了、重启 Caddy 失败时新文件还在，这里换回上一份。
+        restore_caddyfile_if_panel_unchanged "${basepath}"
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"
@@ -1243,15 +1325,22 @@ domain_flow() {
     # 否则后面的失败分支会打印"caddy 已被停用、80/443 上没有任何服务在
     # 监听"这句与事实相反的提示。
     [[ "${stopped_web_svc}" == "caddy" ]] && stopped_web_svc=""
+    pending_caddy_basepath="${basepath}"
 
     wait_for_cert "${domain}" || {
+        local caddy_restored=0
+        restore_caddyfile_if_panel_unchanged "${basepath}" && caddy_restored=1
         if [[ "${force}" == "force" ]]; then
             # 重跑场景里"为避免把你锁在面板外，不修改监听地址"是主动的
             # 错误安慰：webListen 在更早一次成功的配置里就已经是 127.0.0.1，
             # 这次不动它并不代表面板还能从外网进得去。
             echo -e "${yellow}证书未就绪，本次没有改动面板监听地址${plain}"
             echo -e "${yellow}注意这是一次重新配置，面板此前很可能已经只监听 127.0.0.1；${plain}"
-            echo -e "${yellow}Caddy 现在用的还是上一次的配置，若面板打不开请用下面的命令恢复${plain}"
+            if [[ ${caddy_restored} -eq 1 ]]; then
+                echo -e "${yellow}Caddy 已换回这次之前的配置，面板仍按原来的地址访问；若打不开请用下面的命令恢复${plain}"
+            else
+                echo -e "${yellow}Caddy 已经换成这次的新配置、没能换回，面板很可能打不开，请用下面的命令恢复${plain}"
+            fi
         else
             echo -e "${yellow}证书未就绪，为避免把你锁在面板外，不修改面板监听地址${plain}"
         fi
@@ -1289,6 +1378,7 @@ domain_flow() {
             "${cert_args[@]}" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}写入面板配置失败：${out}${plain}"
+        restore_caddyfile_if_panel_unchanged "${basepath}"
         # 这次调用本身多半没能把 webListen 改成 127.0.0.1（bootstrap 按
         # 「先写完其余字段、最后才写监听地址」的顺序执行，中途出错时 -listen
         # 那一步大概率没跑到）。但如果这是一次覆盖已有配置的重装，webListen
@@ -1298,6 +1388,8 @@ domain_flow() {
         print_rescue_hint "${panel_port}"
         return 1
     fi
+    # bootstrap 成功，面板已经在新根路径上，这次的 Caddyfile 就是对的。
+    drop_caddyfile_backup
     systemctl restart a-ui
     if ! wait_for_panel_alive "${panel_port}" "${basepath}"; then
         echo -e "${red}面板重启后探活失败，127.0.0.1:${panel_port} 没有响应${plain}"
@@ -1671,7 +1763,7 @@ install_a-ui() {
     old_install_dir=""
     rm -rf "${stage_dir}"
     stage_dir=""
-    trap - INT TERM HUP
+    trap interrupted_after_commit INT TERM HUP
     chmod +x /usr/local/a-ui/a-ui.sh
     config_after_install
     #echo -e "如果是全新安装，默认网页端口为 ${green}54321${plain}，用户名和密码默认都是 ${green}admin${plain}"
@@ -1684,6 +1776,7 @@ install_a-ui() {
     systemctl daemon-reload
     systemctl enable a-ui
     systemctl start a-ui
+    trap - INT TERM HUP
     echo -e "${green}a-ui ${last_version}${plain} 安装完成，面板已启动，"
     echo -e ""
     echo -e "a-ui 管理脚本使用方法: "
@@ -1723,6 +1816,7 @@ if [[ "$1" == "--wizard-only" ]]; then
     # 退出码必须如实透出：a-ui 菜单的「配置域名与伪装站」据此判断向导是不是
     # 真的跑完了。恒返回 0 会让"中途放弃 + 面板已在 127.0.0.1 + Caddy 被停用"
     # 这种状态一路静默回到主菜单。
+    trap 'trap - INT TERM HUP; echo -e "${red}向导被中断${plain}"; restore_caddyfile_on_interrupt; exit 130' INT TERM HUP
     setup_wizard force
     exit $?
 fi

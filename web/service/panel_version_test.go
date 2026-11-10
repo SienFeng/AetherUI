@@ -529,3 +529,21 @@ func TestUpgradeLogMissingFileIsNotAnError(t *testing.T) {
 		t.Errorf("应返回空切片, got %v", lines)
 	}
 }
+
+// 英文安装包（/usr/local/a-ui 里是 a-ui_en.sh）在面板里一键更新：要跑 install_en.sh，旧版写死 install.sh，
+// 一点更新就换成中文包、/usr/bin/a-ui 也换成中文菜单。
+func TestBuildUpgradeCommandKeepsEnglishInstall(t *testing.T) {
+	old := englishMgrScriptPath
+	t.Cleanup(func() { englishMgrScriptPath = old })
+
+	englishMgrScriptPath = filepath.Join(t.TempDir(), "a-ui_en.sh")
+	if joined := strings.Join(buildUpgradeCommand("v1.4.1", "u"), " "); !strings.Contains(joined, "/install.sh") || strings.Contains(joined, "install_en.sh") {
+		t.Errorf("中文安装应当跑 install.sh: %s", joined)
+	}
+	if err := os.WriteFile(englishMgrScriptPath, []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(buildUpgradeCommand("v1.4.1", "u"), " "); !strings.Contains(joined, "/install_en.sh") {
+		t.Errorf("英文安装应当跑 install_en.sh: %s", joined)
+	}
+}

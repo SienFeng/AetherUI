@@ -15,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"a-ui/database"
+	"a-ui/database/model"
 	"a-ui/web/service"
 )
 
@@ -72,6 +74,17 @@ func alreadyInitialized() (bool, error) {
 	return basePath != "/", nil
 }
 
+// panelInUse 报告库里是否已经有入站。alreadyInitialized 只看根路径，而根路径仍是 "/" 的不一定是新装：
+// 向导出现之前装的、向导当年中途失败后一直这么用着的面板都是。这种面板重跑向导照常配置域名，但开箱默认
+// 不能写——那几项是管理员的既有选择，自动管理地区限制尤其会在一天之内把所有没设地区的用户锁到一个省。
+func panelInUse() (bool, error) {
+	var n int64
+	if err := database.GetDB().Model(&model.Inbound{}).Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func Run(opts Options) (*Result, error) {
 	// Check 分支必须排在 validate 之前：探测时不带 -mode/-domain。
 	if opts.Check {
@@ -94,6 +107,11 @@ func Run(opts Options) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !done {
+			if done, err = panelInUse(); err != nil {
+				return nil, err
+			}
+		}
 		if done {
 			return &Result{Mode: opts.Mode, Skipped: true, Reason: "面板已配置过，不写入新装默认设置"}, nil
 		}
@@ -115,6 +133,12 @@ func Run(opts Options) (*Result, error) {
 				Reason:  "面板已配置过，保留现有设置（需要覆盖请加 -force）",
 			}, nil
 		}
+	}
+
+	// 必须在建 REALITY 入站之前判断：建完库里就有入站了。
+	inUse, err := panelInUse()
+	if err != nil {
+		return nil, err
 	}
 
 	// 建入站放在所有 Set* 之前：它是整个 Run 里唯一会做真实工作、也唯一
@@ -173,7 +197,9 @@ func Run(opts Options) (*Result, error) {
 	// 改掉解析路径是夹带修改，而且完全静默——没人会想到重配域名会动 DNS。
 	// 代价是从旧版本升级上来、又重跑过向导的机器拿不到这几个默认值，那和
 	// 「存量部署零变化」是同一件事，管理员去设置页打开即可。
-	if !opts.Force {
+	//
+	// 库里已经有入站时同样不写（panelInUse）：根路径仍是 "/" 的在用老机器重跑向导，与 -force 是同一回事。
+	if !opts.Force && !inUse {
 		if err := writeOpenBoxDefaults(s); err != nil {
 			return nil, err
 		}

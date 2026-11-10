@@ -842,3 +842,159 @@ func TestAdoptLeavesNoRowForDeletedInbound(t *testing.T) {
 		t.Errorf("入站已被删除，接管不该留下状态行: %+v", st)
 	}
 }
+
+// 观察天数大于 7：观察期必须按更长的窗口量。曾经只读近 7 天的行，「第一次实质使用距今满 N 天」在
+// N > 7 时永远达不到，自动设置看着开着、一直显示「观察中」。
+func TestAutoRegionObserveLongerThanWindow(t *testing.T) {
+	in := arInput()
+	in.Params.ObserveDays = 10
+	in.Rows = homeRowsFor(7)
+	in.SpanRows = homeRowsFor(11)
+	if d := decideAutoRegion(in); d.Action != autoRegionApply {
+		t.Fatalf("用了 11 天、观察期 10 天，应当自动设置: %+v", d)
+	}
+	in.SpanRows = homeRowsFor(9)
+	if d := decideAutoRegion(in); d.Action != autoRegionWait {
+		t.Fatalf("只用了 9 天、观察期 10 天，应当继续观察: %+v", d)
+	}
+	// 观察期设到保留期（30 天）：行只保留 30 天，按原样永远满不了，按保留期内能量到的最长时长判。
+	in.Params.ObserveDays = sharingRetentionDays
+	in.SpanRows = homeRowsFor(sharingRetentionDays)
+	if d := decideAutoRegion(in); d.Action != autoRegionApply {
+		t.Fatalf("观察期设成保留期、整段都在用，应当自动设置: %+v", d)
+	}
+}
+
+// Run 读的两段行：近 7 天给建议与稳定天数用，观察期窗口给观察期用。
+func TestAutoRegionRowsReadsObservationWindow(t *testing.T) {
+	setupGeoDB(t)
+	if err := database.InitTrafficDB(filepath.Join(t.TempDir(), "traffic.db")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for d := 0; d < 12; d++ {
+		u := now.Add(-time.Duration(d) * 24 * time.Hour).Unix()
+		if err := database.GetTrafficDB().Create(&model.InboundIPHour{InboundId: 7, IP: "192.0.2.9", HourStart: u - u%3600,
+			Province: "江苏省", ActiveSeconds: 1800, ActiveBytes: 50 << 20}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := defaultAutoRegionParams()
+	p.ObserveDays = 10
+	rows, span, err := autoRegionRows(7, p, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutoff := now.Add(-time.Duration(sharingWindowDays) * 24 * time.Hour).Unix()
+	for _, r := range rows {
+		if r.HourStart < cutoff {
+			t.Fatalf("近 7 天的行里混进了更早的: %+v", r)
+		}
+	}
+	if len(span) <= len(rows) {
+		t.Fatalf("观察期窗口应当比近 7 天读得多: span=%d rows=%d", len(span), len(rows))
+	}
+	if d := decideAutoRegion(autoRegionInput{Now: now, Loc: time.Local, Rows: rows, SpanRows: span, Params: p,
+		UnplaceablePercent: func([]string) (float64, error) { return 0, nil }}); d.Action != autoRegionApply {
+		t.Fatalf("用了 12 天、观察期 10 天，应当自动设置: %+v", d)
+	}
+}
+
+// 入站打开「不自动设置地区限制」（Inbound.NoAutoRegion，2026-11-10 管理员要求，给少数特例用）：不首次自动设置。
+func TestEligibleForAutoRegionSkipsOptedOut(t *testing.T) {
+	in := &model.Inbound{Id: 1, Enable: true, Regions: "[]", NoAutoRegion: true}
+	if eligibleForAutoRegion(in, nil) {
+		t.Error("打开了「不自动设置地区限制」的入站仍被列为自动设置的候选")
+	}
+}
+
+// 本轮开头读到的入站还没打开开关，写入之前管理员打开了：任务必须让路。
+func TestWriteRegionsRespectsOptOutTurnedOnMidRound(t *testing.T) {
+	setupGeoDB(t)
+	requireIPDB(t)
+	in := mkRegionInbound(t, 60447, true, nil)
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", in.Id).Update("no_auto_region", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := writeRegions(in.Id, []string{"江苏省"}, &model.InboundAutoRegion{InboundId: in.Id, State: model.AutoRegionApplied,
+		UpdatedAt: time.Now().UnixMilli()}, true)
+	if !errors.Is(err, errAutoRegionStale) {
+		t.Fatalf("写入前打开了开关，应当让路: %v", err)
+	}
+	if got := mustGet(t, in.Id); model.HasRegions(got.Regions) {
+		t.Errorf("打开了开关仍被写了地区: %s", got.Regions)
+	}
+}
+
+// 截图里的场景：地区刚被自动设置（7 天内），管理员在编辑里打开「不自动设置地区限制」同时清空地区——这是
+// 明确的意图，不能再当成过期页面拒掉。没打开开关时照旧拒（TestUpdateInboundRejectsStaleWriteOverAutoRegion）。
+func TestUpdateInboundOptOutAllowsClearingFreshAutoRegion(t *testing.T) {
+	in := setupPassInbound(t, 60410, []string{"江苏省"})
+	if err := database.GetDB().Create(&model.InboundAutoRegion{InboundId: in.Id, State: model.AutoRegionApplied,
+		Regions: `["江苏省"]`, UpdatedAt: time.Now().UnixMilli()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	edit := mustGet(t, in.Id)
+	edit.Regions = "[]"
+	edit.NoAutoRegion = true
+	if err := (&InboundService{}).UpdateInbound(edit); err != nil {
+		t.Fatalf("打开开关同时清空地区不该被拦: %v", err)
+	}
+	got := mustGet(t, in.Id)
+	if model.HasRegions(got.Regions) || !got.NoAutoRegion {
+		t.Errorf("regions=%s noAutoRegion=%v，期望已清空且开关已保存", got.Regions, got.NoAutoRegion)
+	}
+	// 再关掉开关：照常保存（之后自动设置也不会再碰它——管理员改过地区，状态是 manual）。
+	got.NoAutoRegion = false
+	if err := (&InboundService{}).UpdateInbound(got); err != nil {
+		t.Fatal(err)
+	}
+	if mustGet(t, in.Id).NoAutoRegion {
+		t.Error("开关关不回去")
+	}
+	if st := autoRegionStateOf(t, in.Id); st == nil || st.State != model.AutoRegionManual {
+		t.Errorf("清空地区后应标为 manual: %+v", st)
+	}
+}
+
+// 管理员要的那个场景走一遍真的 Run：两个入站都只在江苏用、用满观察期，打开「不自动设置地区限制」的那个保持没有
+// 地区、也不留状态行，另一个照常被设成江苏。
+func TestAutoRegionRunSkipsOptedOutInboundEndToEnd(t *testing.T) {
+	autoRegionRunEnv(t)
+	cidrs := regionCIDRSource((&IPDBService{}).DB(), &SettingService{}).CIDRsOfProvinces([]string{"江苏省"})
+	if len(cidrs) == 0 {
+		t.Skip("IP 库里没有江苏省的段")
+	}
+	_, block, err := net.ParseCIDR(cidrs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := block.IP.String()
+	optedOut := mkRegionInbound(t, 60448, true, nil)
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", optedOut.Id).Update("no_auto_region", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	normal := mkRegionInbound(t, 60449, true, nil)
+	now := time.Now()
+	for _, in := range []*model.Inbound{optedOut, normal} {
+		for d := 0; d < 5; d++ {
+			u := now.Add(-time.Duration(d) * 24 * time.Hour).Unix()
+			if err := database.GetTrafficDB().Create(&model.InboundIPHour{InboundId: in.Id, IP: home, HourStart: u - u%3600,
+				Province: "江苏省", ActiveSeconds: 1800, ActiveBytes: 50 << 20}).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := (&AutoRegionService{}).Run(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGet(t, optedOut.Id); model.HasRegions(got.Regions) {
+		t.Errorf("打开了「不自动设置地区限制」仍被自动设置: %s", got.Regions)
+	}
+	if st := autoRegionStateOf(t, optedOut.Id); st != nil {
+		t.Errorf("打开了开关的入站不该留状态行: %+v", st)
+	}
+	if got := mustGet(t, normal.Id); !sameRegions(got.Regions, `["江苏省"]`) {
+		t.Errorf("对照入站应当照常设成江苏省: %s", got.Regions)
+	}
+}

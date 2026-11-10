@@ -256,3 +256,37 @@ func TestUpdateInboundPersistsSkipSpikeThrottle(t *testing.T) {
 		t.Error("关掉不参与暴涨限速后仍是打开的")
 	}
 }
+
+// 保存要先跑一次真实 xray 校验（几百毫秒到几秒），旧版在校验之前读的那一份整行写回：这期间流量任务
+// 累加的用量被倒回去，到期 / 超流量任务刚停掉的入站被放回来。写入时必须按此刻的库重新合并。
+func TestUpdateInboundKeepsChangesMadeDuringValidation(t *testing.T) {
+	setupDB(t)
+	in := makeInboundFor(t, 10041, func(in *model.Inbound) {
+		in.Total, in.Up, in.Down = 1000, 100, 100
+	})
+	old := afterInboundEditValidated
+	t.Cleanup(func() { afterInboundEditValidated = old })
+	afterInboundEditValidated = func() {
+		// 校验期间：流量任务累加，超流量任务停用。
+		if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", in.Id).
+			Updates(map[string]any{"up": 700, "down": 400, "enable": false, "disabled_by_traffic": true}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	edit := *in
+	edit.Remark = "改个备注"
+	base := true
+	if err := (&InboundService{}).UpdateInboundFrom(&edit, InboundEditBase{Enable: &base}); err != nil {
+		t.Fatalf("UpdateInboundFrom: %v", err)
+	}
+	got := reloadInbound(t, in.Id)
+	if got.Up != 700 || got.Down != 400 {
+		t.Errorf("up/down = %d/%d，校验期间累加的用量被倒回去了", got.Up, got.Down)
+	}
+	if got.Enable || !got.DisabledByTraffic {
+		t.Errorf("Enable=%v DisabledByTraffic=%v，校验期间被超流量停用的入站被放回来了", got.Enable, got.DisabledByTraffic)
+	}
+	if got.Remark != "改个备注" {
+		t.Errorf("备注 = %q，表单的改动没写进去", got.Remark)
+	}
+}

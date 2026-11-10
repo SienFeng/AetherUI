@@ -29,8 +29,13 @@ var (
 	panelReleasesURL = "https://api.github.com/repos/SienFeng/AetherUI/releases?per_page=10"
 	// installScriptURL 与 a-ui.sh 的 update() 用的是同一个地址。
 	installScriptURL = "https://raw.githubusercontent.com/SienFeng/AetherUI/main/install.sh"
-	panelBinaryPath  = "/usr/local/a-ui/a-ui"
-	panelServicePath = "/etc/systemd/system/a-ui.service"
+	// installScriptENURL 给英文安装包用（a-ui_en.sh 的 update() 用的是它）。装的是哪个包看安装目录里的管理
+	// 脚本：英文包里是 a-ui_en.sh，中文包里是 a-ui.sh（release.yml 打包时二选一）。两个包的二进制完全相同，
+	// 面板自己分不出来；一律跑 install.sh 的话，英文机器点一次更新就换成了中文包与中文菜单。
+	installScriptENURL   = "https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh"
+	englishMgrScriptPath = "/usr/local/a-ui/a-ui_en.sh"
+	panelBinaryPath      = "/usr/local/a-ui/a-ui"
+	panelServicePath     = "/etc/systemd/system/a-ui.service"
 )
 
 const (
@@ -153,7 +158,7 @@ func buildUpgradeCommand(tag, unitName string) []string {
 	// （在 curl 与 bash 之间改写文件内容）。mktemp -d 的目录是 0700 且名字不可预测。
 	inner := fmt.Sprintf(
 		"d=$(mktemp -d) && curl -fLso \"$d/install.sh\" %s && bash \"$d/install.sh\" %s </dev/null; rc=$?; rm -rf \"$d\"; exit $rc",
-		installScriptURL, tag,
+		upgradeScriptURL(), tag,
 	)
 	inner = fmt.Sprintf("{ %s ; } >%s 2>&1", inner, upgradeLogPath)
 	return []string{
@@ -163,6 +168,14 @@ func buildUpgradeCommand(tag, unitName string) []string {
 		"--description=AetherUI 面板更新",
 		"/bin/bash", "-c", inner,
 	}
+}
+
+// upgradeScriptURL 选与本机安装包同语言的安装脚本（见 installScriptENURL）。
+func upgradeScriptURL() string {
+	if _, err := os.Stat(englishMgrScriptPath); err == nil {
+		return installScriptENURL
+	}
+	return installScriptURL
 }
 
 // checkUpdatable 判断本机是否具备一键更新的条件。

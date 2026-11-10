@@ -292,6 +292,36 @@ func TestReconcileReportsFailureWithoutMarkingApplied(t *testing.T) {
 	}
 }
 
+// 下发 H2 失败时内核里的规则已经被拆掉（计划以整套拆除开头），H1 不再生效：之后配置回到 H1
+// （暴涨限速到点撤掉就是这样），不能因为「H1 就是上次生效的」跳过下发——那样手动限速悄悄全部失效，
+// 「限速中」照样亮着。
+func TestFailedApplyForgetsPreviouslyAppliedPlan(t *testing.T) {
+	setupShapingDB(t)
+	f := useFakeShaper(t)
+	in := mkShapedInbound(t, 40001, true, 2, 5)
+	s := ShapingService{}
+	if err := s.Reconcile(); err != nil { // H1
+		t.Fatal(err)
+	}
+	if err := database.GetDB().Model(in).Update("down_mbit", 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	f.runErr = errors.New("tc 中途失败")
+	if err := s.Reconcile(); err == nil { // H2 下发失败
+		t.Fatal("下发失败却没有报错")
+	}
+	f.runErr = nil
+	if err := database.GetDB().Model(in).Update("down_mbit", 5).Error; err != nil { // 回到 H1
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 2 {
+		t.Fatalf("回到上次生效的配置时没有重新下发，下发次数 = %d，期望 2", len(f.applied))
+	}
+}
+
 func TestTeardownClearsStateSoLimitsCanBeReapplied(t *testing.T) {
 	setupShapingDB(t)
 	f := useFakeShaper(t)

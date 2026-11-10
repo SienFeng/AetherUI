@@ -361,100 +361,62 @@ func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundE
 	if err := s.checkInboundPortUsable(inbound, oldInbound); err != nil {
 		return err
 	}
-	orig := *oldInbound
-	// up/down 从不取自表单：流量任务每 10 秒在累加，页面上的是打开那一刻的快照，写回去就是把用量倒回去
-	// ——超额被停的人被放回来、周期重置之后又被旧用量停掉。清零走 ResetInboundTraffic。
-	oldInbound.Total = inbound.Total
-	oldInbound.Remark = inbound.Remark
-	oldEnable := oldInbound.Enable
-	oldInbound.Enable = base.pick(base.Enable, inbound.Enable, oldInbound.Enable)
-	oldInbound.ExpiryTime = inbound.ExpiryTime
-	oldInbound.ConcurrencyLimit = inbound.ConcurrencyLimit
-	oldInbound.AllowServerSources = inbound.AllowServerSources
-	spikeExemptTurnedOn := !oldInbound.SkipSpikeThrottle && inbound.SkipSpikeThrottle
-	oldInbound.SkipSpikeThrottle = inbound.SkipSpikeThrottle
-	newAutoTravel := base.pick(base.AutoTravel, inbound.AutoTravel, oldInbound.AutoTravel)
-	autoTravelTurnedOff := oldInbound.AutoTravel && !newAutoTravel
-	oldInbound.AutoTravel = newAutoTravel
-	if err := regionsUsable(inbound.Regions, oldInbound.Regions); err != nil {
+	eff, err := mergeInboundEdit(oldInbound, inbound, base)
+	if err != nil {
 		return err
 	}
-	regionsChanged := !sameRegions(inbound.Regions, oldInbound.Regions)
-	hadRegions := model.HasRegions(oldInbound.Regions)
-	oldInbound.Regions = inbound.Regions
-	oldInbound.UpMbit = inbound.UpMbit
-	oldInbound.DownMbit = inbound.DownMbit
-	// 只有启用状态被管理员改动过（或现在是启用的），「因超流量被自动停用」的理由才不再成立：
-	// 手动停用（开→关）之后不能在下一个重置周期自己活过来；重新启用后标记自然作废。
-	// 只改备注、限速等其他字段时保留标记——修复前任何编辑都清掉它，管理员改个备注，
-	// 这个入站就悄悄失去了下个周期自动恢复的资格，列表上也看不出区别。
-	// 想让它保持停用、不再自动恢复：先启用再停用一次即可（列表上会显示「手动停用」）。
-	if oldInbound.Enable || oldInbound.Enable != oldEnable {
-		oldInbound.DisabledByTraffic = false
-	}
-	// 切换重置周期时把时刻顶到当前，避免改一次设置就立刻触发一次计划外的
-	// 清零：从「按订阅周期(28 号)」改到「每月 1 号」时，上次重置停在 8/28，
-	// 而 9/1 这个新周期点已经过去，任务下一轮就会马上清一次。首次开启同理
-	// ——那时 LastResetAt 还是 0，本周期的重置时刻必然在过去。
-	//
-	// 模式没变则不顶：每编辑一次入站就把周期往后推一次的话，重置永远轮不到。
-	if oldInbound.TrafficResetMode != inbound.TrafficResetMode {
-		oldInbound.LastResetAt = time.Now().Unix() * 1000
-	}
-	oldInbound.TrafficResetMode = inbound.TrafficResetMode
-	// 模式没变、订阅周期的日号随到期时间变了（28 号改成 5 号）：同样不能当场清一次，见 raisedResetFloor。
-	// 读不出面板时区就不顶——ResetDueTraffic 那时同样读不出、不会清。
-	if orig.TrafficResetMode == oldInbound.TrafficResetMode {
-		if loc, err := (&SettingService{}).GetTimeLocation(); err == nil {
-			oldInbound.LastResetAt = raisedResetFloor(&orig, loc, oldInbound, loc, time.Now())
-		}
-	}
-	oldInbound.Listen = inbound.Listen
-	oldInbound.Port = inbound.Port
-	oldInbound.Protocol = inbound.Protocol
-	oldInbound.Settings = inbound.Settings
-	oldInbound.StreamSettings = inbound.StreamSettings
-	oldInbound.Sniffing = inbound.Sniffing
-	// 改端口时 tag 会跟着变，摘除完整配置里那份旧的必须按**旧** tag。
-	replacedTag := oldInbound.Tag
-	oldInbound.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
 
-	if err := validateInbound(oldInbound, replacedTag); err != nil {
+	if err := validateInbound(oldInbound, eff.replacedTag); err != nil {
 		return err
 	}
+	afterInboundEditValidated()
 
 	db := database.GetDB()
 	now := time.Now()
 	return db.Transaction(func(tx *gorm.DB) error {
-		// 在事务里读：任务可能刚在 GetInbound 之后自动设置了这个入站。
-		if err := checkStaleAutoRegionWrite(tx, oldInbound.Id, oldInbound.Regions, now); err != nil {
+		// 在事务里读：任务可能刚在 GetInbound 之后自动设置了这个入站。管理员在这次保存里打开着「不自动设置
+		// 地区限制」时不拦：那是在明确说「这个入站的地区我自己定」，清空或改掉刚自动设的地区正是他要做的。
+		if !inbound.NoAutoRegion {
+			if err := checkStaleAutoRegionWrite(tx, oldInbound.Id, oldInbound.Regions, now); err != nil {
+				return err
+			}
+		}
+		// 在事务里按此刻的库重新合并一次再写：上面的 oldInbound 是校验之前读的，而校验要跑一次真实 xray
+		// （几百毫秒到几秒）。这期间流量任务在累加 up/down、到期 / 超流量任务在停用、周期重置在清零，
+		// 拿快照整行写回会把用量倒回去、把刚被停掉的入站放回来。表单给的字段两次合并结果相同，校验过的
+		// 就是要写的；只有服务端在维护的那几列按此刻的值重算。
+		var cur model.Inbound
+		if err := tx.First(&cur, oldInbound.Id).Error; err != nil {
 			return err
 		}
-		if err := tx.Save(oldInbound).Error; err != nil {
+		if eff, err = mergeInboundEdit(&cur, inbound, base); err != nil {
+			return err
+		}
+		if err := tx.Save(&cur).Error; err != nil {
 			return err
 		}
 		// 打开了「不参与流量暴涨限速」：生效中的限速单当场撤掉，ShapingJob 10 秒内把 tc 收敛回去。
 		// 不撤的话要等暴涨检测下一轮（10 分钟）。
-		if spikeExemptTurnedOn {
+		if eff.spikeExemptTurnedOn {
 			if err := tx.Where("inbound_id = ?", oldInbound.Id).Delete(&model.InboundThrottle{}).Error; err != nil {
 				return err
 			}
 		}
 		// 关掉了自动出差放行：生效中的自动通行证一并结束——之后再没有谁按「家里恢复使用」去收回
 		// 或续期它，它会不受管地一直放行到到期。管理员手动发的不动。
-		if autoTravelTurnedOff {
+		if eff.autoTravelTurnedOff {
 			if err := tx.Model(&model.InboundRegionPass{}).
 				Where("inbound_id = ? AND ended_at = 0 AND auto = ?", oldInbound.Id, true).
 				Updates(map[string]any{"ended_at": now.UnixMilli(), "end_reason": model.RegionPassAutoOff}).Error; err != nil {
 				return err
 			}
 		}
-		if !regionsChanged {
+		if !eff.regionsChanged {
 			return nil
 		}
 		// 清空了地区限制：生效中的通行证一并结束。没有地区时它本来就不起作用，但留着的话
 		// 列表上还挂着一张「到期后恢复地区限制」的通行证，以后再设地区时它还会接着放行。
-		if hadRegions && !model.HasRegions(oldInbound.Regions) {
+		if eff.hadRegions && !model.HasRegions(cur.Regions) {
 			if err := endActive(tx, oldInbound.Id, model.RegionPassCleared, now); err != nil {
 				return err
 			}
@@ -462,6 +424,84 @@ func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundE
 		// 管理员亲手改过地区（包括清空自动设置的那份），自动设置就不再碰这个入站。
 		return (&AutoRegionService{}).MarkManual(tx, oldInbound.Id, now)
 	})
+}
+
+// afterInboundEditValidated 是测试用的接缝：模拟校验（真实 xray，几百毫秒到几秒）期间别的任务改了这一行。
+var afterInboundEditValidated = func() {}
+
+// inboundEditEffects 是一次编辑合并带来的、写入之后还要连带处理的变化。
+type inboundEditEffects struct {
+	spikeExemptTurnedOn bool
+	autoTravelTurnedOff bool
+	regionsChanged      bool
+	hadRegions          bool
+	replacedTag         string // 改端口时 tag 会跟着变，摘除完整配置里那份旧的必须按旧 tag
+}
+
+// mergeInboundEdit 把编辑表单 inbound 合并进库里的一份 cur（原地修改）。UpdateInboundFrom 调两次：校验之前
+// 用读到的快照，写入时在事务里用此刻的行——服务端在维护的列（用量、启用、超额停用标记、重置时刻）每次都
+// 按传进来的这一份算。
+func mergeInboundEdit(cur *model.Inbound, inbound *model.Inbound, base InboundEditBase) (inboundEditEffects, error) {
+	var eff inboundEditEffects
+	orig := *cur
+	// up/down 从不取自表单：流量任务每 10 秒在累加，页面上的是打开那一刻的快照，写回去就是把用量倒回去
+	// ——超额被停的人被放回来、周期重置之后又被旧用量停掉。清零走 ResetInboundTraffic。
+	cur.Total = inbound.Total
+	cur.Remark = inbound.Remark
+	oldEnable := cur.Enable
+	cur.Enable = base.pick(base.Enable, inbound.Enable, cur.Enable)
+	cur.ExpiryTime = inbound.ExpiryTime
+	cur.ConcurrencyLimit = inbound.ConcurrencyLimit
+	cur.AllowServerSources = inbound.AllowServerSources
+	eff.spikeExemptTurnedOn = !cur.SkipSpikeThrottle && inbound.SkipSpikeThrottle
+	cur.SkipSpikeThrottle = inbound.SkipSpikeThrottle
+	cur.NoAutoRegion = inbound.NoAutoRegion
+	newAutoTravel := base.pick(base.AutoTravel, inbound.AutoTravel, cur.AutoTravel)
+	eff.autoTravelTurnedOff = cur.AutoTravel && !newAutoTravel
+	cur.AutoTravel = newAutoTravel
+	if err := regionsUsable(inbound.Regions, cur.Regions); err != nil {
+		return eff, err
+	}
+	eff.regionsChanged = !sameRegions(inbound.Regions, cur.Regions)
+	eff.hadRegions = model.HasRegions(cur.Regions)
+	cur.Regions = inbound.Regions
+	cur.UpMbit = inbound.UpMbit
+	cur.DownMbit = inbound.DownMbit
+	// 只有启用状态被管理员改动过（或现在是启用的），「因超流量被自动停用」的理由才不再成立：
+	// 手动停用（开→关）之后不能在下一个重置周期自己活过来；重新启用后标记自然作废。
+	// 只改备注、限速等其他字段时保留标记——修复前任何编辑都清掉它，管理员改个备注，
+	// 这个入站就悄悄失去了下个周期自动恢复的资格，列表上也看不出区别。
+	// 想让它保持停用、不再自动恢复：先启用再停用一次即可（列表上会显示「手动停用」）。
+	if cur.Enable || cur.Enable != oldEnable {
+		cur.DisabledByTraffic = false
+	}
+	// 切换重置周期时把时刻顶到当前，避免改一次设置就立刻触发一次计划外的
+	// 清零：从「按订阅周期(28 号)」改到「每月 1 号」时，上次重置停在 8/28，
+	// 而 9/1 这个新周期点已经过去，任务下一轮就会马上清一次。首次开启同理
+	// ——那时 LastResetAt 还是 0，本周期的重置时刻必然在过去。
+	//
+	// 模式没变则不顶：每编辑一次入站就把周期往后推一次的话，重置永远轮不到。
+	if cur.TrafficResetMode != inbound.TrafficResetMode {
+		cur.LastResetAt = time.Now().Unix() * 1000
+	}
+	cur.TrafficResetMode = inbound.TrafficResetMode
+	// 模式没变、订阅周期的日号随到期时间变了（28 号改成 5 号）：同样不能当场清一次，见 raisedResetFloor。
+	// 读不出面板时区就不顶——ResetDueTraffic 那时同样读不出、不会清。
+	if orig.TrafficResetMode == cur.TrafficResetMode {
+		if loc, err := (&SettingService{}).GetTimeLocation(); err == nil {
+			cur.LastResetAt = raisedResetFloor(&orig, loc, cur, loc, time.Now())
+		}
+	}
+	cur.Listen = inbound.Listen
+	cur.Port = inbound.Port
+	cur.Protocol = inbound.Protocol
+	cur.Settings = inbound.Settings
+	cur.StreamSettings = inbound.StreamSettings
+	cur.Sniffing = inbound.Sniffing
+	// 改端口时 tag 会跟着变，摘除完整配置里那份旧的必须按**旧** tag。
+	eff.replacedTag = cur.Tag
+	cur.Tag = fmt.Sprintf("inbound-%v", inbound.Port)
+	return eff, nil
 }
 
 // sameRegions 比较两个地区字段规范化之后是否相同；解析不了的按「不同」处理。

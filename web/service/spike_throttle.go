@@ -52,8 +52,14 @@ func decideSpike(today int64, past []int64, p SpikeThrottleParams) (bool, int64)
 }
 
 // dailyUsage 返回一个入站当天（当地 0 点起）的用量，与之前 14 天每天的用量（past[0] 是昨天）。
-// 用小时桶算：日桶按天对齐，当天那一桶要到明天才完整。
+// 当天用小时桶算（日桶当天那一桶要到明天才完整也没关系，但小时桶按当地 0 点切得准）；过去的每一天取日桶与
+// 小时桶之和里大的那个：两者各自独立累加同一份增量，哪一级先被保留期清掉都不影响——「用量小时数据保留天数」
+// 可以设到 1 天，只看小时桶的话暴涨限速就永远凑不够 7 天的「平时」，而且没有任何提示。
 func dailyUsage(inboundId int, now time.Time, loc *time.Location) (int64, []int64, error) {
+	tdb := database.GetTrafficDB()
+	if tdb == nil {
+		return 0, nil, fmt.Errorf("用量库没有打开")
+	}
 	midnight := time.Unix(model.AlignDay(now, loc), 0).In(loc)
 	dayStarts := make([]int64, spikeHistoryDays)
 	for d := 1; d <= spikeHistoryDays; d++ {
@@ -61,8 +67,13 @@ func dailyUsage(inboundId int, now time.Time, loc *time.Location) (int64, []int6
 		dayStarts[d-1] = model.AlignDay(midnight.AddDate(0, 0, -d), loc)
 	}
 	var buckets []model.TrafficBucket
-	if err := database.GetTrafficDB().Where("granularity = ? AND inbound_id = ? AND bucket_start >= ?",
+	if err := tdb.Where("granularity = ? AND inbound_id = ? AND bucket_start >= ?",
 		model.GranularityHour, inboundId, dayStarts[spikeHistoryDays-1]).Find(&buckets).Error; err != nil {
+		return 0, nil, err
+	}
+	var days []model.TrafficBucket
+	if err := tdb.Where("granularity = ? AND inbound_id = ? AND bucket_start >= ? AND bucket_start < ?",
+		model.GranularityDay, inboundId, dayStarts[spikeHistoryDays-1], midnight.Unix()).Find(&days).Error; err != nil {
 		return 0, nil, err
 	}
 	index := make(map[int64]int, spikeHistoryDays)
@@ -80,6 +91,11 @@ func dailyUsage(inboundId int, now time.Time, loc *time.Location) (int64, []int6
 			past[i] += b.Up + b.Down
 		}
 	}
+	for _, b := range days {
+		if i, ok := index[b.BucketStart]; ok {
+			past[i] = max(past[i], b.Up+b.Down)
+		}
+	}
 	return today, past, nil
 }
 
@@ -89,10 +105,13 @@ func dailyUsage(inboundId int, now time.Time, loc *time.Location) (int64, []int6
 func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 	db := database.GetDB()
 	// 开关读不出时跳过这一轮：GetSpikeThrottleParams 把它按「关闭」处理，那样会把所有生效中的限速单删光。
-	if _, err := s.settingService.getInt("spikeThrottleEnable"); err != nil {
+	// 开关只读这一次、由它决定 Enabled：GetSpikeThrottleParams 会再读一次，那一次碰上瞬时错误同样按「关闭」。
+	enable, err := s.settingService.getInt("spikeThrottleEnable")
+	if err != nil {
 		return false, fmt.Errorf("读取流量暴涨自动限速开关失败，本轮跳过: %w", err)
 	}
 	p := s.settingService.GetSpikeThrottleParams()
+	p.Enabled = enable == 1
 	expired := db.Where("until <= ?", now.UnixMilli())
 	if !p.Enabled {
 		expired = db.Where("1 = 1")
@@ -109,6 +128,12 @@ func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 	if err != nil {
 		return changed, err
 	}
+	// 管理员改了限速档位：已发出的单跟着改，不按旧档位限到当天结束。
+	res = db.Model(&model.InboundThrottle{}).Where("mbps <> ?", p.Mbps).Update("mbps", p.Mbps)
+	if res.Error != nil {
+		return changed, res.Error
+	}
+	changed = changed || res.RowsAffected > 0
 	var active []model.InboundThrottle
 	if err := db.Find(&active).Error; err != nil {
 		return changed, err
@@ -157,6 +182,24 @@ func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 		return changed, res.Error
 	}
 	return changed || res.RowsAffected > 0, nil
+}
+
+// ApplySettingsNow 让设置页刚保存的开关与档位立刻作用到生效中的限速单：关掉开关撤掉全部，改了档位改写全部。
+// 发新单仍由每 10 分钟一轮的 Run 做——这里只撤、只改，与同时在跑的 Run 不会重复发单。返回限速集合有没有变
+// （ShapingJob 10 秒内收敛下去）。开关读不出时什么都不动。
+func (s *SpikeThrottleService) ApplySettingsNow() (bool, error) {
+	enable, err := s.settingService.getInt("spikeThrottleEnable")
+	if err != nil {
+		return false, fmt.Errorf("读取流量暴涨自动限速开关失败: %w", err)
+	}
+	db := database.GetDB()
+	if enable != 1 {
+		res := db.Where("1 = 1").Delete(&model.InboundThrottle{})
+		return res.RowsAffected > 0, res.Error
+	}
+	mbps := s.settingService.GetSpikeThrottleParams().Mbps
+	res := db.Model(&model.InboundThrottle{}).Where("mbps <> ?", mbps).Update("mbps", mbps)
+	return res.RowsAffected > 0, res.Error
 }
 
 // activeThrottles 返回生效中的暴涨限速（入站 id → Mbps）。

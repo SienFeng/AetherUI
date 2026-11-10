@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"a-ui/database"
+	"a-ui/database/model"
 	"a-ui/web/service"
 )
 
@@ -565,5 +566,60 @@ func TestRunDefaultsThenWizard(t *testing.T) {
 				t.Errorf("整份设置通不过保存校验: %v", err)
 			}
 		})
+	}
+}
+
+// 根路径仍是 "/" 的在用老机器（向导出现之前装的、或向导当年失败后一直这么用着）重跑向导：它被当成
+// 「未配置」照常配置域名，但开箱默认不能跟着写进去——那几项是管理员的既有选择，自动管理地区限制尤其
+// 会在一天之内把所有没设地区的用户锁到一个省，界面上什么提示都没有。判据是库里已经有入站。
+func TestRunWizardOnUsedPanelKeepsExistingDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"caddy", Options{Mode: "caddy", Domain: "example.com", BasePath: "/Ab3xK9pQ/",
+			Listen: "127.0.0.1", Port: 54321}},
+		{"reality", Options{Mode: "reality", RealityDest: "www.microsoft.com:443", BasePath: "/Ab3xK9pQ/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDB(t)
+			if err := database.GetDB().Create(&model.Inbound{Port: 23456, Protocol: model.VMess, Enable: true,
+				Tag: "inbound-23456", Settings: "{}", StreamSettings: "{}", Sniffing: "{}"}).Error; err != nil {
+				t.Fatal(err)
+			}
+			res, err := Run(tc.opts)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.Skipped {
+				t.Fatal("根路径仍是 / 的面板，向导应当照常配置")
+			}
+			s := service.SettingService{}
+			if on, _ := s.GetAutoRegionParams(); on {
+				t.Error("在用的面板重跑向导，自动管理地区限制被打开了")
+			}
+			if v, _ := s.GetAccessLogEnable(); v {
+				t.Error("在用的面板重跑向导，访问日志被打开了")
+			}
+			if v, _ := s.GetDNSServers(); v != "" {
+				t.Errorf("在用的面板重跑向导，DNS 被改成了 %q", v)
+			}
+		})
+	}
+}
+
+// -mode defaults 对库里已有入站的面板同样跳过（脚本只在库文件原本不存在时调它，这里再守一道）。
+func TestRunDefaultsModeSkipsPanelWithInbounds(t *testing.T) {
+	setupDB(t)
+	if err := database.GetDB().Create(&model.Inbound{Port: 23456, Protocol: model.VMess, Enable: true,
+		Tag: "inbound-23456", Settings: "{}", StreamSettings: "{}", Sniffing: "{}"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(Options{Mode: "defaults"})
+	if err != nil || !res.Skipped {
+		t.Fatalf("有入站的面板应当跳过: res=%+v err=%v", res, err)
+	}
+	if on, _ := (&service.SettingService{}).GetAutoRegionParams(); on {
+		t.Error("有入站的面板被打开了自动管理地区限制")
 	}
 }

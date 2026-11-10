@@ -280,3 +280,112 @@ func TestSpikeThrottleRunTreatsNullExemptColumnAsParticipating(t *testing.T) {
 		t.Errorf("列为 NULL 的存量入站暴涨后限速单 %d 张，期望 1", n)
 	}
 }
+
+// 过去的日子小时桶被清掉了（「用量小时数据保留天数」可以设到 1 天），日桶还在：照样有「平时」可比。旧版只读
+// 小时桶，小时数据保留不到 7 天时暴涨限速永远不触发，界面上什么提示都没有。
+func TestDailyUsageFallsBackToDayBuckets(t *testing.T) {
+	setupTrafficDBForTest(t)
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 11, 20, 10, 30, 0, 0, loc)
+	for d := 1; d <= 14; d++ {
+		day := time.Date(2026, 11, 20-d, 0, 0, 0, 0, loc)
+		if err := database.GetTrafficDB().Create(&model.TrafficBucket{Granularity: model.GranularityDay, InboundId: 1,
+			BucketStart: model.AlignDay(day, loc), Up: gb / 2, Down: gb / 2}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	addHourBucket(t, 1, time.Date(2026, 11, 19, 23, 0, 0, 0, loc), loc, gb/4) // 昨天还剩的小时桶
+	addHourBucket(t, 1, now.Add(-time.Hour), loc, 3*gb)                       // 今天
+	today, past, err := dailyUsage(1, now, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if today != 3*gb {
+		t.Errorf("今天 = %d，期望 3 GB（今天只看小时桶）", today)
+	}
+	for i, v := range past {
+		if v != gb {
+			t.Fatalf("past[%d] = %d，期望 1 GB（取日桶与小时桶里大的那个）：%v", i, v, past)
+		}
+	}
+}
+
+// 用量库没打开（启动时 InitTrafficDB 失败只告警）：报错跳过，不能空指针 panic、每 10 分钟一条堆栈。
+func TestDailyUsageWithoutTrafficDB(t *testing.T) {
+	database.ResetTrafficDBForTest()
+	if _, _, err := dailyUsage(1, time.Now(), time.UTC); err == nil {
+		t.Fatal("用量库没打开应当报错")
+	}
+}
+
+// 读开关只读一次：守卫读到「开」、之后再读一次却碰上瞬时错误（按「关」处理）的话，会把所有生效中的限速单删光。
+// 改了限速档位，已发出的单跟着改，不再按旧档位限到当天结束。
+func TestSpikeThrottleRunAppliesCurrentMbpsToActiveThrottles(t *testing.T) {
+	setupDB(t)
+	setupTrafficDBForTest(t)
+	now := time.Now()
+	in := makeInboundFor(t, 10083, func(*model.Inbound) {})
+	if err := database.GetDB().Create(&model.InboundThrottle{InboundId: in.Id, Until: now.Add(time.Hour).UnixMilli(), Mbps: 5}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := (&SettingService{}).saveSetting("spikeThrottleMbps", "20"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := (&SpikeThrottleService{}).Run(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var th model.InboundThrottle
+	if err := database.GetDB().Where("inbound_id = ?", in.Id).First(&th).Error; err != nil {
+		t.Fatal(err)
+	}
+	if th.Mbps != 20 || !changed {
+		t.Errorf("限速单 Mbps = %d changed=%v，期望改成 20 并报告有变化", th.Mbps, changed)
+	}
+}
+
+// 设置页关掉「流量暴涨自动限速」或改了档位：保存时当场作用到生效中的限速单，不等暴涨检测下一轮（10 分钟）。
+func TestSpikeThrottleApplySettingsNow(t *testing.T) {
+	setupDB(t)
+	now := time.Now()
+	in := makeInboundFor(t, 10084, func(*model.Inbound) {})
+	if err := database.GetDB().Create(&model.InboundThrottle{InboundId: in.Id, Until: now.Add(time.Hour).UnixMilli(), Mbps: 5}).Error; err != nil {
+		t.Fatal(err)
+	}
+	s := SpikeThrottleService{}
+	if err := s.settingService.saveSetting("spikeThrottleMbps", "8"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.ApplySettingsNow(); err != nil || !changed {
+		t.Fatalf("改档位：changed=%v err=%v", changed, err)
+	}
+	var th model.InboundThrottle
+	if err := database.GetDB().Where("inbound_id = ?", in.Id).First(&th).Error; err != nil || th.Mbps != 8 {
+		t.Fatalf("限速单 = %+v err=%v，期望改成 8 Mbps", th, err)
+	}
+	if err := s.settingService.saveSetting("spikeThrottleEnable", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.ApplySettingsNow(); err != nil || !changed {
+		t.Fatalf("关开关：changed=%v err=%v", changed, err)
+	}
+	var left int64
+	database.GetDB().Model(&model.InboundThrottle{}).Count(&left)
+	if left != 0 {
+		t.Error("开关关掉后生效中的限速单没有当场撤掉")
+	}
+	// 开关读不出：什么都不动。
+	if err := database.GetDB().Create(&model.InboundThrottle{InboundId: in.Id, Until: now.Add(time.Hour).UnixMilli(), Mbps: 5}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.settingService.saveSetting("spikeThrottleEnable", "坏值"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplySettingsNow(); err == nil {
+		t.Error("开关读不出时应当报错")
+	}
+	database.GetDB().Model(&model.InboundThrottle{}).Count(&left)
+	if left != 1 {
+		t.Error("开关读不出，限速单被删了")
+	}
+}

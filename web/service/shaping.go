@@ -218,7 +218,9 @@ func (s *ShapingService) Reconcile() error {
 	}
 	if err := shaper.Run(cmds); err != nil {
 		// 失败绝不记成「已生效」，否则下一轮以为无需重试，限速永远不生效
-		// 而面板显示一切正常。
+		// 而面板显示一切正常。上一份已生效的也要忘掉：计划以整套拆除开头，失败时内核里
+		// 那一份多半已经被拆了，配置回到它的时候（暴涨限速到点撤掉）必须重新下发。
+		shapingAppliedHash = ""
 		return err
 	}
 

@@ -500,7 +500,8 @@ func (s *AutoTravelService) Run(now time.Time) (bool, error) {
 		input.RiskLevel = risk[in.Id].Level
 		input.RiskUnknown = riskUnknown
 		input.Params = params
-		if masterOn && params.RelocateDays > 0 {
+		// 入站打开了「不自动设置地区限制」：长住外地也不改地区，只按出差处理。
+		if masterOn && params.RelocateDays > 0 && !in.NoAutoRegion {
 			// 通行证到期了也要判：额度先用完、通行证没撑到第 N 天的人，凭通行证期间的实质使用照样改。
 			st, stErr := (&AutoRegionService{}).stateOf(in.Id)
 			rd := relocateDecision{}
