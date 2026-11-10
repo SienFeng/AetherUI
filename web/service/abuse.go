@@ -114,37 +114,50 @@ type abuseRuleSet struct {
 	IDCCode string
 }
 
+func isDokodemo(in *model.Inbound) bool {
+	return strings.EqualFold(string(in.Protocol), "dokodemo-door")
+}
+
+// idcExempt 判断一个入站是否不受机房拦截：端口转发（dokodemo-door）本来就可能来自服务器；管理员给
+// 入站打开了「允许服务器来源」（自己的服务器做中转）。生成规则、并发判定、自动出差剔除三处只认这一个
+// 函数——三处口径一旦不一致，豁免的入站要么照样被拦，要么中转机永远不占并发名额。
+func idcExempt(in *model.Inbound) bool {
+	return isDokodemo(in) || in.AllowServerSources
+}
+
 // abuseRules 生成防滥用的拦截规则。只作用于启用的、非 dokodemo-door 的入站：端口转发可能本来就来自
-// 服务器、也可能本来就是在转发邮件端口，那是管理员的明确配置。按入站 id 排序，逐字节确定。
+// 服务器、也可能本来就是在转发邮件端口，那是管理员的明确配置。机房规则另外跳过打开了「允许服务器来源」
+// 的入站（idcExempt）。按入站 id 排序，逐字节确定。
 func abuseRules(in abuseRuleSet) []any {
 	if !in.BlockSmtp && in.IDCCode == "" {
 		return nil
 	}
 	targets := make([]*model.Inbound, 0, len(in.Inbounds))
 	for _, ib := range in.Inbounds {
-		if ib.Enable && !strings.EqualFold(string(ib.Protocol), "dokodemo-door") && ib.Tag != "" {
+		if ib.Enable && !isDokodemo(ib) && ib.Tag != "" {
 			targets = append(targets, ib)
 		}
 	}
-	// 空的 inboundTag 在 xray 里等于「所有入站」，包括模板里的 api 入站。
-	if len(targets) == 0 {
-		return nil
-	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Id < targets[j].Id })
-	tags := make([]string, 0, len(targets))
+	var smtpTags, idcTags []string
 	for _, ib := range targets {
-		tags = append(tags, ib.Tag)
+		smtpTags = append(smtpTags, ib.Tag)
+		if !idcExempt(ib) {
+			idcTags = append(idcTags, ib.Tag)
+		}
 	}
+	// 空的 inboundTag 在 xray 里等于「所有入站」，包括模板里的 api 入站：两条规则各自判空，列表空了
+	// 就整条不发。机房那条尤其要单独判——入站全都豁免时它的列表是空的，而 25 端口那条不是。
 	var rules []any
-	if in.BlockSmtp {
+	if in.BlockSmtp && len(smtpTags) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "ruleTag": "a-ui-smtp", "inboundTag": tags,
+			"type": "field", "ruleTag": "a-ui-smtp", "inboundTag": smtpTags,
 			"port": "25", "network": "tcp", "outboundTag": model.BlockOutboundTag,
 		})
 	}
-	if in.IDCCode != "" {
+	if in.IDCCode != "" && len(idcTags) > 0 {
 		rules = append(rules, map[string]any{
-			"type": "field", "ruleTag": "a-ui-idc", "inboundTag": tags,
+			"type": "field", "ruleTag": "a-ui-idc", "inboundTag": idcTags,
 			"source": []string{"ext:" + idcDatRef + ":" + in.IDCCode}, "outboundTag": model.BlockOutboundTag,
 		})
 	}

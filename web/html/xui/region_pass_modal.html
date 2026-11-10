@@ -43,15 +43,18 @@
     <div class="form-section tone-amber">
         <div class="form-section-title">发放通行证</div>
         <a-form layout="vertical">
-            <a-row :gutter="16">
-                <a-col :xs="24" :sm="14">
-                    <a-form-item label="放行范围">
-                        <a-radio-group v-model="passModal.form.mode" size="small">
-                            <a-radio-button value="regions">额外允许这些省份</a-radio-button>
-                            <a-radio-button value="all">暂停地区限制</a-radio-button>
-                        </a-radio-group>
-                        <a-select v-if="passModal.form.mode === 'regions'" mode="multiple"
-                                  v-model="passModal.form.regions" style="width: 100%; margin-top: 8px"
+            <!-- 范围单独一行；省份与有效期两个下拉框放在同一行，顶边对齐。省份框原来挂在单选组下面，
+                 有效期却跟单选组同高，两个输入框一上一下错开。 -->
+            <a-form-item label="放行范围">
+                <a-radio-group v-model="passModal.form.mode" size="small">
+                    <a-radio-button value="regions">额外允许这些省份</a-radio-button>
+                    <a-radio-button value="all">暂停地区限制</a-radio-button>
+                </a-radio-group>
+            </a-form-item>
+            <a-row :gutter="16" type="flex" align="top">
+                <a-col v-if="passModal.form.mode === 'regions'" :xs="24" :sm="14">
+                    <a-form-item label="放行省份">
+                        <a-select mode="multiple" v-model="passModal.form.regions" style="width: 100%"
                                   placeholder="选择要临时放行的省份" aria-label="临时放行的省份">
                             <a-select-option v-for="r in passModal.provinces" :key="r" :value="r">[[ r ]]</a-select-option>
                         </a-select>

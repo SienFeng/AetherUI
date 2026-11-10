@@ -47,6 +47,52 @@ func TestAbuseRules(t *testing.T) {
 	}
 }
 
+// 打开「允许服务器来源」的入站只从机房规则里拿掉，25 端口照拦；入站全都豁免时机房规则整条不发——
+// 空的 inboundTag 在 xray 里等于所有入站（含 api），发出去就是反过来把所有入站的机房来源都拦了。
+func TestAbuseRulesSkipIDCExemptInbounds(t *testing.T) {
+	relay := abuseInbound(2, 20002, "vless", true)
+	relay.AllowServerSources = true
+	inbounds := []*model.Inbound{abuseInbound(1, 20001, "vmess", true), relay}
+	rules := abuseRules(abuseRuleSet{Inbounds: inbounds, BlockSmtp: true, IDCCode: "IDCC12345678"})
+	if len(rules) != 2 {
+		t.Fatalf("规则数 = %d，期望 2: %v", len(rules), rules)
+	}
+	if got := rules[0].(map[string]any)["inboundTag"]; !reflect.DeepEqual(got, []string{"inbound-20001", "inbound-20002"}) {
+		t.Errorf("25 端口规则的入站 = %v，豁免机房的入站仍要拦 25 端口", got)
+	}
+	if got := rules[1].(map[string]any)["inboundTag"]; !reflect.DeepEqual(got, []string{"inbound-20001"}) {
+		t.Errorf("机房规则的入站 = %v，期望不含允许服务器来源的入站", got)
+	}
+
+	rules = abuseRules(abuseRuleSet{Inbounds: []*model.Inbound{relay}, BlockSmtp: true, IDCCode: "IDCC12345678"})
+	if len(rules) != 1 || rules[0].(map[string]any)["ruleTag"] != "a-ui-smtp" {
+		t.Errorf("唯一的入站豁免机房时只该有 25 端口规则（机房规则的 inboundTag 为空会匹配所有入站）: %v", rules)
+	}
+	if got := abuseRules(abuseRuleSet{Inbounds: []*model.Inbound{relay}, IDCCode: "IDCC12345678"}); len(got) != 0 {
+		t.Errorf("只开机房拦截、入站全都豁免时不该有规则: %v", got)
+	}
+}
+
+// 生成规则、并发判定、自动出差剔除三处共用的判定。
+func TestIDCExempt(t *testing.T) {
+	relay := abuseInbound(2, 20002, "vmess", true)
+	relay.AllowServerSources = true
+	cases := []struct {
+		in   *model.Inbound
+		want bool
+	}{
+		{abuseInbound(1, 20001, "vmess", true), false},
+		{relay, true},
+		{abuseInbound(3, 20003, "dokodemo-door", true), true},
+		{abuseInbound(4, 20004, "Dokodemo-Door", true), true},
+	}
+	for _, c := range cases {
+		if got := idcExempt(c.in); got != c.want {
+			t.Errorf("idcExempt(%s, allow=%v) = %v，期望 %v", c.in.Protocol, c.in.AllowServerSources, got, c.want)
+		}
+	}
+}
+
 // 关了嗅探的入站：打开只用于分流的嗅探（BT 与域名规则才看得见，连接目标不变）；开着但没识别 QUIC 的：
 // 补上 quic（否则 HTTP/3 绕过域名规则）。dokodemo-door 等不支持嗅探的协议不动。
 func TestForcedSniffing(t *testing.T) {

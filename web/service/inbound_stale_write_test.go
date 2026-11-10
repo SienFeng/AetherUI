@@ -66,6 +66,28 @@ func TestUpdateInboundAppliesEnableTheAdminChanged(t *testing.T) {
 	}
 }
 
+// 「允许服务器来源」只能从编辑表单改：UpdateInboundFrom 逐字段拷贝，漏拷的话开关保存「成功」却从不落库。
+func TestUpdateInboundPersistsAllowServerSources(t *testing.T) {
+	setupDB(t)
+	in := makeInboundFor(t, 10034, func(*model.Inbound) {})
+	s := InboundService{}
+	edit := *in
+	edit.AllowServerSources = true
+	if err := s.UpdateInboundFrom(&edit, InboundEditBase{}); err != nil {
+		t.Fatalf("UpdateInboundFrom: %v", err)
+	}
+	if got := reloadInbound(t, in.Id); !got.AllowServerSources {
+		t.Fatal("打开允许服务器来源后没有落库")
+	}
+	edit.AllowServerSources = false
+	if err := s.UpdateInboundFrom(&edit, InboundEditBase{}); err != nil {
+		t.Fatalf("UpdateInboundFrom: %v", err)
+	}
+	if got := reloadInbound(t, in.Id); got.AllowServerSources {
+		t.Error("关掉允许服务器来源后仍是打开的")
+	}
+}
+
 func activeAutoPassFor(t *testing.T, inboundId int, now time.Time) *model.InboundRegionPass {
 	t.Helper()
 	p := &model.InboundRegionPass{InboundId: inboundId, Auto: true, Regions: `["浙江省"]`,

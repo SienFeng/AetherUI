@@ -42,6 +42,14 @@ var (
 	trafficDBPath string
 )
 
+// DefaultUsername / DefaultPassword 是空库建出来的那个账号，也是安装向导里管理员跳过「设定账户密码」时
+// 落到的账号（install.sh 的 config_after_install）。它是公开的：面板每一页顶部都会提示修改，
+// 判定见 service.UserService.UsingDefaultPassword。
+const (
+	DefaultUsername = "admin"
+	DefaultPassword = "123456"
+)
+
 func initUser() error {
 	err := db.AutoMigrate(&model.User{})
 	if err != nil {
@@ -54,12 +62,12 @@ func initUser() error {
 	}
 	if count == 0 {
 		// 默认账号也存哈希：这一列任何时候都不该出现明文，见 util/crypto。
-		hash, err := crypto.HashPassword("admin")
+		hash, err := crypto.HashPassword(DefaultPassword)
 		if err != nil {
 			return err
 		}
 		user := &model.User{
-			Username: "admin",
+			Username: DefaultUsername,
 			Password: hash,
 		}
 		return db.Create(user).Error

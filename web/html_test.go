@@ -647,3 +647,23 @@ func TestInboundFormIntegerInputsRejectDecimals(t *testing.T) {
 		t.Fatal("#inbound-modal 里一个整数数值框都没找到，本测试该更新了")
 	}
 }
+
+// 「还在用默认密码」提示条：四个登录后的页面都要能显示，没有标记时一个字都不渲染。
+func TestDefaultPasswordBannerOnEveryPage(t *testing.T) {
+	tmpl := parseAllTemplates(t)
+	for _, page := range []string{"index.html", "inbounds.html", "routing.html", "setting.html"} {
+		for _, on := range []bool{true, false} {
+			var buf bytes.Buffer
+			data := map[string]any{
+				"base_path": "/", "cur_ver": "test", "title": "test", "host": "localhost",
+				"request_uri": "/aui/" + page, "default_password": on,
+			}
+			if err := tmpl.ExecuteTemplate(&buf, page, data); err != nil {
+				t.Fatalf("渲染 %s: %v", page, err)
+			}
+			if got := strings.Contains(buf.String(), "default-password-banner"); got != on {
+				t.Errorf("%s：default_password=%v 时提示条出现=%v", page, on, got)
+			}
+		}
+	}
+}

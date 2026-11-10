@@ -241,6 +241,27 @@
                 </a-form-item>
             </a-col>
         </a-row>
+        <!-- 端口转发（dokodemo-door）本来就不受机房拦截，不显示这个开关。 -->
+        <a-row v-if="inbound.protocol !== Protocols.DOKODEMO" :gutter="16">
+            <a-col :span="24">
+                <a-form-item>
+                    <span slot="label">
+                        允许服务器来源（中转）
+                        <a-tooltip>
+                            <template slot="title">
+                                用自己的服务器给这个节点做中转时打开：这个入站不再拦机房 / 云服务器来的连接。<br/>
+                                只影响「面板设置 → 连接限制 → 拦截机房 / 云服务器来源」这一项；<br/>
+                                并发限制、地区限制、25 端口拦截、流量暴涨限速照旧。<br/>
+                                中转机算一个网络：有几台中转机同时连，就把上面的并发限制设成几。<br/>
+                                打开后别人也能用云服务器连这个节点，只给中转专用的入站打开。
+                            </template>
+                            <a-icon type="question-circle" theme="filled"></a-icon>
+                        </a-tooltip>
+                    </span>
+                    <a-switch v-model="dbInbound.allowServerSources" aria-label="允许服务器来源（中转）"></a-switch>
+                </a-form-item>
+            </a-col>
+        </a-row>
         <a-row :gutter="16">
             <a-col :span="24">
                 <a-form-item>

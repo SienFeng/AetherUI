@@ -2,6 +2,8 @@ package service
 
 import (
 	"errors"
+	"sync"
+
 	"gorm.io/gorm"
 	"a-ui/database"
 	"a-ui/database/model"
@@ -146,4 +148,37 @@ func (s *UserService) MigratePlaintextPasswords() (int, error) {
 		migrated += int(res.RowsAffected)
 	}
 	return migrated, nil
+}
+
+// knownDefaultPasswords 是公开的默认密码：当前的默认密码，以及改动前空库与 a-ui.sh「重置账号密码」用的 admin。
+var knownDefaultPasswords = []string{database.DefaultPassword, "admin"}
+
+var (
+	defaultPwMu   sync.Mutex
+	defaultPwHash string // 上一次判定时的哈希；哈希没变就沿用结论，bcrypt 比对每次要几十毫秒
+	defaultPwHit  bool
+)
+
+// UsingDefaultPassword 报告面板账号是否还在用公开的默认密码（123456 或 admin），面板每一页据此在顶部
+// 提示修改。只给已登录的页面用：告诉未登录的人「默认密码还能用」就是在帮扫描器。读库失败按「不是」处理，
+// 提示条只是提醒，不能因为它让页面打不开。
+func (s *UserService) UsingDefaultPassword() bool {
+	user, err := s.GetFirstUser()
+	if err != nil {
+		return false
+	}
+	defaultPwMu.Lock()
+	defer defaultPwMu.Unlock()
+	if user.Password == defaultPwHash {
+		return defaultPwHit
+	}
+	hit := false
+	for _, pw := range knownDefaultPasswords {
+		if crypto.CheckPassword(user.Password, pw) {
+			hit = true
+			break
+		}
+	}
+	defaultPwHash, defaultPwHit = user.Password, hit
+	return hit
 }

@@ -41,6 +41,20 @@
 {{end}}
 
 
+{{define "defaultPasswordBanner"}}
+<!-- 还在用公开的默认密码（123456，或旧版的 admin）时，每一页顶部都提示修改：安装时跳过了设定账户密码就会落到这里。
+     标记由服务端在渲染已登录页面时给出（controller.page），登录页不带。 -->
+{{if .default_password}}
+<a-alert type="warning" show-icon class="default-password-banner" role="alert">
+    <span slot="message">
+        面板还在用默认密码，扫描器会优先试这个密码。请到
+        <a href="{{ .base_path }}aui/setting">面板设置 → 账号与密码</a> 改掉。
+    </span>
+</a-alert>
+{{end}}
+{{end}}
+
+
 {{define "commonSider"}}
 <!-- width 200：菜单项最长四个字，加上图标与左右留白，160 显得局促；
      入站列表那张表的列多，200 是在两者之间的折中。布局是 flex，

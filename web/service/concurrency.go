@@ -239,12 +239,14 @@ func (s *ConcurrencyService) sourceBlocker(inbounds []*model.Inbound, now time.T
 	concurrencyBlockMu.Unlock()
 	idc := idcBlockedSet(&s.settingService, &IPDBService{})
 	return func(in *model.Inbound) func(ip string) bool {
-		dokodemo := strings.EqualFold(string(in.Protocol), "dokodemo-door")
+		// 豁免机房拦截的入站（idcExempt）：机房来源真的连得进来，照常占名额——当成被拦的话，中转机
+		// 永远不占名额，这个入站的并发限制对它们整个失效。
+		exempt := idcExempt(in)
 		return func(ip string) bool {
 			if geo.Blocks(in.Id, ip) {
 				return true
 			}
-			return idc != nil && !dokodemo && idc.Contains(ip)
+			return idc != nil && !exempt && idc.Contains(ip)
 		}
 	}
 }

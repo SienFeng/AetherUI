@@ -370,6 +370,7 @@ func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundE
 	oldInbound.Enable = base.pick(base.Enable, inbound.Enable, oldInbound.Enable)
 	oldInbound.ExpiryTime = inbound.ExpiryTime
 	oldInbound.ConcurrencyLimit = inbound.ConcurrencyLimit
+	oldInbound.AllowServerSources = inbound.AllowServerSources
 	newAutoTravel := base.pick(base.AutoTravel, inbound.AutoTravel, oldInbound.AutoTravel)
 	autoTravelTurnedOff := oldInbound.AutoTravel && !newAutoTravel
 	oldInbound.AutoTravel = newAutoTravel

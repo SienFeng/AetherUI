@@ -78,7 +78,7 @@ func TestConcurrentWrongPasswordsCannotOutrunTheLimiter(t *testing.T) {
 	if _, blocked := loginGuard.Blocked("203.0.113.7"); !blocked {
 		t.Fatal("一批并发的错误密码之后该来源没有被锁定")
 	}
-	msg, err := postLogin(r, attacker, "admin", "admin")
+	msg, err := postLogin(r, attacker, "admin", "123456")
 	if err != nil {
 		t.Fatal(err)
 	}

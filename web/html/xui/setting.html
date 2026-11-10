@@ -35,6 +35,7 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
+            {{ template "defaultPasswordBanner" . }}
             <div class="page-header">
                 <div class="page-heading">
                     <h1 class="page-title">面板设置</h1>
@@ -358,7 +359,7 @@
                                                :changed="isChanged('defaultConcurrencyLimit')" v-model.number="allSetting.defaultConcurrencyLimit"></setting-list-item>
                             <setting-list-item type="switch" title="拦截机房 / 云服务器来源"
                                                desc="拦下云服务器来的连接，防止转发绕过地区限制或转卖"
-                                               hint="拦下来自知名机房、云服务器的连接（多数 IP 归属地库认定才算），防止有人在你的省租一台云服务器转发、绕过地区限制，或用自己的服务器中转转卖。普通家庭宽带和手机网络不受影响；端口转发（dokodemo-door）入站不受影响。只有用户都直连这台服务器时才适合打开"
+                                               hint="拦下来自知名机房、云服务器的连接（多数 IP 归属地库认定才算），防止有人在你的省租一台云服务器转发、绕过地区限制，或用自己的服务器中转转卖。普通家庭宽带和手机网络不受影响；端口转发（dokodemo-door）入站不受影响。给自己的服务器做中转的入站，在入站编辑里打开「允许服务器来源（中转）」单独放行，不必关掉这一项"
                                                :changed="isChanged('blockIdcSources')" v-model="allSetting.blockIdcSources"></setting-list-item>
                             <setting-list-item type="switch" title="拦截 25 端口发信"
                                                desc="防止服务器被拿去群发垃圾邮件，正常收发邮件不受影响"

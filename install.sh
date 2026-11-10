@@ -36,7 +36,7 @@ stage_dir=""
 # 回退。
 old_install_dir=""
 
-# config_after_install 没能把账号密码从默认的 admin/admin 改掉时置 1，安装结束时
+# 全新安装落到默认账户 admin / 123456（向导里跳过或没设成账户密码）时置 1，安装结束时
 # 再提醒一次——中间的向导输出很长，第一次的警告多半已经翻过去了。
 default_credentials_active=0
 
@@ -300,9 +300,9 @@ config_after_install() {
         cred_pass=""
         if [[ ${creds_set} -eq 0 ]]; then
             if [[ ${is_fresh_install} -eq 1 ]]; then
-                # 全新安装落到这里，面板还是公开的默认账户 admin/admin、监听所有 IP 的
-                # 54321，向导再中途放弃就这样对外了。与选 n 时一样改用随机账户密码。
-                echo -e "${red}账户密码未能按你的输入设定。为避免面板以公开的默认账户 admin/admin 运行，下面改为随机生成${plain}"
+                # 全新安装落到这里：与选 n 时一样用默认账户 admin / 123456（管理员 2026-11-10 选定，
+                # 之前是随机账户密码），面板每一页顶部会提示修改。
+                echo -e "${red}账户密码未能按你的输入设定，下面改用默认账户 admin / 密码 123456${plain}"
             else
                 echo -e "${red}账户密码未能设定，面板的账户密码保持更新前的设置，未做改动${plain}"
                 print_credentials_hint
@@ -316,35 +316,30 @@ config_after_install() {
     fi
 
     if [[ ${is_fresh_install} -eq 1 && ${creds_set} -eq 0 ]]; then
-        local usernameTemp passwordTemp portTemp random_creds_set=0
-        usernameTemp=$(head -c 6 /dev/urandom | base64)
-        passwordTemp=$(head -c 6 /dev/urandom | base64)
-        a_ui_setting -username "${usernameTemp}" -password "${passwordTemp}" && random_creds_set=1
+        # 账户用公开的默认值 admin / 123456（管理员 2026-11-10 选定：跳过设定就用默认账户，在面板里再改）；
+        # 端口照旧随机，少挨一部分对默认端口 54321 的扫描。
+        local portTemp
+        if ! a_ui_setting -username "admin" -password "123456"; then
+            echo -e "${red}写入默认账户失败，面板沿用数据库里的初始账户（同样是 admin / 123456）${plain}"
+        fi
+        default_credentials_active=1
         if portTemp=$(pick_free_port) && a_ui_setting -port "${portTemp}"; then
             panel_port=${portTemp}
         else
             portTemp=""
         fi
-        echo -e "检测到您属于全新安装,出于安全考虑已自动为您生成随机用户与端口:"
+        echo -e "检测到您属于全新安装，已使用默认账户，并为您随机生成了面板端口:"
         echo -e "###############################################"
-        if [[ ${random_creds_set} -eq 1 ]]; then
-            echo -e "${green}面板登录用户名:${usernameTemp}${plain}"
-            echo -e "${green}面板登录用户密码:${passwordTemp}${plain}"
-        else
-            default_credentials_active=1
-            echo -e "${red}随机账户密码设定失败：面板目前仍使用公开的默认账户 admin / 密码 admin！${plain}"
-        fi
+        echo -e "${green}面板登录用户名:admin${plain}"
+        echo -e "${green}面板登录用户密码:123456${plain}"
         if [[ -n "${portTemp}" ]]; then
             echo -e "${red}面板登录端口:${portTemp}${plain}"
         else
             echo -e "${red}未能设定随机端口，面板仍使用默认端口 54321${plain}"
         fi
         echo -e "###############################################"
-        if [[ ${random_creds_set} -eq 1 ]]; then
-            echo -e "${red}请现在就记下上面的密码:它以加密形式存储,之后无法再查看。端口、路径与用户名可输入a-ui后选7查看,忘记密码请选4重置${plain}"
-        else
-            print_credentials_hint
-        fi
+        echo -e "${red}admin / 123456 是公开的默认密码，扫描器会优先试它，登录后请尽快修改（面板每一页顶部也会提示）${plain}"
+        print_credentials_hint
     fi
 }
 
@@ -1611,7 +1606,7 @@ install_a-ui() {
     backup_xray_assets
 
     # 只有面板本来在运行才记「被本次安装停止」：全新安装、或管理员自己停着的面板，失败时 die_restoring_panel
-    # 不能把它拉起来——全新安装那时还没跑过 config_after_install，起来的是 0.0.0.0:54321 上的 admin/admin。
+    # 不能把它拉起来——全新安装那时还没跑过 config_after_install，起来的是 0.0.0.0:54321 上的默认账户 admin / 123456。
     if systemctl is-active --quiet a-ui; then
         a_ui_stopped=1
     fi
@@ -1701,7 +1696,7 @@ install_a-ui() {
     echo -e "----------------------------------------------"
     if [[ ${default_credentials_active} -eq 1 ]]; then
         echo -e ""
-        echo -e "${red}注意：面板仍在使用公开的默认账户 admin / 密码 admin，请立即修改！${plain}"
+        echo -e "${red}注意：面板正在使用公开的默认账户 admin / 密码 123456，请尽快修改！${plain}"
         print_credentials_hint
     fi
 }

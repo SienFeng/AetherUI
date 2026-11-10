@@ -17,6 +17,7 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content class="status-page">
+            {{ template "defaultPasswordBanner" . }}
             <div class="page-header page-header-inline">
                 <div class="page-heading">
                     <!-- 「实时」只在最近一次 /server/status 成功后 6 秒内显示；轮询断了就

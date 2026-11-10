@@ -46,12 +46,38 @@ func storedPassword(t *testing.T) string {
 func TestDefaultAdminIsStoredHashed(t *testing.T) {
 	setupUserDB(t)
 	stored := storedPassword(t)
-	if stored == "admin" || !crypto.IsHashed(stored) {
+	if stored == database.DefaultPassword || !crypto.IsHashed(stored) {
 		t.Fatalf("默认账号的密码未哈希: %q", stored)
 	}
 	s := UserService{}
-	if s.CheckUser("admin", "admin") == nil {
-		t.Error("默认账号 admin/admin 无法登录")
+	if s.CheckUser("admin", "123456") == nil {
+		t.Error("默认账号 admin/123456 无法登录")
+	}
+}
+
+// 面板每一页顶部的「还在用默认密码」提示：新的默认 123456 与旧的 admin（升级前的空库、a-ui.sh 重置）
+// 都要提示；改掉之后不再提示——判定按哈希缓存，改密码后哈希变了必须重新判定。
+func TestUsingDefaultPassword(t *testing.T) {
+	setupUserDB(t)
+	s := UserService{}
+	if !s.UsingDefaultPassword() {
+		t.Error("空库建出来的 admin/123456 应当提示修改")
+	}
+	first, err := s.GetFirstUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateUser(first.Id, "admin", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.UsingDefaultPassword() {
+		t.Error("旧的默认密码 admin 也应当提示修改")
+	}
+	if _, err := s.UpdateUser(first.Id, "carol", "n3w-pass"); err != nil {
+		t.Fatal(err)
+	}
+	if s.UsingDefaultPassword() {
+		t.Error("改成别的密码后不该再提示")
 	}
 }
 

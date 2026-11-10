@@ -170,7 +170,7 @@ func decodeCookieLayers(t *testing.T, value string) string {
 func TestSecureCookieBehindLocalReverseProxy(t *testing.T) {
 	r := newAuthRouter(t)
 	_, w := doAuth(t, r, authReq{
-		path: "/login", form: loginForm("admin", "admin"),
+		path: "/login", form: loginForm("admin", "123456"),
 		remoteAddr: "127.0.0.1:40000",
 		headers:    map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9"},
 	})
@@ -179,7 +179,7 @@ func TestSecureCookieBehindLocalReverseProxy(t *testing.T) {
 	}
 	// 面板直接暴露时这个头是访客写的，不能据此下发 Secure。
 	_, w = doAuth(t, r, authReq{
-		path: "/login", form: loginForm("admin", "admin"),
+		path: "/login", form: loginForm("admin", "123456"),
 		remoteAddr: "203.0.113.9:40000",
 		headers:    map[string]string{"X-Forwarded-Proto": "https"},
 	})
@@ -190,11 +190,11 @@ func TestSecureCookieBehindLocalReverseProxy(t *testing.T) {
 
 func TestChangingPasswordInvalidatesOtherSessions(t *testing.T) {
 	r := newAuthRouter(t)
-	other := mustLogin(t, r, "admin", "admin")
-	mine := mustLogin(t, r, "admin", "admin")
+	other := mustLogin(t, r, "admin", "123456")
+	mine := mustLogin(t, r, "admin", "123456")
 
 	msg, w := doAuth(t, r, authReq{path: "/aui/setting/updateUser", cookie: mine, form: url.Values{
-		"oldUsername": {"admin"}, "oldPassword": {"admin"},
+		"oldUsername": {"admin"}, "oldPassword": {"123456"},
 		"newUsername": {"admin"}, "newPassword": {"n3w-pass"},
 	}})
 	if !msg.Success {
@@ -211,14 +211,14 @@ func TestChangingPasswordInvalidatesOtherSessions(t *testing.T) {
 	if renewed == nil || !isLoggedIn(t, r, renewed) {
 		t.Error("改密码的会话没有被重新签发")
 	}
-	if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin")}); msg.Success {
+	if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456")}); msg.Success {
 		t.Error("旧密码仍能登录")
 	}
 }
 
 func TestUpdateUserRequiresCurrentPassword(t *testing.T) {
 	r := newAuthRouter(t)
-	c := mustLogin(t, r, "admin", "admin")
+	c := mustLogin(t, r, "admin", "123456")
 	msg, _ := doAuth(t, r, authReq{path: "/aui/setting/updateUser", cookie: c, form: url.Values{
 		"oldUsername": {"admin"}, "oldPassword": {"wrong"},
 		"newUsername": {"admin"}, "newPassword": {"n3w-pass"},
@@ -235,7 +235,7 @@ func TestUpdateUserRequiresCurrentPassword(t *testing.T) {
 // 已有会话失效——服务端没有别的办法吊销一个存在客户端的 cookie。
 func TestOutOfBandPasswordChangeInvalidatesSession(t *testing.T) {
 	r := newAuthRouter(t)
-	c := mustLogin(t, r, "admin", "admin")
+	c := mustLogin(t, r, "admin", "123456")
 	if err := (&service.UserService{}).UpdateFirstUser("admin", "changed-by-cli"); err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestLoginLockoutCannotBeBypassed(t *testing.T) {
 		}
 	}
 	// 锁定后，哪怕密码是对的也不放行——否则锁定期内仍然可以继续猜。
-	msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin"), remoteAddr: attacker})
+	msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456"), remoteAddr: attacker})
 	if msg.Success {
 		t.Fatal("锁定期内正确密码登录成功，限速形同虚设")
 	}
@@ -267,7 +267,7 @@ func TestLoginLockoutCannotBeBypassed(t *testing.T) {
 		t.Errorf("锁定提示 = %q", msg.Msg)
 	}
 	// 别的来源（管理员自己）不受影响。
-	msg, _ = doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin"), remoteAddr: "192.0.2.50:5000"})
+	msg, _ = doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456"), remoteAddr: "192.0.2.50:5000"})
 	if !msg.Success {
 		t.Errorf("另一个来源被牵连锁定: %s", msg.Msg)
 	}
@@ -284,7 +284,7 @@ func TestLoginLockoutBehindReverseProxyUsesLastForwardedHop(t *testing.T) {
 		})
 	}
 	msg, _ := doAuth(t, r, authReq{
-		path: "/login", form: loginForm("admin", "admin"), remoteAddr: "127.0.0.1:5001",
+		path: "/login", form: loginForm("admin", "123456"), remoteAddr: "127.0.0.1:5001",
 		headers: map[string]string{"X-Forwarded-For": "203.0.113.9"},
 	})
 	if msg.Success {
@@ -292,7 +292,7 @@ func TestLoginLockoutBehindReverseProxyUsesLastForwardedHop(t *testing.T) {
 	}
 	// 同样经反代进来的另一个真实来源照常能登录：不能把整个 127.0.0.1 锁死。
 	msg, _ = doAuth(t, r, authReq{
-		path: "/login", form: loginForm("admin", "admin"), remoteAddr: "127.0.0.1:5002",
+		path: "/login", form: loginForm("admin", "123456"), remoteAddr: "127.0.0.1:5002",
 		headers: map[string]string{"X-Forwarded-For": "192.0.2.50"},
 	})
 	if !msg.Success {
@@ -306,7 +306,7 @@ func TestSuccessfulLoginResetsFailureCount(t *testing.T) {
 		for i := 0; i < loginMaxFailures-1; i++ {
 			doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "typo")})
 		}
-		if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin")}); !msg.Success {
+		if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456")}); !msg.Success {
 			t.Fatalf("第 %d 轮：输错几次后的正确登录被拒: %s", round+1, msg.Msg)
 		}
 	}
@@ -327,7 +327,7 @@ func waitForStableTotpStep(t *testing.T) {
 func TestTwoFactorLoginFlow(t *testing.T) {
 	waitForStableTotpStep(t)
 	r := newAuthRouter(t)
-	c := mustLogin(t, r, "admin", "admin")
+	c := mustLogin(t, r, "admin", "123456")
 
 	// 生成密钥要再输一次密码。
 	if msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/setup", cookie: c,
@@ -335,7 +335,7 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 		t.Fatal("密码错误时生成了密钥")
 	}
 	msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/setup", cookie: c,
-		form: url.Values{"password": {"admin"}}})
+		form: url.Values{"password": {"123456"}}})
 	if !msg.Success {
 		t.Fatalf("生成密钥失败: %s", msg.Msg)
 	}
@@ -364,7 +364,7 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 	}
 
 	// 开启后只有密码登不上，且提示不透露「密码其实是对的」。
-	msg, _ = doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin")})
+	msg, _ = doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456")})
 	if msg.Success {
 		t.Fatal("开启两步验证后，只凭密码登录成功了")
 	}
@@ -373,7 +373,7 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 		t.Errorf("缺验证码与密码错误的提示不同，泄露了密码是否正确: %q vs %q", msg.Msg, wrongPw.Msg)
 	}
 
-	form := loginForm("admin", "admin")
+	form := loginForm("admin", "123456")
 	form.Set("code", codeAt(0))
 	msg, w = doAuth(t, r, authReq{path: "/login", form: form})
 	if !msg.Success {
@@ -383,7 +383,7 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 
 	// 关闭需要密码 + 一个新的有效验证码。
 	if msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/disable", cookie: c2,
-		form: url.Values{"password": {"admin"}, "code": {codeAt(0)}}}); msg.Success {
+		form: url.Values{"password": {"123456"}, "code": {codeAt(0)}}}); msg.Success {
 		t.Fatal("用已经用过的验证码关闭成功了")
 	}
 	if msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/disable", cookie: c2,
@@ -392,10 +392,10 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 	}
 	// 上一条请求里密码错在先、验证码没被校验，因此 codeAt(1) 仍然可用。
 	if msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/disable", cookie: c2,
-		form: url.Values{"password": {"admin"}, "code": {codeAt(1)}}}); !msg.Success {
+		form: url.Values{"password": {"123456"}, "code": {codeAt(1)}}}); !msg.Success {
 		t.Fatalf("关闭两步验证失败: %s", msg.Msg)
 	}
-	if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin")}); !msg.Success {
+	if msg, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456")}); !msg.Success {
 		t.Fatalf("关闭后只凭密码登录失败: %s", msg.Msg)
 	}
 }
@@ -404,9 +404,9 @@ func TestTwoFactorLoginFlow(t *testing.T) {
 func TestWrongTwoFactorCodeCountsTowardLockout(t *testing.T) {
 	waitForStableTotpStep(t)
 	r := newAuthRouter(t)
-	c := mustLogin(t, r, "admin", "admin")
+	c := mustLogin(t, r, "admin", "123456")
 	msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/setup", cookie: c,
-		form: url.Values{"password": {"admin"}}})
+		form: url.Values{"password": {"123456"}}})
 	secret := msg.Obj.(map[string]any)["secret"].(string)
 	code, _ := totp.Code(secret, time.Now().Add(-totp.Period*time.Second))
 	if msg, _ := doAuth(t, r, authReq{path: "/aui/setting/twoFactor/enable", cookie: c,
@@ -415,11 +415,11 @@ func TestWrongTwoFactorCodeCountsTowardLockout(t *testing.T) {
 	}
 
 	for i := 0; i < loginMaxFailures; i++ {
-		form := loginForm("admin", "admin")
+		form := loginForm("admin", "123456")
 		form.Set("code", "000000")
 		doAuth(t, r, authReq{path: "/login", form: form, remoteAddr: "203.0.113.9:5000"})
 	}
-	form := loginForm("admin", "admin")
+	form := loginForm("admin", "123456")
 	good, _ := totp.Code(secret, time.Now())
 	form.Set("code", good)
 	if msg, _ := doAuth(t, r, authReq{path: "/login", form: form, remoteAddr: "203.0.113.9:5000"}); msg.Success {
