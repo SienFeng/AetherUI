@@ -101,6 +101,11 @@ type Inbound struct {
 	// 地区限制、25 端口、流量暴涨限速照旧。判定收敛在 service.idcExempt 一处。
 	AllowServerSources bool `json:"allowServerSources" form:"allowServerSources"`
 
+	// SkipSpikeThrottle 让这个入站不参与「流量暴涨自动限速」：中转节点后面挂着很多人，新接一批用户
+	// 当天用量就翻倍，限一次全体变慢到当天结束。零值（参与）＝ 升级后行为零变化。与 AllowServerSources
+	// 各管各的，分开设：允许中转不等于不限暴涨。见 service.SpikeThrottleService。
+	SkipSpikeThrottle bool `json:"skipSpikeThrottle" form:"skipSpikeThrottle"`
+
 	// config part
 	Listen         string   `json:"listen" form:"listen"`
 	Port           int      `json:"port" form:"port" gorm:"unique"`

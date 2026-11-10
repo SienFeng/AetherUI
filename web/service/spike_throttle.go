@@ -83,7 +83,8 @@ func dailyUsage(inboundId int, now time.Time, loc *time.Location) (int64, []int6
 	return today, past, nil
 }
 
-// Run 跑一轮：删掉到期的限速单（开关关掉时全部撤掉），给当天暴涨的启用入站发一张限速到当地当天结束的单。
+// Run 跑一轮：删掉到期的限速单（开关关掉时全部撤掉）与不参与暴涨限速的入站的限速单，
+// 给当天暴涨的启用入站（不参与的除外）发一张限速到当地当天结束的单。
 // 返回限速集合有没有变（限速由 ShapingJob 每 10 秒按 desiredLimits 收敛下去）。
 func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 	db := database.GetDB()
@@ -117,13 +118,15 @@ func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 		throttled[a.InboundId] = true
 	}
 	var inbounds []*model.Inbound
+	// 不参与的在 Go 里跳过，不在 SQL 里写 `skip_spike_throttle = false`：老库加列时没有默认值，存量行是 NULL，
+	// 那样写会把所有存量入站静默排除在检测之外（TestSpikeThrottleRunTreatsNullExemptColumnAsParticipating）。
 	if err := db.Where("enable = ?", true).Order("id asc").Find(&inbounds).Error; err != nil {
 		return changed, err
 	}
 	n := now.In(loc)
 	until := time.Date(n.Year(), n.Month(), n.Day()+1, 0, 0, 0, 0, loc).UnixMilli()
 	for _, in := range inbounds {
-		if throttled[in.Id] {
+		if throttled[in.Id] || in.SkipSpikeThrottle {
 			continue
 		}
 		today, past, err := dailyUsage(in.Id, now, loc)
@@ -144,7 +147,16 @@ func (s *SpikeThrottleService) Run(now time.Time) (bool, error) {
 		logger.Warning("流量暴涨自动限速：入站", in.Id, "今天已用", today>>20, "MB，平时每天约", baseline>>20,
 			"MB，限速到", p.Mbps, "Mbps 直到当地今天结束")
 	}
-	return changed, nil
+	// 不参与暴涨限速的入站（Inbound.SkipSpikeThrottle）身上的限速单撤掉。必须放在发单之后：编辑表单打开开关时
+	// 在同一个事务里撤过一次，但这一轮的入站列表可能是那之前读的、随后照旧发了单——那次保存早于这里的话，
+	// 这里撤；晚于发单的话，保存自己撤。两头都盖住，不留一张要等下一轮（10 分钟）才撤的单。
+	// 也兜住别的写入路径（直接改库）。
+	res = db.Where("inbound_id IN (?)", db.Model(&model.Inbound{}).Select("id").Where("skip_spike_throttle = ?", true)).
+		Delete(&model.InboundThrottle{})
+	if res.Error != nil {
+		return changed, res.Error
+	}
+	return changed || res.RowsAffected > 0, nil
 }
 
 // activeThrottles 返回生效中的暴涨限速（入站 id → Mbps）。

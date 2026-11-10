@@ -217,3 +217,66 @@ func TestSpikeThrottleRunKeepsThrottlesWhenSwitchUnreadable(t *testing.T) {
 		t.Error("开关读不出，生效中的限速单被当成「开关关闭」删掉了")
 	}
 }
+
+// 入站打开「不参与流量暴涨限速」（中转节点：后面挂着很多人，限一次全体变慢）：暴涨也不发限速单，
+// 开关打开之前发的限速单在下一轮撤掉。别的入站照常判。
+func TestSpikeThrottleRunSkipsExemptInbounds(t *testing.T) {
+	setupDB(t)
+	setupTrafficDBForTest(t)
+	loc := panelLoc(t)
+	now := time.Now()
+	relay := makeInboundFor(t, 10082, func(in *model.Inbound) { in.SkipSpikeThrottle = true })
+	plain := makeInboundFor(t, 10083, func(*model.Inbound) {})
+	for _, id := range []int{relay.Id, plain.Id} {
+		for d := 1; d <= 14; d++ {
+			addHourBucket(t, id, time.Date(now.In(loc).Year(), now.In(loc).Month(), now.In(loc).Day()-d, 12, 0, 0, 0, loc), loc, gb)
+		}
+		addHourBucket(t, id, now, loc, 25*gb)
+	}
+	// 开关打开之前留下的限速单。
+	if err := database.GetDB().Create(&model.InboundThrottle{InboundId: relay.Id, Mbps: 5,
+		Until: now.Add(time.Hour).UnixMilli(), CreatedAt: now.UnixMilli()}).Error; err != nil {
+		t.Fatal(err)
+	}
+	changed, err := (&SpikeThrottleService{}).Run(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("撤掉了限速单、也新发了一张，应当报告限速集合变了")
+	}
+	var n int64
+	database.GetDB().Model(&model.InboundThrottle{}).Where("inbound_id = ?", relay.Id).Count(&n)
+	if n != 0 {
+		t.Errorf("不参与暴涨限速的入站仍有 %d 张限速单", n)
+	}
+	database.GetDB().Model(&model.InboundThrottle{}).Where("inbound_id = ?", plain.Id).Count(&n)
+	if n != 1 {
+		t.Errorf("普通入站暴涨后限速单 %d 张，期望 1", n)
+	}
+}
+
+// 老库 AutoMigrate 加上 skip_spike_throttle 列时没有默认值，已有的行是 NULL。NULL 必须按「参与」处理：
+// 用 SQL 的 `= false` 过滤会把所有存量入站静默排除在暴涨检测之外。
+func TestSpikeThrottleRunTreatsNullExemptColumnAsParticipating(t *testing.T) {
+	setupDB(t)
+	setupTrafficDBForTest(t)
+	loc := panelLoc(t)
+	now := time.Now()
+	in := makeInboundFor(t, 10084, func(*model.Inbound) {})
+	if err := database.GetDB().Exec("UPDATE inbounds SET skip_spike_throttle = NULL WHERE id = ?", in.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	for d := 1; d <= 14; d++ {
+		addHourBucket(t, in.Id, time.Date(now.In(loc).Year(), now.In(loc).Month(), now.In(loc).Day()-d, 12, 0, 0, 0, loc), loc, gb)
+	}
+	addHourBucket(t, in.Id, now, loc, 25*gb)
+	if _, err := (&SpikeThrottleService{}).Run(now); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	database.GetDB().Model(&model.InboundThrottle{}).Where("inbound_id = ?", in.Id).Count(&n)
+	if n != 1 {
+		t.Errorf("列为 NULL 的存量入站暴涨后限速单 %d 张，期望 1", n)
+	}
+}

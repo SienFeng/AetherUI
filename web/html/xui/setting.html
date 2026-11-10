@@ -366,8 +366,8 @@
                                                hint="关了流量嗅探的入站也识别 BT 下载和访问的域名（只用于分流判断，不改连接目标），开着嗅探的入站补上 QUIC——否则 HTTP/3 会绕过域名规则。只在生成配置时补，不改入站本身的设置，关掉就回到原样"
                                                :changed="isChanged('forceSniffing')" v-model="allSetting.forceSniffing"></setting-list-item>
                             <setting-list-item type="switch" title="流量暴涨自动限速"
-                                               desc="当天用量远超平时就限速，次日 0 点自动恢复"
-                                               hint="某个入站当天的流量超过「近 14 天日常用量（中位数）× 倍数」，而且不少于下限时，限速到当地当天结束，到点自动恢复；至少要有 7 天的用量记录才判。正常的一次性大下载也可能被限速。限速只在 Linux 上生效"
+                                               desc="当天用量远超平时就限速，次日 0 点自动恢复；中转节点可在入站里单独排除"
+                                               hint="某个入站当天的流量超过「近 14 天日常用量（中位数）× 倍数」，而且不少于下限时，限速到当地当天结束，到点自动恢复；至少要有 7 天的用量记录才判。正常的一次性大下载也可能被限速。中转节点等用量本来就大起大落的入站，可以在入站编辑里打开「不参与流量暴涨限速」单独排除。限速只在 Linux 上生效"
                                                :changed="isChanged('spikeThrottleEnable')" v-model="allSetting.spikeThrottleEnable"></setting-list-item>
                             <template v-if="allSetting.spikeThrottleEnable === 1">
                                 <setting-list-item type="number" title="暴涨倍数"

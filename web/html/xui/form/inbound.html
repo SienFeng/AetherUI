@@ -251,7 +251,7 @@
                             <template slot="title">
                                 用自己的服务器给这个节点做中转时打开：这个入站不再拦机房 / 云服务器来的连接。<br/>
                                 只影响「面板设置 → 连接限制 → 拦截机房 / 云服务器来源」这一项；<br/>
-                                并发限制、地区限制、25 端口拦截、流量暴涨限速照旧。<br/>
+                                并发限制、地区限制、25 端口拦截照旧；流量暴涨限速看下面那个开关。<br/>
                                 中转机算一个网络：有几台中转机同时连，就把上面的并发限制设成几。<br/>
                                 打开后别人也能用云服务器连这个节点，只给中转专用的入站打开。
                             </template>
@@ -259,6 +259,26 @@
                         </a-tooltip>
                     </span>
                     <a-switch v-model="dbInbound.allowServerSources" aria-label="允许服务器来源（中转）"></a-switch>
+                </a-form-item>
+            </a-col>
+        </a-row>
+        <a-row :gutter="16">
+            <a-col :span="24">
+                <a-form-item>
+                    <span slot="label">
+                        不参与流量暴涨限速
+                        <a-tooltip>
+                            <template slot="title">
+                                打开后这个入站不受「面板设置 → 连接限制 → 流量暴涨自动限速」影响，<br/>
+                                当天用量再高也不会被自动限速；正在生效的限速保存后立即解除。<br/>
+                                适合中转节点：后面挂着很多人，一限全体变慢。<br/>
+                                并发限制、地区限制、上面填的上下行限速照旧。<br/>
+                                和「允许服务器来源（中转）」是两个开关，各设各的。
+                            </template>
+                            <a-icon type="question-circle" theme="filled"></a-icon>
+                        </a-tooltip>
+                    </span>
+                    <a-switch v-model="dbInbound.skipSpikeThrottle" aria-label="不参与流量暴涨限速"></a-switch>
                 </a-form-item>
             </a-col>
         </a-row>

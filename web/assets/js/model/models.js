@@ -47,6 +47,7 @@ class DBInbound {
         this.concurrencyLimit = 0;
         this.autoTravel = false;
         this.allowServerSources = false;
+        this.skipSpikeThrottle = false;
         // ObjectUtil.cloneProps 只克隆目标已有的 key，这里不列的话服务端
         // 返回的值会被直接丢弃，选择器永远停在「不重置」。
         this.trafficResetMode = TRAFFIC_RESET_MODE.OFF;
