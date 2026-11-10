@@ -1316,3 +1316,31 @@ func TestParseSubscriptionConvertsIDNAndSkipsNonASCIIKeywords(t *testing.T) {
 		t.Errorf("skipped = %d，期望 1（非 ASCII 的关键词）", skipped)
 	}
 }
+
+// 订阅地址里常带个人令牌（?token=…）。地址写错时的报错会进保存失败的提示与面板日志（jsonMsgObj 只隐去
+// 形如 scheme:// 的完整地址），所以报错里不能回显原始地址：缺 scheme 的、带空格解析失败的都隐不掉。主机与
+// 路径要留着，排查靠它们。
+func TestValidateSubscribeURLDoesNotEchoTheAddress(t *testing.T) {
+	for _, raw := range []string{
+		"sub.example.com/list?token=SECRET1",
+		"https://a b.example.com/list?token=SECRET2",
+		"https:///list?token=SECRET3",
+		"ftp://example.com/list?token=SECRET4",
+		"user:SECRET6@sub.example.com/list",
+	} {
+		err := ValidateSubscribeURL(raw)
+		if err == nil {
+			t.Fatalf("%q 应当被拒绝", raw)
+		}
+		if strings.Contains(err.Error(), "SECRET") {
+			t.Errorf("报错里带出了令牌: %v", err)
+		}
+		if strings.Contains(strings.SplitN(raw, "?", 2)[0], "example.com") && !strings.Contains(err.Error(), "example.com") {
+			t.Errorf("报错里应保留主机，便于排查: %v", err)
+		}
+	}
+	err := ValidateSubscribeURLs("https://ok.example.com/a\nsub.example.com/b?token=SECRET5")
+	if err == nil || strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "第 2 个") {
+		t.Errorf("多个地址时应当点出是第几个、且不带令牌: %v", err)
+	}
+}

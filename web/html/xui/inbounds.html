@@ -1185,6 +1185,13 @@
                         title: '这个入站不参与流量暴涨自动限速（中转节点等用量本来就会大起大落的入站）',
                     });
                 }
+                if (dbInbound.noAutoRegion) {
+                    out.push({
+                        key: 'noautoregion',
+                        text: '不自动设地区',
+                        title: '「自动管理地区限制」不碰这个入站的地区：不自动设置，长住外地也不自动改',
+                    });
+                }
                 if (dbInbound.upMbit > 0 || dbInbound.downMbit > 0) {
                     const up = dbInbound.upMbit > 0 ? dbInbound.upMbit + 'M' : '不限';
                     const down = dbInbound.downMbit > 0 ? dbInbound.downMbit + 'M' : '不限';
@@ -1298,6 +1305,7 @@
                     autoTravel: dbInbound.autoTravel,
                     allowServerSources: dbInbound.allowServerSources,
                     skipSpikeThrottle: dbInbound.skipSpikeThrottle,
+                    noAutoRegion: dbInbound.noAutoRegion,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,
@@ -1323,6 +1331,7 @@
                     autoTravel: dbInbound.autoTravel,
                     allowServerSources: dbInbound.allowServerSources,
                     skipSpikeThrottle: dbInbound.skipSpikeThrottle,
+                    noAutoRegion: dbInbound.noAutoRegion,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,

@@ -86,6 +86,13 @@ func (a *SettingController) updateSetting(c *gin.Context) {
 		if prevErr != nil || !reflect.DeepEqual(prev, allSetting) {
 			a.xrayService.SetToNeedRestart()
 		}
+		// 关掉了流量暴涨自动限速、或改了限速档位：生效中的限速单当场撤掉或改写，ShapingJob 10 秒内收敛；
+		// 不做的话要等暴涨检测下一轮（10 分钟）。失败只记日志：设置已经保存了，下一轮检测会补上。
+		if prevErr != nil || prev.SpikeThrottleEnable != allSetting.SpikeThrottleEnable || prev.SpikeThrottleMbps != allSetting.SpikeThrottleMbps {
+			if _, err := (&service.SpikeThrottleService{}).ApplySettingsNow(); err != nil {
+				logger.Warning("保存设置后调整生效中的暴涨限速失败:", err)
+			}
+		}
 	}
 	jsonMsg(c, "修改设置", err)
 }

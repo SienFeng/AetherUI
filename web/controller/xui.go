@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"net"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"a-ui/logger"
 	"a-ui/web/service"
@@ -73,7 +76,22 @@ func (a *XUIController) inbounds(c *gin.Context) {
 }
 
 func (a *XUIController) setting(c *gin.Context) {
-	page(c, "setting.html", "设置", nil)
+	page(c, "setting.html", "设置", gin.H{"panel_local_port": localPort(c)})
+}
+
+// localPort 是这个请求实际连到的面板端口（连接的本端地址）。设置页「重启面板」之后据此判断浏览器是不是
+// 直连面板：地址栏的端口等于它才是直连；经 SSH 隧道、端口映射、反代访问时两者不同。不用库里存的端口：
+// 改了端口、还没重启时，库里的已经是新端口，而面板还在旧端口上。取不到时返回空串（按「不是直连」处理）。
+func localPort(c *gin.Context) string {
+	addr, ok := c.Request.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || addr == nil {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return ""
+	}
+	return port
 }
 
 func (a *XUIController) routing(c *gin.Context) {

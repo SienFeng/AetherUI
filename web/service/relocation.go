@@ -196,7 +196,7 @@ func relocate(in *model.Inbound, pass *model.InboundRegionPass, province, reason
 	}
 	err = database.GetDB().Transaction(func(tx *gorm.DB) error {
 		res := whereRegionsStill(tx.Model(&model.Inbound{}).Where("id = ?", in.Id), in.Regions).
-			UpdateColumns(map[string]any{"regions": encoded})
+			Where(autoRegionAllowedSQL).UpdateColumns(map[string]any{"regions": encoded})
 		if res.Error != nil {
 			return res.Error
 		}

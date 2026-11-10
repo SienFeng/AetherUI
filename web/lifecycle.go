@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"a-ui/logger"
 	"a-ui/web/network"
+	"a-ui/web/service"
 )
 
 // 面板 Web 服务生命周期用到的几个时长。做成变量只为测试能把它们调短。
@@ -69,12 +70,23 @@ func (s *Server) initRouterSafely() (engine *gin.Engine, err error) {
 // 消费 xrayService 重启标志的那个 10 秒任务挂在 InboundController 上，路由没建
 // 起来它也就不存在；而 CheckXrayRunningJob 发现 xray 没在跑时只会置标志——没有
 // 人消费的话，xray 一旦崩溃就再也不会被拉起来。
+//
+// 与 InboundController.applyPendingXrayChange 同口径：下发失败把标志放回去（标志在调用前已被清掉，不放回去
+// 的话这次改动——比如到期停用——要等下一次别的改动才会再被尝试），同一错误 5 分钟只记一条 Error。
 func (s *Server) consumeXrayRestartFlag() {
+	failures := service.NewLogThrottle(5 * time.Minute)
 	s.cron.AddFunc("@every 10s", func() {
-		if s.xrayService.IsNeedRestartAndSetFalse() {
-			if err := s.xrayService.RestartXray(false); err != nil {
-				logger.Error("restart xray failed:", err)
-			}
+		if !s.xrayService.IsNeedRestartAndSetFalse() {
+			return
+		}
+		err := s.xrayService.RestartXray(false)
+		if err == nil {
+			failures.Reset()
+			return
+		}
+		s.xrayService.SetToNeedRestart()
+		if failures.Allow(err.Error()) {
+			logger.Error("restart xray failed, will retry in 10s:", err)
 		}
 	})
 }

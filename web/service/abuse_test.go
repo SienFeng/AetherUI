@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"reflect"
 	"testing"
@@ -245,5 +246,26 @@ func TestSniffingBlindFollowsForcedSniffing(t *testing.T) {
 	dk := &model.Inbound{Protocol: model.Protocol("dokodemo-door"), Sniffing: `{"enabled":false}`}
 	if !sniffingBlind(dk, true) {
 		t.Error("dokodemo-door 不补全嗅探，应当仍判成拿不到域名")
+	}
+}
+
+// 机房 dat 写不进去时核心里没有机房规则，机房来源真的连得进来：并发判定与自动出差剔除不能再把它们当成「被拦的」，
+// 否则这段时间里从云服务器来的共享者不占并发名额。dat 写成功之后照常当成被拦的。
+func TestIDCBlockedSetFollowsWhetherTheRuleWasEmitted(t *testing.T) {
+	resetIDCState(t)
+	t.Cleanup(func() { resetIDCState(t) })
+	setupDB(t)
+	s := ipdbServiceWithSources(t, buildISPTestDB(t, "阿里云"), buildISPTestDB(t, "阿里云"))
+	settings := &SettingService{}
+	if idcBlockedSet(settings, &s) == nil {
+		t.Fatal("拦截机房来源默认打开，应当给出机房网段")
+	}
+	noteIDCDatResult(errors.New("磁盘满"))
+	if idcBlockedSet(settings, &s) != nil {
+		t.Error("机房 dat 写失败、核心没有机房规则时，仍把机房来源当成被拦的")
+	}
+	noteIDCDatResult(nil)
+	if idcBlockedSet(settings, &s) == nil {
+		t.Error("dat 写成功之后应当恢复")
 	}
 }

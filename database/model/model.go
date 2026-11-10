@@ -106,6 +106,12 @@ type Inbound struct {
 	// 各管各的，分开设：允许中转不等于不限暴涨。见 service.SpikeThrottleService。
 	SkipSpikeThrottle bool `json:"skipSpikeThrottle" form:"skipSpikeThrottle"`
 
+	// NoAutoRegion 让「自动管理地区限制」不碰这个入站的地区：不首次自动设置，长住外地也不自动改。给少数特例用
+	// （2026-11-10 管理员要求），在编辑里提前设好，不必等自动设置之后再去撤销。零值（参与）＝ 升级后行为零变化；
+	// 老库加列后存量行是 NULL，判断一律在 Go 里做或按 coalesce 写，不写 `no_auto_region = false`。
+	// 自动出差放行与接管存量（替有地区的入站打开一次出差放行）不受影响。见 service.eligibleForAutoRegion。
+	NoAutoRegion bool `json:"noAutoRegion" form:"noAutoRegion"`
+
 	// config part
 	Listen         string   `json:"listen" form:"listen"`
 	Port           int      `json:"port" form:"port" gorm:"unique"`

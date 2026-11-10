@@ -36,6 +36,8 @@ var (
 	idcRecent []string
 	// idcWriteFailLogged：写 dat 失败的告警 10 分钟一条（每次生成配置都会走到这里）。
 	idcWriteFailLogged time.Time
+	// idcDatFailing：最近一次生成配置时机房 dat 没写进去、配置里没有机房规则（见 noteIDCDatResult）。
+	idcDatFailing bool
 )
 
 // resetIDCState 只在测试之间清状态。
@@ -44,6 +46,19 @@ func resetIDCState(t interface{ Helper() }) {
 	idcMu.Lock()
 	defer idcMu.Unlock()
 	idcFor, idcCIDRs, idcSet, idcRecent = nil, nil, nil, nil
+	idcDatFailing = false
+}
+
+// noteIDCDatResult 记下这一次写机房 dat 的结果。写不进去时配置里没有机房规则，机房来源真的连得进来：
+// idcBlockedSet 据此不再把它们当成被拦的（并发判定让它们照常占名额，自动出差照常看见它们）。
+func noteIDCDatResult(err error) {
+	idcMu.Lock()
+	defer idcMu.Unlock()
+	idcDatFailing = err != nil
+	if err != nil && time.Since(idcWriteFailLogged) > 10*time.Minute {
+		idcWriteFailLogged = time.Now()
+		logger.Warning("写入机房网段数据文件失败，本轮不拦机房来源:", err)
+	}
 }
 
 // idcSnapshot 返回这份 IP 库认定的机房网段（多数票，见 ipdb.Multi.MajorityCIDRsOfIDC）与对应的集合。
@@ -171,14 +186,8 @@ func (s *RoutingInjector) buildAbuseRules(inbounds []*model.Inbound) []any {
 	if s.settingService.GetBlockIdcSources() {
 		if cidrs, _ := idcSnapshot(s.ipdbService.DB()); len(cidrs) > 0 {
 			code, err := ensureIDCDat(cidrs)
-			if err != nil {
-				idcMu.Lock()
-				if time.Since(idcWriteFailLogged) > 10*time.Minute {
-					idcWriteFailLogged = time.Now()
-					logger.Warning("写入机房网段数据文件失败，本轮不拦机房来源:", err)
-				}
-				idcMu.Unlock()
-			} else {
+			noteIDCDatResult(err)
+			if err == nil {
 				set.IDCCode = code
 			}
 		}
@@ -186,9 +195,16 @@ func (s *RoutingInjector) buildAbuseRules(inbounds []*model.Inbound) []any {
 	return abuseRules(set)
 }
 
-// idcBlockedSet 返回「拦机房来源」开着时的机房网段集合（给并发判定与自动出差剔除被拦的来源用），关着返回 nil。
+// idcBlockedSet 返回「拦机房来源」开着时的机房网段集合（给并发判定与自动出差剔除被拦的来源用），关着、或最近
+// 一次生成配置时机房 dat 没写进去（核心里没有机房规则）返回 nil。
 func idcBlockedSet(settings *SettingService, ipdbService *IPDBService) *cidrSet {
 	if !settings.GetBlockIdcSources() {
+		return nil
+	}
+	idcMu.Lock()
+	failing := idcDatFailing
+	idcMu.Unlock()
+	if failing {
 		return nil
 	}
 	_, set := idcSnapshot(ipdbService.DB())

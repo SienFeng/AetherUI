@@ -72,7 +72,7 @@ func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
 		if end := strings.Index(body, "};"); end >= 0 {
 			body = body[:end]
 		}
-		for _, field := range []string{"allowServerSources", "skipSpikeThrottle"} {
+		for _, field := range []string{"allowServerSources", "skipSpikeThrottle", "noAutoRegion"} {
 			if !strings.Contains(body, field+": dbInbound."+field) {
 				t.Errorf("%s 的请求体里没有 %s", fn, field)
 			}
@@ -87,5 +87,8 @@ func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
 	}
 	if !strings.Contains(string(form), `v-model="dbInbound.skipSpikeThrottle"`) {
 		t.Error("入站表单里没有「不参与流量暴涨限速」开关")
+	}
+	if !strings.Contains(string(form), `v-model="dbInbound.noAutoRegion"`) {
+		t.Error("入站表单里没有「不自动设置地区限制」开关")
 	}
 }

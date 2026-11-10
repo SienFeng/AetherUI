@@ -51,9 +51,12 @@ func defaultAutoRegionParams() autoRegionParams {
 }
 
 type autoRegionInput struct {
-	Now       time.Time
-	Loc       *time.Location
-	Rows      []model.InboundIPHour // 近 7 天按来源 IP 的小时行
+	Now  time.Time
+	Loc  *time.Location
+	Rows []model.InboundIPHour // 近 7 天按来源 IP 的小时行
+	// SpanRows 是观察期窗口里的行（见 autoRegionRows），只用来量观察期；nil 时用 Rows。观察天数大于 7 时
+	// 只看近 7 天的行，「第一次实质使用距今满 N 天」永远达不到。
+	SpanRows  []model.InboundIPHour
 	RiskLevel string
 	// AccessLogOff：访问日志没开时，自动出差放行发现不了被拦的人，「需要留意」也看不到被拦记录。
 	AccessLogOff bool
@@ -78,8 +81,12 @@ func decideAutoRegion(in autoRegionInput) autoRegionDecision {
 	// 观察期按 7 天窗口里的实质使用算：第一次实质使用要在观察期之前，最近也要在用。两头一起
 	// 要求，一次会话（比如管理员新建入站后自己测了一会儿）就不可能满足——否则 24 小时后会按
 	// 管理员所在的省设置，真正的用户一连上就被拦；库里几周前的旧记录也不能替这次的使用凑观察期。
-	first, last := substantialSpan(in.Rows)
-	if first == 0 || in.Now.Unix()-first < int64(p.ObserveDays)*86400 {
+	spanRows := in.SpanRows
+	if spanRows == nil {
+		spanRows = in.Rows
+	}
+	first, last := substantialSpan(spanRows)
+	if first == 0 || in.Now.Unix()-first < int64(observeDaysWithinRetention(p))*86400 {
 		return wait(fmt.Sprintf("观察中（需要满 %d 天的使用记录）", p.ObserveDays))
 	}
 	if in.Now.Unix()-last > int64(autoRegionRecent(p)/time.Second) {
@@ -192,8 +199,12 @@ func unplaceableShare(rows []model.InboundIPHour, set *cidrSet) float64 {
 
 // eligibleForAutoRegion 判断入站本轮要不要判定：启用、没有地区限制、管理员没接手、
 // 也没被自动设置过（自动设置过又变成没有地区，只可能是管理员清掉的）。
+// autoRegionAllowedSQL 是自动写地区时附在 UPDATE 上的条件：读完入站到写入之间管理员打开了「不自动设置地区
+// 限制」也要让路。按 coalesce 写：老库加列后存量行是 NULL。
+const autoRegionAllowedSQL = "coalesce(no_auto_region, 0) = 0"
+
 func eligibleForAutoRegion(in *model.Inbound, st *model.InboundAutoRegion) bool {
-	if !in.Enable || model.HasRegions(in.Regions) {
+	if !in.Enable || in.NoAutoRegion || model.HasRegions(in.Regions) {
 		return false
 	}
 	return st == nil || st.State == model.AutoRegionPending
@@ -315,7 +326,8 @@ func checkStaleAutoRegionWrite(tx *gorm.DB, id int, incoming string, now time.Ti
 		chip = "地区：自动改过"
 	}
 	return common.NewError("这个入站的地区刚被自动设置为「" + strings.Join(regions, "、") +
-		"」，页面上还是设置之前的数据。请刷新页面后再操作；要取消自动设置，请点入站行上的「" + chip + "」撤销")
+		"」，页面上还是设置之前的数据。请刷新页面后再操作；要取消自动设置，请点入站行上的「" + chip + "」撤销，" +
+		"或在编辑里打开「不自动设置地区限制」再保存")
 }
 
 // DeleteByInbound 在删除入站的事务里删掉它的状态。
@@ -336,7 +348,7 @@ func writeRegions(id int, regions []string, st *model.InboundAutoRegion, allowNe
 	if err != nil {
 		return err
 	}
-	if model.HasRegions(in.Regions) {
+	if model.HasRegions(in.Regions) || in.NoAutoRegion {
 		return errAutoRegionStale
 	}
 	encoded, err := EncodeRegions(regions)
@@ -354,7 +366,7 @@ func writeRegions(id int, regions []string, st *model.InboundAutoRegion, allowNe
 	}
 	return database.GetDB().Transaction(func(tx *gorm.DB) error {
 		res := whereRegionsStill(tx.Model(&model.Inbound{}).Where("id = ?", id), in.Regions).
-			UpdateColumns(cols)
+			Where(autoRegionAllowedSQL).UpdateColumns(cols)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -463,7 +475,30 @@ func earliestHoursOf(ids []int) (map[int]int64, error) {
 // autoRegionObserved 是观察期的必要条件：库里最早一条用量记录距今至少 ObserveDays 天。Run 用它
 // 跳过明显还没满的入站、省一次读明细；真正的判定在 decideAutoRegion 里按窗口内的实质使用算。
 func autoRegionObserved(earliest int64, now time.Time, p autoRegionParams) bool {
-	return earliest != 0 && now.Unix()-earliest >= int64(p.ObserveDays)*86400
+	return earliest != 0 && now.Unix()-earliest >= int64(observeDaysWithinRetention(p))*86400
+}
+
+// observeDaysWithinRetention 是实际能量出来的观察天数：按来源 IP 的小时行只保留 sharingRetentionDays 天，
+// 观察天数设成保留期本身时「第一次实质使用距今满 30 天」永远达不到，按保留期内最长能量到的天数判。
+func observeDaysWithinRetention(p autoRegionParams) int {
+	return min(p.ObserveDays, sharingRetentionDays-1)
+}
+
+// autoRegionRows 读一个入站自动设置要用的两段行：近 7 天（建议、稳定天数、会被拦的占比）与观察期窗口
+// （观察天数 + 1 天，至少 7 天，只用来量观察期）。观察期不长于 7 天时两段是同一份。
+func autoRegionRows(inboundId int, p autoRegionParams, now time.Time) (rows, spanRows []model.InboundIPHour, err error) {
+	days := max(sharingWindowDays, observeDaysWithinRetention(p)+1)
+	spanRows, err = (&SharingService{}).windowRows(inboundId, days, now)
+	if err != nil || days == sharingWindowDays {
+		return spanRows, spanRows, err
+	}
+	cutoff := now.Add(-time.Duration(sharingWindowDays) * 24 * time.Hour).Unix()
+	for _, r := range spanRows {
+		if r.HourStart >= cutoff {
+			rows = append(rows, r)
+		}
+	}
+	return rows, spanRows, nil
 }
 
 // autoRegionRecent 是「最近也在用」的窗口：不超过观察期的一半（最多 24 小时），这样一次会话
@@ -569,13 +604,13 @@ func (s *AutoRegionService) Run(now time.Time) (bool, error) {
 		d := autoRegionDecision{Action: autoRegionWait}
 		// 观察期没满就不用读明细：结论只能是继续观察。
 		if autoRegionObserved(earliest[in.Id], now, params) {
-			rows, err := (&SharingService{}).windowRows(in.Id, sharingWindowDays, now)
+			rows, spanRows, err := autoRegionRows(in.Id, params, now)
 			if err != nil {
 				logger.Warning("自动设置地区限制：读取用量失败，跳过入站", in.Id, ":", err)
 				continue
 			}
 			d = decideAutoRegion(autoRegionInput{
-				Now: now, Loc: loc, Rows: rows, AccessLogOff: !logOn,
+				Now: now, Loc: loc, Rows: rows, SpanRows: spanRows, AccessLogOff: !logOn,
 				RiskLevel: risk[in.Id].Level, Params: params,
 				UnplaceablePercent: func(regions []string) (float64, error) {
 					set, err := allowed(regions)

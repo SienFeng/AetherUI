@@ -98,6 +98,29 @@ die_restoring_panel() {
     exit 1
 }
 
+# Interrupted after the commit point (the new version is in place, no rollback) but before the final
+# systemctl start: Ctrl-C or a dropped SSH session (SIGHUP) lands on the interactive prompts in
+# config_after_install / setup_wizard. The panel is stopped at that point and Restart=on-failure does not
+# cover a stopped unit, so every node stays down until someone starts it by hand. Only start a panel that
+# was running before (a_ui_stopped): on a fresh install the account and port are not set yet, and what
+# would come up is the default account on 0.0.0.0:54321.
+interrupted_after_commit() {
+    trap - INT TERM HUP
+    echo -e "${red}Installation interrupted; the new version is already installed${plain}"
+    restore_caddyfile_on_interrupt
+    if [[ ${a_ui_stopped} -eq 1 ]]; then
+        systemctl daemon-reload
+        if systemctl start a-ui; then
+            echo -e "${green}Panel restarted, account and settings are unchanged from before the update${plain}"
+        else
+            echo -e "${red}Failed to start the panel, please run: systemctl start a-ui${plain}"
+        fi
+    else
+        echo -e "${yellow}The panel was not started, rerun the install script to finish the setup${plain}"
+    fi
+    exit 1
+}
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}Fatal error:${plain}please run this script with root privilege\n" && exit 1
 
@@ -131,7 +154,7 @@ else
     echo -e "${red}fail to check system arch,will use default arch here: ${arch}${plain}"
 fi
 
-echo "架构: ${arch}"
+echo "arch: ${arch}"
 
 if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
     echo "a-ui dosen't support 32bit(x86) system,please use 64 bit operating system(x86_64) instead,if there is something wrong,plz let me know"
@@ -403,7 +426,7 @@ gen_random_path() {
 # would break every process-name check below (nginx/apache/caddy) and
 # always fall through to the "unknown process" branch.
 port_user() {
-    ss -ltnHp "sport = :$1" 2>/dev/null | grep -oP '(?<=users:\(\(")[^"]+' | head -1
+    ss -ltnp "sport = :$1" 2>/dev/null | grep -oP '(?<=users:\(\(")[^"]+' | head -1
 }
 
 # This server's public IP. Returns an empty string when it can't be
@@ -1083,6 +1106,57 @@ choose_mask_site() {
     done
 }
 
+# The Caddyfile from before write_caddyfile overwrote it (a temp file in the same directory); empty when
+# there is nothing to put back.
+caddyfile_backup=""
+
+drop_caddyfile_backup() {
+    [[ -n "${caddyfile_backup}" ]] && rm -f "${caddyfile_backup}"
+    caddyfile_backup=""
+    pending_caddy_basepath=""
+}
+
+# restore_caddyfile_if_panel_unchanged: when a step after write_caddyfile fails before the panel moved to the
+# new base path (certificate not issued, bootstrap did not write), put the previous Caddyfile back and restart
+# Caddy. Otherwise Caddy forwards the newly generated random base path while the panel is still on the old one:
+# the old address lands on the decoy site, the new one is a 404, and a rerun leaves the panel unreachable from
+# outside. Once the panel is on the new base path (bootstrap succeeded) the new configuration is the right one
+# and stays. Returns 0 when it put the old file back.
+restore_caddyfile_if_panel_unchanged() {
+    local new_basepath="$1" current
+    [[ -n "${caddyfile_backup}" ]] || return 1
+    current=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null | grep '^BasePath:' | awk '{print $2}')
+    if [[ "${current}" == "${new_basepath}" ]]; then
+        drop_caddyfile_backup
+        return 1
+    fi
+    if mv -f "${caddyfile_backup}" /etc/caddy/Caddyfile; then
+        caddyfile_backup=""
+        if systemctl restart caddy; then
+            echo -e "${yellow}Caddy is back on the configuration from before this run${plain}"
+            return 0
+        fi
+        echo -e "${red}The Caddy configuration was put back but restarting Caddy failed, please run: systemctl restart caddy${plain}"
+        return 1
+    fi
+    echo -e "${red}Failed to put back the previous Caddy configuration, the backup is at ${caddyfile_backup}${plain}"
+    caddyfile_backup=""
+    return 1
+}
+
+# Holds the new base path after write_caddyfile succeeded and before bootstrap moved the panel to it. An
+# interruption in that window (Ctrl-C during the 60-second certificate wait, a dropped SSH session) puts the
+# previous Caddyfile back through this; otherwise Caddy forwards the new base path while the panel is still on
+# the old one, and a rerun leaves the panel unreachable from outside.
+pending_caddy_basepath=""
+
+restore_caddyfile_on_interrupt() {
+    if [[ -n "${pending_caddy_basepath}" ]]; then
+        restore_caddyfile_if_panel_unchanged "${pending_caddy_basepath}"
+        pending_caddy_basepath=""
+    fi
+}
+
 # See spec §7 for the Caddyfile structure. Two key points:
 #   1. The panel's reverse-proxy path must exactly match the webBasePath
 #      written into the panel, or static assets will 404
@@ -1133,6 +1207,14 @@ write_caddyfile() {
         file_server"
     fi
 
+    # Keep a copy before overwriting: if a later step fails before the panel moves to the new base path it
+    # goes back (restore_caddyfile_if_panel_unchanged).
+    drop_caddyfile_backup
+    if [[ -s /etc/caddy/Caddyfile ]]; then
+        caddyfile_backup=$(mktemp /etc/caddy/Caddyfile.a-ui-prev.XXXXXX) &&
+            cp -p /etc/caddy/Caddyfile "${caddyfile_backup}" || caddyfile_backup=""
+    fi
+
     cat > /etc/caddy/Caddyfile <<EOF
 # BEGIN a-ui managed site: ${domain}
 # Generated by the a-ui setup wizard. Uninstalling a-ui removes only what lies between the BEGIN/END lines; re-running the wizard (a-ui menu "configure domain and decoy site") rewrites this whole file, sites outside the markers included (the wizard backs up /etc/caddy to /root before stopping Caddy).
@@ -1150,6 +1232,12 @@ EOF
 
     if ! caddy validate --config /etc/caddy/Caddyfile 2>&1; then
         echo -e "${red}The generated Caddyfile failed validation${plain}"
+        # Caddy has not been restarted and still runs the previous file; put the file back too so the next
+        # Caddy restart does not read this broken one.
+        if [[ -n "${caddyfile_backup}" ]]; then
+            mv -f "${caddyfile_backup}" /etc/caddy/Caddyfile
+            caddyfile_backup=""
+        fi
         return 1
     fi
     systemctl restart caddy || return 1
@@ -1399,6 +1487,9 @@ domain_flow() {
     panel_port=54321
 
     if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
+        # write_caddyfile already put the file back when validation failed; when validation passed but
+        # restarting Caddy failed the new file is still there, so put the previous one back here.
+        restore_caddyfile_if_panel_unchanged "${basepath}"
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"
@@ -1410,8 +1501,11 @@ domain_flow() {
     # failure branches would print "caddy has already been stopped;
     # nothing is currently listening on 80/443" — the opposite of the truth.
     [[ "${stopped_web_svc}" == "caddy" ]] && stopped_web_svc=""
+    pending_caddy_basepath="${basepath}"
 
     wait_for_cert "${domain}" || {
+        local caddy_restored=0
+        restore_caddyfile_if_panel_unchanged "${basepath}" && caddy_restored=1
         if [[ "${force}" == "force" ]]; then
             # On a rerun, "to avoid locking you out, the listen address
             # will not be changed" is active false reassurance: webListen
@@ -1419,8 +1513,12 @@ domain_flow() {
             # so not touching it now does not mean the panel is still
             # reachable from outside.
             echo -e "${yellow}Certificate not ready; the panel's listen address was not changed this time${plain}"
-            echo -e "${yellow}Note this is a reconfigure: the panel very likely already listens on 127.0.0.1 only,${plain}"
-            echo -e "${yellow}and Caddy is still running the previous configuration. If the panel is unreachable, recover with the commands below${plain}"
+            echo -e "${yellow}Note this is a reconfigure: the panel very likely already listens on 127.0.0.1 only.${plain}"
+            if [[ ${caddy_restored} -eq 1 ]]; then
+                echo -e "${yellow}Caddy is back on the configuration from before this run, so the panel keeps its old address; if it is unreachable, recover with the commands below${plain}"
+            else
+                echo -e "${yellow}Caddy is already on this run's new configuration and could not be put back, so the panel is most likely unreachable; recover with the commands below${plain}"
+            fi
         else
             echo -e "${yellow}Certificate not ready; to avoid locking you out of the panel, the panel's listen address will not be changed${plain}"
         fi
@@ -1460,6 +1558,7 @@ domain_flow() {
             "${cert_args[@]}" "${force_args[@]}" -json 2>&1)
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to write the panel configuration: ${out}${plain}"
+        restore_caddyfile_if_panel_unchanged "${basepath}"
         # This particular call most likely didn't manage to set webListen to
         # 127.0.0.1 (bootstrap writes every other field first and -listen
         # last, so a mid-way failure usually never reaches it). But if this
@@ -1471,6 +1570,8 @@ domain_flow() {
         print_rescue_hint "${panel_port}"
         return 1
     fi
+    # bootstrap succeeded and the panel is on the new base path, so this run's Caddyfile is the right one.
+    drop_caddyfile_backup
     systemctl restart a-ui
     if ! wait_for_panel_alive "${panel_port}" "${basepath}"; then
         echo -e "${red}Panel health check failed after restart; 127.0.0.1:${panel_port} is not responding${plain}"
@@ -1910,13 +2011,14 @@ install_a-ui() {
     old_install_dir=""
     rm -rf "${stage_dir}"
     stage_dir=""
-    trap - INT TERM HUP
+    trap interrupted_after_commit INT TERM HUP
     chmod +x /usr/local/a-ui/a-ui_en.sh
     config_after_install
     setup_wizard
     systemctl daemon-reload
     systemctl enable a-ui
     systemctl start a-ui
+    trap - INT TERM HUP
     echo -e "${green}a-ui ${last_version}${plain} install finished,it is working now..."
     echo -e ""
     echo -e "a-ui control menu usages: "
@@ -1962,6 +2064,7 @@ if [[ "$1" == "--wizard-only" ]]; then
     # decoy site" menu entry uses it to tell whether the wizard actually
     # finished. Always returning 0 lets "gave up midway + panel already on
     # 127.0.0.1 + Caddy stopped" travel silently back to the main menu.
+    trap 'trap - INT TERM HUP; echo -e "${red}Wizard interrupted${plain}"; restore_caddyfile_on_interrupt; exit 130' INT TERM HUP
     setup_wizard force
     exit $?
 fi

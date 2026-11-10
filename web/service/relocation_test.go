@@ -341,3 +341,28 @@ func TestRelocateBackHomeKeepsRelocatedAtAndAdoptedAt(t *testing.T) {
 		t.Errorf("状态行 = %+v，搬回原地区不该刷新 RelocatedAt，也不该丢 AdoptedAt", st)
 	}
 }
+
+// 打开了「不自动设置地区限制」的入站：长住外地也不自动改地区。
+func TestRelocateRespectsOptOut(t *testing.T) {
+	in, pass := relocateFixture(t, 60505)
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", in.Id).Update("no_auto_region", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := relocate(in, pass, "上海市", "长住上海", time.Now()); ok || err != nil {
+		t.Fatalf("打开了开关，应静默跳过: ok=%v err=%v", ok, err)
+	}
+	if got, _ := (&InboundService{}).GetInbound(in.Id); got.Regions != `["江苏省"]` {
+		t.Errorf("地区不该变: %s", got.Regions)
+	}
+}
+
+// 老库加列后存量行的 no_auto_region 是 NULL：照常参与（UPDATE 的条件按 coalesce 写，不能写成 = false）。
+func TestRelocateTreatsNullOptOutAsParticipating(t *testing.T) {
+	in, pass := relocateFixture(t, 60506)
+	if err := database.GetDB().Exec("UPDATE inbounds SET no_auto_region = NULL WHERE id = ?", in.Id).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := relocate(in, pass, "上海市", "长住上海", time.Now()); !ok || err != nil {
+		t.Fatalf("NULL 应当按「参与」处理: ok=%v err=%v", ok, err)
+	}
+}

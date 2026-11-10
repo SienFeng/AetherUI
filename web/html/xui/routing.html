@@ -2812,6 +2812,15 @@
                 this.loadError = '';
                 this.loadedOnce = true;
             },
+            // 改动之后的重新加载：失败时原因已写进 loadError、页面顶部照常显示重试入口，不再往外抛——改动本身已经
+            // 保存成功，调用方后面的重新验证（reverifyIfAffected）还要照常跑，也不能留下未处理的 Promise 拒绝。
+            async reloadAfterChange() {
+                try {
+                    await this.loadAll();
+                } catch (e) {
+                    // 见 loadError
+                }
+            },
             // 页面顶部那条加载失败提示上的「重试」
             async retryLoad() {
                 if (this.reloading) return;
@@ -2910,7 +2919,7 @@
                     // 服务端拒绝多半是列表已被另一个会话改过，此时它才是权威。
                     this.spinning = true;
                     try {
-                        await this.loadAll();
+                        await this.reloadAfterChange();
                     } finally {
                         this.spinning = false;
                     }
@@ -3141,7 +3150,7 @@
                 const msg = await this.post(url, data);
                 if (msg.success) {
                     this.groupModal.visible = false;
-                    await this.loadAll();
+                    await this.reloadAfterChange();
                     if (groupId) this.reverifyIfAffected({ groupId });
                 }
             },
@@ -3191,7 +3200,7 @@
                 }
                 if (msg.success) {
                     this.nodeModal.visible = false;
-                    await this.loadAll();
+                    await this.reloadAfterChange();
                     if (n.id) this.reverifyIfAffected({ nodeId: n.id });
                 }
             },
@@ -3200,7 +3209,7 @@
                     remark: node.remark, enable: !node.enable, config: '',
                 });
                 if (msg.success) {
-                    await this.loadAll();
+                    await this.reloadAfterChange();
                     this.reverifyIfAffected({ nodeId: node.id });
                 }
             },
@@ -4129,7 +4138,7 @@
                 // 重新验证同样不看 success：多地址订阅部分失败时，成功的那几个地址已经写进
                 // 合并结果、接口却返回失败，核心里的条件照样变了。
                 await this.post('aui/routing/domain-group/refresh/' + group.id);
-                await this.loadAll();
+                await this.reloadAfterChange();
                 this.reverifyIfAffected({ groupId: group.id });
             },
             groupMissing(id) {
@@ -4420,7 +4429,7 @@
                 if (!msg.success || !msg.obj) return;
                 this.importReport = msg.obj;
                 this.importReportVisible = true;
-                await this.loadAll();
+                await this.reloadAfterChange();
             },
         },
         watch: {

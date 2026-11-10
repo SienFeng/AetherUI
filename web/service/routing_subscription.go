@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -273,26 +274,54 @@ func ValidateSubscribeURLs(raw string) error {
 	if len(urls) > maxSubscribeURLs {
 		return common.NewError("订阅地址最多", maxSubscribeURLs, "个，当前", len(urls), "个")
 	}
-	for _, u := range urls {
+	for i, u := range urls {
 		if err := ValidateSubscribeURL(u); err != nil {
+			if len(urls) > 1 {
+				return common.NewError(fmt.Sprintf("第 %d 个", i+1), err)
+			}
 			return err
 		}
 	}
 	return nil
 }
 
+// ValidateSubscribeURL 检查一个订阅地址。报错里的地址先经 displaySubscribeURL 去掉查询串、片段与账号密码：
+// 订阅地址常带个人令牌（?token=…），报错会进保存失败的提示与面板日志，而日志出口只隐去形如 scheme:// 的
+// 完整地址——缺 scheme 的、带空格解析失败的原样带出去。
 func ValidateSubscribeURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return common.NewError("订阅地址无法解析:", err)
+		return common.NewError("订阅地址无法解析（检查是否夹着空格等非法字符）:", displaySubscribeURL(raw))
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return common.NewError("订阅地址必须以 http:// 或 https:// 开头:", raw)
+		return common.NewError("订阅地址必须以 http:// 或 https:// 开头:", displaySubscribeURL(raw))
 	}
 	if u.Host == "" {
-		return common.NewError("订阅地址缺少主机名:", raw)
+		return common.NewError("订阅地址缺少主机名:", displaySubscribeURL(raw))
 	}
 	return nil
+}
+
+// displaySubscribeURL 是能放进报错与日志的订阅地址：主机与路径留着（排查靠它们），查询串、片段与账号密码去掉。
+// 只做字符串切分、不走 url.Parse：要处理的恰恰是写坏了、解析不了的地址。
+func displaySubscribeURL(raw string) string {
+	s, suffix := raw, ""
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s, suffix = s[:i], "?***"
+	}
+	start := 0
+	if i := strings.Index(s, "://"); i >= 0 {
+		start = i + 3
+	}
+	rest := s[start:]
+	authority := rest
+	if j := strings.Index(rest, "/"); j >= 0 {
+		authority = rest[:j]
+	}
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		s = s[:start] + "***@" + rest[at+1:]
+	}
+	return s + suffix
 }
 
 // fetchSubscription 拉取订阅内容。超时与体积上限都是硬限制。

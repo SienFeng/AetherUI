@@ -253,7 +253,13 @@ reset_user() {
         fi
         return 0
     fi
-    /usr/local/a-ui/a-ui setting -username admin -password admin
+    if ! a_ui_setting -username admin -password admin; then
+        LOGE "failed to reset the username and password, the account is unchanged"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     # A separate command that is allowed to fail: this script always comes
     # from the main branch while the binary may be an older, rolled-back
     # version that does not know -disable2fa. Merged into the line above, an
@@ -331,7 +337,13 @@ reset_config() {
         fi
         return 0
     fi
-    /usr/local/a-ui/a-ui setting -reset
+    if ! a_ui_setting -reset; then
+        LOGE "failed to reset the settings, they are unchanged"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     echo -e "all settings are reset to default,please restart a-ui,and use default port ${green}54321${plain} to access panel"
     confirm_restart
 }
@@ -746,7 +758,7 @@ ssl_cert_issue_standalone() {
         rm -rf ~/.acme.sh/${domain}
         exit 1
     else
-        LOGE "issue certs succeed,installing certs..."
+        LOGI "issue certs succeed,installing certs..."
     fi
     #install cert
     ~/.acme.sh/acme.sh --installcert -d ${domain} --ca-file /root/cert/ca.cer \
@@ -1217,6 +1229,17 @@ reconfig_domain() {
     fi
 }
 
+# show_listens_all tells whether `a-ui setting -show` output means the panel listens on all IPs. With an empty
+# listen address current binaries print `Listen: all interfaces` and older ones `Listen: ` (empty); both count.
+# Taking only the second column would read the former as `all` and always fail.
+show_listens_all() {
+    local line listen
+    line=$(echo "$1" | grep '^Listen:' | head -1)
+    [[ -n "${line}" ]] || return 1
+    listen=$(echo "${line}" | sed -e 's/^Listen:[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [[ -z "${listen}" || "${listen}" == "all interfaces" ]]
+}
+
 # Stop Caddy and restore direct access to the panel. Only stops the
 # service, doesn't remove the package -- the user might be running other
 # sites on it. The order matters: the panel's listen address must be
@@ -1276,8 +1299,8 @@ restore_direct_panel() {
     fi
     port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
     basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
-    # Confirm it really took (an old binary exits 0 on a failed write): the listen address must be empty.
-    if [[ -n "$(echo "${show_out}" | grep '^Listen:' | awk '{print $2}')" ]]; then
+    # Confirm it really took (an old binary exits 0 on a failed write): the listen address must be "all IPs".
+    if ! show_listens_all "${show_out}"; then
         LOGE "the panel still does not listen on all IPs; Caddy will not be stopped this time"
         if [[ $# == 0 ]]; then
             before_show_menu

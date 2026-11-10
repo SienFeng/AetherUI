@@ -113,6 +113,25 @@
                 </a-form-item>
             </a-col>
         </a-row>
+        <a-row :gutter="16">
+            <a-col :span="24">
+                <a-form-item>
+                    <span slot="label">
+                        不自动设置地区限制
+                        <a-tooltip>
+                            <template slot="title">
+                                给不需要地区限制、或地区要你自己定的特例打开：「自动管理地区限制」不会替这个入站自动设置地区，
+                                长住外地也不会自动改地区。<br/>
+                                已经被自动设置的地区不会自己消失：打开这个开关的同时在上面清空或改掉地区，一起保存即可。<br/>
+                                自动出差放行照旧，由下面那个开关决定。
+                            </template>
+                            <a-icon type="question-circle" theme="filled"></a-icon>
+                        </a-tooltip>
+                    </span>
+                    <a-switch v-model="dbInbound.noAutoRegion" aria-label="不自动设置地区限制"></a-switch>
+                </a-form-item>
+            </a-col>
+        </a-row>
         <a-row v-if="dbInbound.regionList.length > 0" :gutter="16">
             <a-col :span="24">
                 <a-form-item>
@@ -125,7 +144,7 @@
                                 有每月天数、每周次数上限；发现家里与外地同时在用、或你手动收回过自动通行证，会暂停一段时间。<br/>
                                 这些阈值在「面板设置 → 连接限制 → 自动出差放行」里调整。<br/>
                                 需要开启访问日志；只放行国内 IPv4 来源。<br/>
-                                「自动管理地区限制」总开关开着时，系统会替有地区限制的入站打开一次；之后你关掉就不再打开。
+                                「自动管理地区限制」总开关开着时，系统会替有地区限制、需要认证的入站打开一次（免认证的 socks / http、端口转发等不会自动打开）；之后你关掉就不再打开。
                             </template>
                             <a-icon type="question-circle" theme="filled"></a-icon>
                         </a-tooltip>
