@@ -211,7 +211,7 @@ class AllSetting {
         this.accessLogRetentionDays = 7;
         this.trafficHourRetentionDays = 30;
         this.trafficDayRetentionDays = 365;
-        this.concurrencyIdleTimeout = 120;
+        this.concurrencyIdleTimeout = 60;
         this.autoTravelHomeSilenceHours = 2;
         this.autoTravelStableDays = 3;
         this.autoTravelPassHours = 72;

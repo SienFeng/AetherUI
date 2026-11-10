@@ -56,8 +56,9 @@ func newGeoBlockMatcher(inbounds []*model.Inbound) *geoBlockMatcher {
 // newLiveGeoBlockMatcher 只按核心**此刻**生效的地区规则判断，不带 storedAllow 那条回放分支。给判断「这个来源
 // 现在会不会被挡在门外」的调用方（并发判定）用：storedAllow 把持有通行证的入站在存储地区之外的来源一律算成
 // 被拦，那是为回放 24 小时日志写的；并发判定复用它的话，通行证有效期间通行证省份的网络全部不占名额。
-func newLiveGeoBlockMatcher(inbounds []*model.Inbound) *geoBlockMatcher {
-	return newGeoBlockMatcherWith(inbounds, activePassesOrNil(), nil)
+// passes 由调用方传入：并发判定同一轮还要拿它决定哪些入站要排「本人常住省优先」（homeNetworks）。
+func newLiveGeoBlockMatcher(inbounds []*model.Inbound, passes map[int]*model.InboundRegionPass) *geoBlockMatcher {
+	return newGeoBlockMatcherWith(inbounds, passes, nil)
 }
 
 // storedAllowOf 构造存储地区的允许集；测试里可替换，免得依赖真实 IP 库。传 nil 表示不做存储地区的回放

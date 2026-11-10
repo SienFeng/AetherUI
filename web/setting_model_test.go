@@ -56,3 +56,15 @@ func allSettingConstructor(t *testing.T, src string) string {
 	}
 	return rest[ctor : ctor+end]
 }
+
+// 前端设置模型的初始值要与后端默认值（defaultValueMap 的 60）一致：设置页先渲染这个初始值，
+// 两边不一致的话，接口返回之前那一瞬间显示的是一个错的默认值。
+func TestConcurrencyIdleTimeoutFrontendDefault(t *testing.T) {
+	data, err := assetsFS.ReadFile("assets/js/model/models.js")
+	if err != nil {
+		t.Fatalf("读取 models.js: %v", err)
+	}
+	if !strings.Contains(string(data), "this.concurrencyIdleTimeout = 60;") {
+		t.Error("models.js 里 concurrencyIdleTimeout 的初始值应为 60，与后端默认值一致")
+	}
+}

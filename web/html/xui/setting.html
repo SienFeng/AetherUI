@@ -353,48 +353,60 @@
                         <h3 class="setting-group-title is-first">防共享 / 防滥用</h3>
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="默认同时在用的网络数"
-                                               desc="入站没有单独设并发限制时，同一时间最多几个网络在用：同一个 Wi-Fi 下的多台设备算一个，手机流量、公司网络各算一个，IPv6 按 /64 算。超出的后来者会被断开；被地区规则或机房拦截挡在门外的来源不占名额。0 表示不限，默认 1（一人一个网络）。在入站里单独设的并发限制优先"
+                                               desc="每个用户同时能用几个网络，同一 Wi-Fi 算一个。0 不限，默认 1"
+                                               hint="入站没有单独设并发限制时，同一时间最多几个网络在用：同一个 Wi-Fi 下的多台设备算一个，手机流量、公司网络各算一个，IPv6 按 /64 算。超出的后来者会被断开；被地区规则或机房拦截挡在门外的来源不占名额。0 表示不限，默认 1（一人一个网络）。在入站里单独设的并发限制优先"
                                                :changed="isChanged('defaultConcurrencyLimit')" v-model.number="allSetting.defaultConcurrencyLimit"></setting-list-item>
                             <setting-list-item type="switch" title="拦截机房 / 云服务器来源"
-                                               desc="拦下来自知名机房、云服务器的连接（多数 IP 归属地库认定才算），防止有人在你的省租一台云服务器转发、绕过地区限制，或用自己的服务器中转转卖。普通家庭宽带和手机网络不受影响；端口转发（dokodemo-door）入站不受影响。只有用户都直连这台服务器时才适合打开"
+                                               desc="拦下云服务器来的连接，防止转发绕过地区限制或转卖"
+                                               hint="拦下来自知名机房、云服务器的连接（多数 IP 归属地库认定才算），防止有人在你的省租一台云服务器转发、绕过地区限制，或用自己的服务器中转转卖。普通家庭宽带和手机网络不受影响；端口转发（dokodemo-door）入站不受影响。只有用户都直连这台服务器时才适合打开"
                                                :changed="isChanged('blockIdcSources')" v-model="allSetting.blockIdcSources"></setting-list-item>
                             <setting-list-item type="switch" title="拦截 25 端口发信"
-                                               desc="拦下发往 25 端口的连接，防止有人用你的服务器群发垃圾邮件、让服务器 IP 被拉黑。手机和电脑上的邮件客户端用 465 / 587 端口，不受影响"
+                                               desc="防止服务器被拿去群发垃圾邮件，正常收发邮件不受影响"
+                                               hint="拦下发往 25 端口的连接，防止有人用你的服务器群发垃圾邮件、让服务器 IP 被拉黑。手机和电脑上的邮件客户端用 465 / 587 端口，不受影响"
                                                :changed="isChanged('blockSmtp')" v-model="allSetting.blockSmtp"></setting-list-item>
                             <setting-list-item type="switch" title="补全流量识别"
-                                               desc="关了流量嗅探的入站也识别 BT 下载和访问的域名（只用于分流判断，不改连接目标），开着嗅探的入站补上 QUIC——否则 HTTP/3 会绕过域名规则。只在生成配置时补，不改入站本身的设置，关掉就回到原样"
+                                               desc="让 BT 拦截和域名规则对所有入站都生效"
+                                               hint="关了流量嗅探的入站也识别 BT 下载和访问的域名（只用于分流判断，不改连接目标），开着嗅探的入站补上 QUIC——否则 HTTP/3 会绕过域名规则。只在生成配置时补，不改入站本身的设置，关掉就回到原样"
                                                :changed="isChanged('forceSniffing')" v-model="allSetting.forceSniffing"></setting-list-item>
                             <setting-list-item type="switch" title="流量暴涨自动限速"
-                                               desc="某个入站当天的流量超过「近 14 天日常用量（中位数）× 倍数」，而且不少于下限时，限速到当地当天结束，到点自动恢复；至少要有 7 天的用量记录才判。正常的一次性大下载也可能被限速。限速只在 Linux 上生效"
+                                               desc="当天用量远超平时就限速，次日 0 点自动恢复"
+                                               hint="某个入站当天的流量超过「近 14 天日常用量（中位数）× 倍数」，而且不少于下限时，限速到当地当天结束，到点自动恢复；至少要有 7 天的用量记录才判。正常的一次性大下载也可能被限速。限速只在 Linux 上生效"
                                                :changed="isChanged('spikeThrottleEnable')" v-model="allSetting.spikeThrottleEnable"></setting-list-item>
                             <template v-if="allSetting.spikeThrottleEnable === 1">
                                 <setting-list-item type="number" title="暴涨倍数"
-                                                   desc="当天用量达到平时的多少倍才算暴涨。可填 2 ~ 100，默认 10"
+                                                   desc="达到平时用量的几倍算暴涨。可填 2 ~ 100，默认 10"
+                                                   hint="当天用量达到平时的多少倍才算暴涨。可填 2 ~ 100，默认 10"
                                                    :changed="isChanged('spikeThrottleMultiplier')" v-model.number="allSetting.spikeThrottleMultiplier"></setting-list-item>
                                 <setting-list-item type="number" title="暴涨下限（GB）"
-                                                   desc="当天至少用了这么多才算暴涨，免得平时用得很少的人看一部电影就被限速。可填 1 ~ 10000，默认 20"
+                                                   desc="当天至少用这么多才会限速。可填 1 ~ 10000，默认 20"
+                                                   hint="当天至少用了这么多才算暴涨，免得平时用得很少的人看一部电影就被限速。可填 1 ~ 10000，默认 20"
                                                    :changed="isChanged('spikeThrottleFloorGB')" v-model.number="allSetting.spikeThrottleFloorGB"></setting-list-item>
                                 <setting-list-item type="number" title="限速到（Mbps）"
-                                                   desc="暴涨后这个入站的上下行各限到多少。可填 1 ~ 1000，默认 5"
+                                                   desc="暴涨后上下行各限到多少。可填 1 ~ 1000，默认 5"
+                                                   hint="暴涨后这个入站的上下行各限到多少。可填 1 ~ 1000，默认 5"
                                                    :changed="isChanged('spikeThrottleMbps')" v-model.number="allSetting.spikeThrottleMbps"></setting-list-item>
                             </template>
                         </a-list>
                         <h3 class="setting-group-title">并发限制</h3>
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="闲置超时（秒）"
-                                               desc="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。建议 120，可填 0 或 30 ~ 86400"
+                                               desc="多久没流量就让出名额。0 关闭，可填 30 ~ 86400，默认 60"
+                                               hint="连接仍在但连续这么久没有任何流量，就不再占用并发额度。0 表示关闭（连接不断开就一直占名额）。默认 60，可填 0 或 30 ~ 86400"
                                                :changed="isChanged('concurrencyIdleTimeout')" v-model.number="allSetting.concurrencyIdleTimeout"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">自动管理地区限制</h3>
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="switch" title="自动管理地区限制"
-                                               desc="打开后全程自动，不需要你确认：没有地区限制的用户观察期满后自动设为最常用的一个省；已有地区限制的用户自动打开出差放行；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、或撤销过的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
+                                               desc="自动把用户限定在常用省份，出差、搬家也自动处理"
+                                               hint="打开后全程自动，不需要你确认：没有地区限制的用户观察期满后自动设为最常用的一个省；已有地区限制的用户自动打开出差放行；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、或撤销过的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
                                                :changed="isChanged('autoRegionEnable')" :value="allSetting.autoRegionEnable" @input="setAutoRegionEnable"></setting-list-item>
                             <setting-list-item type="number" title="观察天数"
-                                               desc="用户第一次使用满这么多天、并且最近还在用，才判定。调小 = 更快设置，依据的数据也更少。可填 1 ~ 30，默认 1"
+                                               desc="用满几天后再判断常用省份。可填 1 ~ 30，默认 1"
+                                               hint="用户第一次使用满这么多天、并且最近还在用，才判定。调小 = 更快设置，依据的数据也更少。可填 1 ~ 30，默认 1"
                                                :changed="isChanged('autoRegionObserveDays')" v-model.number="allSetting.autoRegionObserveDays"></setting-list-item>
                             <setting-list-item type="number" title="误拦流量上限（%）"
-                                               desc="设置之后会被拦、而且自动出差放行也救不了的流量（境外、IPv6、归属地不明）超过近 7 天的这个比例时，先不设置、继续观察；发现共享迹象时照样设置。可填 0 ~ 50，默认 5"
+                                               desc="会被误拦的流量超过这个比例就先不设地区。可填 0 ~ 50，默认 5"
+                                               hint="设置之后会被拦、而且自动出差放行也救不了的流量（境外、IPv6、归属地不明）超过近 7 天的这个比例时，先不设置、继续观察；发现共享迹象时照样设置。可填 0 ~ 50，默认 5"
                                                :changed="isChanged('autoRegionMaxBlockedPercent')" v-model.number="allSetting.autoRegionMaxBlockedPercent"></setting-list-item>
                         </a-list>
                         <!-- 只对打开了「自动出差放行」的入站生效（总开关开着时，已有地区限制的入站会被自动打开一次）。
@@ -402,25 +414,32 @@
                         <h3 class="setting-group-title">自动出差放行</h3>
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="家里静默多久才放行（小时）"
-                                               desc="允许的地区里连续这么久没有实质流量，外地来源被拦时才自动放行。调小 = 更快放行，也更容易放过错峰共享。可填 1 ~ 24，默认 2"
+                                               desc="家里多久没用，外地才自动放行。可填 1 ~ 24，默认 2"
+                                               hint="允许的地区里连续这么久没有实质流量，外地来源被拦时才自动放行。调小 = 更快放行，也更容易放过错峰共享。可填 1 ~ 24，默认 2"
                                                :changed="isChanged('autoTravelHomeSilenceHours')" v-model.number="allSetting.autoTravelHomeSilenceHours"></setting-list-item>
                             <setting-list-item type="number" title="稳定使用天数"
-                                               desc="近 7 天里至少这么多天在允许的地区有流量，才算「有固定的家」，新客户不会被自动放行。可填 1 ~ 7，默认 3"
+                                               desc="近 7 天至少用几天才算有固定住处。可填 1 ~ 7，默认 3"
+                                               hint="近 7 天里至少这么多天在允许的地区有流量，才算「有固定的家」，新客户不会被自动放行。可填 1 ~ 7，默认 3"
                                                :changed="isChanged('autoTravelStableDays')" v-model.number="allSetting.autoTravelStableDays"></setting-list-item>
                             <setting-list-item type="number" title="每张通行证时长（小时）"
-                                               desc="自动发放的通行证有效多久；家里一直没用、外地仍在用时会按这个时长续期。可填 1 ~ 720，默认 72"
+                                               desc="每次放行多久，外地仍在用会自动续期。可填 1 ~ 720，默认 72"
+                                               hint="自动发放的通行证有效多久；家里一直没用、外地仍在用时会按这个时长续期。可填 1 ~ 720，默认 72"
                                                :changed="isChanged('autoTravelPassHours')" v-model.number="allSetting.autoTravelPassHours"></setting-list-item>
                             <setting-list-item type="number" title="每月最多自动放行天数"
-                                               desc="按面板时区的自然月累计。调大 = 常出差的客户更少被挡，转卖者可用的时间也更多。可填 1 ~ 31，默认 10"
+                                               desc="调大对常出差的人友好，也更容易被转卖。可填 1 ~ 31，默认 10"
+                                               hint="按面板时区的自然月累计。调大 = 常出差的客户更少被挡，转卖者可用的时间也更多。可填 1 ~ 31，默认 10"
                                                :changed="isChanged('autoTravelMonthlyDays')" v-model.number="allSetting.autoTravelMonthlyDays"></setting-list-item>
                             <setting-list-item type="number" title="每周最多自动放行次数"
-                                               desc="近 7 天内自动发放的次数上限。家里和外地频繁交替不像出差，更像错峰共享。可填 1 ~ 20，默认 3"
+                                               desc="来回切换太频繁更像共享。可填 1 ~ 20，默认 3"
+                                               hint="近 7 天内自动发放的次数上限。家里和外地频繁交替不像出差，更像错峰共享。可填 1 ~ 20，默认 3"
                                                :changed="isChanged('autoTravelWeeklyGrants')" v-model.number="allSetting.autoTravelWeeklyGrants"></setting-list-item>
                             <setting-list-item type="number" title="暂停自动放行天数"
-                                               desc="发现家里与外地同时在用，或你手动收回了自动通行证之后，这个入站暂停自动放行多少天；同样用这个天数判断「本人在用时外地也来连过」「通行证刚发就因家里回来而收回」这两种共享痕迹。30 天内第二次同时在用则暂停 30 天。0 表示不暂停（这些判断一起关闭）。可填 0 ~ 30，默认 7"
+                                               desc="发现疑似共享后暂停自动放行几天。0 不暂停，可填 0 ~ 30，默认 7"
+                                               hint="发现家里与外地同时在用，或你手动收回了自动通行证之后，这个入站暂停自动放行多少天；同样用这个天数判断「本人在用时外地也来连过」「通行证刚发就因家里回来而收回」这两种共享痕迹。30 天内第二次同时在用则暂停 30 天。0 表示不暂停（这些判断一起关闭）。可填 0 ~ 30，默认 7"
                                                :changed="isChanged('autoTravelCooldownDays')" v-model.number="allSetting.autoTravelCooldownDays"></setting-list-item>
                             <setting-list-item type="number" title="长住改地区天数"
-                                               desc="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地一直在用（至少 3 天有实质流量），就把地区直接改成外地，不再按出差处理。不能超过每月放行天数。0 表示不自动改。可填 0 ~ 7，默认 5"
+                                               desc="在外地连续用满几天，就把地区改过去。0 不改，可填 0 ~ 7，默认 5"
+                                               hint="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地一直在用（至少 3 天有实质流量），就把地区直接改成外地，不再按出差处理。不能超过每月放行天数。0 表示不自动改。可填 0 ~ 7，默认 5"
                                                :changed="isChanged('autoTravelRelocateDays')" v-model.number="allSetting.autoTravelRelocateDays"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">端口限速</h3>

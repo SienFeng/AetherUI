@@ -1,16 +1,17 @@
 {{define "component/settingListItem"}}
 <!-- 一行设置：左边标题 + 说明，右边控件（与视觉稿 v3 一致）。
      说明常驻在标题下、最多两行；更长的完整内容仍在 ⓘ 里，不删一个字。
+     给了 hint 时常驻的只是一句短说明，ⓘ 里放 hint（完整说明）。
      需要重启面板才生效的项带「需重启面板」标签；改过未保存的行左侧一条橙色竖条。 -->
 <a-list-item class="setting-row" :class="{ 'is-changed': changed, 'is-stacked': type === 'textarea' }">
     <div class="setting-row-main">
         <div class="setting-row-title">
             <span v-text="title"></span>
             <span v-if="needsRestart" class="setting-badge">需重启面板</span>
-            <a-tooltip v-if="desc && desc.length > 60" placement="topLeft" overlay-class-name="setting-hint-tip"
+            <a-tooltip v-if="fullHint" placement="topLeft" overlay-class-name="setting-hint-tip"
                        :trigger="['hover', 'focus']">
-                <template slot="title"><span v-text="desc"></span></template>
-                <span class="setting-hint" tabindex="0" :aria-label="'完整说明：' + desc">
+                <template slot="title"><span v-text="fullHint"></span></template>
+                <span class="setting-hint" tabindex="0" :aria-label="'完整说明：' + fullHint">
                     <a-icon type="info-circle"></a-icon>
                 </span>
             </a-tooltip>
@@ -64,11 +65,17 @@
     // 说明常驻显示在标题下（最多两行），超过 60 字的完整内容另放进 ⓘ。
     // changed：这一项改过、还没保存（由页面按字段比对后传入）。
     Vue.component('setting-list-item', {
-        props: ["type", "title", "desc", "value", "changed"],
+        props: ["type", "title", "desc", "hint", "value", "changed"],
         computed: {
+            // ⓘ 里的完整说明：显式给了 hint 就用它（desc 只是一句短话）；
+            // 没给时沿用原来的规则——desc 超过 60 字才把全文另放进 ⓘ。
+            fullHint() {
+                if (this.hint) return this.hint;
+                return this.desc && this.desc.length > 60 ? this.desc : '';
+            },
             // 只认「重启面板」：「重启 xray（约 10 秒后自动完成）」不需要管理员动手
             needsRestart() {
-                return /重启面板/.test(this.desc || '');
+                return /重启面板/.test((this.desc || '') + (this.hint || ''));
             },
         },
         template: `{{template "component/settingListItem"}}`,

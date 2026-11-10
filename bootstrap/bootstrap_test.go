@@ -377,6 +377,10 @@ func TestRunWritesObservabilityDefaults(t *testing.T) {
 			if v, _ := s.GetIPDBUpdateTime(); v != "" {
 				t.Fatalf("defaultValueMap 里 ipdbUpdateTime 必须仍是空串，实际 %q", v)
 			}
+			// 自动管理地区限制同理：存量部署升级后不能突然开始替所有用户设地区限制。
+			if on, _ := s.GetAutoRegionParams(); on {
+				t.Fatal("defaultValueMap 里 autoRegionEnable 必须仍是 0")
+			}
 
 			if _, err := Run(tc.opts); err != nil {
 				t.Fatalf("Run: %v", err)
@@ -387,6 +391,18 @@ func TestRunWritesObservabilityDefaults(t *testing.T) {
 			}
 			if v, _ := s.GetIPDBUpdateTime(); v != DefaultIPDBUpdateTime {
 				t.Errorf("ipdbUpdateTime 期望 %q，实际 %q", DefaultIPDBUpdateTime, v)
+			}
+			if on, _ := s.GetAutoRegionParams(); !on {
+				t.Error("新装应打开自动管理地区限制")
+			}
+			// 新装后的整份设置必须能通过保存校验：自动管理地区开着而访问日志关着是 CheckValid
+			// 拒绝的组合，写出那种状态的话管理员在设置页改什么都保存不了。
+			all, err := s.GetAllSetting()
+			if err != nil {
+				t.Fatalf("GetAllSetting: %v", err)
+			}
+			if err := all.CheckValid(); err != nil {
+				t.Errorf("新装后的设置通不过保存校验: %v", err)
 			}
 			// 常量本身也要钉一下：它一旦被改成空串，上面那条相等断言照样通过，
 			// 而空串的含义是「关闭自动更新」——新装即开启这个意图会静默消失，
@@ -423,6 +439,9 @@ func TestRunForceKeepsExistingObservabilityDefaults(t *testing.T) {
 	if err := s.SetIPDBUpdateTime(""); err != nil {
 		t.Fatalf("SetIPDBUpdateTime: %v", err)
 	}
+	if err := s.SetAutoRegionEnable(false); err != nil {
+		t.Fatalf("SetAutoRegionEnable: %v", err)
+	}
 
 	second := first
 	second.BasePath = "/second/"
@@ -436,5 +455,8 @@ func TestRunForceKeepsExistingObservabilityDefaults(t *testing.T) {
 	}
 	if v, _ := s.GetIPDBUpdateTime(); v != "" {
 		t.Errorf("ipdbUpdateTime 被向导覆盖了，实际 %q", v)
+	}
+	if on, _ := s.GetAutoRegionParams(); on {
+		t.Error("autoRegionEnable 被向导覆盖了")
 	}
 }

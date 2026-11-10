@@ -80,6 +80,19 @@ func TestIPRuleResolveDomainDefaultsToOff(t *testing.T) {
 	}
 }
 
+// 并发闲置超时默认 60 秒：120 秒时切换网络要等两分钟才连得上；30 秒时本人停下来半分钟名额就空出来，
+// 错峰共享的空子明显变大。前端 models.js 的初始值由 web.TestConcurrencyIdleTimeoutFrontendDefault 守着。
+func TestConcurrencyIdleTimeoutDefaultsTo60(t *testing.T) {
+	setupDB(t)
+	v, err := (&SettingService{}).GetConcurrencyIdleTimeout()
+	if err != nil {
+		t.Fatalf("GetConcurrencyIdleTimeout: %v", err)
+	}
+	if v != 60 {
+		t.Errorf("concurrencyIdleTimeout 默认值 = %d，期望 60", v)
+	}
+}
+
 func TestCheckValidRejectsOutOfRangeIPRuleResolveDomain(t *testing.T) {
 	all := validBaseSetting()
 	all.IPRuleResolveDomain = 2

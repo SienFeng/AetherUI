@@ -139,8 +139,8 @@ func Run(opts Options) (*Result, error) {
 		}
 	}
 
-	// 新装的开箱默认，四项：IP 分流规则也匹配域名目标、加密 DNS、记录访问
-	// 日志、每日自动更新 IP 归属地库。只在这里显式落库，不动 defaultValueMap
+	// 新装的开箱默认，五项：IP 分流规则也匹配域名目标、加密 DNS、记录访问
+	// 日志、每日自动更新 IP 归属地库、自动管理地区限制。只在这里显式落库，不动 defaultValueMap
 	// ——那张表给的是「从未写过这个 key 时读到什么」，也就是存量部署升级后的
 	// 取值，改它会让老面板里从未点过「保存配置」的那些静默启用 DoH 与
 	// IPIfNonMatch、开始持续写盘记录用户访问了哪些站点、每天出网几十 MB 拉
@@ -168,6 +168,12 @@ func Run(opts Options) (*Result, error) {
 		}
 		if err := s.SetIPDBUpdateTime(DefaultIPDBUpdateTime); err != nil {
 			return nil, fmt.Errorf("写入 IP 库更新时刻失败: %w", err)
+		}
+		// 自动管理地区限制：用户观察期满后自动设为最常用的一个省、打开出差放行，外省共享者从此
+		// 在核心里就被挡在门外。必须排在访问日志之后——它靠访问日志发现被拦的人，开着它却关着
+		// 访问日志是 CheckValid 拒绝的组合，管理员之后在设置页什么都保存不了。
+		if err := s.SetAutoRegionEnable(true); err != nil {
+			return nil, fmt.Errorf("写入自动管理地区限制开关失败: %w", err)
 		}
 	}
 
