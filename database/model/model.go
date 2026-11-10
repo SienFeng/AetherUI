@@ -96,6 +96,11 @@ type Inbound struct {
 	// 见 service.AutoTravelService。
 	AutoTravel bool `json:"autoTravel" form:"autoTravel"`
 
+	// AllowServerSources 让这个入站不受「拦截机房 / 云服务器来源」影响：给管理员自己的服务器做中转
+	// 落地时，来源就是机房 IP。零值（不豁免）＝ 升级后行为零变化。只管机房这一条，并发限制、
+	// 地区限制、25 端口、流量暴涨限速照旧。判定收敛在 service.idcExempt 一处。
+	AllowServerSources bool `json:"allowServerSources" form:"allowServerSources"`
+
 	// config part
 	Listen         string   `json:"listen" form:"listen"`
 	Port           int      `json:"port" form:"port" gorm:"unique"`

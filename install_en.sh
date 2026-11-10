@@ -46,8 +46,8 @@ stage_dir=""
 # management script is installed; there is no rollback after that.
 old_install_dir=""
 
-# Set to 1 when config_after_install could not move the credentials off the
-# default admin/admin; the end of the install repeats the warning, since the
+# Set to 1 when a fresh install ends up on the default admin / 123456 (the
+# wizard's credential step was skipped or failed); the end of the install repeats the warning, since the
 # first one has usually scrolled away behind the wizard's output by then.
 default_credentials_active=0
 
@@ -331,10 +331,10 @@ config_after_install() {
         cred_pass=""
         if [[ ${creds_set} -eq 0 ]]; then
             if [[ ${is_fresh_install} -eq 1 ]]; then
-                # A fresh install landing here still has the public default
-                # admin/admin on 0.0.0.0:54321, and an aborted wizard would
-                # leave it that way. Fall back to random credentials, as for n.
-                echo -e "${red}the username and password could not be set from your input. so the panel does not run with the public default admin/admin, random ones are generated below${plain}"
+                # A fresh install landing here gets the default admin / 123456,
+                # as for n (chosen 2026-11-10, random credentials before); every
+                # panel page then shows a banner asking to change it.
+                echo -e "${red}the username and password could not be set from your input, the default username admin / password 123456 is used below${plain}"
             else
                 echo -e "${red}the username and password could not be set, the panel keeps the credentials it had before the update${plain}"
                 print_credentials_hint
@@ -348,35 +348,31 @@ config_after_install() {
     fi
 
     if [[ ${is_fresh_install} -eq 1 && ${creds_set} -eq 0 ]]; then
-        local usernameTemp passwordTemp portTemp random_creds_set=0
-        usernameTemp=$(head -c 6 /dev/urandom | base64)
-        passwordTemp=$(head -c 6 /dev/urandom | base64)
-        a_ui_setting -username "${usernameTemp}" -password "${passwordTemp}" && random_creds_set=1
+        # The account is the public default admin / 123456 (chosen 2026-11-10:
+        # skip the step, get the default, change it in the panel); the port is
+        # still random, which keeps off part of the scanning of the default 54321.
+        local portTemp
+        if ! a_ui_setting -username "admin" -password "123456"; then
+            echo -e "${red}writing the default account failed, the panel keeps the database's initial account (also admin / 123456)${plain}"
+        fi
+        default_credentials_active=1
         if portTemp=$(pick_free_port) && a_ui_setting -port "${portTemp}"; then
             panel_port=${portTemp}
         else
             portTemp=""
         fi
-        echo -e "this is a fresh installation,will generate random login info for security concerns:"
+        echo -e "this is a fresh installation, the default account is used and a random web port was generated:"
         echo -e "###############################################"
-        if [[ ${random_creds_set} -eq 1 ]]; then
-            echo -e "${green}user name:${usernameTemp}${plain}"
-            echo -e "${green}user password:${passwordTemp}${plain}"
-        else
-            default_credentials_active=1
-            echo -e "${red}setting random credentials failed: the panel still uses the public default username admin / password admin!${plain}"
-        fi
+        echo -e "${green}user name:admin${plain}"
+        echo -e "${green}user password:123456${plain}"
         if [[ -n "${portTemp}" ]]; then
             echo -e "${red}web port:${portTemp}${plain}"
         else
             echo -e "${red}could not set a random port, the panel still uses the default port 54321${plain}"
         fi
         echo -e "###############################################"
-        if [[ ${random_creds_set} -eq 1 ]]; then
-            echo -e "${red}write the password above down now: it is stored hashed and cannot be shown again. type a-ui then 7 for port/path/username, or 4 to reset a forgotten password${plain}"
-        else
-            print_credentials_hint
-        fi
+        echo -e "${red}admin / 123456 is a public default that scanners try first, change it soon after login (every panel page also shows a reminder)${plain}"
+        print_credentials_hint
     fi
 }
 
@@ -1840,7 +1836,7 @@ install_a-ui() {
 
     # Only record "stopped by this install" if the panel was actually running: on a fresh install, or a
     # panel the admin stopped on purpose, die_restoring_panel must not start it -- on a fresh install
-    # config_after_install hasn't run yet, so it would come up as admin/admin on 0.0.0.0:54321.
+    # config_after_install hasn't run yet, so it would come up as the default admin / 123456 on 0.0.0.0:54321.
     if systemctl is-active --quiet a-ui; then
         a_ui_stopped=1
     fi
@@ -1930,7 +1926,7 @@ install_a-ui() {
     echo -e "----------------------------------------------"
     if [[ ${default_credentials_active} -eq 1 ]]; then
         echo -e ""
-        echo -e "${red}NOTE: the panel still uses the public default username admin / password admin, change it now!${plain}"
+        echo -e "${red}NOTE: the panel uses the public default username admin / password 123456, change it soon!${plain}"
         print_credentials_hint
     fi
 }

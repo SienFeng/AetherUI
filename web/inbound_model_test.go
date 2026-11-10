@@ -54,3 +54,33 @@ func dbInboundConstructor(t *testing.T, src string) string {
 	}
 	return rest[ctor : ctor+end]
 }
+
+// 新增 / 编辑入站的请求体是逐字段手写的：漏掉「允许服务器来源」的话，Gin 把它绑成 false 写回，
+// 管理员打开的豁免保存一次就被清掉，界面上没有任何报错。表单里也要真有这个开关。
+func TestInboundPayloadsCarryAllowServerSources(t *testing.T) {
+	page, err := htmlFS.ReadFile("html/xui/inbounds.html")
+	if err != nil {
+		t.Fatalf("读取 inbounds.html: %v", err)
+	}
+	src := string(page)
+	for _, fn := range []string{"async addInbound(", "async updateInbound("} {
+		start := strings.Index(src, fn)
+		if start < 0 {
+			t.Fatalf("inbounds.html 里找不到 %s，本测试该更新了", fn)
+		}
+		body := src[start:]
+		if end := strings.Index(body, "};"); end >= 0 {
+			body = body[:end]
+		}
+		if !strings.Contains(body, "allowServerSources: dbInbound.allowServerSources") {
+			t.Errorf("%s 的请求体里没有 allowServerSources", fn)
+		}
+	}
+	form, err := htmlFS.ReadFile("html/xui/form/inbound.html")
+	if err != nil {
+		t.Fatalf("读取 form/inbound.html: %v", err)
+	}
+	if !strings.Contains(string(form), `v-model="dbInbound.allowServerSources"`) {
+		t.Error("入站表单里没有「允许服务器来源」开关")
+	}
+}

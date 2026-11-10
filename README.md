@@ -14,7 +14,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install
 bash <(curl -Ls https://raw.githubusercontent.com/SienFeng/AetherUI/main/install_en.sh)
 ```
 
-安装完成后面板默认监听 **54321** 端口，默认账号密码均为 `admin`。**请立刻登录面板修改账号密码。**
+安装时脚本会请你设定面板账号密码；跳过的话使用默认账号 `admin`、密码 `123456`（面板端口随机生成，安装结束时打印）。这是公开的默认密码，**请尽快登录面板，在「面板设置 → 账号与密码」里修改**；没改之前面板每一页顶部都会提示。
 
 > 安装脚本会拉取 GitHub Release 里最新的 `a-ui-linux-<架构>.tar.gz`，解压到 `/usr/local/a-ui/`，注册 systemd 服务并开机自启。
 

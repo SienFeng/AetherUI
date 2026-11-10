@@ -17,9 +17,9 @@ func TestUpdateUserRejectsSurroundingWhitespace(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newAuthRouter(t)
-			c := mustLogin(t, r, "admin", "admin")
+			c := mustLogin(t, r, "admin", "123456")
 			msg, _ := doAuth(t, r, authReq{path: "/aui/setting/updateUser", cookie: c, form: url.Values{
-				"oldUsername": {"admin"}, "oldPassword": {"admin"},
+				"oldUsername": {"admin"}, "oldPassword": {"123456"},
 				"newUsername": {tc.username}, "newPassword": {tc.password},
 			}})
 			if msg.Success {
@@ -28,7 +28,7 @@ func TestUpdateUserRejectsSurroundingWhitespace(t *testing.T) {
 			if !strings.Contains(msg.Msg, "首尾") {
 				t.Errorf("提示没有说清楚原因: %q", msg.Msg)
 			}
-			if login, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "admin")}); !login.Success {
+			if login, _ := doAuth(t, r, authReq{path: "/login", form: loginForm("admin", "123456")}); !login.Success {
 				t.Fatalf("被拒绝的修改让原账号密码失效了: %s", login.Msg)
 			}
 		})

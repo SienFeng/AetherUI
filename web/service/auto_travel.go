@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -598,7 +597,7 @@ func (s *AutoTravelService) assemble(in *model.Inbound, active *model.InboundReg
 	input.GeoClosed = GeoDegradedInbounds()[in.Id].Mode == geoDegradeClosed
 	if logEnabled && active == nil {
 		input.Blocked = dropStoredCandidates(recentGeoBlocked(in.Id, matcher, now), home)
-		if !strings.EqualFold(string(in.Protocol), "dokodemo-door") {
+		if !idcExempt(in) {
 			input.Blocked = dropIDCCandidates(input.Blocked, idcBlockedSet(&SettingService{}, &IPDBService{}))
 		}
 		if len(input.Blocked) > 0 && cooldown > 0 {

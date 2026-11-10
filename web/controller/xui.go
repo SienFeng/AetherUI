@@ -34,8 +34,18 @@ func (a *XUIController) initRouter(g *gin.RouterGroup) {
 	a.routingController = NewRoutingController(g)
 }
 
+// page 渲染登录后的页面：带上「还在用默认密码」的标记（common_sider.html 的 defaultPasswordBanner）。
+// 只在这里加、不加进 html()：登录页也走 html()，不能对未登录的人透露默认密码还能用。
+func page(c *gin.Context, name string, title string, data gin.H) {
+	if data == nil {
+		data = gin.H{}
+	}
+	data["default_password"] = (&service.UserService{}).UsingDefaultPassword()
+	html(c, name, title, data)
+}
+
 func (a *XUIController) index(c *gin.Context) {
-	html(c, "index.html", "系统状态", nil)
+	page(c, "index.html", "系统状态", nil)
 }
 
 func (a *XUIController) inbounds(c *gin.Context) {
@@ -55,7 +65,7 @@ func (a *XUIController) inbounds(c *gin.Context) {
 	if err != nil {
 		logger.Warning("get default key file failed:", err)
 	}
-	html(c, "inbounds.html", "入站列表", gin.H{
+	page(c, "inbounds.html", "入站列表", gin.H{
 		"default_domain":    domain,
 		"default_cert_file": certFile,
 		"default_key_file":  keyFile,
@@ -63,12 +73,12 @@ func (a *XUIController) inbounds(c *gin.Context) {
 }
 
 func (a *XUIController) setting(c *gin.Context) {
-	html(c, "setting.html", "设置", nil)
+	page(c, "setting.html", "设置", nil)
 }
 
 func (a *XUIController) routing(c *gin.Context) {
 	// 「补全流量识别」开着时，生成配置会替关了嗅探的入站打开嗅探，规则列表的「永远不会命中」
 	// 警告要按同一口径判断（routing.html 的 sniffingOff，镜像 service.sniffingBlind）。
 	settingService := service.SettingService{}
-	html(c, "routing.html", "分流管理", gin.H{"force_sniffing": settingService.GetForceSniffing()})
+	page(c, "routing.html", "分流管理", gin.H{"force_sniffing": settingService.GetForceSniffing()})
 }

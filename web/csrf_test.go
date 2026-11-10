@@ -70,7 +70,7 @@ func TestCrossSiteLoginIsRejectedBeforeReachingLoginLogic(t *testing.T) {
 
 	post := func(headers map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/login",
-			strings.NewReader("username=admin&password=admin"))
+			strings.NewReader("username=admin&password=123456"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		for k, v := range headers {
 			req.Header.Set(k, v)

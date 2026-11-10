@@ -31,6 +31,7 @@
     {{ template "commonSider" . }}
     <a-layout id="content-layout">
         <a-layout-content>
+            {{ template "defaultPasswordBanner" . }}
             <div class="page-header">
                 <div class="page-heading">
                     <h1 class="page-title">入站列表</h1>
@@ -1151,8 +1152,8 @@
                 if (ms <= 7 * 86400000) return 'is-warn';
                 return '';
             },
-            // 地区 / 并发 / 限速三项合成一列。只输出**已经设了**的那几项，
-            // 三项都没设时返回空数组，单元格显示一条短横。
+            // 地区 / 并发 / 允许中转 / 限速合成一列。只输出**已经设了**的那几项，
+            // 都没设时返回空数组，单元格显示一条短横。
             limitsOf(dbInbound) {
                 const out = [];
                 const regions = dbInbound.regionList;
@@ -1168,6 +1169,13 @@
                         key: 'conc',
                         text: `并发 ${dbInbound.concurrencyLimit}`,
                         title: `最多同时 ${dbInbound.concurrencyLimit} 个网络在用（同一个 Wi-Fi 算一个，IPv6 按 /64）；没单独设的入站按面板设置里的默认值`,
+                    });
+                }
+                if (dbInbound.allowServerSources && dbInbound.protocol !== Protocols.DOKODEMO) {
+                    out.push({
+                        key: 'relay',
+                        text: '允许中转',
+                        title: '这个入站不拦机房 / 云服务器来源（给自己的服务器做中转用）',
                     });
                 }
                 if (dbInbound.upMbit > 0 || dbInbound.downMbit > 0) {
@@ -1281,6 +1289,7 @@
                     expiryTime: dbInbound.expiryTime,
                     concurrencyLimit: dbInbound.concurrencyLimit,
                     autoTravel: dbInbound.autoTravel,
+                    allowServerSources: dbInbound.allowServerSources,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,
@@ -1304,6 +1313,7 @@
                     expiryTime: dbInbound.expiryTime,
                     concurrencyLimit: dbInbound.concurrencyLimit,
                     autoTravel: dbInbound.autoTravel,
+                    allowServerSources: dbInbound.allowServerSources,
                     trafficResetMode: dbInbound.trafficResetMode,
                     regions: dbInbound.regions,
                     upMbit: dbInbound.upMbit,

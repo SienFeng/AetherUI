@@ -23,13 +23,13 @@ var badCredentials = []struct {
 	{"用户名超长", strings.Repeat("a", 257), "n3w-pass"},
 }
 
-func assertStillAdminAdmin(t *testing.T) {
+func assertStillDefaultAccount(t *testing.T) {
 	t.Helper()
 	user, err := (&UserService{}).GetFirstUser()
 	if err != nil {
 		t.Fatalf("GetFirstUser: %v", err)
 	}
-	if user.Username != "admin" || !crypto.CheckPassword(user.Password, "admin") {
+	if user.Username != "admin" || !crypto.CheckPassword(user.Password, "123456") {
 		t.Fatalf("被拒绝的修改仍然落库了: username=%q", user.Username)
 	}
 }
@@ -42,7 +42,7 @@ func TestUpdateFirstUserRejectsCredentialsTheLoginPageCannotSubmit(t *testing.T)
 			if err == nil {
 				t.Fatalf("UpdateFirstUser(%q, %q) 应当被拒绝", c.username, c.password)
 			}
-			assertStillAdminAdmin(t)
+			assertStillDefaultAccount(t)
 		})
 	}
 }
@@ -58,7 +58,7 @@ func TestUpdateUserRejectsCredentialsTheLoginPageCannotSubmit(t *testing.T) {
 			if _, err := (&UserService{}).UpdateUser(user.Id, c.username, c.password); err == nil {
 				t.Fatalf("UpdateUser(%q, %q) 应当被拒绝", c.username, c.password)
 			}
-			assertStillAdminAdmin(t)
+			assertStillDefaultAccount(t)
 		})
 	}
 }

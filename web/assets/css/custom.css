@@ -352,11 +352,14 @@ button:focus-visible,
  * 结构，不加这层限定的话 display:flex 会把 inline 表单的
  * display:inline-block 一并覆盖掉，把本该并排的字段拆成逐行堆叠——这不是
  * 本次要解决的问题，也不在「预期效果」范围内。 */
-/* 标签在控件上方（与视觉稿 v3 一致）：标签长短不一也互不挤占，控件始终占满整列。 */
+/* 标签在左、控件紧跟在后（「最低版本：[下拉框]」），与 TLS 域名 / 证书那几行 inline 表单同一种读法。
+ * 2026-11-10 管理员要求由「标签在上」改回：同一个弹窗里一半标签在上、一半标签在左，读起来是两套表单。
+ * 标签宽度随内容（nowrap），控件填满这一列剩下的宽度；窄屏（< 576px）列已经占满整行，退回标签在上，
+ * 否则长标签（rejectUnknownSni）会把控件挤得只剩几个字宽。 */
 #inbound-modal .ant-form-horizontal .ant-form-item {
     display: flex;
-    flex-direction: column;
-    align-items: stretch;
+    flex-direction: row;
+    align-items: flex-start; /* 控件下面带提示行或多选框变高时，标签仍和第一行控件齐平 */
     margin-bottom: 14px;
 }
 
@@ -364,8 +367,8 @@ button:focus-visible,
     flex: 0 0 auto;
     width: auto;
     max-width: none;
-    padding: 0 0 6px;
-    line-height: 20px;
+    padding: 0 8px 0 0;
+    line-height: 40px; /* 与 antd .ant-form-item-control 的行高一致，标签与控件中线对齐 */
     white-space: nowrap; /* 标签不折行 */
 }
 
@@ -375,14 +378,26 @@ button:focus-visible,
     color: var(--aui-text);
 }
 
-/* 标签后的冒号在上下排时是多余的 */
+/* 冒号与 inline 表单（「域名：」）一致；antd 的冒号带左右外边距，收成紧贴标签 */
 #inbound-modal .ant-form-horizontal .ant-form-item-label > label::after {
-    display: none;
+    content: '：';
+    margin: 0;
 }
 
 #inbound-modal .ant-form-horizontal .ant-form-item-control-wrapper {
-    flex: 1 1 auto;      /* 控件填满整列 */
+    flex: 1 1 auto;      /* 控件填满列内剩余宽度 */
     min-width: 0;        /* 允许收缩，避免溢出列宽 */
+}
+
+@media (max-width: 575px) {
+    #inbound-modal .ant-form-horizontal .ant-form-item {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    #inbound-modal .ant-form-horizontal .ant-form-item-label {
+        padding: 0 0 6px;
+        line-height: 20px;
+    }
 }
 
 /* 侧栏底部的版本区。ant-design-vue 1.x 的 sider 内部包一层
@@ -4625,4 +4640,9 @@ button.chip.is-degraded:hover {
     justify-content: flex-end;
     gap: 8px;
     margin-top: 16px;
+}
+
+/* 默认密码提示条：每一页内容区最上方，与页头之间留出间距。 */
+.default-password-banner {
+    margin-bottom: 16px;
 }
