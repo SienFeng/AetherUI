@@ -179,6 +179,7 @@ func TestChangedConfigArmsRollbackAndRevertsWhenPanelGoesSilent(t *testing.T) {
 	}
 
 	// 管理员改了限速值 → 这是运行中的变更，要武装自动撤销。
+	s.Heartbeat() // 管理员保存限速的那次请求：他此刻就在面板前
 	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).
 		UpdateColumn("down_mbit", 50).Error; err != nil {
 		t.Fatal(err)
@@ -237,6 +238,7 @@ func TestRolledBackConfigIsNotReappliedUntilChanged(t *testing.T) {
 	if err := s.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
+	s.Heartbeat() // 管理员保存限速的那次请求：他此刻就在面板前
 	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).
 		UpdateColumn("down_mbit", 50).Error; err != nil {
 		t.Fatal(err)
@@ -364,5 +366,100 @@ func TestUpdateInboundPersistsRateLimits(t *testing.T) {
 	// UpdateInbound 是逐字段复制的，漏掉新字段会让"改了保存后没生效"静默发生。
 	if got.UpMbit != 3 || got.DownMbit != 20 {
 		t.Errorf("上/下行限速 = %d/%d，期望 3/20", got.UpMbit, got.DownMbit)
+	}
+}
+
+// 到期 / 超流量停用、每月 1 号的自动恢复、流量暴涨限速都会改动限速集合，而那时往往没有管理员在面板前。
+// 改动前它们一样武装自动撤销：2 分钟没有面板请求，就把所有人的限速整个拆掉，而且记成「被拒绝」不再下发。
+func TestBackgroundChangeDoesNotArmRollback(t *testing.T) {
+	setupShapingDB(t)
+	f := useFakeShaper(t)
+	in := mkShapedInbound(t, 40011, true, 2, 5)
+	mkShapedInbound(t, 40012, true, 3, 6)
+	s := ShapingService{}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	// 夜里任务把一个入站因到期停用了：限速集合变了，但没有任何面板请求。
+	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).UpdateColumn("enable", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.CheckRollback(time.Now().Add(shapingRollbackTimeout + time.Second))
+	if f.tornDown != 0 {
+		t.Fatal("后台任务引起的变更武装了自动撤销，没人在面板前就把全部限速拆掉了")
+	}
+}
+
+// 被自动撤销过的配置不是永远不再下发：一小时后带着自动撤销再试一次（管理员可能只是关了页面）。
+func TestRolledBackConfigIsRetriedAfterAnHour(t *testing.T) {
+	setupShapingDB(t)
+	f := useFakeShaper(t)
+	in := mkShapedInbound(t, 40013, true, 2, 5)
+	s := ShapingService{}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.Heartbeat() // 管理员保存限速的那次请求
+	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).UpdateColumn("down_mbit", 50).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.CheckRollback(time.Now().Add(shapingRollbackTimeout + time.Second))
+	applied := len(f.applied)
+	shapingLock.Lock()
+	shapingRejectedAt = time.Now().Add(-61 * time.Minute)
+	shapingLock.Unlock()
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != applied+1 {
+		t.Fatal("被撤销一小时后的配置没有重新下发")
+	}
+	s.CheckRollback(time.Now().Add(shapingRollbackTimeout + time.Second))
+	if f.tornDown != 2 {
+		t.Errorf("重试的那次也要带着自动撤销（tornDown=%d，期望 2）", f.tornDown)
+	}
+}
+
+// 一小时后的重试只在管理员此刻在面板前时才做：重试必须带着自动撤销（被撤销过的配置可能真的掐断过网络），
+// 没人在场就没人确认，2 分钟后必然再撤一次——限速变成每小时只生效 2 分钟，「限速中」的标签却一直亮着。
+func TestRolledBackConfigIsNotRetriedWhileNobodyIsWatching(t *testing.T) {
+	setupShapingDB(t)
+	f := useFakeShaper(t)
+	in := mkShapedInbound(t, 40014, true, 2, 5)
+	s := ShapingService{}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.Heartbeat()
+	if err := database.GetDB().Model(model.Inbound{}).Where("id = ?", in.Id).UpdateColumn("down_mbit", 50).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	s.CheckRollback(time.Now().Add(shapingRollbackTimeout + time.Second))
+	applied := len(f.applied)
+	shapingLock.Lock()
+	shapingRejectedAt = time.Now().Add(-61 * time.Minute)
+	shapingLastHeartbeat = time.Now().Add(-time.Hour) // 管理员早就关了页面
+	shapingLock.Unlock()
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != applied {
+		t.Fatal("没人在面板前，被撤销过的配置不该重试（重试必带自动撤销，2 分钟后必然再撤）")
+	}
+	s.Heartbeat() // 管理员回来了
+	if err := s.Reconcile(); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != applied+1 {
+		t.Fatal("管理员回到面板后，被撤销过的配置应当重试")
 	}
 }

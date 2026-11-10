@@ -25,19 +25,26 @@ const (
 	// 就是安装根目录（systemd 的 WorkingDirectory）。
 	accessLogPath = "bin/access.log"
 
-	// 单轮最多读这么多字节，防止一次把整个日志读进内存。
-	accessLogMaxReadBytes = 4 << 20
-
-	// 日志文件超过这个大小就在消费完之后清空。xray 以 O_APPEND 打开，
-	// 截断后会继续从 0 追加，不需要重启。
-	accessLogMaxFileSize = 16 << 20
-
 	// 剩余磁盘低于这个值就停止写入。日志写满磁盘会让整个面板和 xray
 	// 一起失效，代价远大于丢一段日志。
 	accessLogMinFreeBytes = 512 << 20
 
 	// 单批插入条数。批太大时 SQLite 的单条语句参数会超限。
 	accessLogBatchSize = 200
+)
+
+// 下面三个上限是变量而不是常量，只为测试能用几 KB 的文件走到每一条分支，生产代码不改它们。
+var (
+	// 单轮最多读这么多字节，防止一次把整个日志读进内存。
+	accessLogMaxReadBytes int64 = 4 << 20
+
+	// 日志文件超过这个大小就在消费完之后清空。xray 以 O_APPEND 打开，
+	// 截断后会继续从 0 追加，不需要重启。
+	accessLogMaxFileSize int64 = 16 << 20
+
+	// accessLogEmergencyFileSize 是兜底上限：库写不进去、或读取一直跟不上时，文件超过它就
+	// 清空，丢掉未读的积压，见 Collect。
+	accessLogEmergencyFileSize int64 = 4 * (16 << 20)
 )
 
 var (
@@ -510,13 +517,17 @@ func (s *AccessLogService) MeterableConnCounts(inboundId int, sinceMs int64) (ma
 // ReadAfter 按 (time, id) 升序读出游标之后的至多 limit 行，供异常扫描增量读取。
 // 条件不单用 id：SQLite 会复用自增 id，日志被清理到 0 行后新行 id 会回到 1，
 // 单看 id 会把它们全部漏掉。访问日志库未初始化时返回空。
+//
+// 写成 time >= ? AND (time > ? OR id > ?) 而不是逻辑等价的 time > ? OR (time = ? AND id > ?)：
+// 后者在绑定参数下用不上 time 索引的定位，退化成按索引顺序把游标之前的全部历史扫一遍，
+// 理由与 DomainStatService.Aggregate 的位点查询相同（那里有完整的推导）。
 func (s *AccessLogService) ReadAfter(afterTime, afterId int64, limit int) ([]model.AccessLog, error) {
 	db := database.GetAccessLogDB()
 	if db == nil {
 		return nil, nil
 	}
 	rows := make([]model.AccessLog, 0)
-	err := db.Where("time > ? OR (time = ? AND id > ?)", afterTime, afterTime, afterId).
+	err := db.Where("time >= ? AND (time > ? OR id > ?)", afterTime, afterTime, afterId).
 		Order("time, id").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -569,7 +580,11 @@ func (s *AccessLogService) PruneOrphans() (int64, error) {
 }
 
 // Collect 消费 xray 写下的新日志行。
-func (s *AccessLogService) Collect() error {
+//
+// 文件大小有两道上限：追平之后超过 accessLogMaxFileSize 就清空（常规路径）；任何时候超过
+// accessLogEmergencyFileSize 都清空（兜底）。落后时不按常规上限截断——那会把还没读的积压
+// 整段丢掉——而是在一次调用里连读几轮追平。
+func (s *AccessLogService) Collect() (err error) {
 	accessLogLock.Lock()
 	defer accessLogLock.Unlock()
 
@@ -585,7 +600,9 @@ func (s *AccessLogService) Collect() error {
 			accessLogDiskWarned = true
 			logger.Warning("磁盘剩余空间不足, 已暂停写入访问日志")
 		}
-		return nil
+		// 不写库，但 access.log 自己也在吃这块盘：直接返回的话 xray 会一直往里追加，
+		// 正好把剩下的空间写满。与库没打开时一样读过即弃、保住大小上限。
+		return discardAccessLog()
 	}
 	accessLogDiskWarned = false
 
@@ -593,11 +610,31 @@ func (s *AccessLogService) Collect() error {
 	if db == nil {
 		// 访问日志库没初始化成功，没有地方可写：照旧读过即弃，并保住文件大小上限——
 		// 不读不截的话 xray 会让 access.log 无限增长。
-		if _, err := accessLogTailer.Read(accessLogMaxReadBytes); err != nil {
-			return err
-		}
-		return accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
+		return discardAccessLog()
 	}
+
+	// 从这里往下，恢复进度或写库失败时都不推进、不截断，等下一轮重读（宁可重复不丢）。
+	// 可库一直坏着（被锁、表坏了、盘满）的话文件就会无限增长，所以不论成败都再过一道
+	// 兜底上限：宁可丢一段积压，也不能让 access.log 把磁盘写满。
+	defer func() {
+		truncated, terr := accessLogTailer.TruncateIfLargerThan(accessLogEmergencyFileSize)
+		if terr != nil {
+			if err == nil {
+				err = terr
+			}
+			return
+		}
+		if !truncated {
+			return
+		}
+		reason := "读取跟不上写入"
+		if err != nil {
+			reason = err.Error()
+		}
+		logger.Warningf("%v 超过 %v 字节仍未写进库，已清空，未读的积压丢弃（%v）",
+			accessLogTailer.Path, accessLogEmergencyFileSize, reason)
+	}()
+
 	if !accessLogResumed {
 		if err := resumeAccessLogTailer(db); err != nil {
 			return err
@@ -605,39 +642,79 @@ func (s *AccessLogService) Collect() error {
 		accessLogResumed = true
 	}
 
-	lines, next, err := accessLogTailer.Peek(accessLogMaxReadBytes)
-	if err != nil {
-		return err
-	}
-	if next != accessLogTailer.Offset() {
-		entries := make([]accesslog.Entry, 0, len(lines))
-		for _, line := range lines {
-			// xray 的 access 文件只写访问记录，但保险起见丢掉认不出的行，
-			// 不往库里塞垃圾。
-			e, ok := accesslog.ParseLine(line, time.Local)
-			// 控制面入站的记录是面板自己每几秒一次的 gRPC 轮询，不是任何用户的流量：
-			// 线上一天一万五千多行、约占全表 15%，只白占空间、拖慢查询。
-			if !ok || e.Inbound == xray.APIInboundTag {
-				continue
-			}
-			entries = append(entries, e)
-		}
-		head, err := accessLogTailer.Head()
+	// 轮数取「兜底上限 ÷ 单轮上限」：库恢复之后的第一次调用就能把攒到兜底上限的积压一次
+	// 读完，不会读到一半被兜底截断丢掉剩下的。平时一轮就追平。
+	rounds := int(accessLogEmergencyFileSize / accessLogMaxReadBytes)
+	for i := 0; i < rounds; i++ {
+		caughtUp, err := collectAccessLogRound(db)
 		if err != nil {
 			return err
 		}
-		// 写库失败时不 Commit：下一轮从原进度重读这一段，不丢也不重。
-		if err := storeWithCursor(db, entries, model.AccessLogCursor{Offset: next, Head: head}); err != nil {
+		if caughtUp {
+			_, err := accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
 			return err
 		}
-		accessLogTailer.Commit(next)
 	}
-	return accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
+	return nil
+}
+
+// collectAccessLogRound 读一批、写一批，返回是否已经追平（没有新的完整行可读）。
+func collectAccessLogRound(db *gorm.DB) (caughtUp bool, err error) {
+	lines, next, err := accessLogTailer.Peek(accessLogMaxReadBytes)
+	if err != nil {
+		return false, err
+	}
+	if next == accessLogTailer.Offset() {
+		return true, nil
+	}
+	// 在读完之后取「现在」：这一批里的每一行都写在它之前。
+	now := time.Now()
+	entries := make([]accesslog.Entry, 0, len(lines))
+	for _, line := range lines {
+		// xray 的 access 文件只写访问记录，但保险起见丢掉认不出的行，
+		// 不往库里塞垃圾。
+		//
+		// 按 UTC 解析：面板拉起的核心带着 TZ=UTC（xray/process.go）。日志里的时间不带
+		// 时区，按本地时间写的话夏令时结束那一小时会重复，解析不出唯一的时刻。
+		e, ok := accesslog.ParseLine(line, time.UTC)
+		// 控制面入站的记录是面板自己每几秒一次的 gRPC 轮询，不是任何用户的流量：
+		// 线上一天一万五千多行、约占全表 15%，只白占空间、拖慢查询。
+		if !ok || e.Inbound == xray.APIInboundTag {
+			continue
+		}
+		// 读到的行不可能来自未来（同一个时钟，先写后读）。解析出未来时刻只有两种来源：
+		// 升级前那一版核心按本地时间写下、还没读走的残行（东八区会落到 8 小时之后），
+		// 或者两次读之间系统时钟往回拨过。原样入库会把域名统计与异常扫描的 (time, id)
+		// 游标顶到未来，期间写进来的新行全部被跳过，所以按读到的时刻记。
+		if e.Time.After(now) {
+			e.Time = now
+		}
+		entries = append(entries, e)
+	}
+	head, err := accessLogTailer.Head()
+	if err != nil {
+		return false, err
+	}
+	// 写库失败时不 Commit：下一轮从原进度重读这一段，不丢也不重。
+	if err := storeWithCursor(db, entries, model.AccessLogCursor{Offset: next, Head: head}); err != nil {
+		return false, err
+	}
+	accessLogTailer.Commit(next)
+	return false, nil
+}
+
+// discardAccessLog 在没法写库时读过即弃，并保住文件大小上限。
+func discardAccessLog() error {
+	if _, err := accessLogTailer.Read(accessLogMaxReadBytes); err != nil {
+		return err
+	}
+	_, err := accessLogTailer.TruncateIfLargerThan(accessLogMaxFileSize)
+	return err
 }
 
 // hasEnoughDisk 判断日志库所在分区是否还有余量。取不到用量时放行——
-// 探测本身出问题不该把功能关掉。
-func hasEnoughDisk() bool {
+// 探测本身出问题不该把功能关掉。做成变量只为测试能模拟磁盘将满。
+var hasEnoughDisk = func() bool {
 	usage, err := disk.Usage(filepath.Dir(config.GetAccessLogDBPath()))
 	if err != nil || usage == nil {
 		return true

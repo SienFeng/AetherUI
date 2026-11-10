@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -53,24 +54,29 @@ func runXrayTest(cfg map[string]any) error {
 	file.Close()
 
 	cmd := exec.Command(binaryPath, "run", "-test", "-c", file.Name())
-	done := make(chan struct{})
-	var output []byte
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	// 在这里同步启动：起不来（权限、架构不对）是校验器自身的故障，按 fail open 放行——修复前
+	// 它被当成「校验未通过」，报一句后面什么都没有的错并拦下所有保存。同步启动也让超时那一支
+	// 能安全地拿到 cmd.Process：修复前它与跑 CombinedOutput 的 goroutine 同时读写这个字段。
+	if err := cmd.Start(); err != nil {
+		logger.Warning("skip config validation, cannot start xray:", err)
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	var runErr error
-	go func() {
-		output, runErr = cmd.CombinedOutput()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case runErr = <-done:
 	case <-time.After(xrayTestTimeout):
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
+		cmd.Process.Kill()
 		logger.Warning("skip config validation, xray -test timed out")
 		return nil
 	}
 
-	text := string(output)
+	// Wait 返回之后 output 不再被写，可以读。
+	text := output.String()
 	if runErr == nil || strings.Contains(text, "Configuration OK") {
 		return nil
 	}

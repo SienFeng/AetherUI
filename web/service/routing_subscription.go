@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -114,7 +115,10 @@ func convertSubscriptionLine(item string) (string, bool, bool) {
 			//
 			// 必须带显式前缀：手工录入路径（ParseDomains）存的是 keyword:xxx，
 			// 两条路径形态不一致的话 MergeDomains 按字符串去重，去不掉重复。
-			if !isValidKeyword(value) {
+			//
+			// 非 ASCII 的关键词跳过：嗅探出的域名一律是 ASCII（中文域名是 xn--
+			// 形态），这样的关键词永远匹配不到，与手工录入路径的拒绝同一口径。
+			if !isValidKeyword(value) || !isASCII(value) {
 				return "", false, false
 			}
 			return "keyword:" + strings.ToLower(value), false, true
@@ -169,7 +173,9 @@ func domainRule(prefix, value string) (string, bool) {
 	value = strings.TrimPrefix(value, "*.")
 	value = strings.TrimPrefix(value, ".")
 	value = strings.TrimSuffix(value, ".")
-	if !isValidDomain(value) {
+	// 国际化域名转成 punycode，理由见 domainToASCII；转不了就当垃圾跳过。
+	value, err := domainToASCII(value)
+	if err != nil || !isValidDomain(value) {
 		return "", false
 	}
 	return prefix + strings.ToLower(value), true
@@ -197,8 +203,10 @@ func isValidDomain(s string) bool {
 		}
 		for _, r := range label {
 			isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
-			// 允许非 ASCII：xray 接受中文等国际化域名
-			if !isAlnum && r != '-' && r != '_' && r < 128 {
+			// 不收非 ASCII：xray 虽然接受「例子.cn」这样的配置，但嗅探出的 SNI/Host
+			// 是 punycode，那是一条永不命中的哑规则。调用方（domainRule）已先用
+			// domainToASCII 转成 xn-- 形态，到这里还剩非 ASCII 就是转不了的垃圾。
+			if !isAlnum && r != '-' && r != '_' {
 				return false
 			}
 		}
@@ -334,4 +342,54 @@ func ShouldUpdateNow(now time.Time, lastUpdatedAt int64, hour, minute int) bool 
 	}
 	// 上次成功早于今天的时间点，说明今天这一轮还没跑过
 	return time.UnixMilli(lastUpdatedAt).In(now.Location()).Before(target)
+}
+
+// urlInTextPattern 抓出一段文本里的 URL，交给 redactURL 脱敏。
+//
+// 终止字符除了空白、引号与尖括号，还包括本包错误文案里紧跟在地址后面的全角
+// 标点（refreshLockedURLs 用「（」包住原因、用「；」分隔多个地址）：不在这里
+// 停下的话，整段原因会被当成 URL 的一部分。不按「只收 ASCII」来停，是因为
+// 主机名可能是中文域名，那样会在主机名中间停住，后面的 query 反而漏网。
+var urlInTextPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>（）；，、]+`)
+
+// redactURL 去掉一个地址里的 userinfo、query 与 fragment，只留 scheme://host/path，
+// 用于写日志。
+//
+// 订阅地址的 query 里常带访问令牌（规则托管、机场订阅的 ?token=、?key=），userinfo
+// 里则是账号密码；而面板日志会被拷去排查、贴进工单。只在日志里脱敏：界面上显示的
+// 失败原因是管理员自己填的地址，原样给他看才知道是哪一行出了问题。
+//
+// 不用 url.Parse：要脱敏的恰恰包括解析不了的地址（ValidateSubscribeURL 的报错就会
+// 带着它们），解析失败时原样返回等于把令牌写进日志。
+func redactURL(raw string) string {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return raw
+	}
+	scheme, rest := raw[:i+3], raw[i+3:]
+	suffix := ""
+	// fragment 与 query 谁先出现谁之后的内容都不要；只有 query 留一个占位，
+	// 让排查的人知道原地址是带参数的。
+	if j := strings.IndexAny(rest, "?#"); j >= 0 {
+		if rest[j] == '?' {
+			suffix = "?***"
+		}
+		rest = rest[:j]
+	}
+	// authority 到第一个 / 为止，其中最后一个 @ 之前是 userinfo；path 里的 @ 不算。
+	authEnd := strings.Index(rest, "/")
+	if authEnd < 0 {
+		authEnd = len(rest)
+	}
+	if at := strings.LastIndex(rest[:authEnd], "@"); at >= 0 {
+		rest = "***" + rest[at:]
+	}
+	return scheme + rest + suffix
+}
+
+// redactURLsInText 对一段文本（多是嵌着订阅地址的错误信息）里的每个 URL 做 redactURL。
+// net/http 的错误会以 Get "<地址>": ... 的形式带出整串地址，它只把密码换成 ***，
+// query 原样保留。
+func redactURLsInText(s string) string {
+	return urlInTextPattern.ReplaceAllStringFunc(s, redactURL)
 }

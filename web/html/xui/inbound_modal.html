@@ -50,15 +50,15 @@
                 this.dbInbound = new DBInbound();
             }
             this.confirm = confirm;
-            this.preview = { shown: false, loading: false, error: '', result: null, regionsText: '' };
+            this.preview = { shown: false, loading: false, error: '', result: null, regionsText: '', regions: [] };
             this.visible = true;
             this.loadProvinces();
         },
         // 地区预演：按当前选中的省份，看这个入站近 7 天的真实来源会被拦掉哪些。只读。
-        preview: { shown: false, loading: false, error: '', result: null, regionsText: '' },
+        preview: { shown: false, loading: false, error: '', result: null, regionsText: '', regions: [] },
         async requestPreview(regions) {
             const id = this.dbInbound.id;
-            this.preview = { shown: true, loading: true, error: '', result: null, regionsText: regions.join('、') };
+            this.preview = { shown: true, loading: true, error: '', result: null, regionsText: regions.join('、'), regions: regions.slice() };
             let msg;
             try {
                 const resp = await axios.post('/aui/inbound/regions/preview/' + id, { regions: JSON.stringify(regions) });
@@ -85,7 +85,7 @@
         async fillSuggestion() {
             const regions = this.dbInbound.regionList.length ? this.dbInbound.regionList.slice() : this.provinces.slice(0, 1);
             if (regions.length === 0) {
-                this.preview = { shown: true, loading: false, error: 'IP 归属地库未加载，没有可选地区', result: null, regionsText: '' };
+                this.preview = { shown: true, loading: false, error: 'IP 归属地库未加载，没有可选地区', result: null, regionsText: '', regions: [] };
                 return;
             }
             const result = await this.requestPreview(regions);
@@ -102,7 +102,15 @@
             const r = this.preview.result;
             if (!r || !r.totalBytes) return '0%';
             const pct = r.blockedBytes * 100 / r.totalBytes;
-            return (pct > 0 && pct < 1 ? '<1' : pct.toFixed(0)) + '%';
+            if (pct > 0 && pct < 1) return '<1%';
+            if (pct > 99 && pct < 100) return '>99%';
+            return pct.toFixed(0) + '%';
+        },
+        // 预演的省份里，出现在异地同时使用记录中的那些：可能是共享者所在地。
+        coexistingPicked() {
+            const r = this.preview.result;
+            const flagged = (r && r.suggestion && r.suggestion.coexisting) || [];
+            return flagged.filter(p => (this.preview.regions || []).indexOf(p) >= 0);
         },
         // 只对**新建**的入站生效：编辑既有入站时用的是它自己存下来的值，
         // 覆盖会静默改掉管理员之前的配置。

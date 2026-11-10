@@ -716,6 +716,11 @@ func TestAggregateHandlesBatchBoundaryMidMillisecond(t *testing.T) {
 	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
 
 	const n = domainStatBatchSize + 500
+	// 这条测的是位点跨批次边界不漏不重，靠「每个不同的域名各一行、计数为 1」来看出漏读或
+	// 重复计入，与每桶的目标数上限无关（那条见 TestAggregateCapsDistinctTargetsPerBucket）。
+	oldHour, oldDay := domainStatMaxHourTargets, domainStatMaxDayTargets
+	domainStatMaxHourTargets, domainStatMaxDayTargets = n, n
+	t.Cleanup(func() { domainStatMaxHourTargets, domainStatMaxDayTargets = oldHour, oldDay })
 	entries := make([]accesslog.Entry, 0, n)
 	for i := 0; i < n; i++ {
 		entries = append(entries, accesslog.Entry{

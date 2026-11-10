@@ -2,8 +2,8 @@ package web
 
 import (
 	"context"
-	"crypto/tls"
 	"embed"
+	"errors"
 	"github.com/BurntSushi/toml"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -17,8 +17,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"a-ui/config"
 	"a-ui/database"
@@ -26,8 +26,8 @@ import (
 	"a-ui/util/common"
 	"a-ui/web/controller"
 	"a-ui/web/job"
-	"a-ui/web/network"
 	"a-ui/web/service"
+	"a-ui/web/session"
 )
 
 //go:embed assets/*
@@ -78,8 +78,14 @@ func (f *wrapAssetsFileInfo) ModTime() time.Time {
 }
 
 type Server struct {
+	// mu 保护 httpServer / listener / stopped：监听失败时它们由后台重试的
+	// goroutine 写入（retryListen），Stop 在另一个 goroutine 里读。
+	mu         sync.Mutex
+	stopped    bool
 	httpServer *http.Server
 	listener   net.Listener
+	// retrying 等后台的监听重试退出，见 Stop。
+	retrying sync.WaitGroup
 
 	index  *controller.IndexController
 	server *controller.ServerController
@@ -98,14 +104,21 @@ type Server struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// startBackground 拉起不依赖 Web 服务的那一半：IP 库、两个独立库、xray 与
+	// 全部定时任务（默认是 startDataPlane）。做成字段只为测试：真实的那一份会
+	// 拉起 xray、连它的 gRPC 端口、过几秒去 GitHub 查版本，测试里换成桩。
+	startBackground func()
 }
 
 func NewServer() *Server {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{
+	s := &Server{
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	s.startBackground = s.startDataPlane
+	return s
 }
 
 func (s *Server) getHtmlFiles() ([]string, error) {
@@ -155,7 +168,7 @@ func (s *Server) getHtmlTemplate(funcMap template.FuncMap) (*template.Template, 
 // 验证这两层确实挂在了引擎上——中间件写得再对，没挂上也等于没有。
 func useSessionAndCSRF(engine *gin.Engine, secret []byte) {
 	store := cookie.NewStore(secret)
-	engine.Use(sessions.Sessions("session", store))
+	engine.Use(sessions.Sessions(session.CookieName, store))
 	engine.Use(csrfGuard())
 }
 
@@ -168,7 +181,7 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	engine := gin.Default()
+	engine := newEngine()
 
 	secret, err := s.settingService.GetSecret()
 	if err != nil {
@@ -311,8 +324,12 @@ func (s *Server) startTask() {
 	// 每 30 秒检查一次 xray 是否在运行
 	s.cron.AddJob("@every 30s", job.NewCheckXrayRunningJob())
 
+	// 下面几条延迟任务都等在 s.ctx 上：SIGHUP 重建 Server 时旧 Server 的 Stop 会
+	// 取消它，延迟还没到的就不再执行，不会与新 Server 的同一个任务各跑一遍。
 	go func() {
-		time.Sleep(time.Second * 5)
+		if !s.waitOrStop(time.Second * 5) {
+			return
+		}
 		// 每 10 秒统计一次流量，首次启动延迟 5 秒，与重启 xray 的时间错开
 		s.cron.AddJob("@every 10s", job.NewXrayTrafficJob())
 	}()
@@ -332,7 +349,9 @@ func (s *Server) startTask() {
 	// 与这两个源合计约 60 MB 的下载互相抢网络。关闭自动更新时它一个字节都
 	// 不下，存量部署因此完全无感。
 	go func() {
-		time.Sleep(time.Second * 30)
+		if !s.waitOrStop(time.Second * 30) {
+			return
+		}
 		job.NewIPDBUpdateJob().RunInitial()
 	}()
 
@@ -363,6 +382,8 @@ func (s *Server) startTask() {
 
 	// 自动出差放行：只对开了「自动出差」的地区受限入站生效，见 AutoTravelService。
 	s.cron.AddJob("@every 1m", job.NewAutoTravelJob())
+	// 自动设置地区限制：总开关在面板设置里，默认关闭。
+	s.cron.AddJob("@every 10m", job.NewAutoRegionJob())
 
 	// 路由规则后台审计：代次变化或满 10 分钟才真正验证；异常扫描每分钟一次。
 	s.cron.AddJob("@every 30s", job.NewRouteAuditJob())
@@ -386,6 +407,8 @@ func (s *Server) startTask() {
 
 	// 每 10 秒对齐一次端口限速规则；没人配限速时不碰 tc
 	s.cron.AddJob("@every 10s", job.NewShapingJob())
+	// 流量暴涨自动限速：10 分钟一轮发 / 撤限速单，ShapingJob 负责把限速下发到内核。
+	s.cron.AddJob("@every 10m", job.NewSpikeThrottleJob())
 
 	// 每 6 小时检查一次面板是否有新版本。
 	s.cron.AddJob("@every 6h", job.NewPanelVersionJob())
@@ -394,7 +417,9 @@ func (s *Server) startTask() {
 	// 面板要等 6 小时才显示版本状态。延迟 10 秒是为了避开面板刚启动时
 	// 和 xray 启动抢网络。
 	go func() {
-		time.Sleep(time.Second * 10)
+		if !s.waitOrStop(time.Second * 10) {
+			return
+		}
 		job.NewPanelVersionJob().Run()
 	}()
 
@@ -405,21 +430,33 @@ func (s *Server) startTask() {
 	// RunInitial 内部自带 common.Recover，**不要去掉**：这条 goroutine
 	// 不经过 cron，上面那层 cron.Recover 覆盖不到它。
 	go func() {
-		time.Sleep(time.Second * 15)
+		if !s.waitOrStop(time.Second * 15) {
+			return
+		}
 		job.NewSharingRiskJob().RunInitial()
 	}()
 }
 
-func (s *Server) Start() (err error) {
-	defer func() {
-		if err != nil {
-			s.Stop()
-		}
-	}()
-
+// Start 拉起面板：定时任务的 cron、Web 路由、xray 与全部定时任务，最后是 Web 服务。
+//
+// xray 与定时任务不依赖 Web 服务，不论路由建没建起来、端口能不能监听都要拉起来。
+// 改动前它们排在 net.Listen 与加载面板证书之后，任何一步失败 Start 都返回错误：
+// 首次启动时进程记一行日志就以退出码 0 退出；SIGHUP 重启时旧 Server 已经把 xray
+// 停了——两条路径都是全部代理用户断网，而 a-ui.service 没配 Restart=，没有任何
+// 东西会把它重新拉起来。端口被占、监听地址不在本机网卡上、面板证书文件被删、
+// 库里躺着一个 gin 注册不了的根路径，都能触发。
+//
+// 现在 Web 服务的问题只记错误日志（带救援命令）：监听失败在后台按间隔重试，条件
+// 恢复（端口空出来、证书文件补回来）之后面板自己恢复；绝不退回成「不带根路径/
+// 证书地监听 0.0.0.0」这种更危险的状态。路由初始化失败（多半是根路径非法）重试
+// 无用，要等管理员用命令行改掉再重启。所以 Start 现在总是返回 nil。
+func (s *Server) Start() error {
 	loc, err := s.settingService.GetTimeLocation()
 	if err != nil {
-		return err
+		// 读不出时区说明连设置表都读不了。照样往下走：能拉起多少拉起多少，
+		// 也比整个进程退出、全员断网强。
+		logger.Error("读取面板时区失败，定时任务改按本机时区运行:", err)
+		loc = time.Local
 	}
 	// robfig/cron 自身不做 panic 恢复，任何一个定时任务 panic 都会直接带走整个
 	// 面板进程——实测过一次：XrayTrafficJob 解析流量时越界，面板启动 25 秒后静默
@@ -427,51 +464,21 @@ func (s *Server) Start() (err error) {
 	s.cron = cron.New(cron.WithLocation(loc), cron.WithSeconds(), cron.WithChain(cron.Recover(cronLogger{})))
 	s.cron.Start()
 
-	engine, err := s.initRouter()
-	if err != nil {
-		return err
-	}
+	engine, routerErr := s.initRouterSafely()
 
-	certFile, err := s.settingService.GetCertFile()
-	if err != nil {
-		return err
-	}
-	keyFile, err := s.settingService.GetKeyFile()
-	if err != nil {
-		return err
-	}
-	listen, err := s.settingService.GetListen()
-	if err != nil {
-		return err
-	}
-	port, err := s.settingService.GetPort()
-	if err != nil {
-		return err
-	}
-	listenAddr := net.JoinHostPort(listen, strconv.Itoa(port))
-	listener, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return err
-	}
-	if certFile != "" || keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			listener.Close()
-			return err
-		}
-		c := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
-		listener = network.NewAutoHttpsListener(listener)
-		listener = tls.NewListener(listener, c)
-	}
-	if certFile != "" || keyFile != "" {
-		logger.Info("web server run https on", listener.Addr())
-	} else {
-		logger.Info("web server run http on", listener.Addr())
-	}
-	s.listener = listener
+	s.startBackground()
 
+	if routerErr != nil {
+		logger.Error("面板 Web 服务初始化失败，面板暂时无法访问；xray 与定时任务照常运行，代理用户不受影响:", routerErr, routerFailedHint)
+		s.consumeXrayRestartFlag()
+		return nil
+	}
+	s.serveOrRetry(engine)
+	return nil
+}
+
+// startDataPlane 拉起 IP 库、访问日志库、用量库、xray 与全部定时任务。
+func (s *Server) startDataPlane() {
 	// IP 归属地库缺失或损坏不阻断面板启动：只是归属地显示与地区限制不可用，
 	// 管理员可以在设置页点「更新 IP 库」补上。
 	// 先把旧位置（安装目录 bin/ 下）的库搬到 /etc/<name>/：更新面板会 rm -rf
@@ -504,33 +511,50 @@ func (s *Server) Start() (err error) {
 	}
 
 	s.startTask()
-
-	s.httpServer = &http.Server{
-		Handler: engine,
-	}
-
-	go func() {
-		s.httpServer.Serve(listener)
-	}()
-
-	return nil
 }
 
+// Stop 依次停掉 Web 服务、定时任务与 xray。SIGHUP 重启时紧接着就是新 Server 的
+// Start，所以每一步都要真的收尾再往下走，并且各自有上限，不让一个卡住的请求或
+// 任务把重启拖住。
 func (s *Server) Stop() error {
+	s.mu.Lock()
+	s.stopped = true
+	srv := s.httpServer
+	s.mu.Unlock()
+
+	// 先取消 ctx：后台的监听重试与 startTask 里那几条延迟任务都等在它上面。
+	// Shutdown 不能再用它——改动前正是先 cancel 再 Shutdown(s.ctx)，Shutdown
+	// 立刻返回 context.Canceled，在途请求没人等，随后又去关一个 Shutdown 已经
+	// 关掉的 listener，Stop 因此永远返回错误。
 	s.cancel()
-	s.xrayService.StopXray()
+	// 等后台的监听重试真正退出再往下走：它可能正打开着一个刚监听上的端口，
+	// 新 Server 紧接着就要监听同一个端口。重试的每一步（读设置、listen）都很快，
+	// 收到取消后立即返回。
+	s.retrying.Wait()
+
+	var err error
+	if srv != nil {
+		// Shutdown 会关掉它正在 Serve 的 listener，不必再单独 Close。
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		err = srv.Shutdown(ctx)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.Warning("仍有请求在", shutdownTimeout, "内没有处理完，强制关闭剩余连接")
+			err = srv.Close()
+		}
+	}
+
+	// 等正在跑的定时任务收尾，再停 xray：流量统计这类任务正在和 xray 通信，
+	// 先停 xray 会让它们这一轮白跑；也免得新 Server 的同一个任务与它并发执行。
 	if s.cron != nil {
-		s.cron.Stop()
+		select {
+		case <-s.cron.Stop().Done():
+		case <-time.After(cronDrainTimeout):
+			logger.Warning("仍有定时任务在", cronDrainTimeout, "内没有跑完，不再等待")
+		}
 	}
-	var err1 error
-	var err2 error
-	if s.httpServer != nil {
-		err1 = s.httpServer.Shutdown(s.ctx)
-	}
-	if s.listener != nil {
-		err2 = s.listener.Close()
-	}
-	return common.Combine(err1, err2)
+	s.xrayService.StopXray()
+	return err
 }
 
 func (s *Server) GetCtx() context.Context {

@@ -30,7 +30,7 @@ func makeInbound(t *testing.T, expiryTime int64, enable bool, up, down int64) *m
 		Up:             up,
 		Down:           down,
 		Total:          0,
-		Settings:       `{"clients":[{"id":"x"}]}`,
+		Settings:       vlessSettings(), // 合法配置：续期拉回停用的入站时要过真实 xray 校验
 		StreamSettings: `{"network":"tcp"}`,
 		Sniffing:       `{"enabled":true}`,
 	}

@@ -217,10 +217,7 @@ func TestBuildApplyPlanRejectsBadInput(t *testing.T) {
 		{"网卡名含分号", "eth0;reboot", []Limit{{InboundId: 3, Port: 10011, DownMbit: 5}}},
 		{"没有任何限速", "eth0", []Limit{{InboundId: 3, Port: 10011}}},
 		{"入站 id 为 0", "eth0", []Limit{{InboundId: 0, Port: 10011, DownMbit: 5}}},
-		// 9999 是默认类。撞上它就等于把默认类的速率改成了这个用户的限速，
-		// 整机未分类流量（含 SSH）会一起被限死。
-		{"入站 id 撞上默认类", "eth0", []Limit{{InboundId: DefaultClassId, Port: 10011, DownMbit: 5}}},
-		{"入站 id 超上限", "eth0", []Limit{{InboundId: 70000, Port: 10011, DownMbit: 5}}},
+		// id ≥ 9999 不再拒绝：分到一个空闲类号，见 TestPlanAcceptsLargeInboundIdsWithoutTouchingOthers。
 		{"端口越界", "eth0", []Limit{{InboundId: 3, Port: 70000, DownMbit: 5}}},
 		{"速率为负", "eth0", []Limit{{InboundId: 3, Port: 10011, DownMbit: -1}}},
 		{"速率超上限", "eth0", []Limit{{InboundId: 3, Port: 10011, DownMbit: 999999}}},
@@ -352,5 +349,51 @@ func TestTeardownPlanIncludesIfbCleanup(t *testing.T) {
 		if !found {
 			t.Errorf("完整拆除计划里缺少 %q", want)
 		}
+	}
+}
+
+// SQLite 自增到上万之后，一个 id ≥ 9999 的入站设了限速：改动前整份计划被拒绝，所有人的限速一起失效，
+// 每 10 秒刷一条警告。现在它分到一个没被占用的类号，其余入站的类号不变。
+func TestPlanAcceptsLargeInboundIdsWithoutTouchingOthers(t *testing.T) {
+	cmds, err := BuildApplyPlan("eth0", []Limit{
+		{InboundId: 7, Port: 10007, DownMbit: 5},
+		{InboundId: 12000, Port: 12000, DownMbit: 8},
+	})
+	if err != nil {
+		t.Fatalf("BuildApplyPlan: %v", err)
+	}
+	classes := map[string]bool{}
+	for _, c := range cmds {
+		for i, a := range c.Args {
+			if a == "classid" && i+1 < len(c.Args) {
+				classes[c.Args[i+1]] = true
+			}
+		}
+	}
+	if !classes["1:7"] {
+		t.Error("小 id 的类号变了：现有机器上的规则会无谓地换号")
+	}
+	if !classes["1:9998"] {
+		t.Errorf("大 id 应分到 1:9998，实际类号: %v", classes)
+	}
+	if classes["1:12000"] {
+		t.Error("1:12000 超出 HTB 类号范围（tc 按十六进制解析，最大 ffff）")
+	}
+	// id 恰好等于默认类号：绝不能分到默认类（整机未分类流量含 SSH 会被一起限死）。
+	cmds, err = BuildApplyPlan("eth0", []Limit{{InboundId: DefaultClassId, Port: 10011, DownMbit: 5}})
+	if err != nil {
+		t.Fatalf("BuildApplyPlan(9999): %v", err)
+	}
+	leaf := 0
+	for _, c := range cmds {
+		if len(c.Args) > 8 && c.Args[1] == "class" && c.Args[8] == "1:9999" && c.Args[len(c.Args)-1] == mbit(5) {
+			t.Error("入站 9999 的限速类撞上了默认类")
+		}
+		if len(c.Args) > 8 && c.Args[1] == "class" && c.Args[8] == "1:9998" {
+			leaf++
+		}
+	}
+	if leaf == 0 {
+		t.Error("入站 9999 没有分到 1:9998")
 	}
 }

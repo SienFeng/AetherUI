@@ -124,18 +124,65 @@ func TestParseLineThreeSegmentDetour(t *testing.T) {
 	}
 }
 
+// 真实的 rejected 行：核心（proxy/*/server.go 里每一处 log.AccessRejected）只填来源与原因，
+// To 恒为空串、也没有 [detour]（Detour 只在 app/dispatcher 的放行路径上才写），所以
+// "rejected" 之后是两个空格紧跟原因。认不出属于哪个入站，只能丢弃。
 func TestParseLineRejected(t *testing.T) {
-	line := `2026/09/03 01:00:00.000000 from tcp:1.2.3.4:1111 rejected tcp:a.com:443 [inbound-1] some error`
+	line := `2026/09/03 01:00:00.000000 from 192.0.2.10:51234 rejected  proxy/vless/encoding: invalid request user id`
 
-	e, ok := ParseLine(line, time.UTC)
-	if !ok {
-		t.Fatal("解析失败")
+	if e, ok := ParseLine(line, time.UTC); ok {
+		t.Fatalf("rejected 行没有入站信息，不该解析成功，却得到 %+v", e)
 	}
-	if e.Accepted {
-		t.Error("Accepted = true，rejected 行应为 false")
+}
+
+// 原因里经常带着地址。IPv6 地址的方括号不是路由信息：修复前它被当成了入站 tag，
+// 这条记录以 Inbound="2001:db8::5"、inbound_id=0 落库。
+func TestParseLineRejectedReasonWithBracketedIPv6IsNotADetour(t *testing.T) {
+	for _, line := range []string{
+		`2026/09/03 01:00:00.000000 from tcp:[2001:db8::5]:51234 rejected  proxy/socks: failed to read request > read tcp [2001:db8::5]:51234->[2001:db8::1]:1080: i/o timeout`,
+		// 原因的第二个词恰好以方括号开头：目标为空时这里不能把原因的第一个词当成目标。
+		`2026/09/03 01:00:00.000000 from 192.0.2.10:51234 rejected  common/drain: [2001:db8::5]:443 drained connection`,
+	} {
+		if e, ok := ParseLine(line, time.UTC); ok {
+			t.Errorf("行 %q 不该解析成功，却得到 Inbound=%q Route=%q", line, e.Inbound, e.Route)
+		}
 	}
-	if e.Inbound != "inbound-1" {
-		t.Errorf("Inbound = %q，期望 inbound-1", e.Inbound)
+}
+
+// 方括号必须紧跟在目标之后（common/log/access.go 的 AccessMessage.String 只写一个空格）。
+func TestParseLineRequiresDetourRightAfterTarget(t *testing.T) {
+	line := `2026/09/03 01:00:00.000000 from tcp:192.0.2.10:1111 accepted tcp:www.example.com:443 something [inbound-1 -> direct]`
+	if e, ok := ParseLine(line, time.UTC); ok {
+		t.Errorf("目标后面不是方括号的行不该解析成功，却得到 %+v", e)
+	}
+}
+
+// http 入站记的是请求的 URL（proxy/http/server.go 的 To: request.URL），不是 host:port：
+// CONNECT 是 "//host:port"，普通代理请求是 "http://host/path"。不归一的话域名统计里
+// 「http」会成为一个注册域名，按目标的查询与分流验证也都对不上。默认端口与核心一致：
+// https 为 443，其余为 80。
+func TestParseLineNormalizesHTTPProxyTargets(t *testing.T) {
+	for _, c := range []struct{ logged, want string }{
+		{"//www.example.com:443", "www.example.com:443"},
+		{"http://www.example.com/index.html?q=1", "www.example.com:80"},
+		{"http://www.example.com:8080/a/b", "www.example.com:8080"},
+		{"https://www.example.com/", "www.example.com:443"},
+		{"http://[2001:db8::1]:8080/", "[2001:db8::1]:8080"},
+		{"//[2001:db8::1]:443", "[2001:db8::1]:443"},
+		{"http://192.0.2.7/", "192.0.2.7:80"},
+	} {
+		line := `2026/09/03 01:00:00.000000 from 192.0.2.10:51234 accepted ` + c.logged + ` [inbound-1 -> direct]`
+		e, ok := ParseLine(line, time.UTC)
+		if !ok {
+			t.Errorf("%q 解析失败", c.logged)
+			continue
+		}
+		if e.Target != c.want {
+			t.Errorf("%q 归一成 %q，期望 %q", c.logged, e.Target, c.want)
+		}
+		if e.Inbound != "inbound-1" || e.Route != "direct" || e.SourceIP != "192.0.2.10" {
+			t.Errorf("%q 的其余字段不对: %+v", c.logged, e)
+		}
 	}
 }
 
@@ -244,8 +291,8 @@ func TestTailerTruncateResetsOffset(t *testing.T) {
 	if _, err := tl.Read(1 << 20); err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if err := tl.TruncateIfLargerThan(5); err != nil {
-		t.Fatalf("TruncateIfLargerThan: %v", err)
+	if truncated, err := tl.TruncateIfLargerThan(5); err != nil || !truncated {
+		t.Fatalf("TruncateIfLargerThan = %v, %v，期望截断", truncated, err)
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -271,8 +318,8 @@ func TestTailerDoesNotTruncateSmallFile(t *testing.T) {
 	if _, err := tl.Read(1 << 20); err != nil {
 		t.Fatal(err)
 	}
-	if err := tl.TruncateIfLargerThan(1 << 20); err != nil {
-		t.Fatal(err)
+	if truncated, err := tl.TruncateIfLargerThan(1 << 20); err != nil || truncated {
+		t.Fatalf("TruncateIfLargerThan = %v, %v，没超过阈值不该截断", truncated, err)
 	}
 	st, _ := os.Stat(path)
 	if st.Size() == 0 {

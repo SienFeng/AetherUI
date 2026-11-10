@@ -685,7 +685,7 @@
                            :type="passwordVisible ? 'text' : 'password'"
                            autocomplete="current-password" spellcheck="false"
                            placeholder='{{ i18n "password" }}'
-                           v-model.trim="user.password"
+                           v-model="user.password"
                            @input="errorMsg = ''" @keyup="checkCapsLock" @keydown="checkCapsLock">
                     <button type="button" class="field-action"
                             :aria-label="passwordVisible ? '隐藏密码' : '显示密码'"

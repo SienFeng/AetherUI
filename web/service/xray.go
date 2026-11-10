@@ -41,6 +41,26 @@ func XrayApplyGeneration() uint64 {
 	return xrayApplyGen.Load()
 }
 
+// procMu 保护 p 与 result 这两个包级变量本身的读写。RestartXray / StopXray 在 lock 里改它们，
+// 而面板首页的状态轮询（每 2 秒）、流量采集（每 10 秒）都不拿 lock 就读；result 是字符串，
+// 不加保护的并发读写可能读到撕裂的值。进程自己的状态由 xray.Process 内部的锁保护。
+var procMu sync.RWMutex
+
+// currentProcess 返回当前的 xray 进程（可能为 nil）。不持有 lock 的调用方一律经它取。
+func currentProcess() *xray.Process {
+	procMu.RLock()
+	defer procMu.RUnlock()
+	return p
+}
+
+// swapProcess 换上新的 xray 进程，并清掉旧进程的输出缓存。调用方持有 lock。
+func swapProcess(np *xray.Process) {
+	procMu.Lock()
+	p = np
+	result = ""
+	procMu.Unlock()
+}
+
 type XrayService struct {
 	inboundService  InboundService
 	settingService  SettingService
@@ -49,35 +69,43 @@ type XrayService struct {
 }
 
 func (s *XrayService) IsXrayRunning() bool {
-	return p != nil && p.IsRunning()
+	cur := currentProcess()
+	return cur != nil && cur.IsRunning()
 }
 
 func (s *XrayService) GetXrayErr() error {
-	if p == nil {
+	cur := currentProcess()
+	if cur == nil {
 		return nil
 	}
-	return p.GetErr()
+	return cur.GetErr()
 }
 
 func (s *XrayService) GetXrayResult() string {
-	if result != "" {
-		return result
+	procMu.RLock()
+	cached, cur := result, p
+	procMu.RUnlock()
+	if cached != "" {
+		return cached
 	}
-	if s.IsXrayRunning() {
+	if cur == nil || cur.IsRunning() {
 		return ""
 	}
-	if p == nil {
-		return ""
+	out := cur.GetResult()
+	procMu.Lock()
+	if p == cur { // 期间换过进程的话，不把旧进程的输出记成新进程的
+		result = out
 	}
-	result = p.GetResult()
-	return result
+	procMu.Unlock()
+	return out
 }
 
 func (s *XrayService) GetXrayVersion() string {
-	if p == nil {
+	cur := currentProcess()
+	if cur == nil {
 		return "Unknown"
 	}
-	return p.GetVersion()
+	return cur.GetVersion()
 }
 
 func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
@@ -91,7 +119,11 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Config 不认识的顶层段在上面这一步被静默丢掉了，至少让管理员在日志里看到。
+	xray.WarnDroppedTemplateKeys([]byte(templateConfig))
 
+	// 「补全流量识别」：在生成时补，不改库里的入站（关掉开关就回到管理员原来的嗅探设置）。
+	forceSniffing := s.settingService.GetForceSniffing()
 	inbounds, err := s.inboundService.GetAllInbounds()
 	if err != nil {
 		return nil, err
@@ -101,6 +133,9 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 			continue
 		}
 		inboundConfig := inbound.GenXrayInboundConfig()
+		if forceSniffing {
+			inboundConfig.Sniffing = []byte(forcedSniffing(string(inbound.Protocol), string(inboundConfig.Sniffing)))
+		}
 		xrayConfig.InboundConfigs = append(xrayConfig.InboundConfigs, *inboundConfig)
 	}
 
@@ -111,6 +146,10 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	// 必须排在 routingInjector 之后：那一步重写了整个 outbounds 数组，
 	// 本注入器要往它的首位加 domainStrategy。
 	if err := s.dnsInjector.Inject(xrayConfig); err != nil {
+		return nil, err
+	}
+	// 必须排在 dnsInjector 之后：dokodemo 的直连副本要带上默认出站的 domainStrategy。
+	if err := applyDokodemoDirect(xrayConfig); err != nil {
 		return nil, err
 	}
 
@@ -132,14 +171,17 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 		return nil, err
 	}
 
+	// 端口被本机其它程序占着的入站不下发（见 xray_port_conflict.go）。必须是最后一步。
+	applyPortConflicts(xrayConfig)
 	return xrayConfig, nil
 }
 
 func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, error) {
-	if !s.IsXrayRunning() {
+	cur := currentProcess()
+	if cur == nil || !cur.IsRunning() {
 		return nil, errors.New("xray is not running")
 	}
-	return p.GetTraffic(true)
+	return cur.GetTraffic(true)
 }
 
 func (s *XrayService) RestartXray(isForce bool) error {
@@ -148,14 +190,20 @@ func (s *XrayService) RestartXray(isForce bool) error {
 	defer lock.Unlock()
 	logger.Debug("restart xray, force:", isForce)
 
+	// 端口冲突：先注销已经空出来的，生成之后再探测运行中的核心没占着的端口（xray_port_conflict.go）。
+	recoverPortConflicts()
 	xrayConfig, err := s.GetXrayConfig()
 	if err != nil {
 		return err
 	}
+	excludeBusyInbounds(xrayConfig, runningConfigOf(p))
 
 	if p != nil && p.IsRunning() {
 		if !isForce && p.GetConfig().Equals(xrayConfig) {
 			logger.Debug("not need to restart xray")
+			// 核心跑的就是这一份：它的地区规则结果（降级状态、dat 代码）如实记为已生效。不提交的话，与
+			// 核心字节相同、只有降级状态不同的生成会让每一轮都再置一次重启标志。
+			commitGeoApplied(xrayConfig)
 			return nil
 		}
 		// 配置确实变了，但改动可能全都落在核心支持运行时重载的部分。
@@ -166,16 +214,24 @@ func (s *XrayService) RestartXray(isForce bool) error {
 		// 真的发了 RPC 是两码事，混在一句「已通过控制面热应用」里会让
 		// 「明明什么都没改却说下发了」的日志误导排查。
 		if !isForce && s.tryHotApply(p, xrayConfig) {
+			commitGeoApplied(xrayConfig)
 			return nil
 		}
+		// 热应用中途登记的端口冲突（AddInbound 撞上端口占用之后又有别的 RPC 失败）也不能带进新核心。
+		excludePortConflicts(xrayConfig)
+		// 先把新配置写下去再停核心：写不下去（磁盘满、只读）时旧核心照常跑，而不是整机断网。
+		if err := xray.WriteConfigFile(xrayConfig); err != nil {
+			return err
+		}
+		s.drainTraffic(p)
 		p.Stop()
 	}
 
-	p = xray.NewProcess(xrayConfig)
-	result = ""
+	swapProcess(xray.NewProcess(xrayConfig))
 	if err := p.Start(); err != nil {
 		return err
 	}
+	commitGeoApplied(xrayConfig)
 	xrayApplyGen.Inc()
 	return nil
 }
@@ -202,6 +258,13 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 		return true
 	}
 
+	// 删除/修改的入站在旧端口上的已建立连接要断掉（见 xray_conn_kill.go）；本平台断不了就整进程重启。
+	killPorts := hotDiffKillPorts(process.GetConfig(), diff)
+	if len(killPorts) > 0 && !connKillSupported() {
+		logger.Debug("热应用：本平台断不开被删除/修改入站上的已建立连接，退回重启")
+		return false
+	}
+
 	apiPort := process.GetAPIPort()
 	if apiPort <= 0 {
 		logger.Debug("热应用：拿不到 xray 控制面端口，退回重启")
@@ -224,8 +287,18 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 			return false
 		}
 	}
+	// 端口被占的入站不退回重启（新核心同样 bind 不上，整机断网），登记冲突、其余改动照常下发。
+	var busy map[string]bool
 	for _, raw := range diff.AddedInbounds {
 		if err := api.AddInbound(raw); err != nil {
+			if tag, spec, ok := addedInboundSpec(raw); ok && isBindError(err) {
+				registerPortConflict(tag, spec, err)
+				if busy == nil {
+					busy = map[string]bool{}
+				}
+				busy[tag] = true
+				continue
+			}
 			logger.Debug("热应用：新增入站失败，退回重启:", err)
 			return false
 		}
@@ -258,14 +331,23 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 			return false
 		}
 	}
+	if err := killInboundConns(killPorts); err != nil {
+		logger.Warning("热应用：", err, "，退回整进程重启以保证旧连接断开")
+		return false
+	}
 
+	// 核心实际持有的配置：没加进去的入站不能记成已下发，否则下一轮比对以为它已经在核心里了。
+	applied := newCfg
+	if len(busy) > 0 {
+		applied = withoutInbounds(newCfg, busy)
+	}
 	if meterOnly {
 		// 只换了计量池：不推进应用代次，分流审计的结论继续有效（见 xrayApplyGen 的说明）。
-		process.SetConfig(newCfg)
+		process.SetConfig(applied)
 		logger.Debug("xray 计量池改动已通过控制面下发，无需重启")
 		return true
 	}
-	process.SetConfig(newCfg)
+	process.SetConfig(applied)
 	xrayApplyGen.Inc()
 	logger.Info("xray 配置改动已通过控制面下发，无需重启")
 	return true
@@ -276,6 +358,7 @@ func (s *XrayService) StopXray() error {
 	defer lock.Unlock()
 	logger.Debug("stop xray")
 	if s.IsXrayRunning() {
+		s.drainTraffic(p)
 		return p.Stop()
 	}
 	return errors.New("xray is not running")

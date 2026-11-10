@@ -290,6 +290,14 @@ TcpStreamSettings.TcpResponse = class extends XrayCommonClass {
 };
 
 class KcpStreamSettings extends XrayCommonClass {
+    // mKCP 的伪装（header）与混淆密码（seed）已被核心移除：kcpSettings 里只要出现这两个键，
+    // 哪怕是 header.type = none 或空串 seed，核心都会拒绝整份配置（KCPConfig.Build 判的是
+    // HeaderConfig != nil || Seed != nil；实测原文 "The feature mkcp header & seed has been
+    // removed"）。核心给的替代是 streamSettings.finalmask 的 udp 掩码（mkcp-legacy），面板暂未提供。
+    //
+    // 所以新建的入站一律不带这两个键。type / seed 只从存量配置里读出来：legacyObfs 为真时
+    // toJson 原样保留它们、deprecatedFeatures 报出来并挡住保存，直到管理员点「清除」——
+    // 静默丢掉的话，客户端会连不上而界面上看不出任何原因。
     constructor(mtu=1350, tti=20,
                 uplinkCapacity=5,
                 downlinkCapacity=20,
@@ -297,7 +305,8 @@ class KcpStreamSettings extends XrayCommonClass {
                 readBufferSize=2,
                 writeBufferSize=2,
                 type='none',
-                seed=RandomUtil.randomSeq(10),
+                seed='',
+                legacyObfs=false,
                 ) {
         super();
         this.mtu = mtu;
@@ -309,6 +318,7 @@ class KcpStreamSettings extends XrayCommonClass {
         this.writeBuffer = writeBufferSize;
         this.type = type;
         this.seed = seed;
+        this.legacyObfs = legacyObfs;
     }
 
     static fromJson(json={}) {
@@ -321,12 +331,20 @@ class KcpStreamSettings extends XrayCommonClass {
             json.readBufferSize,
             json.writeBufferSize,
             ObjectUtil.isEmpty(json.header) ? 'none' : json.header.type,
-            json.seed,
+            ObjectUtil.isEmpty(json.seed) ? '' : json.seed,
+            // header: null 同样会被拒绝（json.RawMessage 收到的是 "null"），seed: null 不会。
+            json.header !== undefined || (json.seed !== undefined && json.seed !== null),
         );
     }
 
+    clearLegacyObfs() {
+        this.type = 'none';
+        this.seed = '';
+        this.legacyObfs = false;
+    }
+
     toJson() {
-        return {
+        const json = {
             mtu: this.mtu,
             tti: this.tti,
             uplinkCapacity: this.upCap,
@@ -334,11 +352,12 @@ class KcpStreamSettings extends XrayCommonClass {
             congestion: this.congestion,
             readBufferSize: this.readBuffer,
             writeBufferSize: this.writeBuffer,
-            header: {
-                type: this.type,
-            },
-            seed: this.seed,
         };
+        if (this.legacyObfs) {
+            json.header = { type: this.type };
+            json.seed = this.seed;
+        }
+        return json;
     }
 }
 
@@ -1047,6 +1066,15 @@ class Inbound extends XrayCommonClass {
                 fix: '改用 ws 或 grpc。QUIC 传输已从核心移除。',
             });
         }
+        if (this.stream.network === 'kcp' && this.stream.kcp.legacyObfs) {
+            const kcp = this.stream.kcp;
+            found.push({
+                field: 'kcp 伪装 / 密码',
+                value: kcp.seed ? kcp.type + ' / ' + kcp.seed : kcp.type,
+                fix: '在下方 kcp 设置里点「清除」后保存，客户端也要同步去掉伪装与密码。'
+                    + 'mKCP 的 header 与 seed 已从核心移除，带着它们（哪怕是 none 或空密码）整份配置都会被拒绝。',
+            });
+        }
         const clients = this.settings && (this.settings.vlesses || this.settings.clients);
         if (clients instanceof Array) {
             for (const c of clients) {
@@ -1143,7 +1171,7 @@ class Inbound extends XrayCommonClass {
         let obj = {
             v: '2',
             ps: remark,
-            add: address,
+            add: Inbound.bareHost(address),
             port: this.port,
             id: this.settings.vmesses[0].id,
             aid: this.settings.vmesses[0].alterId,
@@ -1156,31 +1184,79 @@ class Inbound extends XrayCommonClass {
         return 'vmess://' + base64(JSON.stringify(obj, null, 2));
     }
 
+    // 分享链接里嵌入主机名时用的形式。URI 的 authority 里 IPv6 字面量必须带方括号
+    // （RFC 3986 §3.2.2），否则主机与端口分不开：new URL('vless://id@2001:db8::1:443')
+    // 直接抛 Invalid URL，整条链接生成失败。地址有两个来源——浏览器的 location.hostname
+    // 对 IPv6 已经自带方括号，监听地址（DBInbound.address 取 listen）不带——两种都要接住。
+    static uriHost(address) {
+        const host = Inbound.bareHost(address);
+        return host.includes(':') ? '[' + host + ']' : host;
+    }
+
+    // 去掉 IPv6 的方括号。vmess 链接的 add 是 JSON 字段而不是 URI authority，放裸地址。
+    static bareHost(address) {
+        const host = String(address || '');
+        return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+    }
+
+    // scheme://user@host:port?params#remark。user 要转义：Trojan 的密码可以含 @ : / # ?，
+    // 原样拼进去会把链接从中间截断。
+    static genUrlLink(scheme, user, address, port, params, remark) {
+        const url = new URL(`${scheme}://${encodeURIComponent(user)}@${Inbound.uriHost(address)}:${port}`);
+        for (const [key, value] of params) {
+            url.searchParams.set(key, value);
+        }
+        url.hash = encodeURIComponent(remark);
+        return url.toString();
+    }
+
     genVLESSLink(address = '', remark='') {
         const settings = this.settings;
         const uuid = settings.vlesses[0].id;
-        const port = this.port;
-        const type = this.stream.network;
         const params = new Map();
+        address = this.genShareParams(address, params);
+
+        const flow = this.settings.vlesses[0].flow;
+        if (!ObjectUtil.isEmpty(flow)) {
+            params.set("flow", flow);
+        }
+        return Inbound.genUrlLink('vless', uuid, address, this.port, params, remark);
+    }
+
+    // VLESS 与 Trojan 的分享链接共用同一套查询参数：type / security / 传输细节 / tls 或
+    // reality。参数名必须与面板自己的解析器一致（util/link/outbound.go 的 applyTransport 与
+    // applySecurity），两边由 util/link/inbound_link_roundtrip_test.go 钉住。
+    // 把参数写进 params，返回链接里该用的地址：tls 填了域名时换成证书域名。
+    genShareParams(address, params) {
         params.set("type", this.stream.network);
         params.set("security", this.stream.security);
-        switch (type) {
+        switch (this.stream.network) {
             case "tcp":
                 const tcp = this.stream.tcp;
                 if (tcp.type === 'http') {
+                    // type 参数已被传输方式占用，解析端只认 headerType=http 才建 http 伪装头；
+                    // 缺了它客户端按 header none 连接，与服务端对不上。
+                    params.set("headerType", "http");
                     const request = tcp.request;
                     params.set("path", request.path.join(','));
-                    const index = request.headers.findIndex(header => header.name.toLowerCase() === 'host');
-                    if (index >= 0) {
-                        const host = request.headers[index].value;
-                        params.set("host", host);
+                    const hosts = request.headers
+                        .filter(header => header.name.toLowerCase() === 'host')
+                        .map(header => header.value);
+                    if (hosts.length > 0) {
+                        params.set("host", hosts.join(','));
                     }
                 }
                 break;
             case "kcp":
+                // 新建的 kcp 入站没有伪装与密码（见 KcpStreamSettings），链接里也就不带：
+                // headerType 省略即 none。只有存量配置里还留着它们时才原样带上。
                 const kcp = this.stream.kcp;
-                params.set("headerType", kcp.type);
-                params.set("seed", kcp.seed);
+                if (kcp.legacyObfs) {
+                    params.set("headerType", kcp.type);
+                    if (!ObjectUtil.isEmpty(kcp.seed)) {
+                        params.set("seed", kcp.seed);
+                    }
+                }
                 break;
             case "ws":
                 const ws = this.stream.ws;
@@ -1235,19 +1311,7 @@ class Inbound extends XrayCommonClass {
                 params.set("pqv", re.settings.mldsa65Verify);
             }
         }
-
-        const flow = this.settings.vlesses[0].flow;
-        if (!ObjectUtil.isEmpty(flow)) {
-            params.set("flow", flow);
-        }
-
-        const link = `vless://${uuid}@${address}:${port}`;
-        const url = new URL(link);
-        for (const [key, value] of params) {
-            url.searchParams.set(key, value)
-        }
-        url.hash = encodeURIComponent(remark);
-        return url.toString();
+        return address;
     }
 
     genSSLink(address='', remark='') {
@@ -1256,13 +1320,17 @@ class Inbound extends XrayCommonClass {
         if (!ObjectUtil.isEmpty(server)) {
             address = server;
         }
-        return 'ss://' + safeBase64(settings.method + ':' + settings.password + '@' + address + ':' + this.port)
+        return 'ss://' + safeBase64(settings.method + ':' + settings.password + '@' + Inbound.uriHost(address) + ':' + this.port)
             + '#' + encodeURIComponent(remark);
     }
 
+    // 与 VLESS 同一套参数。改动前这里只拼了 password@address:port：解析端对缺省的
+    // security 一律按 tls 处理，于是 REALITY 链接丢了 pbk / sid / sni，tls 链接丢了
+    // 证书域名与 sni，ws / grpc 丢了 path / serviceName——客户端全都连不上。
     genTrojanLink(address='', remark='') {
-        let settings = this.settings;
-        return `trojan://${settings.clients[0].password}@${address}:${this.port}#${encodeURIComponent(remark)}`;
+        const params = new Map();
+        address = this.genShareParams(address, params);
+        return Inbound.genUrlLink('trojan', this.settings.clients[0].password, address, this.port, params, remark);
     }
 
     genLink(address='', remark='') {

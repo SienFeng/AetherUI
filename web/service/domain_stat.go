@@ -2,6 +2,7 @@ package service
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,6 +25,29 @@ const (
 	// 这期间榜单是残缺的；连跑到追平即可，20 轮（40 万行）的上限则防止
 	// 单次调用长时间占住 CPU 与两个库。
 	domainStatMaxRounds = 20
+
+	// domainStatFolded 是被封顶挤掉的目标合并成的那一行的 Domain，见 domainStatMaxHourTargets。
+	// 空串不会与任何真实目标撞上：Registrable 解析不出的目标在 Aggregate 里根本不计数。
+	// domain.IsMeterable 拒绝它，计量池不会选中它；TopDomains 不列它。
+	domainStatFolded = ""
+)
+
+// domainStatMaxHourTargets / domainStatMaxDayTargets 是每个入站、每个桶里单独成行的目标数上限，
+// 域名与 IP 字面量各算各的。超出的新目标不再各占一行，次数并进 domainStatFolded 那一行。
+//
+// 修复前每个不同的目标（含 IP 字面量）都各占一个小时行和一个日行、分别留 30 天和 365 天：
+// 一个跑 BT 或被扫描器借道的入站一天就能留下上万个不同的 IP，表随之无界增长。上限只挡新目标，
+// 已经有行的目标照常累加；同一批里的新目标按次数从多到少放行，常去的目标先占位。两类各算各的，
+// IP 洪水挤不掉域名。界面最多列 50 行、计量池每入站最多 60 个，上限远在这两者之上，正常使用
+// 碰不到；最坏情况下每入站约 2×200×24×30 + 2×500×365 ≈ 65 万行，而不是无界。
+//
+// 不把 IP 字面量折成 /24：榜单点进去是按目标子串查访问日志，计量池给 IP 目标下发的是精确
+// 的 ip 规则，折叠后的字符串在这两处都对不上。
+//
+// 是变量而不是常量，只为测试能用几个目标走到封顶分支。
+var (
+	domainStatMaxHourTargets = 200
+	domainStatMaxDayTargets  = 500
 )
 
 // DomainStatService 负责域名统计的聚合、清理与查询。
@@ -154,12 +178,15 @@ func (s *DomainStatService) Aggregate() (int, error) {
 			// 聚合一遍历史——这是需要人判断"值不值得"的操作，不适合
 			// 程序自己替管理员做主）。
 			//
-			// 24 小时的容差覆盖两类良性抖动，不是任意选的：面板与 xray
-			// 各自独立启动，重启窗口内若系统时区被改动，time.Local 是
-			// 进程内缓存、两个进程在这段窗口里对同一时刻的本地时间解读
-			// 可能整体错位最多 26 小时（不同时区偏移之差的极值）；再加上
-			// 普通的 NTP 抖动，24 小时是一个远超正常抖动、但仍能及时报出
-			// 真实故障的阈值。
+			// 24 小时的容差远超普通的 NTP 抖动，但仍能及时报出真实故障。
+			// 曾经还要盖住另一类偏差：xray 按本地时间写日志、面板按本地
+			// 时间解析，两个进程的 time.Local 各自缓存，重启窗口内改过系统
+			// 时区就会整体错位。现在核心带着 TZ=UTC 启动、采集按 UTC 解析，
+			// 并把解析出的未来时刻钳到读取时刻（AccessLogService.Collect），
+			// 这一类在本版本里不会再把位点顶到未来；剩下的有系统时钟本身的跳变，以及**回退到
+			// 本版本之前的面板**：旧面板按本地时间解析新核心按 UTC 写下的那几秒日志，东半球会
+			// 落到未来（UTC+8 即 8 小时），位点被顶过去，此后 8 小时的新行被跳过——不到 24 小时，
+			// 这条告警也不会报。
 			if cursor.LastLogTime > 0 {
 				if future := time.UnixMilli(cursor.LastLogTime); future.Sub(time.Now()) > 24*time.Hour {
 					logger.Warningf("域名统计位点的时间(%s)超前于当前系统时间超过 24 小时，聚合已经停止且不会自愈——这通常是系统时钟曾经跳变导致的（NTP 故障、误设系统时间、虚拟机快照），需要人工确认后清空 domain_stat_cursors 表里 id=1 的那一行以重新开始聚合", future.Format(time.RFC3339))
@@ -170,12 +197,7 @@ func (s *DomainStatService) Aggregate() (int, error) {
 
 		// 先在内存里按 (粒度, 入站, 域名, 桶) 聚合，再逐条 UPSERT。
 		// 同一轮里同一个键出现几百次是常态，不合并就是白写几百次。
-		type key struct {
-			g     model.TrafficGranularity
-			id    int
-			dom   string
-			start int64
-		}
+		type key = domainStatKey
 		counts := make(map[key]int64, len(logs))
 		for i := range logs {
 			row := &logs[i]
@@ -205,7 +227,11 @@ func (s *DomainStatService) Aggregate() (int, error) {
 		// 是几百次 fsync。位点的推进也在同一个事务里——先写桶后推位点，
 		// 中途失败则整轮不写，下一轮从原位点重来，不会丢也不会重。
 		err = tdb.Transaction(func(tx *gorm.DB) error {
-			for k, c := range counts {
+			capped, err := capDomainStatTargets(tx, counts)
+			if err != nil {
+				return err
+			}
+			for k, c := range capped {
 				if err := upsertDomainStat(tx, k.g, k.id, k.dom, k.start, c); err != nil {
 					return err
 				}
@@ -223,6 +249,83 @@ func (s *DomainStatService) Aggregate() (int, error) {
 		}
 	}
 	return total, nil
+}
+
+// domainStatKey 是一个域名统计行的身份：(粒度, 入站, 域名, 桶)。
+type domainStatKey struct {
+	g     model.TrafficGranularity
+	id    int
+	dom   string
+	start int64
+}
+
+// capDomainStatTargets 给每个桶里单独成行的目标数封顶（见 domainStatMaxHourTargets），
+// 返回实际要累加的计数：已有行的目标原样累加，新目标按本批次数从多到少放行，放不下的并进
+// domainStatFolded。必须在写桶的同一个事务里调用，读到的已有行才与随后的写入一致。
+func capDomainStatTargets(tx *gorm.DB, counts map[domainStatKey]int64) (map[domainStatKey]int64, error) {
+	type bucket struct {
+		g     model.TrafficGranularity
+		id    int
+		start int64
+	}
+	byBucket := map[bucket][]domainStatKey{}
+	for k := range counts {
+		b := bucket{k.g, k.id, k.start}
+		byBucket[b] = append(byBucket[b], k)
+	}
+
+	out := make(map[domainStatKey]int64, len(counts))
+	for b, keys := range byBucket {
+		// 前三列正是唯一索引的前缀，只扫这一个桶的行。
+		var existing []string
+		if err := tx.Model(&model.DomainStat{}).
+			Where("granularity = ? AND inbound_id = ? AND bucket_start = ?", b.g, b.id, b.start).
+			Pluck("domain", &existing).Error; err != nil {
+			return nil, err
+		}
+		has := make(map[string]bool, len(existing))
+		used := map[string]int{}
+		for _, d := range existing {
+			has[d] = true
+			if d != domainStatFolded {
+				used[topDomainKind(d)]++
+			}
+		}
+
+		var fresh []domainStatKey
+		for _, k := range keys {
+			if has[k.dom] {
+				out[k] += counts[k]
+			} else {
+				fresh = append(fresh, k)
+			}
+		}
+		// 次数相同按名字排：map 的遍历顺序是随机的，同一份输入每次要放行同一批目标。
+		sort.Slice(fresh, func(i, j int) bool {
+			if counts[fresh[i]] != counts[fresh[j]] {
+				return counts[fresh[i]] > counts[fresh[j]]
+			}
+			return fresh[i].dom < fresh[j].dom
+		})
+		limit := domainStatMaxHourTargets
+		if b.g == model.GranularityDay {
+			limit = domainStatMaxDayTargets
+		}
+		var folded int64
+		for _, k := range fresh {
+			kind := topDomainKind(k.dom)
+			if used[kind] < limit {
+				used[kind]++
+				out[k] += counts[k]
+				continue
+			}
+			folded += counts[k]
+		}
+		if folded > 0 {
+			out[domainStatKey{g: b.g, id: b.id, dom: domainStatFolded, start: b.start}] += folded
+		}
+	}
+	return out, nil
 }
 
 // upsertDomainStat 把次数累加进目标桶，桶不存在时创建。
@@ -475,6 +578,8 @@ func (s *DomainStatService) TopDomains(
 		// 每小时必崩一次，两害相权取范围略宽的这个。这条不止影响 1h 档：
 		// 所有档位都多覆盖一个桶，7d 实际是 8 个日桶、15d 是 16 个。
 		Where("granularity = ? and inbound_id = ? and bucket_start >= ?", g, inboundId, since).
+		// 合并行不是一个目标：点进去按子串查访问日志查不出任何东西，不列。
+		Where("domain <> ?", domainStatFolded).
 		Group("domain").
 		Order(orderClause).
 		Limit(limit).

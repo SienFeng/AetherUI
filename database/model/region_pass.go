@@ -29,9 +29,12 @@ const RegionPassAll = "*"
 
 // 通行证的结束原因。
 const (
-	RegionPassExpired  = "expired"
-	RegionPassRevoked  = "revoked"
-	RegionPassReplaced = "replaced"
-	RegionPassHome     = "home"    // 自动通行证：家里恢复使用
-	RegionPassCoexist  = "coexist" // 自动通行证：家里与外地同时在用
+	RegionPassExpired   = "expired"
+	RegionPassRevoked   = "revoked"
+	RegionPassReplaced  = "replaced"
+	RegionPassHome      = "home"      // 自动通行证：家里恢复使用
+	RegionPassCoexist   = "coexist"   // 自动通行证：家里与外地同时在用
+	RegionPassCleared   = "cleared"   // 管理员在编辑里清空了地区限制
+	RegionPassAutoOff   = "auto_off"  // 管理员关掉了入站的自动出差放行（只结束自动通行证）
+	RegionPassRelocated = "relocated" // 长住外地，地区已改成这个省，通行证不再需要
 )

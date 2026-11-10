@@ -4,6 +4,9 @@ bin/xray-darwin-arm64
 bin/config.json
 bin/access.log
 bin/a-ui-geo.dat
+bin/a-ui-idc.dat
+bin/.config.json.tmp-*
+bin/.xray-candidate-*
 bin/ipdb-qqwry.dat
 dist/
 a-ui-*.tar.gz

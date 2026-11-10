@@ -44,7 +44,10 @@ type TrafficBucket struct {
 // 流量。这类错误不会报错，只会让人根据错的数据做判断。
 func AlignHour(t time.Time, loc *time.Location) int64 {
 	lt := t.In(loc)
-	return time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, loc).Unix()
+	// 按绝对时刻往回减到当地整点，不经 time.Date 重新解析钟面时间：夏令时回拨那一小时钟面走两遍，
+	// time.Date 会把两个小时解析成同一个时刻，两小时的流量并进一个桶。其余时刻（含半小时偏移的时区）结果不变。
+	return lt.Add(-time.Duration(lt.Minute())*time.Minute - time.Duration(lt.Second())*time.Second -
+		time.Duration(lt.Nanosecond())).Unix()
 }
 
 // AlignDay 把时刻对齐到它所在日的起点（当地 00:00:00），返回 Unix 秒。

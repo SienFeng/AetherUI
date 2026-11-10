@@ -71,9 +71,22 @@ func (s *InboundService) RenewInbound(id, days int, expiryTime int64) error {
 	// 「立即停用」，此时重新启用毫无意义：CheckInboundJob 30 秒后会再把它停用，
 	// 中间还白白触发一次 xray 重启。
 	if newExpiry > now {
+		if !inbound.Enable {
+			if err := s.checkRevivable(inbound); err != nil {
+				return err
+			}
+		}
 		fields["enable"] = true
 		fields["up"] = 0
 		fields["down"] = 0
+	}
+	// 按订阅周期重置的，续期挪了日号：顶一下 LastResetAt，免得下一轮计划外清零（见 raisedResetFloor）。
+	if loc, err := (&SettingService{}).GetTimeLocation(); err == nil {
+		renewed := *inbound
+		renewed.ExpiryTime = newExpiry
+		if floor := raisedResetFloor(inbound, loc, &renewed, loc, time.UnixMilli(now)); floor > inbound.LastResetAt {
+			fields["last_reset_at"] = floor
+		}
 	}
 
 	return database.GetDB().Model(model.Inbound{}).

@@ -196,7 +196,7 @@ func TestBuildGeoRulesEmitsIPv6DenyBeforeAllowSet(t *testing.T) {
 	setupGeoDB(t)
 	in := mkRegionInbound(t, 60001, true, []string{"江苏省"})
 
-	rules, err := buildGeoRules([]*model.Inbound{mustGet(t, in.Id)}, testProvinceDB(), "deadbeef")
+	rules, err := buildGeoRules([]*model.Inbound{mustGet(t, in.Id)}, testProvinceDB())
 	if err != nil {
 		t.Fatalf("buildGeoRules: %v", err)
 	}
@@ -220,11 +220,14 @@ func TestBuildGeoRulesEmitsIPv6DenyBeforeAllowSet(t *testing.T) {
 	if len(src) != 1 || !strings.HasPrefix(src[0], "ext:") || !strings.Contains(src[0], ":!") {
 		t.Errorf("允许集规则的 source = %v，期望 ext:<文件>:!<TAG> 形式", src)
 	}
-	// dat 内容变化不体现在配置字节里，Config.Equals 察觉不到。
-	// 把内容哈希嵌进 ruleTag，哈希变则配置字节变，重启逻辑天然正确。
-	tag, _ := second["ruleTag"].(string)
-	if !strings.Contains(tag, "deadbeef") {
-		t.Errorf("ruleTag = %q，里面没有 dat 内容哈希", tag)
+	// 允许集内容变化必须体现在配置字节里（否则 Config.Equals 察觉不到，xray 的「文件:代码」缓存也会给出旧集合）：
+	// 引用的代码按内容寻址，带内容后缀；ruleTag 不再带 dat 哈希。
+	code := strings.TrimPrefix(src[0], "ext:"+geoDatRef+":!")
+	if geoTagOfCode(code) == code || geoTagOfCode(code) != regionTag([]string{"江苏省"}) {
+		t.Errorf("允许集的代码 = %q，应为 tag + 内容哈希", code)
+	}
+	if tag, _ := second["ruleTag"].(string); tag != "a-ui-geo-"+itoa(in.Id) {
+		t.Errorf("ruleTag = %q", tag)
 	}
 
 	for i, r := range []map[string]any{first, second} {
@@ -239,7 +242,7 @@ func TestBuildGeoRulesEmitsNothingWithoutRegions(t *testing.T) {
 	setupGeoDB(t)
 	in := mkRegionInbound(t, 60001, true, nil)
 
-	rules, err := buildGeoRules([]*model.Inbound{mustGet(t, in.Id)}, testProvinceDB(), "deadbeef")
+	rules, err := buildGeoRules([]*model.Inbound{mustGet(t, in.Id)}, testProvinceDB())
 	if err != nil {
 		t.Fatalf("buildGeoRules: %v", err)
 	}
@@ -254,13 +257,13 @@ func TestGeoRulesAreByteDeterministic(t *testing.T) {
 	b := mkRegionInbound(t, 60002, true, []string{"江苏省"})
 	list := []*model.Inbound{mustGet(t, a.Id), mustGet(t, b.Id)}
 
-	first, err := buildGeoRules(list, testProvinceDB(), "abcd1234")
+	first, err := buildGeoRules(list, testProvinceDB())
 	if err != nil {
 		t.Fatal(err)
 	}
 	encodedFirst, _ := json.Marshal(first)
 	for i := 0; i < 5; i++ {
-		again, err := buildGeoRules(list, testProvinceDB(), "abcd1234")
+		again, err := buildGeoRules(list, testProvinceDB())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -369,6 +372,7 @@ func cleanupGeoDat(t *testing.T) {
 
 func TestInjectPutsGeoRulesBeforeBlockAndProxyRules(t *testing.T) {
 	setupDB(t)
+	disableAbuseRules(t) // 这里数的是其他功能的规则条数
 	requireIPDB(t)
 	cleanupGeoDat(t)
 
@@ -439,6 +443,7 @@ func TestInjectPutsGeoRulesBeforeBlockAndProxyRules(t *testing.T) {
 
 func TestInjectSkipsGeoEntirelyWhenNoInboundUsesRegions(t *testing.T) {
 	setupDB(t)
+	disableAbuseRules(t) // 这里数的是其他功能的规则条数
 	cleanupGeoDat(t)
 	newTestInbound(t, 60102)
 
@@ -533,5 +538,97 @@ func TestCheckRegionsUsable(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 			t.Errorf("%s: err = %v, 期望包含 %q", c.name, err, c.wantErr)
 		}
+	}
+}
+
+// dat 的写入要么完整换上新内容，要么原文件原样不动。os.WriteFile 会先截断原文件：写到一半失败
+// （最常见的是磁盘满）时留下一个半截的 dat，降级逻辑解不开它，所有地区入站都会被锁死。
+func TestWriteFileAtomicLeavesNoPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a-ui-geo.dat")
+	if err := writeFileAtomic(path, []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("new content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new content" {
+		t.Fatalf("内容 = %q", got)
+	}
+	// 目标是个目录：改名失败，临时文件要清掉，不能在 bin/ 里越积越多。
+	blocker := filepath.Join(dir, "blocked")
+	if err := os.MkdirAll(filepath.Join(blocker, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(blocker, []byte("x"), 0o644); err == nil {
+		t.Fatal("目标是目录时应当报错")
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("留下了临时文件 %s", e.Name())
+		}
+	}
+}
+
+// fakeListedProvinceDB 同时给出省份列表：IP 库更新后某个省的名字变了 / 没了，CIDRsOfProvinces 对整组
+// 省份仍然返回非空（其余省份的段），只有对照省份列表才看得出少了一个。
+type fakeListedProvinceDB struct {
+	fakeProvinceDB
+	list []string
+}
+
+func (f fakeListedProvinceDB) Provinces() []string { return f.list }
+
+func TestGeoPlanDetectsMissingProvinceInSet(t *testing.T) {
+	db := fakeListedProvinceDB{fakeProvinceDB: fakeProvinceDB{"江苏省": {"58.192.0.0/11"}}, list: []string{"江苏省"}}
+	a := &model.Inbound{Id: 1, Enable: true, Regions: `["江苏省","浙江省"]`}
+	b := &model.Inbound{Id: 2, Enable: true, Regions: `["浙江省","江苏省"]`}
+	single := &model.Inbound{Id: 3, Enable: true, Regions: `["江苏省"]`}
+
+	plan := buildGeoPlanWith([]*model.Inbound{a, b, single}, db, nil, nil)
+	for _, id := range []int{1, 2} {
+		d, ok := plan.Degraded[id]
+		if !ok || d.Mode != geoDegradePartial || !strings.Contains(d.Reason, "浙江省") {
+			t.Errorf("入站 %d：浙江省在 IP 库里没了，应标为 partial 并点名: %+v", id, d)
+		}
+	}
+	if _, ok := plan.Degraded[3]; ok {
+		t.Error("只用江苏省的入站不受影响")
+	}
+	if _, closed := plan.FailClosed[1]; closed {
+		t.Error("还有江苏省的段，不该整体锁死")
+	}
+
+	// 有上一次成功的允许集（包含浙江省的段）：沿用它，标 stale。
+	tag := regionTag([]string{"江苏省", "浙江省"})
+	old := []string{"58.192.0.0/11", "60.12.0.0/14"}
+	plan = buildGeoPlanWith([]*model.Inbound{a}, db, nil, map[string][]string{tag: old})
+	if d := plan.Degraded[1]; d.Mode != geoDegradeStale {
+		t.Errorf("有上一次的允许集应沿用并标 stale: %+v", d)
+	}
+	found := false
+	for _, e := range plan.Entries {
+		if strings.Join(e.CIDRs, ",") == strings.Join(old, ",") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dat 里应是上一次的完整允许集: %+v", plan.Entries)
+	}
+}
+
+// 缺省份时算出来的是残缺的允许集：不能记成 last-known-good，否则下一轮就把这份残缺的集合当成「上一次的
+// 允许集」沿用，状态从 partial 变成 stale，原因还写着「沿用上一次的允许集」——渲染验收时发现的。
+func TestPartialAllowSetIsNotRememberedAsLastGood(t *testing.T) {
+	resetGeoLastGood(t)
+	db := fakeListedProvinceDB{fakeProvinceDB: fakeProvinceDB{"江苏省": {"58.192.0.0/11"}}, list: []string{"江苏省"}}
+	in := &model.Inbound{Id: 1, Enable: true, Regions: `["江苏省","火星省"]`}
+	for round := 1; round <= 2; round++ {
+		plan := buildGeoPlanWith([]*model.Inbound{in}, db, nil, lastGoodSnapshot())
+		if d := plan.Degraded[1]; d.Mode != geoDegradePartial {
+			t.Fatalf("第 %d 轮：仍应是 partial（没有真正完整的旧允许集）: %+v", round, d)
+		}
+		rememberLastGood(plan)
 	}
 }

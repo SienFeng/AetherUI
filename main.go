@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/op/go-logging"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"a-ui/util/tcshape"
 	"a-ui/v2ui"
 	"a-ui/web"
+	"a-ui/web/entity"
 	"a-ui/web/global"
 	"a-ui/web/service"
 )
@@ -55,10 +57,13 @@ func runWebServer() {
 
 	server = web.NewServer()
 	global.SetWebServer(server)
+	// Start 已经把 Web 服务的失败（监听不上、证书缺失、路由注册失败）留在自己内部
+	// 处理：只记日志、后台重试，xray 与定时任务照常运行。它若仍返回错误，就是连
+	// 这些都没能拉起来——退出码必须非零，不能像改动前那样以 0 静默退出。
 	err = server.Start()
 	if err != nil {
-		log.Println(err)
-		return
+		logger.Error("start server failed:", err)
+		os.Exit(1)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -74,10 +79,11 @@ func runWebServer() {
 			}
 			server = web.NewServer()
 			global.SetWebServer(server)
-			err = server.Start()
-			if err != nil {
-				log.Println(err)
-				return
+			// 面板「重启」失败也不退出进程：改动前这里 return，进程以退出码 0
+			// 结束，而 a-ui.service 没配 Restart=，面板与 xray 从此都不再运行。
+			// 留在循环里，下一次 SIGHUP（或 a-ui restart）还能再试。
+			if err := server.Start(); err != nil {
+				logger.Error("restart server failed:", err)
 			}
 		default:
 			server.Stop()
@@ -90,13 +96,14 @@ func resetSetting() {
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println(err)
-		return
+		os.Exit(1)
 	}
 
 	settingService := service.SettingService{}
 	err = settingService.ResetSettings()
 	if err != nil {
 		fmt.Println("reset setting failed:", err)
+		os.Exit(1)
 	} else {
 		fmt.Println("reset setting success")
 	}
@@ -115,6 +122,9 @@ type settingFlags struct {
 	// 救援入口。能执行这条命令的人已经是这台机器的 root，不需要再验证。
 	Disable2FA bool
 	Port     int
+	// PortSet 表示命令行里出现过 -port：flag 包分不清「没传」和「传了 0」，
+	// 而 -port 0 是个必须报错的非法值，不能当成没传静默忽略。
+	PortSet  bool
 	Username string
 	Password string
 	Listen   *string
@@ -142,6 +152,8 @@ func parseSettingFlags(args []string) (settingFlags, error) {
 	}
 	cmd.Visit(func(fl *flag.Flag) {
 		switch fl.Name {
+		case "port":
+			f.PortSet = true
 		case "listen":
 			f.Listen = &listen
 		case "basepath":
@@ -155,55 +167,124 @@ func updateSetting(f settingFlags) {
 	err := database.InitDB(config.GetDBPath())
 	if err != nil {
 		fmt.Println(err)
-		return
+		os.Exit(1)
+	}
+	if code := applySettingFlags(f, os.Stdout); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// applySettingFlags 把 `a-ui setting` 的参数落库，返回进程应当使用的退出码：
+// 全部成功为 0，任何一步失败为 1。调用方先自己 InitDB——与 currentSettings
+// 同理，拆出来是为了测试能在临时库上直接调用它，不必途经 os.Exit。
+//
+// 退出码必须如实：install.sh、a-ui.sh 靠它判断改没改成功。改动前每一步失败都只
+// 打印一行，进程照样退出 0；-port 也完全不校验，70000 照存不误，面板下次启动
+// 必然监听失败。
+//
+// 先整体校验、再落库，全有或全无：一条命令里任何一项被拒绝，其余各项一律不写，
+// 免得留下「端口没改成、账号却改了」这种半截状态。校验规则与设置页相同
+// （entity.CheckWebXxx 与 SettingService.ValidatePanelAddrChange），但只校验这条
+// 命令真正要改的那几项：库里若已经躺着一个旧的坏值，不能因为它把修别的项的
+// 救援命令也挡住。-listen "" 这条救援命令因此任何时候都能执行。
+func applySettingFlags(f settingFlags, out io.Writer) int {
+	settingService := service.SettingService{}
+	portGiven := f.PortSet || f.Port != 0
+
+	if portGiven || f.Listen != nil || f.BasePath != nil {
+		cur, err := settingService.PanelAddr()
+		if err != nil {
+			fmt.Fprintln(out, "read current settings failed:", err)
+			return 1
+		}
+		next := cur
+		if portGiven {
+			next.Port = f.Port
+			if err := entity.CheckWebPort(next.Port); err != nil {
+				fmt.Fprintln(out, "set port failed:", err)
+				return 1
+			}
+		}
+		if f.Listen != nil {
+			next.Listen = *f.Listen
+			if err := entity.CheckWebListenIsLocal(next.Listen); err != nil {
+				fmt.Fprintln(out, "set listen failed:", err)
+				return 1
+			}
+		}
+		if f.BasePath != nil {
+			next.BasePath = entity.NormalizeWebBasePath(*f.BasePath)
+			if err := entity.CheckWebBasePath(next.BasePath); err != nil {
+				fmt.Fprintln(out, "set base path failed:", err)
+				return 1
+			}
+		}
+		if err := settingService.ValidatePanelAddrChange(next); err != nil {
+			fmt.Fprintln(out, "set panel address failed:", err)
+			return 1
+		}
+	}
+	if f.Username != "" || f.Password != "" {
+		if err := service.CheckNewCredential(f.Username, f.Password); err != nil {
+			fmt.Fprintln(out, "set username and password failed:", err)
+			return 1
+		}
 	}
 
-	settingService := service.SettingService{}
-
-	if f.Port > 0 {
+	failed := false
+	if portGiven {
 		err := settingService.SetPort(f.Port)
 		if err != nil {
-			fmt.Println("set port failed:", err)
+			fmt.Fprintln(out, "set port failed:", err)
+			failed = true
 		} else {
-			fmt.Printf("set port %v success\n", f.Port)
+			fmt.Fprintf(out, "set port %v success\n", f.Port)
 		}
 	}
 	if f.Listen != nil {
 		err := settingService.SetListen(*f.Listen)
 		if err != nil {
-			fmt.Println("set listen failed:", err)
+			fmt.Fprintln(out, "set listen failed:", err)
+			failed = true
 		} else if *f.Listen == "" {
-			fmt.Println("set listen to all interfaces success")
+			fmt.Fprintln(out, "set listen to all interfaces success")
 		} else {
-			fmt.Printf("set listen %v success\n", *f.Listen)
+			fmt.Fprintf(out, "set listen %v success\n", *f.Listen)
 		}
 	}
 	if f.BasePath != nil {
 		err := settingService.SetBasePath(*f.BasePath)
 		if err != nil {
-			fmt.Println("set base path failed:", err)
+			fmt.Fprintln(out, "set base path failed:", err)
+			failed = true
 		} else {
-			fmt.Printf("set base path %v success\n", *f.BasePath)
+			fmt.Fprintf(out, "set base path %v success\n", *f.BasePath)
 		}
 	}
 	if f.Username != "" || f.Password != "" {
 		userService := service.UserService{}
 		err := userService.UpdateFirstUser(f.Username, f.Password)
 		if err != nil {
-			fmt.Println("set username and password failed:", err)
+			fmt.Fprintln(out, "set username and password failed:", err)
+			failed = true
 		} else {
-			fmt.Println("set username and password success")
+			fmt.Fprintln(out, "set username and password success")
 		}
 	}
 	if f.Disable2FA {
 		twoFactorService := service.TwoFactorService{}
 		err := twoFactorService.Disable()
 		if err != nil {
-			fmt.Println("disable two-factor authentication failed:", err)
+			fmt.Fprintln(out, "disable two-factor authentication failed:", err)
+			failed = true
 		} else {
-			fmt.Println("disable two-factor authentication success")
+			fmt.Fprintln(out, "disable two-factor authentication success")
 		}
 	}
+	if failed {
+		return 1
+	}
+	return 0
 }
 
 // currentSettings 把面板当前设置读出来拼成展示文本，不做任何写入。
@@ -217,6 +298,9 @@ func updateSetting(f settingFlags) {
 // 的出路是重设（`a-ui setting -username x -password y`），输出里直接
 // 给出这条命令。Port / Listen / BasePath 三行的格式不能动——a-ui.sh 的
 // restore_direct_panel 用 grep '^Port:' 这类写法解析它们。
+//
+// 提示里的命令写二进制的完整路径 /usr/local/a-ui/a-ui：管理员在终端里敲的 a-ui
+// 是 /usr/bin/a-ui 那个管理菜单脚本（a-ui.sh），它没有 setting 子命令。
 func currentSettings() (string, error) {
 	settingService := service.SettingService{}
 	port, err := settingService.GetPort()
@@ -253,7 +337,7 @@ func currentSettings() (string, error) {
 	}
 	twoFactorDisplay := "off"
 	if twoFactor {
-		twoFactorDisplay = "on (lost your authenticator? run: a-ui setting -disable2fa)"
+		twoFactorDisplay = "on (lost your authenticator? run: /usr/local/a-ui/a-ui setting -disable2fa)"
 	}
 
 	return fmt.Sprintf(
@@ -261,7 +345,7 @@ func currentSettings() (string, error) {
 			"Listen: %v\n"+
 			"BasePath: %v\n"+
 			"Username: %v\n"+
-			"Password: (stored hashed, cannot be shown; reset with: a-ui setting -username <name> -password <pass>)\n"+
+			"Password: (stored hashed, cannot be shown; reset with: /usr/local/a-ui/a-ui setting -username <name> -password <pass>)\n"+
 			"TwoFactor: %v\n",
 		port, listenDisplay, basePath, user.Username, twoFactorDisplay,
 	), nil

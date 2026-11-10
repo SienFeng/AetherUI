@@ -374,15 +374,16 @@ func extractXrayFiles(r *zip.Reader, binPath, geositePath, geoipPath string) err
 	return nil
 }
 
-// UpdateXray 是面板「切换版本」按钮的入口：下载 → 验证 → 停核心 → 解包 → 重启。
+// UpdateXray 是面板「切换版本」按钮的入口：下载 → 验证 → 用新核心校验当前配置 → 停核心 → 解包 → 重启。
 //
 // StopXray 必须排在 openXrayZip 之后：下载几十 MB 与包损坏检测都不该让用户
 // 白断一次流。**这条顺序没有任何测试守着**——xrayService 是按值嵌入的具体
 // 类型而不是接口，要给 StopXray 打桩就得先抽一层接口，为一条三行的顺序约束
 // 不值得。所以改这个函数时只能靠读注释：把 StopXray 挪到 downloadXRay 或
 // openXrayZip 之前，测试全绿，代价是每次下载失败都白停一次核心。
+// （新核心校验那一步排在 StopXray 之前，由 TestUpdateXrayRefusesBeforeStoppingTheCore 守着。）
 func (s *ServerService) UpdateXray(version string) error {
-	zipFileName, err := s.downloadXRay(version)
+	zipFileName, err := downloadXrayFn(s, version)
 	if err != nil {
 		return err
 	}
@@ -393,6 +394,11 @@ func (s *ServerService) UpdateXray(version string) error {
 		return err
 	}
 	defer closeZip()
+
+	// 新核心不认当前配置就不换（见 xray_version_check.go）。同样必须排在 StopXray 之前。
+	if err := s.checkCandidateCore(r); err != nil {
+		return err
+	}
 
 	s.xrayService.StopXray()
 	defer func() {

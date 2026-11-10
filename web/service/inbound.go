@@ -149,6 +149,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	if exist {
 		return common.NewError("端口已存在:", inbound.Port)
 	}
+	if err := s.checkInboundPortUsable(inbound, nil); err != nil {
+		return err
+	}
 	// 校验放在落库之前，因此不需要事务回滚。
 	if err := validateInbound(inbound, ""); err != nil {
 		return err
@@ -157,12 +160,44 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	// 事务包住「落库 + 扩散」：扩散失败若放行，就是一个用户静默地没进规则，
 	// 正是「自动应用于新增用户」这个功能要消灭的失效。宁可整个失败让管理员
 	// 重试。inbound.Id 是自增的，必须 Save 之后才能拿来扩散。
-	return db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(inbound).Error; err != nil {
 			return err
 		}
 		return (&RoutingRuleService{}).AttachInbound(tx, inbound.Id)
 	})
+	if err == nil {
+		clearInboundLeftovers(inbound.Id)
+	}
+	return err
+}
+
+// clearInboundLeftovers 在新入站拿到 id 之后，清掉其它库里这个 id 的残留行。
+//
+// 删除入站时这些库的清理失败只告警（由每小时的 PruneOrphans 兜底），而 SQLite 会复用自增 id：这一小时里新建的
+// 入站拿到同一个 id，残留行就不再是孤儿，PruneOrphans 也救不回来了——新用户继承上一个用户的访问记录、
+// 用量曲线、按来源用量与共享风险分，自动设置地区还会拿上一个用户的省份来设置这个新用户。新入站此刻还
+// 没进核心，不会有属于它的新数据被误删。失败只告警：这不是创建入站本身的一部分。
+func clearInboundLeftovers(id int) {
+	cleanups := []struct {
+		what string
+		run  func(int) error
+	}{
+		{"访问记录", (&AccessLogService{}).DeleteByInbound},
+		{"用量历史", (&TrafficHistoryService{}).DeleteByInbound},
+		{"域名统计", (&DomainStatService{}).DeleteByInbound},
+		{"计量池", (&MeterPoolService{}).DeleteByInbound},
+		{"按来源用量", (&SharingService{}).DeleteByInbound},
+		{"共享风险快照", (&SharingRiskService{}).DeleteByInbound},
+		{"流量暴涨限速", func(id int) error {
+			return database.GetDB().Where("inbound_id = ?", id).Delete(&model.InboundThrottle{}).Error
+		}},
+	}
+	for _, c := range cleanups {
+		if err := c.run(id); err != nil {
+			logger.Warning("新建入站：清理复用 id 的残留", c.what, "失败, id:", id, "err:", err)
+		}
+	}
 }
 
 func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
@@ -174,31 +209,30 @@ func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
 		if exist {
 			return common.NewError("端口已存在:", inbound.Port)
 		}
+		if err := s.checkInboundPortUsable(inbound, nil); err != nil {
+			return err
+		}
 	}
 
-	db := database.GetDB()
-	tx := db.Begin()
-	var err error
-	defer func() {
-		if err == nil {
-			tx.Commit()
-		} else {
-			tx.Rollback()
+	// 事务提交之后才清理残留（clearInboundLeftovers 动的是其它库），所以用 Transaction 而不是 defer 提交。
+	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
+		for _, inbound := range inbounds {
+			if err := tx.Save(inbound).Error; err != nil {
+				return err
+			}
+			// v2ui 迁移路径。只挂 AddInbound 会漏掉它，spec §4.3 三条路径要齐。
+			if err := (&RoutingRuleService{}).AttachInbound(tx, inbound.Id); err != nil {
+				return err
+			}
 		}
-	}()
-
+		return nil
+	})
+	if err != nil {
+		return err
+	}
 	for _, inbound := range inbounds {
-		err = tx.Save(inbound).Error
-		if err != nil {
-			return err
-		}
-		// v2ui 迁移路径。只挂 AddInbound 会漏掉它，spec §4.3 三条路径要齐。
-		err = (&RoutingRuleService{}).AttachInbound(tx, inbound.Id)
-		if err != nil {
-			return err
-		}
+		clearInboundLeftovers(inbound.Id)
 	}
-
 	return nil
 }
 
@@ -214,6 +248,37 @@ func (s *InboundService) DelInbound(id int) error {
 	if _, err := ruleService.PlanInboundDetach(id); err != nil {
 		return err
 	}
+	db := database.GetDB()
+	// 清理规则引用与删除入站必须原子：只成一半的两种残留——规则没了入站还在、
+	// 入站没了规则还指着它——都不会有任何一层报错。
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := ruleService.DetachInbound(tx, id); err != nil {
+			return err
+		}
+		// 封禁同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的入站会凭空继承上一个用户的封禁名单。
+		// 放在同一个事务里：改动前它在事务之前删，事务失败时入站还在、封禁却没了，被封的 IP 直接又能连上。
+		if err := tx.Where("inbound_id = ?", id).Delete(&model.IPBan{}).Error; err != nil {
+			return err
+		}
+		// 出差通行证同样按入站 id 存：不删的话下一个建出来的入站会继承上一个
+		// 用户的放行地区。放在同一个事务里，失败即阻断。
+		if err := (&RegionPassService{}).DeleteByInbound(tx, id); err != nil {
+			return err
+		}
+		if err := (&AutoRegionService{}).DeleteByInbound(tx, id); err != nil {
+			return err
+		}
+		// 流量暴涨限速单同样按入站 id 存：不删的话下一个建出来的入站会继承上一个用户的限速。
+		if err := tx.Where("inbound_id = ?", id).Delete(&model.InboundThrottle{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(model.Inbound{}, id).Error
+	})
+	if err != nil {
+		return err
+	}
+	// 其他库里按入站 id 存的数据在入站真的删掉之后再清：改动前先清，事务失败时入站还在、历史却没了。
+	// 这里失败只告警（下面各条说明），新建入站时 clearInboundLeftovers 与每小时的 PruneOrphans 兜底。
 	// 访问日志按入站 id 存，同样会被 id 复用坑到：不清掉的话，
 	// 下一个建出来的入站会看到上一个用户访问过哪些网站。
 	//
@@ -255,26 +320,7 @@ func (s *InboundService) DelInbound(id int) error {
 	if err := (&SharingRiskService{}).DeleteByInbound(id); err != nil {
 		logger.Warning("清理入站的共享风险快照失败, 将由定时清理兜底, id:", id, "err:", err)
 	}
-	// 封禁同样按入站 id 存，同样会被 id 复用坑到：不清的话下一个建出来的
-	// 入站会凭空继承上一个用户的封禁名单。这里失败要阻断——残留封禁会让
-	// 新用户莫名其妙连不上，且没有定时任务兜底清理孤儿封禁。
-	if err := (&IPBanService{}).DeleteByInbound(id); err != nil {
-		return err
-	}
-	db := database.GetDB()
-	// 清理规则引用与删除入站必须原子：只成一半的两种残留——规则没了入站还在、
-	// 入站没了规则还指着它——都不会有任何一层报错。
-	return db.Transaction(func(tx *gorm.DB) error {
-		if err := ruleService.DetachInbound(tx, id); err != nil {
-			return err
-		}
-		// 出差通行证同样按入站 id 存：不删的话下一个建出来的入站会继承上一个
-		// 用户的放行地区。放在同一个事务里，失败即阻断。
-		if err := (&RegionPassService{}).DeleteByInbound(tx, id); err != nil {
-			return err
-		}
-		return tx.Delete(model.Inbound{}, id).Error
-	})
+	return nil
 }
 
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
@@ -288,6 +334,12 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 }
 
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
+	return s.UpdateInboundFrom(inbound, InboundEditBase{})
+}
+
+// UpdateInboundFrom 写入编辑表单。base 是页面打开那一刻看到的、会被任务改写的字段（见 InboundEditBase）：
+// 请求里的值与 base 相同，说明管理员没动它，保留库里此刻的值。
+func (s *InboundService) UpdateInboundFrom(inbound *model.Inbound, base InboundEditBase) error {
 	if err := normalizeInboundRegions(inbound); err != nil {
 		return err
 	}
@@ -306,17 +358,26 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	if err != nil {
 		return err
 	}
-	oldInbound.Up = inbound.Up
-	oldInbound.Down = inbound.Down
+	if err := s.checkInboundPortUsable(inbound, oldInbound); err != nil {
+		return err
+	}
+	orig := *oldInbound
+	// up/down 从不取自表单：流量任务每 10 秒在累加，页面上的是打开那一刻的快照，写回去就是把用量倒回去
+	// ——超额被停的人被放回来、周期重置之后又被旧用量停掉。清零走 ResetInboundTraffic。
 	oldInbound.Total = inbound.Total
 	oldInbound.Remark = inbound.Remark
-	oldInbound.Enable = inbound.Enable
+	oldEnable := oldInbound.Enable
+	oldInbound.Enable = base.pick(base.Enable, inbound.Enable, oldInbound.Enable)
 	oldInbound.ExpiryTime = inbound.ExpiryTime
 	oldInbound.ConcurrencyLimit = inbound.ConcurrencyLimit
-	oldInbound.AutoTravel = inbound.AutoTravel
+	newAutoTravel := base.pick(base.AutoTravel, inbound.AutoTravel, oldInbound.AutoTravel)
+	autoTravelTurnedOff := oldInbound.AutoTravel && !newAutoTravel
+	oldInbound.AutoTravel = newAutoTravel
 	if err := regionsUsable(inbound.Regions, oldInbound.Regions); err != nil {
 		return err
 	}
+	regionsChanged := !sameRegions(inbound.Regions, oldInbound.Regions)
+	hadRegions := model.HasRegions(oldInbound.Regions)
 	oldInbound.Regions = inbound.Regions
 	oldInbound.UpMbit = inbound.UpMbit
 	oldInbound.DownMbit = inbound.DownMbit
@@ -325,7 +386,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	// 只改备注、限速等其他字段时保留标记——修复前任何编辑都清掉它，管理员改个备注，
 	// 这个入站就悄悄失去了下个周期自动恢复的资格，列表上也看不出区别。
 	// 想让它保持停用、不再自动恢复：先启用再停用一次即可（列表上会显示「手动停用」）。
-	if inbound.Enable || inbound.Enable != oldInbound.Enable {
+	if oldInbound.Enable || oldInbound.Enable != oldEnable {
 		oldInbound.DisabledByTraffic = false
 	}
 	// 切换重置周期时把时刻顶到当前，避免改一次设置就立刻触发一次计划外的
@@ -338,6 +399,13 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 		oldInbound.LastResetAt = time.Now().Unix() * 1000
 	}
 	oldInbound.TrafficResetMode = inbound.TrafficResetMode
+	// 模式没变、订阅周期的日号随到期时间变了（28 号改成 5 号）：同样不能当场清一次，见 raisedResetFloor。
+	// 读不出面板时区就不顶——ResetDueTraffic 那时同样读不出、不会清。
+	if orig.TrafficResetMode == oldInbound.TrafficResetMode {
+		if loc, err := (&SettingService{}).GetTimeLocation(); err == nil {
+			oldInbound.LastResetAt = raisedResetFloor(&orig, loc, oldInbound, loc, time.Now())
+		}
+	}
 	oldInbound.Listen = inbound.Listen
 	oldInbound.Port = inbound.Port
 	oldInbound.Protocol = inbound.Protocol
@@ -353,7 +421,44 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) error {
 	}
 
 	db := database.GetDB()
-	return db.Save(oldInbound).Error
+	now := time.Now()
+	return db.Transaction(func(tx *gorm.DB) error {
+		// 在事务里读：任务可能刚在 GetInbound 之后自动设置了这个入站。
+		if err := checkStaleAutoRegionWrite(tx, oldInbound.Id, oldInbound.Regions, now); err != nil {
+			return err
+		}
+		if err := tx.Save(oldInbound).Error; err != nil {
+			return err
+		}
+		// 关掉了自动出差放行：生效中的自动通行证一并结束——之后再没有谁按「家里恢复使用」去收回
+		// 或续期它，它会不受管地一直放行到到期。管理员手动发的不动。
+		if autoTravelTurnedOff {
+			if err := tx.Model(&model.InboundRegionPass{}).
+				Where("inbound_id = ? AND ended_at = 0 AND auto = ?", oldInbound.Id, true).
+				Updates(map[string]any{"ended_at": now.UnixMilli(), "end_reason": model.RegionPassAutoOff}).Error; err != nil {
+				return err
+			}
+		}
+		if !regionsChanged {
+			return nil
+		}
+		// 清空了地区限制：生效中的通行证一并结束。没有地区时它本来就不起作用，但留着的话
+		// 列表上还挂着一张「到期后恢复地区限制」的通行证，以后再设地区时它还会接着放行。
+		if hadRegions && !model.HasRegions(oldInbound.Regions) {
+			if err := endActive(tx, oldInbound.Id, model.RegionPassCleared, now); err != nil {
+				return err
+			}
+		}
+		// 管理员亲手改过地区（包括清空自动设置的那份），自动设置就不再碰这个入站。
+		return (&AutoRegionService{}).MarkManual(tx, oldInbound.Id, now)
+	})
+}
+
+// sameRegions 比较两个地区字段规范化之后是否相同；解析不了的按「不同」处理。
+func sameRegions(a, b string) bool {
+	x, errA := DecodeRegions(a)
+	y, errB := DecodeRegions(b)
+	return errA == nil && errB == nil && strings.Join(x, "\x00") == strings.Join(y, "\x00")
 }
 
 func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
@@ -373,28 +478,8 @@ func (s *InboundService) AddTraffic(traffics []*xray.Traffic) (err error) {
 	if err := (&DomainStatService{}).RecordMetered(traffics, time.Now()); err != nil {
 		logger.Warning("记录域名计量流量失败:", err)
 	}
-	db := database.GetDB()
-	db = db.Model(model.Inbound{})
-	tx := db.Begin()
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
-	for _, traffic := range traffics {
-		if traffic.IsInbound {
-			err = tx.Where("tag = ?", traffic.Tag).
-				UpdateColumn("up", gorm.Expr("up + ?", traffic.Up)).
-				UpdateColumn("down", gorm.Expr("down + ?", traffic.Down)).
-				Error
-			if err != nil {
-				return
-			}
-		}
-	}
-	return
+	// 主库累加失败时增量暂存、下一轮补写，见 traffic_pending.go。
+	return s.addInboundTraffic(traffics)
 }
 
 // DisableInvalidInbounds 停用已超流量或已到期的入站，返回被停用的条数。

@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"strconv"
 	"time"
 	"a-ui/database/model"
@@ -29,6 +30,7 @@ type InboundController struct {
 	attentionService      service.InboundAttentionService
 	regionPassService     service.RegionPassService
 	regionPreviewService  service.RegionPreviewService
+	autoRegionService     service.AutoRegionService
 }
 
 func NewInboundController(g *gin.RouterGroup) *InboundController {
@@ -46,6 +48,8 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/del/:id", a.delInbound)
 	g.POST("/delPreview/:id", a.delPreviewInbound)
 	g.POST("/update/:id", a.updateInbound)
+	g.POST("/enable/:id", a.setInboundEnable)
+	g.POST("/resetTraffic/:id", a.resetInboundTraffic)
 	g.POST("/renew/:id", a.renewInbound)
 	g.POST("/onlines/:id", a.getOnlines)
 	g.POST("/onlineCounts", a.getOnlineCounts)
@@ -64,6 +68,7 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/sharing/risk/detail/:id", a.getSharingRiskDetail)
 	g.POST("/provinces", a.getProvinces)
 	g.POST("/regions/preview/:id", a.previewRegions)
+	g.POST("/autoRegion/undo/:id", a.undoAutoRegion)
 	g.POST("/regions/pass/grant/:id", a.grantRegionPass)
 	g.POST("/regions/pass/revoke/:id", a.revokeRegionPass)
 	g.POST("/regions/pass/list/:id", a.listRegionPasses)
@@ -72,14 +77,30 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 func (a *InboundController) startTask() {
 	webServer := global.GetWebServer()
 	c := webServer.GetCron()
-	c.AddFunc("@every 10s", func() {
-		if a.xrayService.IsNeedRestartAndSetFalse() {
-			err := a.xrayService.RestartXray(false)
-			if err != nil {
-				logger.Error("restart xray failed:", err)
-			}
-		}
-	})
+	c.AddFunc("@every 10s", a.applyPendingXrayChange)
+}
+
+// restartFailureLog 限制下发失败的 Error 日志：失败后每 10 秒重试一次，同一个错误 5 分钟只记一条。
+var restartFailureLog = service.NewLogThrottle(5 * time.Minute)
+
+// applyPendingXrayChange 消费重启标志，把库里的改动下发到核心。
+func (a *InboundController) applyPendingXrayChange() {
+	if !a.xrayService.IsNeedRestartAndSetFalse() {
+		return
+	}
+	err := a.xrayService.RestartXray(false)
+	if err == nil {
+		restartFailureLog.Reset()
+		return
+	}
+	// 标志在调用前已被 CAS 清掉。不放回去的话，这次改动要等下一次别的改动才会再被尝试：
+	// 核心一直跑着旧配置（停用的入站照常能用），面板却显示已保存。
+	a.xrayService.SetToNeedRestart()
+	if restartFailureLog.Allow(err.Error()) {
+		logger.Error("restart xray failed, will retry in 10s:", err)
+	} else {
+		logger.Debug("restart xray failed again:", err)
+	}
 }
 
 func (a *InboundController) getInbounds(c *gin.Context) {
@@ -153,9 +174,58 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 		jsonMsg(c, "修改", err)
 		return
 	}
-	err = a.inboundService.UpdateInbound(inbound)
+	// 页面打开时看到的 enable / autoTravel（见 service.InboundEditBase）。前端是 urlencoded，
+	// 表单在第一次绑定时已经解析并缓存，这里按 form 再取一次。
+	var base inboundEditBaseForm
+	if err := c.ShouldBindWith(&base, binding.Form); err != nil {
+		jsonMsg(c, "修改", err)
+		return
+	}
+	err = a.inboundService.UpdateInboundFrom(inbound, service.InboundEditBase{
+		Enable: base.EnableBase, AutoTravel: base.AutoTravelBase,
+	})
 	jsonMsg(c, "修改", err)
 	if err == nil {
+		a.xrayService.SetToNeedRestart()
+	}
+}
+
+type inboundEditBaseForm struct {
+	EnableBase     *bool `form:"enableBase"`
+	AutoTravelBase *bool `form:"autoTravelBase"`
+}
+
+// setInboundEnable 只改启用状态（列表上的开关）。
+func (a *InboundController) setInboundEnable(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "修改", err)
+		return
+	}
+	form := struct {
+		Enable *bool `form:"enable"`
+	}{}
+	if err := c.ShouldBind(&form); err != nil || form.Enable == nil {
+		jsonMsg(c, "修改", common.NewError("缺少 enable 参数"))
+		return
+	}
+	err = a.inboundService.SetInboundEnable(id, *form.Enable)
+	jsonMsg(c, "修改", err)
+	if err == nil {
+		a.xrayService.SetToNeedRestart()
+	}
+}
+
+// resetInboundTraffic 清零已用流量；只因超流量被停、还没到期的随之拉回来，这时要重新下发配置。
+func (a *InboundController) resetInboundTraffic(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, "重置流量", err)
+		return
+	}
+	revived, err := a.inboundService.ResetInboundTraffic(id, time.Now())
+	jsonMsg(c, "重置流量", err)
+	if err == nil && revived {
 		a.xrayService.SetToNeedRestart()
 	}
 }
@@ -668,4 +738,25 @@ func (a *InboundController) previewRegions(c *gin.Context) {
 		return
 	}
 	jsonObj(c, result, nil)
+}
+
+// autoRegionAction 是「自动设置地区」管理员操作（现在只剩撤销）的公共骨架。写了地区的操作要重新下发。
+func (a *InboundController) autoRegionAction(c *gin.Context, action string, restart bool, do func(id int, now time.Time) error) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	if err := do(id, time.Now()); err != nil {
+		jsonMsg(c, action, err)
+		return
+	}
+	if restart {
+		a.xrayService.SetToNeedRestart()
+	}
+	jsonMsg(c, action, nil)
+}
+
+func (a *InboundController) undoAutoRegion(c *gin.Context) {
+	a.autoRegionAction(c, "撤销自动设置", true, a.autoRegionService.Undo)
 }

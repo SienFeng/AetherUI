@@ -130,14 +130,91 @@ update() {
     fi
 }
 
+# Remove the three things install.sh's install_cert_sync sets up on a domain
+# install. The certificates in /root/cert/ are left alone: menu 16's acme.sh
+# issuance writes there too, and there is no telling whose is whose. No
+# disable --now: this script claims to support CentOS 7, whose systemd 219
+# does not know --now yet.
+remove_cert_sync() {
+    local unit_dir=/etc/systemd/system found=0
+    if [[ -f "${unit_dir}/a-ui-cert-sync.timer" || -f "${unit_dir}/a-ui-cert-sync.service" ]]; then
+        systemctl stop a-ui-cert-sync.timer a-ui-cert-sync.service >/dev/null 2>&1
+        systemctl disable a-ui-cert-sync.timer >/dev/null 2>&1
+        rm -f "${unit_dir}/a-ui-cert-sync.timer" "${unit_dir}/a-ui-cert-sync.service"
+        systemctl daemon-reload
+        found=1
+    fi
+    if [[ -f /usr/local/bin/a-ui-cert-sync ]]; then
+        rm -f /usr/local/bin/a-ui-cert-sync
+        found=1
+    fi
+    [[ ${found} -eq 1 ]] && LOGI "removed the a-ui-cert-sync certificate sync timer (certificate files in /root/cert/ are kept)"
+    return 0
+}
+
+# Remove the site the panel itself wrote from the Caddyfile; the Caddy package
+# and any other site are never touched (uninstalling Caddy itself is by design
+# only ever offered, never done by default). install.sh's write_caddyfile
+# wraps the site block it writes in BEGIN/END lines, and only what lies
+# between them is removed; the file is backed up first, checked with
+# caddy validate afterwards and restored as it was if that fails, and Caddy
+# is reloaded only when it passes. Older wizards wrote no markers; in such a
+# file there is no telling reliably which part is the panel's, so it is only
+# pointed out, never edited. The argument is the panel port read before the
+# uninstall (may be empty), used only for that hint.
+remove_caddy_site() {
+    local panel_port="$1" cf=/etc/caddy/Caddyfile
+    [[ -f "${cf}" ]] || return 0
+    if ! grep -q '^# BEGIN a-ui managed site' "${cf}"; then
+        if grep -qE "reverse_proxy[[:space:]]+127\.0\.0\.1:${panel_port:-[0-9]+}([^0-9]|\$)" "${cf}"; then
+            LOGD "${cf} has a site reverse-proxying to this machine's panel port, apparently written by an older setup wizard. It carries no a-ui markers, so it was left unchanged to avoid deleting your own configuration"
+            LOGD "if you no longer need it: edit ${cf} to delete that site block, then run systemctl reload caddy"
+        fi
+        return 0
+    fi
+    local new backup
+    if ! new=$(awk '
+        /^# BEGIN a-ui managed site/ { if (skip) bad = 1; skip = 1; next }
+        /^# END a-ui managed site/   { if (!skip) bad = 1; skip = 0; next }
+        !skip { print }
+        END { if (skip || bad) exit 3 }' "${cf}"); then
+        LOGE "the BEGIN/END markers of the panel site in ${cf} do not pair up; left unchanged to avoid deleting other sites, please clean it up by hand"
+        return 1
+    fi
+    backup="${cf}.a-ui-uninstall-$(date +%Y%m%d-%H%M%S).bak"
+    if ! cp -p "${cf}" "${backup}"; then
+        LOGE "failed to back up ${cf}, the panel site in it was not removed"
+        return 1
+    fi
+    printf '%s\n' "${new}" >"${cf}"
+    if command -v caddy >/dev/null 2>&1 && ! caddy validate --config "${cf}" >/dev/null 2>&1; then
+        cp -p "${backup}" "${cf}"
+        LOGE "after removing the panel site ${cf} failed caddy validate, the original file was restored, please clean it up by hand"
+        return 1
+    fi
+    if systemctl is-active --quiet caddy 2>/dev/null && ! systemctl reload caddy; then
+        LOGE "reloading Caddy failed, see systemctl status caddy"
+    fi
+    LOGI "removed the site written by the panel from ${cf} (the original file is backed up at ${backup})"
+    LOGI "the Caddy package itself was not uninstalled; if you no longer need it: systemctl stop caddy && systemctl disable caddy, then remove it with the system package manager"
+    local old_backup
+    old_backup=$(ls -t /root/caddy-backup-*.tar.gz 2>/dev/null | head -n 1)
+    [[ -n "${old_backup}" ]] && LOGI "the setup wizard backed up the configuration of the Caddy it disabled back then: ${old_backup}, your original sites can be recovered from it"
+    return 0
+}
+
 uninstall() {
-    confirm "sure you want to uninstall a-ui?" "n"
+    confirm "sure you want to uninstall a-ui? (the Caddy site, certificate sync timer and cron jobs the panel added are removed too, Caddy itself is kept)" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
+    # The panel port must be read before the database is deleted; it is only
+    # used to recognize a Caddyfile written by an older wizard, for a hint
+    local panel_port_for_caddy
+    panel_port_for_caddy=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null | awk '/^Port:/ {print $2; exit}')
     systemctl stop a-ui
     systemctl disable a-ui
     rm /etc/systemd/system/a-ui.service -f
@@ -150,7 +227,14 @@ uninstall() {
     # restore_or_install_xray, but a Ctrl-C or a signal in the middle leaves
     # ~66MB behind — it was deliberately moved out of /tmp into /usr/local to
     # avoid tmpfs, and the price of that is it no longer disappears on reboot.
+    # The download staging directory (fetch_release) is the same.
     rm -rf /usr/local/a-ui-xray-backup-*
+    rm -rf /usr/local/a-ui-update-*
+    # Cron jobs added by menu 17 (they point at a panel that no longer exists)
+    cron_drop_lines "a-ui geo" || LOGE "failed to remove the geo update job, delete the line containing a-ui geo with crontab -e"
+    cron_drop_lines "a-ui clear" || LOGE "failed to remove the log clearing jobs, delete the lines containing a-ui clear with crontab -e"
+    remove_cert_sync
+    remove_caddy_site "${panel_port_for_caddy}"
 
     echo ""
     echo -e "uninstall a-ui succeed,you can delete this script by ${green}rm /usr/bin/a-ui -f${plain}"
@@ -180,7 +264,66 @@ reset_user() {
     confirm_restart
 }
 
+# Run /usr/local/a-ui/a-ui setting and report honestly whether it worked
+# (same rule as install.sh's a_ui_setting): look at the output as well as the
+# exit code — this script always comes from the main branch while the binary
+# may be an older, rolled-back version, which exits 0 even when the database
+# write fails and only prints a "... failed: ..." line. On failure print the
+# output and return 1.
+a_ui_setting() {
+    local out rc
+    out=$(/usr/local/a-ui/a-ui setting "$@" 2>&1)
+    rc=$?
+    if [[ ${rc} -ne 0 || "${out}" == *failed* ]]; then
+        echo -e "${red}${out}${plain}"
+        return 1
+    fi
+    return 0
+}
+
+# Whether something is already listening on the TCP port, same as install.sh's
+# port_in_use: ss first (no -H, CentOS 7 does not know it), netstat when there
+# is no ss, and treated as free when neither exists.
+port_in_use() {
+    local port="$1" listeners
+    if command -v ss >/dev/null 2>&1; then
+        listeners=$(ss -ltn 2>/dev/null)
+    elif command -v netstat >/dev/null 2>&1; then
+        listeners=$(netstat -ltn 2>/dev/null)
+    else
+        return 1
+    fi
+    echo "${listeners}" | awk -v p="${port}" '{ n = split($4, a, ":"); if (a[n] == p) found = 1 } END { exit !found }'
+}
+
+# Whether the panel is currently reached through Caddy (domain install): the
+# Caddyfile proxies requests to the panel's current port, and the panel either
+# listens on loopback only (reachable only through Caddy) or Caddy is running.
+# Loopback-only without a Caddy proxy (SSH tunnel only) does not count —
+# changing the port there locks nobody out; neither does the state after menu
+# 19 restored direct access (listening on every IP, Caddy disabled). The
+# argument is the output of a-ui setting -show.
+panel_behind_caddy() {
+    local listen port
+    listen=$(echo "$1" | awk '/^Listen:/ {print $2; exit}')
+    port=$(echo "$1" | awk '/^Port:/ {print $2; exit}')
+    [[ "${port}" =~ ^[0-9]+$ && -f /etc/caddy/Caddyfile ]] || return 1
+    grep -qE "reverse_proxy[[:space:]]+(127\.0\.0\.1|localhost):${port}([^0-9]|\$)" /etc/caddy/Caddyfile || return 1
+    case "${listen}" in
+    127.* | ::1 | localhost) return 0 ;;
+    esac
+    systemctl is-active --quiet caddy 2>/dev/null
+}
+
 reset_config() {
+    # On a domain install, a reset puts the listen address, port and base path
+    # back to their defaults: the panel is then served directly on port 54321
+    # of every IP at base path /, and Caddy's reverse proxy stops working. Say
+    # so before asking.
+    local show_out
+    if show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null) && panel_behind_caddy "${show_out}"; then
+        LOGD "Note: the panel is currently reached through Caddy (domain install). After the reset it will be served directly on port 54321 of every IP at base path /, and access through the domain stops working; to hide the panel again, run menu 18 (Configure domain and decoy site) after the reset"
+    fi
     confirm "are you sure you want to reset all settings,user data will not be lost,two-factor authentication will be turned off" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
@@ -207,11 +350,59 @@ set_port() {
     if [[ -z "${port}" ]]; then
         LOGD "cancelled..."
         before_show_menu
-    else
-        /usr/local/a-ui/a-ui setting -port ${port}
-        echo -e "set port done,please restart a-ui,and use this new port ${green}${port}${plain} to access panel"
-        confirm_restart
+        return 0
     fi
+    # Validate before handing it to a-ui setting: 0 and numbers above 65535 are
+    # stored as they are and the panel cannot bind after the restart; numbers
+    # with a leading 0 are parsed as octal by Go's flag package (010 becomes 8,
+    # 08 is an error).
+    if [[ ! "${port}" =~ ^[0-9]{1,5}$ ]] || ((10#${port} < 1 || 10#${port} > 65535)); then
+        LOGE "invalid port: please enter a whole number between 1 and 65535"
+        before_show_menu
+        return 1
+    fi
+    port=$((10#${port}))
+
+    local show_out cur_port
+    if ! show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null); then
+        LOGE "failed to read the current panel settings, nothing changed"
+        before_show_menu
+        return 1
+    fi
+    cur_port=$(echo "${show_out}" | awk '/^Port:/ {print $2; exit}')
+    # On a domain install the panel is only reached through Caddy, and
+    # install.sh wrote a fixed reverse_proxy 127.0.0.1:<port> into the
+    # Caddyfile. Changing the panel port alone leaves Caddy forwarding to the
+    # old port and locks the admin out. Deliberately not rewriting the
+    # Caddyfile here: that is a coordinated change of two configurations,
+    # each with its own failure and rollback, and getting only half of it done
+    # is a lockout; the menu 18 wizard is already the one entry point that
+    # writes Caddy and the panel settings together with full failure handling.
+    # So refuse and point there.
+    if panel_behind_caddy "${show_out}"; then
+        LOGE "the panel is reached through Caddy (domain install), its port cannot be changed here on its own: Caddy would keep forwarding to the old port ${cur_port} and the panel would no longer open via the domain"
+        LOGI "to reconfigure the domain and the panel, use menu 18 (Configure domain and decoy site), which updates Caddy and the panel settings together"
+        LOGI "to access the panel directly instead, first use menu 19 (Uninstall Caddy and restore direct panel access), then change the port"
+        before_show_menu
+        return 1
+    fi
+    if [[ "${port}" == "${cur_port}" ]]; then
+        LOGI "the panel already uses port ${port}, nothing to change"
+        before_show_menu
+        return 0
+    fi
+    if port_in_use "${port}"; then
+        LOGE "port ${port} is already in use by another program, please pick another one"
+        before_show_menu
+        return 1
+    fi
+    if ! a_ui_setting -port "${port}"; then
+        LOGE "setting the port failed, the panel port is unchanged"
+        before_show_menu
+        return 1
+    fi
+    echo -e "set port done,please restart a-ui,and use this new port ${green}${port}${plain} to access panel"
+    confirm_restart
 }
 
 start() {
@@ -323,16 +514,44 @@ install_bbr() {
     before_show_menu
 }
 
+# Download the new script to a temp file under /usr/bin, check it, then mv it
+# over /usr/bin/a-ui instead of writing to /usr/bin/a-ui directly:
+#   - certificates must be verified: this script runs as root and must not
+#     come over a connection a man in the middle could swap.
+#   - wget -O truncates the target before writing, so a failed download or an
+#     error page would destroy the management script itself.
+#   - the file being replaced is the very one bash is reading line by line
+#     right now. Rewriting it in place makes the running bash continue with
+#     misaligned bytes of the new file; mv puts in a new inode and the
+#     running process keeps reading the old one. The temp file sits in the
+#     target's directory so the mv is an atomic same-filesystem rename.
 update_shell() {
-    wget -O /usr/bin/a-ui -N --no-check-certificate https://github.com/SienFeng/AetherUI/raw/main/a-ui_en.sh
-    if [[ $? != 0 ]]; then
+    local tmp
+    tmp=$(mktemp /usr/bin/.a-ui-update.XXXXXX) || {
+        LOGE "failed to create a temp file, nothing changed"
+        before_show_menu
+        return 1
+    }
+    if ! wget -O "${tmp}" https://github.com/SienFeng/AetherUI/raw/main/a-ui_en.sh; then
+        rm -f "${tmp}"
         echo ""
         LOGE "update shell script failed,please check whether your server can access github"
         before_show_menu
-    else
-        chmod +x /usr/bin/a-ui
-        LOGI "update shell script succeed" && exit 0
+        return 1
     fi
+    if [[ ! -s "${tmp}" ]] || ! head -n 1 "${tmp}" | grep -qE '^#!.*bash' || ! bash -n "${tmp}" 2>/dev/null; then
+        rm -f "${tmp}"
+        LOGE "the download is not a complete bash script (empty, an error page or truncated), nothing replaced"
+        before_show_menu
+        return 1
+    fi
+    if ! chmod 755 "${tmp}" || ! mv -f "${tmp}" /usr/bin/a-ui; then
+        rm -f "${tmp}"
+        LOGE "failed to replace /usr/bin/a-ui, the current script is unchanged"
+        before_show_menu
+        return 1
+    fi
+    LOGI "update shell script succeed" && exit 0
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -589,9 +808,13 @@ ssl_cert_issue_by_cloudflare() {
         else
             LOGI "your domain is ready for issuing cert now..."
         fi
-        LOGD "please inout your cloudflare global API key:"
-        read -p "Input your key here:" CF_GlobalKey
-        LOGD "your cloudflare global API key is:${CF_GlobalKey}"
+        # The Global API Key controls the whole Cloudflare account: not echoed
+        # while typing and never printed afterwards — terminal scrollback,
+        # screen recordings and session logs would all keep it.
+        LOGD "please inout your cloudflare global API key (not shown while typing):"
+        read -rs -p "Input your key here:" CF_GlobalKey
+        echo ""
+        LOGD "cloudflare global API key read"
         LOGD "please input your cloudflare account email:"
         read -p "Input your email here:" CF_AccountEmail
         LOGD "your cloudflare account email:${CF_AccountEmail}"
@@ -678,8 +901,24 @@ cron_jobs() {
 # The old code overwrote bin/ with curl -s -L: without -f, an error page from
 # GitHub (rate limit, 5xx) still exits 0 and gets written as the .dat file, and
 # the restart that follows leaves xray unable to load geo data - every node on
-# the machine goes down, and a-ui.service has no Restart= to recover. The cron
-# job runs every two days at night, exactly when nobody is watching.
+# the machine goes down; the panel process itself keeps running, so
+# a-ui.service's Restart=on-failure cannot recover it either. The cron job runs
+# every two days at night, exactly when nobody is watching.
+#
+# The check before the swap uses bin/config.json, which may be stale: a hot
+# apply (tryHotApply) only pushes changes into the running core over gRPC and
+# does not rewrite that file, which is regenerated only when the core is
+# started as a whole process. If a routing rule added by a hot apply refers to
+# a category the new data lacks, the stale file cannot catch it and xray still
+# fails to start after the restart. So after swapping and restarting, wait for
+# the panel to regenerate bin/config.json and check it against the new data
+# once more; only when the old data passes and the new data fails is the new
+# data to blame, and then the old data is put back and the panel restarted
+# again. Without a bin/config.json (the panel never started the core yet)
+# nothing can be stale, so this step is skipped.
+#
+# This function must stay self-contained: update_geo_script_test.go extracts it
+# verbatim and runs it on its own.
 update_geo() {
     local bin_dir install_dir xray_bin tmp_dir f
     bin_dir=$(dirname "${PATH_FOR_GEO_SITE}")
@@ -733,33 +972,138 @@ EOF
         return 1
     fi
 
+    # Keep the current data in old/ for a rollback (hard links, so nothing is
+    # copied within one filesystem; copy if that fails), with the other .dat
+    # files linked in as well, so old/ is itself a complete asset directory to
+    # check against.
+    local old_dir="${tmp_dir}/old" have_old=1
+    mkdir -p "${old_dir}"
+    for f in "${bin_dir}"/*.dat; do
+        case "$(basename "${f}")" in
+        geoip.dat | geosite.dat) ;;
+        *) ln -s "${f}" "${old_dir}/" 2>/dev/null ;;
+        esac
+    done
+    for f in "${PATH_FOR_GEO_IP}" "${PATH_FOR_GEO_SITE}"; do
+        if ! ln -f "${f}" "${old_dir}/$(basename "${f}")" 2>/dev/null &&
+            ! cp -p "${f}" "${old_dir}/$(basename "${f}")" 2>/dev/null; then
+            have_old=0
+        fi
+    done
+
+    local had_cfg=0
+    [[ -f "${PATH_FOR_CONFIG}" ]] && had_cfg=1
     mv -f "${tmp_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
         mv -f "${tmp_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
     local mv_rc=$?
-    rm -rf "${tmp_dir}"
     if [[ ${mv_rc} -ne 0 ]]; then
+        [[ ${have_old} -eq 1 ]] && mv -f "${old_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
+            mv -f "${old_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
+        rm -rf "${tmp_dir}"
         LOGE "failed to replace geo data, check geoip.dat and geosite.dat in ${bin_dir}"
         return 1
     fi
+    # Note the moment before the restart, to tell whether bin/config.json was
+    # written after it. The extra second is because bash 4's -nt only compares
+    # whole seconds.
+    if [[ ${had_cfg} -eq 1 ]]; then
+        touch "${tmp_dir}/restart-stamp"
+        sleep 1
+    fi
     LOGI "geo data updated and checked, restarting panel"
     systemctl restart a-ui
+    local restart_rc=$?
+    if [[ ${had_cfg} -eq 1 ]]; then
+        local i regenerated=0
+        for ((i = 0; i < 30; i++)); do
+            if [[ "${PATH_FOR_CONFIG}" -nt "${tmp_dir}/restart-stamp" ]]; then
+                regenerated=1
+                break
+            fi
+            sleep 1
+        done
+        if [[ ${regenerated} -eq 0 ]]; then
+            rm -rf "${tmp_dir}"
+            LOGE "geo data was replaced and the panel restarted, but the panel did not regenerate ${PATH_FOR_CONFIG} within 30 seconds, so it is not confirmed that xray started with the new data; check with a-ui status and a-ui log"
+            return 1
+        fi
+        if ! (cd "${install_dir}" && XRAY_LOCATION_ASSET="${bin_dir}" "${xray_bin}" run -test -c "${PATH_FOR_CONFIG}") >/dev/null 2>&1; then
+            if [[ ${have_old} -eq 1 ]] &&
+                (cd "${install_dir}" && XRAY_LOCATION_ASSET="${old_dir}" "${xray_bin}" run -test -c "${PATH_FOR_CONFIG}") >/dev/null 2>&1; then
+                if mv -f "${old_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" && mv -f "${old_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"; then
+                    LOGE "the core config regenerated by the panel refers to a category missing from the new geo data (most likely a routing rule added by a hot apply); the old data was put back and the panel restarted again"
+                    systemctl restart a-ui
+                else
+                    LOGE "the core config regenerated by the panel does not work with the new geo data and putting the old data back failed too, xray may not start, check ${bin_dir} now"
+                fi
+                rm -rf "${tmp_dir}"
+                return 1
+            fi
+            # The old data fails as well: the config itself has another problem
+            # (e.g. a certificate file is gone), unrelated to this update; keep
+            # the new data, but xray is most likely not running, so report failure
+            rm -rf "${tmp_dir}"
+            LOGE "the core config regenerated by the panel fails the xray check, and the old geo data fails it as well, so the problem is not the updated data (the new data was kept); check a-ui log"
+            return 1
+        fi
+    fi
+    rm -rf "${tmp_dir}"
+    return ${restart_rc}
+}
+
+# root's crontab is only changed through the two functions below: the current
+# contents are filtered and piped straight into crontab -, no temp file is
+# ever written. The old code wrote the crontab to the fixed path
+# /tmp/crontabTask.tmp and then ran crontab on it: /tmp is world-writable, so
+# any local user could create that file first (with protected_regular root's
+# write to it fails, but the crontab call that follows installs the file
+# anyway), and whatever he put in it became root's cron jobs; every "enable"
+# also appended another duplicate line.
+#
+# The marker is the job's command itself (a-ui geo / a-ui clear), so
+# duplicates written by older versions of this script are collapsed too. If
+# crontab -l fails for a reason other than "no crontab yet", leave it alone:
+# otherwise an empty read would overwrite all of root's existing jobs.
+
+# cron_replace_lines <marker> [line...]: drop every line containing the
+# marker, then append the given lines.
+cron_replace_lines() {
+    local marker="$1" current
+    shift
+    if ! current=$(crontab -l 2>/dev/null); then
+        if ! crontab -l 2>&1 | grep -qi 'no crontab'; then
+            LOGE "failed to read root's crontab, nothing changed"
+            return 1
+        fi
+        current=""
+    fi
+    {
+        [[ -n "${current}" ]] && printf '%s\n' "${current}" | grep -vF -- "${marker}"
+        [[ $# -gt 0 ]] && printf '%s\n' "$@"
+    } | crontab -
+}
+
+# cron_drop_lines <marker>: drop every line containing the marker; does not
+# touch the crontab when there is none.
+cron_drop_lines() {
+    crontab -l 2>/dev/null | grep -qF -- "$1" || return 0
+    cron_replace_lines "$1"
 }
 
 enable_auto_update_geo() {
     LOGI "enable automatically update geo data..."
-    crontab -l >/tmp/crontabTask.tmp
-    echo "00 4 */2 * * a-ui geo > /dev/null" >>/tmp/crontabTask.tmp
-    crontab /tmp/crontabTask.tmp
-    rm /tmp/crontabTask.tmp
-    LOGI "enable automatically update geo data succeed"
+    if cron_replace_lines "a-ui geo" "00 4 */2 * * a-ui geo > /dev/null"; then
+        LOGI "enable automatically update geo data succeed"
+    else
+        LOGE "enable automatically update geo data failed"
+    fi
 }
 
 disable_auto_update_geo() {
-    crontab -l | grep -v "a-ui geo" | crontab -
-    if [[ $? -ne 0 ]]; then
-        LOGI "cancel a-ui automatically update geo data failed"
-    else
+    if cron_drop_lines "a-ui geo"; then
         LOGI "cancel a-ui automatically update geo data succeed"
+    else
+        LOGE "cancel a-ui automatically update geo data failed"
     fi
 }
 
@@ -804,34 +1148,37 @@ enable_auto_clear_log() {
         LOGI "current configuration didn't set valid logs,will exited"
         exit 1
     fi
-    if [[ -f ${accessfilePath} ]]; then
-        crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * a-ui clear ${accessfilePath} > /dev/null" >>/tmp/crontabTask.tmp
-        crontab /tmp/crontabTask.tmp
-        rm /tmp/crontabTask.tmp
-        LOGI "enable automatically clear xray log:${accessfilePath} succeed"
-    else
-        LOGE "accesslog didn't existed,won't automatically clear it"
-    fi
-
-    if [[ -f ${errorfilePath} ]]; then
-        crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * a-ui clear ${errorfilePath} > /dev/null" >>/tmp/crontabTask.tmp
-        crontab /tmp/crontabTask.tmp
-        rm /tmp/crontabTask.tmp
-        LOGI "enable automatically clear xray log:${errorfilePath} succeed"
-    else
-        LOGE "errorlog didn't existed,won't automatically clear it"
-    fi
+    # The marker carries the full path plus the space after it
+    # ("a-ui clear <path> "): only the previous job for the same log is
+    # replaced and the other log's job is left alone — with a shared
+    # "a-ui clear" marker, adding the second job would delete the first one
+    # just added; the trailing space keeps access.log from matching
+    # access.log.1. The path goes verbatim into root's crontab and cron hands
+    # it to sh, so only absolute paths made of plain characters are allowed —
+    # a path with spaces, quotes, $ or % would either break the job or become
+    # an injection point executed as root.
+    local p kind
+    for kind in access error; do
+        p="${accessfilePath}"
+        [[ "${kind}" == error ]] && p="${errorfilePath}"
+        if [[ ! -f ${p} ]]; then
+            LOGE "${kind}log didn't existed,won't automatically clear it"
+        elif [[ ! "${p}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            LOGE "log path ${p} contains characters that cannot safely go into a crontab (only letters, digits and . _ - / are supported), won't automatically clear it"
+        elif cron_replace_lines "a-ui clear ${p} " "30 4 */2 * * a-ui clear ${p} > /dev/null"; then
+            LOGI "enable automatically clear xray log:${p} succeed"
+        else
+            LOGE "enable automatically clear xray log:${p} failed"
+        fi
+    done
 }
 
 #disable auto dlete log
 disable_auto_clear_log() {
-    crontab -l | grep -v "a-ui clear" | crontab -
-    if [[ $? -ne 0 ]]; then
-        LOGI "cancel  automatically clear xray logs failed"
-    else
+    if cron_drop_lines "a-ui clear"; then
         LOGI "cancel  automatically clear xray logs succeed"
+    else
+        LOGE "cancel  automatically clear xray logs failed"
     fi
 }
 
@@ -900,7 +1247,16 @@ restore_direct_panel() {
         return 0
     fi
 
-    /usr/local/a-ui/a-ui setting -listen ""
+    # A failed write (locked DB, full disk) must stop here: the probe below hits 127.0.0.1, which also
+    # succeeds while the panel still listens on loopback only, and Caddy would then be stopped while it
+    # is the only way in.
+    if ! a_ui_setting -listen ""; then
+        LOGE "failed to restore the panel to listen on all IPs; Caddy will not be stopped this time"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     systemctl restart a-ui
 
     # The panel's port and base path may have both been randomized, don't
@@ -920,6 +1276,14 @@ restore_direct_panel() {
     fi
     port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
     basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
+    # Confirm it really took (an old binary exits 0 on a failed write): the listen address must be empty.
+    if [[ -n "$(echo "${show_out}" | grep '^Listen:' | awk '{print $2}')" ]]; then
+        LOGE "the panel still does not listen on all IPs; Caddy will not be stopped this time"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
 
     local alive=1 i
     if [[ -n "${port}" ]]; then

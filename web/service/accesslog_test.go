@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -649,8 +650,9 @@ func countAccessLogs(t *testing.T) int64 {
 	return n
 }
 
+// accessLine 造一行访问日志。时间按 UTC 写：面板拉起的核心带着 TZ=UTC（xray/process.go）。
 func accessLine(tag, target string, sec int) string {
-	ts := time.Date(2026, 11, 4, 20, 0, sec, 0, time.Local).Format("2006/01/02 15:04:05.000000")
+	ts := time.Date(2026, 11, 4, 20, 0, sec, 0, time.UTC).Format("2006/01/02 15:04:05.000000")
 	return ts + " from tcp:192.0.2.235:9677 accepted tcp:" + target + " [" + tag + " -> direct]\n"
 }
 
@@ -776,6 +778,10 @@ func TestAccessLogDBMigratesOldSchema(t *testing.T) {
 	if err := database.InitAccessLogDB(path); err != nil {
 		t.Fatalf("InitAccessLogDB 迁移旧库: %v", err)
 	}
+	// 现存部署都是带着历史数据的老库，复合索引必须由 AutoMigrate 补建；tag 写错是静默的。
+	if !database.GetAccessLogDB().Migrator().HasIndex(&model.AccessLog{}, "idx_access_logs_inbound_time") {
+		t.Error("老库升级后没有建出 idx_access_logs_inbound_time")
+	}
 	rows, _, err := (&AccessLogService{}).GroupByTargetRoute(3, 0, 10)
 	if err != nil {
 		t.Fatalf("GroupByTargetRoute: %v", err)
@@ -831,5 +837,146 @@ func TestMeterableConnCounts(t *testing.T) {
 	}
 	if got["example.com"] != 5 || got["chatgpt.com"] != 0 {
 		t.Errorf("got = %v，期望 example.com=5、chatgpt.com 不计", got)
+	}
+}
+
+// captureQuery 记下 fn 期间对 access_logs 发出的最后一条查询（带绑定参数的原样 SQL），
+// 供 EXPLAIN QUERY PLAN 复核真实语句的计划，而不是复核测试里另抄的一份。
+func captureQuery(t *testing.T, fn func()) (string, []any) {
+	t.Helper()
+	db := database.GetAccessLogDB()
+	var sql string
+	var vars []any
+	const name = "test:capture-access-log-query"
+	capture := func(tx *gorm.DB) {
+		if tx.Statement.Table == "access_logs" {
+			sql = tx.Statement.SQL.String()
+			vars = append([]any(nil), tx.Statement.Vars...)
+		}
+	}
+	// Find 走 Query 回调，Scan 走 Row 回调，两条都挂上。
+	if err := db.Callback().Query().After("gorm:query").Register(name, capture); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Callback().Query().Remove(name)
+	if err := db.Callback().Row().After("gorm:row").Register(name, capture); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Callback().Row().Remove(name)
+	fn()
+	if sql == "" {
+		t.Fatal("没有捕获到对 access_logs 的查询")
+	}
+	return sql, vars
+}
+
+func queryPlan(t *testing.T, sql string, vars []any) string {
+	t.Helper()
+	var plan []struct{ Detail string }
+	if err := database.GetAccessLogDB().Raw("EXPLAIN QUERY PLAN "+sql, vars...).Scan(&plan).Error; err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	lines := make([]string, 0, len(plan))
+	for _, p := range plan {
+		lines = append(lines, p.Detail)
+	}
+	return strings.Join(lines, " | ")
+}
+
+// fillAccessLogs 塞一批跨多个入站、跨几天的行：空表上 SQLite 怎么选计划都行，测不出东西。
+func fillAccessLogs(t *testing.T) {
+	t.Helper()
+	rows := make([]model.AccessLog, 0, 2000)
+	base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	for i := 0; i < 2000; i++ {
+		rows = append(rows, model.AccessLog{
+			Time: base + int64(i)*60_000, InboundId: i%10 + 1, InboundTag: "inbound-" + itoaS(i%10+1),
+			SourceIP: "192.0.2." + itoaS(i%200), Network: "tcp", Target: "www.example.com:443",
+			Route: "direct", Accepted: true,
+		})
+	}
+	if err := database.GetAccessLogDB().CreateInBatches(rows, 200).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 异常扫描每分钟按 (time, id) 游标增量读一次。纯 OR 的写法在绑定参数下用不上 time 索引的
+// 定位，退化成按索引顺序把游标之前的全部历史扫一遍（domain_stat.go 的位点查询记过同一个坑）。
+func TestReadAfterSeeksTimeIndex(t *testing.T) {
+	setupAccessLogDB(t)
+	fillAccessLogs(t)
+
+	cursor := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	sql, vars := captureQuery(t, func() {
+		if _, err := (&AccessLogService{}).ReadAfter(cursor, 5, 100); err != nil {
+			t.Fatal(err)
+		}
+	})
+	plan := queryPlan(t, sql, vars)
+	if !strings.Contains(plan, "SEARCH") || !strings.Contains(plan, "idx_access_logs_time (time>?") {
+		t.Errorf("ReadAfter 没有按 time 索引定位，计划是：%s（语句：%s）", plan, sql)
+	}
+}
+
+// 游标语义不能因为改写条件而变：同一毫秒内只取 id 更大的，之后的全取，之前的一条不取。
+func TestReadAfterKeepsCursorSemantics(t *testing.T) {
+	setupAccessLogDB(t)
+	adb := database.GetAccessLogDB()
+	for _, r := range []model.AccessLog{
+		{Time: 1000, Target: "a.example.com:443"}, // id 1
+		{Time: 2000, Target: "b.example.com:443"}, // id 2
+		{Time: 2000, Target: "c.example.com:443"}, // id 3
+		{Time: 3000, Target: "d.example.com:443"}, // id 4
+	} {
+		r := r
+		if err := adb.Create(&r).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := (&AccessLogService{}).ReadAfter(2000, 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range rows {
+		got = append(got, r.Target)
+	}
+	if strings.Join(got, ",") != "c.example.com:443,d.example.com:443" {
+		t.Errorf("游标 (2000, 2) 之后读到 %v，期望 c、d", got)
+	}
+}
+
+// 分流验证、后台审计、自动出差放行与「需要留意」都按「某入站自某时刻以来」查访问日志。
+// 只有 inbound_id 单列索引时要把该入站保留期内的全部行扫一遍再按时间过滤。
+func TestGroupByTargetRouteSeeksInboundTimeIndex(t *testing.T) {
+	setupAccessLogDB(t)
+	fillAccessLogs(t)
+
+	since := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	sql, vars := captureQuery(t, func() {
+		if _, _, err := (&AccessLogService{}).GroupByTargetRoute(3, since, 50); err != nil {
+			t.Fatal(err)
+		}
+	})
+	plan := queryPlan(t, sql, vars)
+	if !strings.Contains(plan, "idx_access_logs_inbound_time (inbound_id=? AND time>?") {
+		t.Errorf("GroupByTargetRoute 没有走 (inbound_id, time) 复合索引，计划是：%s", plan)
+	}
+}
+
+// 明细分页（inbound_id = ? ORDER BY id DESC LIMIT）仍走单列 inbound_id 索引：它的顺序就是
+// id 序，不用排序。加了复合索引之后如果计划换到复合索引上，每翻一页都要把该入站全部行排一遍。
+func TestAccessLogPageQueryKeepsInboundIdIndex(t *testing.T) {
+	setupAccessLogDB(t)
+	fillAccessLogs(t)
+
+	sql, vars := captureQuery(t, func() {
+		if _, _, err := (&AccessLogService{}).Query(AccessLogQuery{InboundId: 3, Page: 1, PageSize: 50, SkipTotal: true}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	plan := queryPlan(t, sql, vars)
+	if !strings.Contains(plan, "idx_access_logs_inbound_id") || strings.Contains(plan, "TEMP B-TREE FOR ORDER BY") {
+		t.Errorf("明细分页的计划变了：%s", plan)
 	}
 }

@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -42,10 +44,10 @@ func TestPlanPassChangesOnlyThatInboundTag(t *testing.T) {
 	if plan.TagByInbound[a.Id] == plan.TagByInbound[b.Id] {
 		t.Fatal("A 有通行证，tag 应当与 B 不同")
 	}
-	if plan.TagByInbound[b.Id] != regionTag([]string{"江苏省"}) {
+	if geoTagOfCode(plan.TagByInbound[b.Id]) != regionTag([]string{"江苏省"}) {
 		t.Error("B 的 tag 被连带改变了")
 	}
-	if plan.TagByInbound[a.Id] != regionTag([]string{"上海市", "江苏省"}) {
+	if geoTagOfCode(plan.TagByInbound[a.Id]) != regionTag([]string{"上海市", "江苏省"}) {
 		t.Error("A 的 tag 应当按有效地区计算")
 	}
 }
@@ -203,7 +205,7 @@ func TestRevokePassOnlyEndsThatPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ended, err := s.RevokePass(auto.Id, model.RegionPassHome, now); err != nil || ended {
+	if ended, err := s.RevokePass(in.Id, auto.Id, model.RegionPassHome, now); err != nil || ended {
 		t.Fatalf("已被替换的自动通行证不该再结束任何东西: ended=%v err=%v", ended, err)
 	}
 	if p, _ := s.ActiveOf(in.Id); p == nil || p.Id != manual.Id {
@@ -225,5 +227,165 @@ func TestGrantAutoRefusesWhenPassAppeared(t *testing.T) {
 	}
 	if p, _ := s.ActiveOf(in.Id); p == nil || p.Id != manual.Id {
 		t.Fatalf("手动通行证被自动发放替换了: %+v", p)
+	}
+}
+
+// 续期要说实话：通行证已经结束（被收回、被替换、到期）时不能报「已续期」。按 id 收回与续期
+// 还要对得上入站：SQLite 会复用 id，只认 id 可能碰到别的入站的那一张。
+func TestRenewAndRevokePassMatchTheInboundAndReportTruth(t *testing.T) {
+	in := setupPassInbound(t, 60308, []string{"江苏省"})
+	other := mkRegionInbound(t, 60309, true, []string{"江苏省"})
+	s := RegionPassService{}
+	now := time.Now()
+	p, err := s.Grant(in.Id, []string{"上海市"}, now.Add(time.Hour).UnixMilli(), true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := s.RevokePass(other.Id, p.Id, model.RegionPassHome, now); err != nil || ended {
+		t.Fatalf("入站对不上时不该收回: ended=%v err=%v", ended, err)
+	}
+	if renewed, err := s.Renew(other.Id, p.Id, now.Add(2*time.Hour).UnixMilli()); err != nil || renewed {
+		t.Fatalf("入站对不上时不该续期: renewed=%v err=%v", renewed, err)
+	}
+	if ended, err := s.RevokePass(in.Id, p.Id, model.RegionPassHome, now); err != nil || !ended {
+		t.Fatalf("应当收回: ended=%v err=%v", ended, err)
+	}
+	if renewed, err := s.Renew(in.Id, p.Id, now.Add(2*time.Hour).UnixMilli()); err != nil || renewed {
+		t.Fatalf("已结束的通行证不该报续期成功: renewed=%v err=%v", renewed, err)
+	}
+}
+
+// 关掉入站的「自动出差放行」：生效中的自动通行证一并结束（之后没人管它的收回与续期），
+// 管理员手动发的不动。
+func TestUpdateInboundTurningAutoTravelOffEndsAutoPass(t *testing.T) {
+	in := setupPassInbound(t, 60310, []string{"江苏省"})
+	db := database.GetDB()
+	if err := db.Model(&model.Inbound{}).Where("id = ?", in.Id).UpdateColumn("auto_travel", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := (&RegionPassService{}).GrantAuto(in.Id, "上海市", now.Add(time.Hour).UnixMilli(), now); err != nil {
+		t.Fatal(err)
+	}
+	got := mustGet(t, in.Id)
+	got.AutoTravel = false
+	if err := (&InboundService{}).UpdateInbound(got); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := (&RegionPassService{}).ActiveOf(in.Id); p != nil {
+		t.Errorf("关掉自动出差放行后自动通行证仍在生效: %+v", p)
+	}
+
+	manual := mkRegionInbound(t, 60311, true, []string{"江苏省"})
+	if err := db.Model(&model.Inbound{}).Where("id = ?", manual.Id).UpdateColumn("auto_travel", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&RegionPassService{}).Grant(manual.Id, []string{"上海市"}, now.Add(time.Hour).UnixMilli(), false, now); err != nil {
+		t.Fatal(err)
+	}
+	m := mustGet(t, manual.Id)
+	m.AutoTravel = false
+	if err := (&InboundService{}).UpdateInbound(m); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := (&RegionPassService{}).ActiveOf(manual.Id); p == nil {
+		t.Error("管理员手动发的通行证不该跟着结束")
+	}
+}
+
+// 预演只针对一个存在的入站：id 为 0 在 windowRows 里表示「所有入站」，会把所有客户的来源混在一起。
+func TestPreviewRejectsMissingInbound(t *testing.T) {
+	setupPassInbound(t, 60312, nil)
+	for _, id := range []int{0, -1, 999999} {
+		if _, err := (&RegionPreviewService{}).Preview(id, []string{"江苏省"}, time.Now()); err == nil {
+			t.Errorf("入站 %d 不存在，预演应当报错", id)
+		}
+	}
+}
+
+// 「需要留意」给被拦来源标的省份要能真的放行它：多数票的省份在执行口径下不一定包含这个 IP
+// （按多数判据合并时各库平票），那时一键发的通行证放行不了它，宁可标成未知。
+func TestEnforceableProvince(t *testing.T) {
+	calls := 0
+	allowed := func(regions []string) (*cidrSet, error) {
+		calls++
+		return newCIDRSet([]string{"192.0.2.0/24"}), nil
+	}
+	cache := map[string]*cidrSet{}
+	if got := enforceableProvince("192.0.2.5", "江苏省", allowed, cache); got != "江苏省" {
+		t.Errorf("在允许集里的 IP 应保留省份: %q", got)
+	}
+	if got := enforceableProvince("198.51.100.5", "江苏省", allowed, cache); got != "" {
+		t.Errorf("放行该省也放不进来的 IP 应标成未知: %q", got)
+	}
+	if got := enforceableProvince("198.51.100.5", "", allowed, cache); got != "" {
+		t.Errorf("没有省份的保持为空: %q", got)
+	}
+	if calls != 1 {
+		t.Errorf("同一个省的允许集只建一次，实际 %d 次", calls)
+	}
+}
+
+// 并发判定（一个人一个网络）跳过「被核心挡在门外」的来源，那个判断必须只看核心此刻生效的地区规则。
+// 回放 24 小时日志用的匹配器对持有通行证的入站把「存储地区之外」一律算成被拦（storedAllow）；
+// 并发判定若复用它，通行证有效期间通行证省份里的网络全部不占名额——五个人在外省同时用也一个都不断。
+func TestConcurrencySourceBlockerIgnoresStoredRegionReplay(t *testing.T) {
+	in := setupPassInbound(t, 60331, []string{"江苏省"})
+	isolateLiveGeo(t)
+	if _, err := (&RegionPassService{}).Grant(in.Id, []string{"*"}, time.Now().Add(time.Hour).UnixMilli(), false, time.Now()); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	concurrencyBlockMu.Lock()
+	concurrencyBlockGeo = nil
+	concurrencyBlockMu.Unlock()
+	t.Cleanup(func() {
+		concurrencyBlockMu.Lock()
+		concurrencyBlockGeo = nil
+		concurrencyBlockMu.Unlock()
+	})
+	blocked := (&ConcurrencyService{}).sourceBlocker([]*model.Inbound{in}, time.Now())(in)
+	if blocked("198.51.100.1") {
+		t.Error("地区限制已暂停（* 通行证），核心不拦任何来源，并发判定却把江苏以外的来源当成被拦、不计名额")
+	}
+}
+
+// 单省通行证（存储江苏、通行证上海）：两个网络同时在用，额度 1 时要断掉后到的那个。改动前存储地区之外的
+// 来源一律被当成「被核心拦着」，两个都不占名额，一个都不断。测试环境里核心还没用上过地区规则、dat 里也
+// 没有这一组，所以这里只看「回放分支不再参与」；真实核心对允许集之外的来源照常拦截、照常不占名额。
+func TestConcurrencyCountsNetworksDuringSingleProvincePass(t *testing.T) {
+	in := setupPassInbound(t, 60332, []string{"江苏省"})
+	isolateLiveGeo(t)
+	if _, err := (&RegionPassService{}).Grant(in.Id, []string{"上海市"}, time.Now().Add(time.Hour).UnixMilli(), true, time.Now()); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	concurrencyBlockMu.Lock()
+	concurrencyBlockGeo = nil
+	concurrencyBlockMu.Unlock()
+	t.Cleanup(func() {
+		concurrencyBlockMu.Lock()
+		concurrencyBlockGeo = nil
+		concurrencyBlockMu.Unlock()
+	})
+	blocked := (&ConcurrencyService{}).sourceBlocker([]*model.Inbound{in}, time.Now())(in)
+	list := []OnlineIP{
+		{IP: "192.0.2.21", Conns: 1, FirstSeen: 100},
+		{IP: "198.51.100.21", Conns: 1, FirstSeen: 200},
+	}
+	if got := planNetworkRejections(list, 1, blocked); !reflect.DeepEqual(got, []string{"198.51.100.21"}) {
+		t.Errorf("通行证期间两个网络同时在用、额度 1，应当断开后到的那个，实际 %v", got)
+	}
+}
+
+// isolateLiveGeo 让并发判定的匹配器只看「核心还没用上任何地区规则、dat 里也没有」的状态，不受同一进程里
+// 其它用例留下的已生效地区与 dat 文件影响（那时允许集之外的来源会被真实规则拦下，测不到回放分支）。
+func isolateLiveGeo(t *testing.T) {
+	t.Helper()
+	resetGeoGenerations(t)
+	if _, err := os.Stat(geoDatPath); err == nil {
+		aside := filepath.Join(t.TempDir(), "a-ui-geo.dat")
+		if err := os.Rename(geoDatPath, aside); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Rename(aside, geoDatPath) })
 	}
 }

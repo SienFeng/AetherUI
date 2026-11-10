@@ -278,3 +278,44 @@ func TestRunXrayTestFailsOpenOnTimeout(t *testing.T) {
 		t.Fatalf("超时必须放行，得到错误: %v", err)
 	}
 }
+
+// fakeXrayBinary 在临时目录的 bin/ 下放一个假 xray 并切过去（GetBinaryPath 是相对路径）。
+func fakeXrayBinary(t *testing.T, script string, mode os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("需要 /bin/sh")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, xray.GetBinaryPath()), []byte(script), mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+}
+
+// 校验超时要杀掉 xray 并放行。修复前超时那一支在主 goroutine 里读 cmd.Process，而它正由跑
+// CombinedOutput 的 goroutine 写入（用 -race 跑才看得出来）。
+func TestRunXrayTestTimeoutKillsAndFailsOpen(t *testing.T) {
+	fakeXrayBinary(t, "#!/bin/sh\nsleep 30\n", 0o755)
+	old := xrayTestTimeout
+	xrayTestTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { xrayTestTimeout = old })
+	start := time.Now()
+	if err := runXrayTest(map[string]any{}); err != nil {
+		t.Fatalf("超时应当放行: %v", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("超时没有生效")
+	}
+}
+
+// 二进制在但执行不了（权限、架构不对）：这是校验器自身的故障，按 fail open 放行。修复前会报
+// 「xray 校验未通过: 」——后面什么原因都没有——并拦下所有入站与出站的保存。
+func TestRunXrayTestFailsOpenWhenBinaryCannotStart(t *testing.T) {
+	fakeXrayBinary(t, "#!/bin/sh\nexit 0\n", 0o644)
+	if err := runXrayTest(map[string]any{}); err != nil {
+		t.Fatalf("执行不了 xray 时应当放行: %v", err)
+	}
+}

@@ -29,17 +29,17 @@ func TestAccumulatorRequiresThresholdBeforeFlush(t *testing.T) {
 	a := newSharingAccumulator()
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 
-	if got := a.observe(base, oneObs(), 30); len(got) != 0 {
+	if got := observeAcked(a, base, oneObs(), 30); len(got) != 0 {
 		t.Fatalf("累计 30 秒就落库了: %+v", got)
 	}
-	got := a.observe(base.Add(30*time.Second), oneObs(), 30)
+	got := observeAcked(a, base.Add(30*time.Second), oneObs(), 30)
 	if len(got) != 1 || got[0].ActiveSeconds != 60 {
 		t.Fatalf("累计 60 秒 = %+v, want 1 条 ActiveSeconds=60", got)
 	}
-	if got := a.observe(base.Add(60*time.Second), oneObs(), 30); len(got) != 0 {
+	if got := observeAcked(a, base.Add(60*time.Second), oneObs(), 30); len(got) != 0 {
 		t.Fatalf("距上次落库只多 30 秒，不该再落库: %+v", got)
 	}
-	got = a.observe(base.Add(90*time.Second), oneObs(), 30)
+	got = observeAcked(a, base.Add(90*time.Second), oneObs(), 30)
 	if len(got) != 1 || got[0].ActiveSeconds != 120 {
 		t.Fatalf("累计 120 秒 = %+v, want 1 条 ActiveSeconds=120", got)
 	}
@@ -52,10 +52,10 @@ func TestAccumulatorDiscardsSubThresholdRemainderAcrossHours(t *testing.T) {
 	h10 := time.Date(2026, 9, 5, 10, 59, 30, 0, time.UTC)
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 
-	if got := a.observe(h10, oneObs(), 30); len(got) != 0 {
+	if got := observeAcked(a, h10, oneObs(), 30); len(got) != 0 {
 		t.Fatalf("不该落库: %+v", got)
 	}
-	if got := a.observe(h11, oneObs(), 30); len(got) != 0 {
+	if got := observeAcked(a, h11, oneObs(), 30); len(got) != 0 {
 		t.Fatalf("跨小时结转了不满门槛的余量: %+v", got)
 	}
 }
@@ -67,11 +67,11 @@ func TestAccumulatorFlushesCompletedHourOnRollover(t *testing.T) {
 	h10 := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 
-	a.observe(h10, oneObs(), 30)                     // 30
-	a.observe(h10.Add(30*time.Second), oneObs(), 30) // 60，落库
-	a.observe(h10.Add(60*time.Second), oneObs(), 30) // 90，未落库
+	observeAcked(a, h10, oneObs(), 30)                     // 30
+	observeAcked(a, h10.Add(30*time.Second), oneObs(), 30) // 60，落库
+	observeAcked(a, h10.Add(60*time.Second), oneObs(), 30) // 90，未落库
 
-	got := a.observe(h11, oneObs(), 30)
+	got := observeAcked(a, h11, oneObs(), 30)
 	if len(got) != 1 {
 		t.Fatalf("跨小时 = %+v, want 1 条收尾记录", got)
 	}
@@ -97,8 +97,8 @@ func TestAccumulatorCapsRowsPerInboundPerHour(t *testing.T) {
 			Meta:      provinceMeta("江苏"),
 		})
 	}
-	a.observe(base, obs, 30)
-	got := a.observe(base.Add(30*time.Second), obs, 30)
+	observeAcked(a, base, obs, 30)
+	got := observeAcked(a, base.Add(30*time.Second), obs, 30)
 	if len(got) != sharingMaxRowsPerHour {
 		t.Errorf("落库 %v 条, want 上限 %v 条", len(got), sharingMaxRowsPerHour)
 	}
@@ -111,7 +111,7 @@ func TestAccumulatorCapDoesNotEvictExistingSources(t *testing.T) {
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	real := sharingObservation{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}
 
-	a.observe(base, []sharingObservation{real}, 30)
+	observeAcked(a, base, []sharingObservation{real}, 30)
 
 	flood := []sharingObservation{real}
 	for i := 0; i < sharingMaxRowsPerHour+10; i++ {
@@ -121,7 +121,7 @@ func TestAccumulatorCapDoesNotEvictExistingSources(t *testing.T) {
 			Meta:      provinceMeta("江苏"),
 		})
 	}
-	got := a.observe(base.Add(30*time.Second), flood, 30)
+	got := observeAcked(a, base.Add(30*time.Second), flood, 30)
 
 	found := false
 	for _, f := range got {
@@ -147,13 +147,13 @@ func TestAccumulatorForgetDropsInboundBeforeRollover(t *testing.T) {
 	}
 
 	// 攒到 90 秒：60 秒时落过一次，剩下的 30 秒还挂在内存里。
-	a.observe(h10, obs, 30)
-	a.observe(h10.Add(30*time.Second), obs, 30)
-	a.observe(h10.Add(60*time.Second), obs, 30)
+	observeAcked(a, h10, obs, 30)
+	observeAcked(a, h10.Add(30*time.Second), obs, 30)
+	observeAcked(a, h10.Add(60*time.Second), obs, 30)
 
 	a.forget(1)
 
-	got := a.observe(h11, nil, 30)
+	got := observeAcked(a, h11, nil, 30)
 	for _, f := range got {
 		if f.InboundId == 1 {
 			t.Errorf("已删除的入站 1 在跨小时时又被写回: %+v", f)
@@ -183,8 +183,8 @@ func TestAccumulatorAccumulatesByteDeltas(t *testing.T) {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up, Down: down}}
 	}
 
-	a.observe(base, obs(1000, 2000), 30)
-	got := a.observe(base.Add(30*time.Second), obs(500, 1500), 30)
+	observeAcked(a, base, obs(1000, 2000), 30)
+	got := observeAcked(a, base.Add(30*time.Second), obs(500, 1500), 30)
 	if len(got) != 1 {
 		t.Fatalf("满 60 秒没落库: %+v", got)
 	}
@@ -207,10 +207,10 @@ func TestAccumulatorCarriesBytesOnRollover(t *testing.T) {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up}}
 	}
 
-	a.observe(h10, obs(0), 30)
-	a.observe(h10.Add(30*time.Second), obs(5000), 30) // 落库，5000 字节
-	a.observe(h10.Add(60*time.Second), obs(4000), 30) // 未到下一次落库门槛
-	got := a.observe(h11, obs(0), 30)
+	observeAcked(a, h10, obs(0), 30)
+	observeAcked(a, h10.Add(30*time.Second), obs(5000), 30) // 落库，5000 字节
+	observeAcked(a, h10.Add(60*time.Second), obs(4000), 30) // 未到下一次落库门槛
+	got := observeAcked(a, h11, obs(0), 30)
 	if len(got) == 0 {
 		t.Fatal("跨小时没有补写收尾记录")
 	}
@@ -237,13 +237,13 @@ func TestAccumulatorBytesOnlyBelowGateIsNotWritten(t *testing.T) {
 	for i := 0; i < sharingMaxRowsPerHour+10; i++ {
 		flood = append(flood, bytesOnly(fmt.Sprintf("10.0.%v.%v", i/256, i%256), 600))
 	}
-	if got := a.observe(base, flood, 30); len(got) != 0 {
+	if got := observeAcked(a, base, flood, 30); len(got) != 0 {
 		t.Fatalf("不满门槛的纯字节来源落库了: %+v", got)
 	}
 
 	real := sharingObservation{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}
-	a.observe(base.Add(30*time.Second), []sharingObservation{real}, 30)
-	got := a.observe(base.Add(60*time.Second), []sharingObservation{real}, 30)
+	observeAcked(a, base.Add(30*time.Second), []sharingObservation{real}, 30)
+	got := observeAcked(a, base.Add(60*time.Second), []sharingObservation{real}, 30)
 	if len(got) != 1 || got[0].IP != real.IP {
 		t.Errorf("真实用户被纯字节来源挤出了上限: %+v", got)
 	}
@@ -257,10 +257,10 @@ func TestAccumulatorBytesOnlyIsWrittenOnceOverGate(t *testing.T) {
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	half := int64(coexistMinActiveBytes / 2)
 
-	if got := a.observe(base, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
+	if got := observeAcked(a, base, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
 		t.Fatalf("半个门槛就落库了: %+v", got)
 	}
-	got := a.observe(base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
+	got := observeAcked(a, base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
 	if len(got) != 1 {
 		t.Fatalf("攒满门槛没落库: %+v", got)
 	}
@@ -278,9 +278,9 @@ func TestAccumulatorAbsorbsLooseBytesWhenObserved(t *testing.T) {
 		return []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏"), Up: up}}
 	}
 
-	a.observe(base, []sharingObservation{bytesOnly("1.1.1.1", 700)}, 30)
-	a.observe(base.Add(30*time.Second), active(100), 30)
-	got := a.observe(base.Add(60*time.Second), active(200), 30)
+	observeAcked(a, base, []sharingObservation{bytesOnly("1.1.1.1", 700)}, 30)
+	observeAcked(a, base.Add(30*time.Second), active(100), 30)
+	got := observeAcked(a, base.Add(60*time.Second), active(200), 30)
 	if len(got) != 1 || got[0].ActiveUp != 1000 {
 		t.Errorf("落库 = %+v, want ActiveUp=1000（纯字节 700 + 活跃 300）", got)
 	}
@@ -294,14 +294,14 @@ func TestAccumulatorRewritesBytesOnlyProgress(t *testing.T) {
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	active := []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: provinceMeta("江苏")}}
 
-	a.observe(base, active, 30)
-	if got := a.observe(base.Add(30*time.Second), active, 30); len(got) != 1 {
+	observeAcked(a, base, active, 30)
+	if got := observeAcked(a, base.Add(30*time.Second), active, 30); len(got) != 1 {
 		t.Fatalf("满 60 秒没落库: %+v", got)
 	}
-	if got := a.observe(base.Add(60*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 4000)}, 30); len(got) != 0 {
+	if got := observeAcked(a, base.Add(60*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 4000)}, 30); len(got) != 0 {
 		t.Fatalf("距上次落库只过了 30 秒就又写了: %+v", got)
 	}
-	got := a.observe(base.Add(90*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 1000)}, 30)
+	got := observeAcked(a, base.Add(90*time.Second), []sharingObservation{bytesOnly("1.1.1.1", 1000)}, 30)
 	if len(got) != 1 || got[0].ActiveUp != 5000 || got[0].ActiveSeconds != 60 {
 		t.Errorf("落库 = %+v, want ActiveUp=5000 ActiveSeconds=60（纯字节不加时长）", got)
 	}
@@ -314,8 +314,8 @@ func TestAccumulatorDropsLooseBytesOnRollover(t *testing.T) {
 	h11 := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
 	half := int64(coexistMinActiveBytes / 2)
 
-	a.observe(h10, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
-	if got := a.observe(h11, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
+	observeAcked(a, h10, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30)
+	if got := observeAcked(a, h11, []sharingObservation{bytesOnly("1.1.1.1", half)}, 30); len(got) != 0 {
 		t.Errorf("上一小时的余量结转进了新的一小时: %+v", got)
 	}
 }
@@ -329,8 +329,8 @@ func TestAccumulatorReplacesMetaAsAWhole(t *testing.T) {
 	old := NetworkMeta{Country: "中国", Province: "北京市", City: "北京市", ISP: "中国移动"}
 	fresh := NetworkMeta{Country: "中国", Province: "湖北省", City: "武汉市", ISP: "中国联通"}
 
-	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: old}}, 30)
-	got := a.observe(base.Add(30*time.Second),
+	observeAcked(a, base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: old}}, 30)
+	got := observeAcked(a, base.Add(30*time.Second),
 		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: fresh}}, 30)
 
 	if len(got) != 1 {
@@ -348,8 +348,8 @@ func TestAccumulatorKeepsKnownMetaWhenLookupYieldsNothing(t *testing.T) {
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	known := NetworkMeta{Country: "中国", Province: "江苏省", City: "南通市", ISP: "中国电信"}
 
-	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: known}}, 30)
-	got := a.observe(base.Add(30*time.Second),
+	observeAcked(a, base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: known}}, 30)
+	got := observeAcked(a, base.Add(30*time.Second),
 		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: NetworkMeta{}}}, 30)
 
 	if len(got) != 1 {
@@ -367,8 +367,8 @@ func TestAccumulatorAcceptsForeignMetaWithoutProvince(t *testing.T) {
 	base := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
 	foreign := NetworkMeta{Country: "美国", ISP: "Amazon"}
 
-	a.observe(base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: NetworkMeta{}}}, 30)
-	got := a.observe(base.Add(30*time.Second),
+	observeAcked(a, base, []sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: NetworkMeta{}}}, 30)
+	got := observeAcked(a, base.Add(30*time.Second),
 		[]sharingObservation{{InboundId: 1, IP: "1.1.1.1", Meta: foreign}}, 30)
 
 	if len(got) != 1 {
@@ -390,9 +390,9 @@ func TestAccumulatorPromotesOverGateEvenWhenLooseIsFull(t *testing.T) {
 	for i := 0; i < sharingMaxLoosePerHour; i++ {
 		flood = append(flood, bytesOnly(fmt.Sprintf("10.%v.%v.%v", i>>16&255, i>>8&255, i&255), 100))
 	}
-	a.observe(base, flood, 30)
+	observeAcked(a, base, flood, 30)
 
-	got := a.observe(base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", coexistMinActiveBytes)}, 30)
+	got := observeAcked(a, base.Add(30*time.Second), []sharingObservation{bytesOnly("1.1.1.1", coexistMinActiveBytes)}, 30)
 	if len(got) != 1 || got[0].IP != "1.1.1.1" {
 		t.Errorf("暂存表满时，满门槛的新来源被丢掉了: %+v", got)
 	}

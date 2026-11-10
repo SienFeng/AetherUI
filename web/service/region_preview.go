@@ -217,9 +217,20 @@ type RegionPreviewService struct{}
 // Preview 用该入站近 sharingWindowDays 天按来源 IP 的小时用量，算出按 regions
 // 限制时会被拦掉的来源。只覆盖活跃满 60 秒、落过库的来源（见 sharingFlushThreshold）。
 func (s *RegionPreviewService) Preview(inboundId int, regions []string, now time.Time) (*RegionPreview, error) {
+	// windowRows 把 0 当成「所有入站」：不挡的话，一个手写的请求能拿到混着所有客户来源的预演。
+	if inboundId <= 0 {
+		return nil, common.NewError("入站不存在")
+	}
+	if _, err := (&InboundService{}).GetInbound(inboundId); err != nil {
+		return nil, common.NewError("入站不存在")
+	}
 	regions = normalizeRegions(regions)
 	if len(regions) == 0 {
 		return nil, common.NewError("请先选择地区")
+	}
+	// 先查 IP 库：checkPassProvinces 在库没加载时说的是通行证的事，放在表单里文不对题。
+	if (&IPDBService{}).DB() == nil {
+		return nil, common.NewError("IP 归属地库未加载，无法预演；请先到「面板设置 → IP 归属地库」更新")
 	}
 	if err := checkPassProvinces(regions); err != nil {
 		return nil, err

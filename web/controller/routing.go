@@ -367,7 +367,10 @@ func (a *RoutingController) refreshDomainGroup(c *gin.Context) {
 	}
 	err = a.domainGroupService.Refresh(id)
 	jsonMsg(c, "更新订阅", err)
-	if err == nil {
+	// 部分地址失败时，成功的那部分已经写进了合并结果：响应如实报失败，配置照样
+	// 要下发。只在 err == nil 时置标志的话，新内容会一直停在库里，规则全都挂着
+	// 「等待下发」。配置其实没变时 RestartXray 是空操作。
+	if err == nil || service.IsPartialRefresh(err) {
 		a.xrayService.SetToNeedRestart()
 	}
 }

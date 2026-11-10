@@ -73,3 +73,11 @@ func TestIsReservedTagRejectsMeterPrefix(t *testing.T) {
 		}
 	}
 }
+
+// dokodemo-door 入站用的那个不带私网守卫的默认出站副本也是注入器自己发的：导入或手工加的节点撞上它，
+// xray 会报 existing tag found 拒绝启动。
+func TestIsReservedTagIncludesDokodemoDirect(t *testing.T) {
+	if !IsReservedTag(DokodemoDirectOutboundTag) {
+		t.Errorf("IsReservedTag(%q) = false，期望 true", DokodemoDirectOutboundTag)
+	}
+}

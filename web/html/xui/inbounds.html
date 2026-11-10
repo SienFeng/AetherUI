@@ -85,7 +85,8 @@
                                 <span>[[ inboundSpeed.down === null ? '暂时读不到连接表' : '各入站在线连接的速度之和' ]]</span>
                             </div>
                         </div>
-                        <!-- 过期、7 天内到期、共享风险达到「中」以上、近 24 小时被地区限制拦截的入站数。有数才变红。 -->
+                        <!-- 过期、7 天内到期、共享风险达到「中」以上、近 24 小时被地区限制拦截或地区规则降级、
+                             端口被占用的入站数。有数才变红。 -->
                         <div class="stat-card" :class="dueSummary.total ? 'tone-alert' : 'tone-ok'">
                             <span class="stat-icon">
                                 <a-icon :type="dueSummary.total ? 'warning' : 'check-circle'"></a-icon>
@@ -538,7 +539,28 @@
                                         :title="geoDegradedOf(dbInbound).reason"
                                         @click.stop="showRegionPass(dbInbound)">
                                     <a-icon type="exclamation-circle" aria-hidden="true"></a-icon>
-                                    [[ geoDegradedOf(dbInbound).mode === 'closed' ? '地区规则异常，已全部拦截' : '地区数据沿用旧版' ]]
+                                    [[ { closed: '地区规则异常，已全部拦截', partial: '地区缺省份' }[geoDegradedOf(dbInbound).mode] || '地区数据沿用旧版' ]]
+                                </button>
+                                <!-- 端口被别的程序占着：这个入站被临时摘出核心配置，所有用户都连不上；端口空出来后 30 秒内自动恢复 -->
+                                <a-tooltip v-if="portConflictOf(dbInbound)" :trigger="['hover', 'focus', 'click']">
+                                    <template slot="title"><span v-text="portConflictOf(dbInbound).detail"></span></template>
+                                    <span class="chip is-degraded" tabindex="0" role="button"
+                                          :aria-label="portConflictOf(dbInbound).detail" @click.stop>
+                                        <a-icon type="exclamation-circle" aria-hidden="true"></a-icon>
+                                        端口被占用
+                                    </span>
+                                </a-tooltip>
+                                <!-- 流量暴涨自动限速：到当地当天结束自动恢复。点按、悬停、键盘聚焦都能看到为什么限速 -->
+                                <a-tooltip v-if="throttleOf(dbInbound)" :trigger="['hover', 'focus', 'click']">
+                                    <template slot="title"><span v-text="throttleOf(dbInbound).detail"></span></template>
+                                    <span class="chip is-degraded" tabindex="0" role="button"
+                                          :aria-label="throttleOf(dbInbound).detail" @click.stop>限速中</span>
+                                </a-tooltip>
+                                <!-- 7 天内自动设置的地区（首次设置，或长住外地自动改地区），可撤销 -->
+                                <button v-if="autoRegionOf(dbInbound)" type="button" class="chip is-pass"
+                                        :title="autoRegionOf(dbInbound).reason"
+                                        @click.stop="openAutoRegion(dbInbound)">
+                                    [[ autoRegionOf(dbInbound).prevRegions.length ? '地区：自动改过' : '地区：自动设置' ]]
                                 </button>
                             </template>
 
@@ -610,6 +632,37 @@
             </a-spin>
         </a-layout-content>
     </a-layout>
+    <!-- 自动设置的地区：查看依据，或撤销（首次设置撤销后不限制地区；长住改地区撤销后恢复原来的省） -->
+    <a-modal v-model="autoRegionModal.visible" :width="520" :footer="null">
+        <template slot="title">
+            <div class="modal-head">
+                <span class="modal-icon tone-blue" aria-hidden="true"><a-icon type="environment"></a-icon></span>
+                <span class="modal-head-text">
+                    <span class="modal-head-title">[[ autoRegionModal.prevRegions.length ? '长住外地，已自动改地区' : '已自动设置地区限制' ]]</span>
+                    <span class="modal-head-sub">[[ autoRegionModal.name ]]</span>
+                </span>
+            </div>
+        </template>
+        <div class="auto-region-body">
+            <div class="auto-region-row"><span class="cell-muted">地区</span><b>[[ autoRegionModal.regions.join('、') ]]</b></div>
+            <div v-if="autoRegionModal.prevRegions.length" class="auto-region-row"><span class="cell-muted">原来的地区</span><span>[[ autoRegionModal.prevRegions.join('、') ]]</span></div>
+            <div class="auto-region-row"><span class="cell-muted">依据</span><span>[[ autoRegionModal.reason ]]</span></div>
+            <div class="auto-region-row"><span class="cell-muted">时间</span><span class="cell-num">[[ autoRegionModal.at ? DateUtil.formatMillis(autoRegionModal.at).slice(0, 16) : '—' ]]</span></div>
+            <p class="cell-muted">
+                [[ autoRegionModal.prevRegions.length
+                    ? '撤销会把地区恢复为「' + autoRegionModal.prevRegions.join('、') + '」，并关闭这个用户的自动出差放行（以后不再自动放行或改地区）、收回通行证。'
+                    : '撤销会清空地区限制、关闭自动出差放行、收回通行证，以后不再为这个用户自动设置。' ]]
+            </p>
+        </div>
+        <div class="auto-region-actions">
+            <a-popconfirm :title="autoRegionModal.prevRegions.length
+                              ? '撤销后地区恢复为「' + autoRegionModal.prevRegions.join('、') + '」，不再自动管理这个用户。确定？'
+                              : '撤销后这个用户恢复为不限制地区。确定？'"
+                          ok-text="撤销" cancel-text="取消" @confirm="autoRegionUndo">
+                <a-button type="danger" :loading="autoRegionModal.loading">撤销自动设置</a-button>
+            </a-popconfirm>
+        </div>
+    </a-modal>
     <!-- 踢下线 / 禁止连接（视觉稿 v3 的弹窗头部 + 选择卡）。放在 #app 内，
          否则 v-model 等指令不会被编译（CLAUDE.md「Vue 指令写在根元素之外是死代码」）。 -->
     <a-modal v-model="kickModal.visible" :width="560" :mask-closable="false"
@@ -706,7 +759,9 @@
     }, {
         title: "限制",
         align: 'left',
-        width: 115,
+        // 表格是 table-layout: fixed，窄屏时各列就是这里的宽度。115 时「端口被占用」「地区缺省份」
+        // 「地区：自动设置」这类状态标签会从字中间折成两行（「端口被占 / 用」）；130 刚好放下一行
+        width: 130,
         scopedSlots: { customRender: 'limits' },
     }, {
         title: "启用",
@@ -833,6 +888,7 @@
             onlineCounts: {},
             onlineCountError: '',
             onlineCountTimer: null,
+            autoRegionModal: { visible: false, loading: false, id: 0, name: '', regions: [], prevRegions: [], reason: '', at: 0 },
             // 踢下线弹窗。value 是选中的封禁时长（秒）：0 只断开，-1 永久。
             kickModal: {
                 visible: false,
@@ -910,6 +966,24 @@
             showRegionPass(dbInbound) {
                 passModal.show(dbInbound, this.inboundAttentionOf(dbInbound.id));
             },
+            // portConflictOf：端口被别的程序占着、入站被临时摘出核心配置（来自「需要留意」摘要），没有返回 null。
+            portConflictOf(dbInbound) {
+                const c = this.inboundAttentionOf(dbInbound.id).portConflict;
+                if (!c || !dbInbound.enable) return null;
+                return {
+                    detail: `端口 ${c.port} 被这台服务器上的其他程序占用，这个入站暂时没有生效（用户都连不上）；` +
+                        `面板每 30 秒检查一次，端口空出来后自动恢复。可以换一个端口，或停掉占用它的程序。原因：${c.reason}`,
+                };
+            },
+            // throttleOf：生效中的流量暴涨自动限速（来自「需要留意」摘要），没有返回 null。
+            throttleOf(dbInbound) {
+                const t = this.inboundAttentionOf(dbInbound.id).throttle;
+                if (!t || !dbInbound.enable || t.until <= Date.now()) return null;
+                return {
+                    detail: `流量暴涨自动限速：今天已用 ${sizeFormat(t.todayBytes)}，平时每天约 ${sizeFormat(t.baseline)}；` +
+                        `上下行各限 ${t.mbps} Mbps，${DateUtil.formatMillis(t.until)} 自动恢复`,
+                };
+            },
             regionPassChipOf(dbInbound) {
                 if (!dbInbound.enable) return null;
                 const p = this.inboundAttentionOf(dbInbound.id).regionPass;
@@ -924,6 +998,36 @@
                     title: (p.auto ? '自动出差放行发放的' : '手动发放的') + '临时通行证：' + scope + '，'
                         + until + ' 到期后恢复入站本身的地区限制。点击查看或收回。',
                 };
+            },
+            autoRegionOf(dbInbound) {
+                // 只有 7 天内的自动设置；停用的入站上也显示：那段时间里把地区改回去只能点它撤销
+                const a = this.inboundAttentionOf(dbInbound.id).autoRegion || null;
+                if (!a) return null;
+                return Object.assign({ regions: [], prevRegions: [] }, a);
+            },
+            openAutoRegion(dbInbound) {
+                const a = this.autoRegionOf(dbInbound);
+                if (!a) return;
+                Object.assign(this.autoRegionModal, {
+                    visible: true, loading: false, id: dbInbound.id,
+                    name: dbInbound.remark || ('入站 #' + dbInbound.id),
+                    regions: a.regions, prevRegions: a.prevRegions, reason: a.reason, at: a.at,
+                });
+            },
+            async autoRegionUndo() {
+                if (this.autoRegionModal.loading) return;
+                const id = this.autoRegionModal.id;
+                this.autoRegionModal.loading = true;
+                await HttpUtil.post('/aui/inbound/autoRegion/undo/' + id);
+                // 失败也关掉并刷新：失败多半是状态刚被任务或别的页面改过，弹窗里的数据已经过时，
+                // 留着它只会让人对着旧数据再点一次。失败原因由 HttpUtil 的提示给出。
+                // 结果回来时弹窗若已换成别的入站，不去动它。
+                if (this.autoRegionModal.id === id) {
+                    this.autoRegionModal.loading = false;
+                    this.autoRegionModal.visible = false;
+                }
+                await this.getDBInbounds();
+                this.refreshInboundAttention();
             },
             geoDegradedOf(dbInbound) {
                 if (!dbInbound.enable) return null;
@@ -1063,7 +1167,7 @@
                     out.push({
                         key: 'conc',
                         text: `并发 ${dbInbound.concurrencyLimit}`,
-                        title: `最多同时 ${dbInbound.concurrencyLimit} 个来源 IP`,
+                        title: `最多同时 ${dbInbound.concurrencyLimit} 个网络在用（同一个 Wi-Fi 算一个，IPv6 按 /64）；没单独设的入站按面板设置里的默认值`,
                     });
                 }
                 if (dbInbound.upMbit > 0 || dbInbound.downMbit > 0) {
@@ -1144,13 +1248,17 @@
                     okText: '添加',
                     confirm: async (inbound, dbInbound) => {
                         inModal.loading();
-                        await this.addInbound(inbound, dbInbound);
-                        inModal.close();
+                        // 失败时留着弹窗：填好的内容不能因为一次被拒就丢掉
+                        const msg = await this.addInbound(inbound, dbInbound);
+                        if (msg.success) inModal.close();
                     }
                 });
             },
             openEditInbound(dbInbound) {
                 const inbound = dbInbound.toInbound();
+                // 打开那一刻的启用状态与自动出差：服务端只在提交值与它不同（管理员确实改了）时才写入，
+                // 否则保留库里此刻的值——页面开着的这段时间里，任务可能已经停用了它或接管了自动出差。
+                const base = { enable: dbInbound.enable, autoTravel: dbInbound.autoTravel };
                 inModal.show({
                     title: '修改入站',
                     okText: '修改',
@@ -1158,8 +1266,8 @@
                     dbInbound: dbInbound,
                     confirm: async (inbound, dbInbound) => {
                         inModal.loading();
-                        await this.updateInbound(inbound, dbInbound);
-                        inModal.close();
+                        const msg = await this.updateInbound(inbound, dbInbound, base);
+                        if (msg.success) inModal.close();
                     }
                 });
             },
@@ -1185,12 +1293,11 @@
                     streamSettings: inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
-                await this.submit('/aui/inbound/add', data, inModal);
+                return await this.submit('/aui/inbound/add', data, inModal);
             },
-            async updateInbound(inbound, dbInbound) {
+            async updateInbound(inbound, dbInbound, base) {
+                // 不带 up/down：服务端从不从编辑表单取用量（流量任务一直在累加，页面上的是旧快照）。
                 const data = {
-                    up: dbInbound.up,
-                    down: dbInbound.down,
                     total: dbInbound.total,
                     remark: dbInbound.remark,
                     enable: dbInbound.enable,
@@ -1209,15 +1316,20 @@
                     streamSettings: inbound.stream.toString(),
                     sniffing: inbound.canSniffing() ? inbound.sniffing.toString() : '{}',
                 };
-                await this.submit(`/aui/inbound/update/${dbInbound.id}`, data, inModal);
+                if (base) {
+                    data.enableBase = base.enable;
+                    data.autoTravelBase = base.autoTravel;
+                }
+                return await this.submit(`/aui/inbound/update/${dbInbound.id}`, data, inModal);
             },
             openRenew(dbInbound) {
                 renewModal.show({
                     dbInbound: dbInbound,
                     confirm: async (payload) => {
                         renewModal.loading();
-                        await this.submit(`/aui/inbound/renew/${dbInbound.id}`, payload, renewModal);
-                        renewModal.close();
+                        const msg = await this.submit(`/aui/inbound/renew/${dbInbound.id}`, payload, renewModal);
+                        // 失败时留着弹窗（与新增 / 修改一致）：填好的天数或日期不能因为一次被拒就丢掉。
+                        if (msg.success) renewModal.close();
                     },
                 });
             },
@@ -1228,11 +1340,9 @@
                     icon: 'reload',
                     okText: '重置流量',
                     cancelText: '取消',
-                    onOk: () => {
-                        const inbound = dbInbound.toInbound();
-                        dbInbound.up = 0;
-                        dbInbound.down = 0;
-                        this.updateInbound(inbound, dbInbound);
+                    onOk: async () => {
+                        // 专用接口只清用量（因超流量被停、还没到期的随之恢复），不再整行写回页面上的旧值。
+                        await this.submit(`/aui/inbound/resetTraffic/${dbInbound.id}`, {});
                     },
                 });
             },
@@ -1296,8 +1406,14 @@
             showInfo(dbInbound) {
                 infoModal.show(dbInbound);
             },
-            switchEnable(dbInbound) {
-                this.submit(`/aui/inbound/update/${dbInbound.id}`, dbInbound);
+            async switchEnable(dbInbound) {
+                // 只改启用状态。改动前这里把整行 dbInbound 原样提交，页面打开后被任务改过的用量、
+                // 自动出差等字段会一起被写回旧值。
+                const msg = await this.submit(`/aui/inbound/enable/${dbInbound.id}`, { enable: dbInbound.enable });
+                // 被拒时开关已经被 v-model 拨过去了，不刷新的话列表上的启用状态与库里相反。
+                if (!msg.success) {
+                    await this.getDBInbounds();
+                }
             },
             onlineCountOf(id) {
                 if (this.onlineCountError) {
@@ -1306,6 +1422,8 @@
                 return this.onlineCounts[id] || emptyOnlineCount;
             },
             async loadOnlineCounts() {
+                // 页面在后台时不轮询：这一列看不见，每 2 秒一次请求只是白耗。切回来时下一轮就会刷新。
+                if (document.hidden) return;
                 // 同 loadOnlines：这个接口每 2 秒轮询一次，走 HttpUtil 的话
                 // 每次失败都会弹一条 message，很快就能把屏幕刷满。错误就地
                 // 显示在那一列的 tooltip 里。
@@ -1706,6 +1824,7 @@
                 if (msg.success) {
                     await this.getDBInbounds();
                 }
+                return msg;
             },
         },
         watch: {
@@ -1793,8 +1912,9 @@
                         const r = this.riskOf(db.id);
                         const rated = r.state === 'ready';
                         if (f.risk === 'unrated' && rated) return false;
+                        // 与「到期与风险」卡的「中高风险」同一口径：观察（30~44 分）低于中，不算。
                         if (f.risk === 'alert' &&
-                            !(rated && ['watch', 'medium', 'high', 'severe'].includes(r.level))) {
+                            !(rated && ['medium', 'high', 'severe'].includes(r.level))) {
                             return false;
                         }
                     }
@@ -1855,21 +1975,28 @@
             // 与系统状态页「需要关注」同一套口径：过期、7 天内到期、风险结论为高 / 严重
             dueSummary() {
                 const now = Date.now();
-                let expired = 0, soon = 0, risky = 0, geo = 0;
+                let expired = 0, soon = 0, risky = 0, geo = 0, port = 0, total = 0;
                 this.dbInbounds.forEach(i => {
+                    const before = expired + soon + risky + geo + port;
                     if (i.expiryTime > 0 && i.expiryTime <= now) expired++;
                     else if (i.expiryTime > now && i.expiryTime - now <= 7 * 86400000) soon++;
                     const r = this.riskOf(i.id);
                     // 「中」起算：中风险已经是「很可能多人共用」，只数高风险会让它在汇总里看不见
                     if (r.state === 'ready' && ['medium', 'high', 'severe'].includes(r.level)) risky++;
                     if (this.geoBlockedOf(i) || this.geoDegradedOf(i)) geo++;
+                    // 端口被别的程序占着：这个入站此刻不在核心里、谁都连不上。侧栏提醒点算它，这里不算的话
+                    // 管理员顺着红点进来，卡片上对不上数
+                    if (this.portConflictOf(i)) port++;
+                    // 大数字是「要处理的入站数」：中风险的入站往往也有地区拦截，按类相加会重复计数
+                    if (expired + soon + risky + geo + port > before) total++;
                 });
                 const parts = [];
                 if (expired) parts.push(`${expired} 已过期`);
                 if (soon) parts.push(`${soon} 即将到期`);
                 if (risky) parts.push(`${risky} 中高风险`);
                 if (geo) parts.push(`${geo} 地区拦截或异常`);
-                return { total: expired + soon + risky + geo, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
+                if (port) parts.push(`${port} 端口被占用`);
+                return { total, text: parts.length ? parts.join(' · ') : '没有需要处理的入站' };
             },
         },
     });

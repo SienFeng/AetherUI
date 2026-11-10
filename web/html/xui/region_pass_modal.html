@@ -12,10 +12,11 @@
     </template>
 
     <a-alert v-if="passModal.degraded" type="error" show-icon style="margin-bottom: 12px"
-             :message="passModal.degraded.mode === 'closed' ? '地区规则异常，这个入站的来源已全部被拦截' : '地区数据沿用旧版'"
-             :description="passModal.degraded.reason + (passModal.degraded.mode === 'closed'
-                 ? '。其他入站不受影响。请检查 IP 归属地库与地区设置，或发一张「暂停地区限制」的通行证临时恢复使用。'
-                 : '。当前仍按上一次成功生成的允许集放行，其他入站不受影响。')">
+             :message="{ closed: '地区规则异常，这个入站的来源已全部被拦截', partial: '部分地区在 IP 归属地库里找不到' }[passModal.degraded.mode] || '地区数据沿用旧版'"
+             :description="passModal.degraded.reason + ({
+                 closed: '。其他入站不受影响。请检查 IP 归属地库与地区设置，或发一张「暂停地区限制」的通行证临时恢复使用。',
+                 partial: '。找不到的那些省的用户此刻会被拦下，其他入站不受影响。请在编辑里把地区改成库里现有的省名。',
+             }[passModal.degraded.mode] || '。当前仍按上一次成功生成的允许集放行，其他入站不受影响。')">
     </a-alert>
 
     <div v-if="passModal.autoTravel" class="cell-muted" style="margin-bottom: 12px" role="status">
@@ -96,13 +97,24 @@
                         <span v-else class="cell-muted">—</span>
                     </td>
                     <td>
-                        <!-- 只给「疑似出差」：两地同时在用的来源一键放行，等于替买家开门 -->
-                        <a-button v-if="b.province && b.kind !== 'coexist'" size="small" :disabled="passModal.busy"
-                                  @click="passModal.grantProvince(b.province)">放行[[ b.province ]] 3 天</a-button>
+                        <!-- 只给「疑似出差」：两地同时在用的来源一键放行，等于替买家开门。
+                             发放会替换当前通行证：已经覆盖这个省的不给按钮，要替换别的通行证时先确认。 -->
+                        <template v-if="b.province && b.kind !== 'coexist'">
+                            <span v-if="passModal.covers(b.province)" class="cell-muted">已在当前通行证内</span>
+                            <a-popconfirm v-else-if="passModal.active" ok-text="替换" cancel-text="取消"
+                                          :title="'会替换当前通行证（' + passModal.regionsText(passModal.active) + '，至 '
+                                              + DateUtil.formatMillis(passModal.active.until).slice(5, 16) + '）。确定？'"
+                                          @confirm="passModal.grantProvince(b.province)">
+                                <a-button size="small" :disabled="passModal.busy">放行[[ b.province ]] 3 天</a-button>
+                            </a-popconfirm>
+                            <a-button v-else size="small" :disabled="passModal.busy"
+                                      @click="passModal.grantProvince(b.province)">放行[[ b.province ]] 3 天</a-button>
+                        </template>
                     </td>
                 </tr>
                 </tbody>
             </table>
+            <div v-if="passModal.moreBlocked" class="cell-muted">另有 [[ passModal.moreBlocked ]] 个来源未列出</div>
         </div>
     </div>
 
@@ -132,6 +144,8 @@
     const PASS_END_TEXT = {
         expired: '到期', revoked: '手动收回', replaced: '被新通行证替换',
         home: '家里恢复使用，自动收回', coexist: '家里与外地同时在用，自动收回',
+        cleared: '入站清空了地区限制', auto_off: '关掉了自动出差放行',
+        relocated: '长住外地，地区已改成这个省',
     };
 
     const passModal = {
@@ -147,6 +161,7 @@
         degraded: null,
         autoTravel: null,
         blocked: [],
+        moreBlocked: 0,
         history: [],
         provinces: [],
         form: { mode: 'regions', regions: [], hours: 72 },
@@ -172,6 +187,9 @@
             this.degraded = a.geoDegraded || null;
             this.autoTravel = a.autoTravel || null;
             this.blocked = (a.geoBlocked && a.geoBlocked.ips) || [];
+            this.moreBlocked = (a.geoBlocked && a.geoBlocked.moreIps) || 0;
+            // 上一个入站的请求可能还没回来：这个入站的按钮不能跟着一直转圈
+            this.busy = false;
             this.history = [];
             this.error = '';
             this.listError = '';
@@ -205,13 +223,15 @@
         },
         async submit(regions, hours) {
             if (this.busy) return;
+            const id = this.inboundId;
             this.busy = true;
             this.error = '';
-            const msg = await HttpUtil.post('/aui/inbound/regions/pass/grant/' + this.inboundId,
+            const msg = await HttpUtil.post('/aui/inbound/regions/pass/grant/' + id,
                 { regions: JSON.stringify(regions), hours: hours });
-            this.busy = false;
+            if (this.settled(id, msg)) return;
             if (!msg.success) {
                 this.error = msg.msg || '发放失败';
+                this.loadHistory(++this.reqSeq); // 失败多半是通行证刚被别处改过，重新读一次
                 return;
             }
             this.changed();
@@ -232,10 +252,30 @@
         },
         async revoke() {
             if (this.busy) return;
+            const id = this.inboundId;
             this.busy = true;
-            const msg = await HttpUtil.post('/aui/inbound/regions/pass/revoke/' + this.inboundId);
-            this.busy = false;
+            const msg = await HttpUtil.post('/aui/inbound/regions/pass/revoke/' + id);
+            if (this.settled(id, msg)) return;
             if (msg.success) this.changed();
+            else this.loadHistory(++this.reqSeq);
+        },
+        // 请求回来时弹窗已经换成别的入站：结果只通知入站列表，不落到眼前这个弹窗上。返回是否已处理。
+        settled(id, msg) {
+            if (this.inboundId === id) {
+                this.busy = false;
+                return false;
+            }
+            if (msg.success) {
+                window.dispatchEvent(new CustomEvent('region-pass-changed', { detail: { inboundId: id } }));
+            }
+            return true;
+        },
+        // 当前通行证是否已经放行了这个省（暂停地区限制等于全部放行）。
+        covers(province) {
+            if (!this.active) return false;
+            let list = [];
+            try { list = JSON.parse(this.active.regions || '[]'); } catch (e) { list = []; }
+            return list.indexOf('*') >= 0 || list.indexOf(province) >= 0;
         },
         // 入站列表与本弹窗是两棵 Vue 树，靠事件通知它重新拉「需要留意」摘要。
         changed() {

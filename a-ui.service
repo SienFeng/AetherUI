@@ -7,6 +7,8 @@ Wants=network.target
 Type=simple
 WorkingDirectory=/usr/local/a-ui/
 ExecStart=/usr/local/a-ui/a-ui
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target

@@ -33,7 +33,7 @@ type sharingKey struct {
 type sharingCell struct {
 	meta      NetworkMeta
 	seconds   int // 本小时累计活跃秒数
-	flushedAt int // 上次落库时 seconds 的值
+	flushedAt int // 上次确认落库（ack）时 seconds 的值
 
 	// bytes 是本小时累计的上下行字节，upBytes/downBytes 是它的拆分。
 	//
@@ -45,7 +45,7 @@ type sharingCell struct {
 	upBytes   int64
 	downBytes int64
 
-	// flushedBytes / flushedTime 是上次落库时的 bytes 与时刻。只有纯字节
+	// flushedBytes / flushedTime 是上次确认落库时的 bytes 与时刻。只有纯字节
 	// 增长（来源在用、但观测时刻恰好没有连接）时，靠它们判断要不要再写一次。
 	flushedBytes int64
 	flushedTime  time.Time
@@ -102,13 +102,27 @@ type sharingFlush struct {
 
 // sharingAccumulator 在内存里累计各来源 IP 的活跃时长，满门槛才产出落库项。
 //
-// 纯内存、不做持久化恢复：内存累计每满门槛就落一次库，面板重启最多丢当前
-// 那一分钟，为这点精度引入一套恢复逻辑不划算。
+// 落库是覆盖式的绝对值，所以有两处不能只靠内存：
+//   - 面板重启后累加器从零开始，新进程第一次写某一行就会把重启前写下的整小时数据覆盖掉
+//     （实测一行从 911 MB / 2370 秒变成 11 MB / 30 秒）。每个小时第一次采样时读一次库里
+//     本小时已有的行（seeds），来源在本小时第一次出现时拿它打底。
+//   - 写库失败的那一批要重写。产出落库项时不记「已落库」，写库成功、调用方 ack 之后才记；
+//     跨小时的收尾写入留在 prev 里每轮重发，直到确认。
 type sharingAccumulator struct {
 	mu    sync.Mutex
 	hour  int64
 	cells map[sharingKey]*sharingCell
 	loose map[sharingKey]*sharingLoose
+
+	// seeds 是 seedHour 这个小时库里已有、内存里还没有 cell 的行（重启之前那个进程写下的），
+	// 已经整理成「已落库」状态的 cell。它们同样占 sharingMaxRowsPerHour 的名额。
+	seedHour int64
+	seeds    map[sharingKey]*sharingCell
+
+	// prev 是上一个小时（prevHour）的收尾写入里还没确认落库的 cell。只留一个小时：库坏了
+	// 一个多小时的话丢掉更早那一小时并告警，内存不随故障时长增长。
+	prevHour int64
+	prev     map[sharingKey]*sharingCell
 
 	// cappedWarned 记录本小时已经为哪些入站打过上限告警。
 	//
@@ -127,26 +141,36 @@ func newSharingAccumulator() *sharingAccumulator {
 }
 
 // observe 记一轮采样：obs 里非 BytesOnly 的 IP 都算作在本轮的 step 秒内持续
-// 活跃，所有 IP 的增量字节照单全收。返回本轮需要落库的记录（可能为空）。
+// 活跃，所有 IP 的增量字节照单全收。返回本轮需要落库的记录（可能为空），其中包括
+// 上一小时还没确认落库的收尾写入。写库成功之后调用方必须 ack 这一批。
 func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, step int) []sharingFlush {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	hour := model.AlignHourUTC(now)
-	var out []sharingFlush
 	if hour != a.hour {
-		out = a.rolloverLocked(hour)
+		a.rolloverLocked(hour)
 	}
+	out := a.pendingPrevLocked()
 
 	perInbound := map[int]int{}
 	for k := range a.cells {
+		perInbound[k.inboundId]++
+	}
+	for k := range a.seeds {
 		perInbound[k.inboundId]++
 	}
 
 	for _, o := range obs {
 		key := sharingKey{inboundId: o.InboundId, ip: o.IP}
 		cell := a.cells[key]
-		if cell == nil && o.BytesOnly {
+		if cell == nil && a.seeds[key] != nil {
+			// 库里本小时已有这一行（重启前写的）：接着它记。名额已经算过，落库门槛也早就
+			// 过了，纯字节观测不用再进暂存。
+			cell = a.seeds[key]
+			delete(a.seeds, key)
+			a.cells[key] = cell
+		} else if cell == nil && o.BytesOnly {
 			cell = a.stashLooseLocked(key, o, perInbound)
 			if cell == nil {
 				continue
@@ -188,13 +212,89 @@ func (a *sharingAccumulator) observe(now time.Time, obs []sharingObservation, st
 		if !o.BytesOnly {
 			cell.seconds += step
 		}
+		// 这里不记「已落库」：写库失败的话，下一轮它照样到期、带着最新的绝对值重发。
 		if cell.dueForFlush(now) {
-			cell.flushedAt = cell.seconds
-			cell.flushedBytes = cell.bytes
-			cell.flushedTime = now
 			out = append(out, cell.flushOf(key, hour))
 		}
 	}
+	return out
+}
+
+// ack 在 flushes 这一批确认落库之后调用，这时才把对应的 cell 记成「已落库」。
+//
+// 只往前推：采样任务没有防重入（cron 不跳过仍在跑的上一轮），两轮的确认可能乱序到达。
+func (a *sharingAccumulator) ack(flushes []sharingFlush, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for _, f := range flushes {
+		key := sharingKey{inboundId: f.InboundId, ip: f.IP}
+		switch f.HourStart {
+		case a.hour:
+			cell := a.cells[key]
+			if cell == nil {
+				continue
+			}
+			if f.ActiveSeconds > cell.flushedAt {
+				cell.flushedAt = f.ActiveSeconds
+			}
+			if f.ActiveBytes > cell.flushedBytes {
+				cell.flushedBytes = f.ActiveBytes
+			}
+			if now.After(cell.flushedTime) {
+				cell.flushedTime = now
+			}
+		case a.prevHour:
+			// 收尾写入带的是上一小时的终值，写进去的就是 cell 现在的样子才算数。
+			if cell := a.prev[key]; cell != nil && cell.seconds == f.ActiveSeconds && cell.bytes == f.ActiveBytes {
+				delete(a.prev, key)
+			}
+		}
+	}
+}
+
+// needsSeed 报告 hour 这个小时还没读过库里已有的行。
+func (a *sharingAccumulator) needsSeed(hour int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.seedHour != hour
+}
+
+// seed 记下 hour 这个小时库里已有的行，见 sharingAccumulator.seeds。
+func (a *sharingAccumulator) seed(hour int64, rows []model.InboundIPHour) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.seedHour = hour
+	a.seeds = make(map[sharingKey]*sharingCell, len(rows))
+	for _, r := range rows {
+		key := sharingKey{inboundId: r.InboundId, ip: r.IP}
+		if r.HourStart != hour || (hour == a.hour && a.cells[key] != nil) {
+			continue // 内存里已经在记的，以内存为准
+		}
+		a.seeds[key] = &sharingCell{
+			meta:    NetworkMeta{Country: r.Country, Province: r.Province, City: r.City, ISP: r.ISP},
+			seconds: r.ActiveSeconds, flushedAt: r.ActiveSeconds,
+			bytes: r.ActiveBytes, upBytes: r.ActiveUp, downBytes: r.ActiveDown,
+			flushedBytes: r.ActiveBytes,
+		}
+	}
+}
+
+// pendingPrevLocked 返回上一小时还没确认落库的收尾写入。
+func (a *sharingAccumulator) pendingPrevLocked() []sharingFlush {
+	var out []sharingFlush
+	for key, cell := range a.prev {
+		out = append(out, cell.flushOf(key, a.prevHour))
+	}
+	// 遍历的是 map，顺序不定。调用方要把这批依次写进库，排序让同一份输入永远产生
+	// 同一个写入次序，测试才好断言。
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].InboundId != out[j].InboundId {
+			return out[i].InboundId < out[j].InboundId
+		}
+		return out[i].IP < out[j].IP
+	})
 	return out
 }
 
@@ -270,26 +370,23 @@ func (c *sharingCell) flushOf(key sharingKey, hour int64) sharingFlush {
 	}
 }
 
-// rolloverLocked 结束上一个小时：把已过门槛、但最后一段还没落库的单元补写
-// 一次，然后清空。
+// rolloverLocked 结束上一个小时：已过门槛、但最后一段还没落库的单元转进 prev，
+// 收尾写入由 observe 每轮发出、直到确认落库，然后清空。
 //
 // **不满门槛的余量直接丢弃，不跨小时结转**——结转会让一个每小时只用 30 秒
 // 的扫描器攒几轮就攒够门槛落库，正好绕开 sharingFlushThreshold。
-func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
-	var out []sharingFlush
+func (a *sharingAccumulator) rolloverLocked(newHour int64) {
+	if len(a.prev) > 0 {
+		logger.Warningf("共享检测：%v 个来源在 %v 那一小时的收尾写入一直没能落库，已放弃",
+			len(a.prev), time.Unix(a.prevHour, 0).UTC().Format(time.RFC3339))
+	}
+	a.prev = map[sharingKey]*sharingCell{}
 	for key, cell := range a.cells {
 		if cell.eligible() && (cell.seconds > cell.flushedAt || cell.bytes != cell.flushedBytes) {
-			out = append(out, cell.flushOf(key, a.hour))
+			a.prev[key] = cell
 		}
 	}
-	// 上面遍历的是 map，顺序不定。调用方要把这批依次写进库，排序让同一份
-	// 输入永远产生同一个写入次序，测试才好断言。
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].InboundId != out[j].InboundId {
-			return out[i].InboundId < out[j].InboundId
-		}
-		return out[i].IP < out[j].IP
-	})
+	a.prevHour = a.hour
 
 	// 每个入站每小时最多打一条汇总告警，而不是每条被挡下的观测各打一行——
 	// 遍历 map 打日志是可以的，日志行之间没有顺序契约，不产生任何返回值
@@ -303,8 +400,10 @@ func (a *sharingAccumulator) rolloverLocked(newHour int64) []sharingFlush {
 	a.cells = map[sharingKey]*sharingCell{}
 	// 不满门槛的纯字节暂存同样不结转，理由同上。
 	a.loose = map[sharingKey]*sharingLoose{}
+	if a.seedHour != newHour {
+		a.seeds = nil
+	}
 	a.hour = newHour
-	return out
 }
 
 // forget 丢掉某入站在内存里的全部累计。
@@ -326,6 +425,17 @@ func (a *sharingAccumulator) forget(inboundId int) {
 	for key := range a.loose {
 		if key.inboundId == inboundId {
 			delete(a.loose, key)
+		}
+	}
+	// 打底的行与没确认的收尾写入同理：留着的话会被接着记、写回库里。
+	for key := range a.seeds {
+		if key.inboundId == inboundId {
+			delete(a.seeds, key)
+		}
+	}
+	for key := range a.prev {
+		if key.inboundId == inboundId {
+			delete(a.prev, key)
 		}
 	}
 }

@@ -47,6 +47,46 @@ func resetDayFor(in *model.Inbound, loc *time.Location) (int, bool) {
 	}
 }
 
+// raisedResetFloor 返回重置日程从 orig（在 origLoc 下）改成 next（在 nextLoc 下）之后 LastResetAt 应有的值。
+//
+// 改日程（订阅周期的日号随到期时间变了、续期挪了日号、面板时区换了）不能凭空造出一次清零：新日程下「本周期」
+// 的时刻多半已经过去、又晚于上次清零的时刻，任务下一轮就会马上清一次。所以旧日程下本周期已经清过时，顶到
+// 新日程的本周期时刻，表示这个周期算清过，下一次按新日程的下一个时刻来。
+//
+// 只在日程真的变了时顶；旧日程下本周期的重置已经到期、任务还没跑（每小时一轮，月初那一小时里）时也不顶
+// ——那次是该清的，顶掉了这个月就不清了。
+func raisedResetFloor(orig *model.Inbound, origLoc *time.Location, next *model.Inbound, nextLoc *time.Location, now time.Time) int64 {
+	last := orig.LastResetAt
+	oldDay, okOld := resetDayFor(orig, origLoc)
+	newDay, okNew := resetDayFor(next, nextLoc)
+	if !okOld || !okNew || (oldDay == newDay && origLoc.String() == nextLoc.String()) {
+		return last
+	}
+	if last < resetInstantFor(now, oldDay, origLoc) {
+		return last
+	}
+	return max(last, resetInstantFor(now, newDay, nextLoc))
+}
+
+// RaiseResetFloorsForTimeZone 在面板时区从 oldLoc 改成 newLoc 之后给按周期重置的入站顶一下 LastResetAt
+// （见 raisedResetFloor）。
+func (s *InboundService) RaiseResetFloorsForTimeZone(now time.Time, oldLoc, newLoc *time.Location) error {
+	db := database.GetDB()
+	var inbounds []*model.Inbound
+	if err := db.Model(model.Inbound{}).Where("traffic_reset_mode > 0").Find(&inbounds).Error; err != nil {
+		return err
+	}
+	for _, in := range inbounds {
+		if floor := raisedResetFloor(in, oldLoc, in, newLoc, now); floor > in.LastResetAt {
+			if err := db.Model(model.Inbound{}).Where("id = ?", in.Id).
+				UpdateColumn("last_reset_at", floor).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // resetInstantFor 返回 now 之前（含当刻）最近的一次「每月 day 号 00:00」的
 // 毫秒时间戳，按 loc 对齐。day 超过当月天数时取当月最后一天。
 //
@@ -126,6 +166,14 @@ func (s *InboundService) ResetDueTraffic(now time.Time, loc *time.Location) (int
 		// 只把「因超流量被自动停用、且还没到期」的那一批拉回来。已过期的
 		// 不动，也不清标记：管理员续期时 RenewInbound 会一并处理。
 		reviving := in.DisabledByTraffic && !in.Enable && !expiredAt(in, now)
+		if reviving {
+			// 拉回来之前过一遍保存时的校验（checkRevivable）：停用期间核心可能升级过、不再认这份配置，
+			// 拉回来就是全员断网。没过就只清零、不拉回、保留标记，管理员修好后启用或续期照常。
+			if err := s.checkRevivable(in); err != nil {
+				logger.Warning("周期重置：入站", in.Tag, "的配置当前核心不接受，只清零不重新启用:", err)
+				reviving = false
+			}
+		}
 		if reviving {
 			fields["enable"] = true
 			fields["disabled_by_traffic"] = false

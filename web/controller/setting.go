@@ -1,12 +1,14 @@
 package controller
 
 import (
-	"errors"
-	"github.com/gin-gonic/gin"
-	"time"
+	"a-ui/logger"
 	"a-ui/web/entity"
 	"a-ui/web/service"
 	"a-ui/web/session"
+	"errors"
+	"github.com/gin-gonic/gin"
+	"reflect"
+	"time"
 )
 
 type updateUserForm struct {
@@ -20,10 +22,10 @@ type SettingController struct {
 	settingService   service.SettingService
 	userService      service.UserService
 	twoFactorService service.TwoFactorService
-	panelService   service.PanelService
-	ipdbService    service.IPDBService
-	shapingService service.ShapingService
-	xrayService    service.XrayService
+	panelService     service.PanelService
+	ipdbService      service.IPDBService
+	shapingService   service.ShapingService
+	xrayService      service.XrayService
 }
 
 func NewSettingController(g *gin.RouterGroup) *SettingController {
@@ -65,7 +67,26 @@ func (a *SettingController) updateSetting(c *gin.Context) {
 		jsonMsg(c, "修改设置", err)
 		return
 	}
+	// 保存前后各取一次 IP 库各源的启用状态（源地址留空 = 未启用）：清空了地址的源要立刻
+	// 从内存卸下，否则它在下次重启之前一直参与归属地判定与地区限制的允许集。
+	before, beforeErr := a.ipdbService.EnabledSources()
+	// 保存前的设置：有任何一项变了就要求重新下发核心配置。拦 25 端口、补全流量识别、拦截机房来源、
+	// 访问日志、DNS 等都进 xray 配置，不置标志的话保存成功、核心却一直用旧配置，直到某个无关的改动
+	// 或手动重启面板。不逐项判断哪些键进配置：漏一项就是静默不生效，而配置逐字节没变时 RestartXray
+	// 什么都不做，多置一次没有代价。读不出旧值时按「变了」处理。
+	prev, prevErr := a.settingService.GetAllSetting()
 	err = a.settingService.UpdateAllSetting(allSetting)
+	if err == nil {
+		if beforeErr != nil {
+			logger.Warning("读取 IP 库启用状态失败，本次保存不即时装卸数据源:", beforeErr)
+		} else if a.ipdbService.ApplySourceToggles(before) {
+			// 允许集按已加载的库现算，装卸了源就要重新下发，与 updateIPDB 同理。
+			a.xrayService.SetToNeedRestart()
+		}
+		if prevErr != nil || !reflect.DeepEqual(prev, allSetting) {
+			a.xrayService.SetToNeedRestart()
+		}
+	}
 	jsonMsg(c, "修改设置", err)
 }
 
@@ -183,13 +204,14 @@ func (a *SettingController) updateIPDB(c *gin.Context) {
 	// upToDate 单独回传：管理员点了更新，界面得说清楚是真的换了新库，
 	// 还是上游本来就没变。
 	updated, upToDate, err := a.ipdbService.UpdateNow(form.Key)
+	if updated > 0 {
+		// 地区限制的允许集按库现算，换了库就要重新下发，否则核心一直用旧允许集。
+		// 先于报错：一部分源已经换上新库、后面的源失败时，同样要下发。
+		a.xrayService.SetToNeedRestart()
+	}
 	if err != nil {
 		jsonMsg(c, "更新 IP 库", err)
 		return
-	}
-	if updated > 0 {
-		// 地区限制的允许集按库现算，换了库就要重新下发，否则核心一直用旧允许集。
-		a.xrayService.SetToNeedRestart()
 	}
 	jsonObj(c, gin.H{"updated": updated, "upToDate": upToDate}, nil)
 }

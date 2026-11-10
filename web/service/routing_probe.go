@@ -193,7 +193,13 @@ func (s *ProbeService) Probe(id int) (*ProbeResult, error) {
 		delete(probeInflight, id)
 		// 「无法测试」不进缓存：它不是对这个节点的判断，缓存下来只会让
 		// TTL 内都不再重试。
-		if result.Status != ProbeUnavailable {
+		//
+		// 探测期间节点可能被编辑过（一次探测十几秒）：Update 已经清掉了缓存，这份
+		// 结果测的却是旧配置，写进去就会让改过的节点顶着旧配置的绿灯。所以只在
+		// 节点此刻仍是被测的那份（tag 与 config 都没变）时才缓存。在 probeMu 内
+		// 重读，配合 Update「先落库、后 Forget」的顺序：这里读到旧配置，Update
+		// 随后的 Forget 一定排在本次写入之后；读到新配置则根本不写。
+		if result.Status != ProbeUnavailable && s.stillProbedConfig(node) {
 			probeCache[id] = result
 		}
 		probeMu.Unlock()
@@ -203,6 +209,15 @@ func (s *ProbeService) Probe(id int) (*ProbeResult, error) {
 
 	result = probeRunner(s, node)
 	return result, nil
+}
+
+// stillProbedConfig 报告库里这个节点是否仍是 probed 那一份（tag 与 config 都没变）。
+func (s *ProbeService) stillProbedConfig(probed *model.OutboundNode) bool {
+	current, err := s.outboundService.Get(probed.Id)
+	if err != nil {
+		return false
+	}
+	return current.Tag == probed.Tag && current.Config == probed.Config
 }
 
 func (s *ProbeService) run(node *model.OutboundNode) *ProbeResult {
@@ -266,7 +281,7 @@ func (s *ProbeService) run(node *model.OutboundNode) *ProbeResult {
 	country, err := probeExitCountry(addr)
 	if err != nil {
 		logger.Debug("出站节点出口国家测试失败 tag=", node.Tag, " err=", err)
-	} else if err := s.outboundService.SetExitCountry(node.Id, node.Tag, country); err != nil {
+	} else if err := s.outboundService.SetExitCountry(node.Id, node.Tag, node.Config, country); err != nil {
 		logger.Warning("记录出站节点出口国家失败 tag=", node.Tag, " err=", err)
 	}
 	return &ProbeResult{

@@ -10,12 +10,13 @@
 <a-menu-item-group title="管理">
     <a-menu-item key="{{ .base_path }}aui/inbounds">
         <a-icon type="user"></a-icon>
-        <!-- 提醒点：有启用入站 7 天内到期，或近 24 小时被地区限制拦截（inbound-attention.js 每 5 分钟拉一次）。
+        <!-- 提醒点：有启用入站 7 天内到期、近 24 小时被地区限制拦截，或地区规则降级
+             （inbound-attention.js 每 5 分钟拉一次，计数口径在它的 alertCount）。
              与分流管理的红点同一写法：点本身读屏读不到，数量另写一份 sr-only 文字。 -->
         <a-badge :dot="inboundAttention.alertCount > 0">
-            <span :title="inboundAttention.alertCount > 0 ? inboundAttention.alertCount + ' 个入站即将到期或被地区限制拦截' : undefined">入站列表</span>
+            <span :title="inboundAttention.alertCount > 0 ? inboundAttention.alertCount + ' 个入站需要留意' : undefined">入站列表</span>
         </a-badge>
-        <span v-if="inboundAttention.alertCount > 0" class="sr-only">（[[ inboundAttention.alertCount ]] 个入站即将到期或被地区限制拦截）</span>
+        <span v-if="inboundAttention.alertCount > 0" class="sr-only">（[[ inboundAttention.alertCount ]] 个入站需要留意）</span>
     </a-menu-item>
     <a-menu-item key="{{ .base_path }}aui/routing">
         <a-icon type="fork"></a-icon>
@@ -54,7 +55,7 @@
     </div>
     <!-- 浅色侧栏：颜色留给数据和状态，导航本身退到背景里。
          与窄屏抽屉（下方 #sider-drawer）同为 light，两处不再是两套配色。 -->
-    <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
+    <a-menu theme="light" mode="inline" :selected-keys="[siderCurrentPath]"
             @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
@@ -218,12 +219,19 @@
             :aria-expanded="siderDrawer.visible ? 'true' : 'false'">
         <a-icon :type="siderDrawer.visible ? 'close' : 'menu-fold'"></a-icon>
     </button>
-    <a-menu theme="light" mode="inline" :selected-keys="['{{ .request_uri }}']"
+    <a-menu theme="light" mode="inline" :selected-keys="[siderCurrentPath]"
         @click="({key}) => key.startsWith('http') ? window.open(key) : location.href = key">
         {{template "menuItems" .}}
     </a-menu>
 </a-drawer>
 <script>
+
+    // 当前页面的路径，侧栏与抽屉两个菜单按它高亮（菜单项的 key 是 base_path 加路由）。
+    // 只能在 script 里取：这里 html/template 按 JS 字符串转义；写进 :selected-keys 属性时
+    // 它只做 HTML 转义，浏览器解码后原样进了 Vue 表达式，路径里一个反斜杠或引号就让
+    // 表达式编译失败。查询串要去掉，否则 key 对不上任何菜单项，高亮消失。
+    // 模板里直接引用这个全局常量，与同一处的 location / window 一样经全局作用域取到。
+    const siderCurrentPath = '{{ .request_uri }}'.split('?')[0];
 
     const siderDrawer = {
         visible: false,

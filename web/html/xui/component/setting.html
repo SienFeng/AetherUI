@@ -22,7 +22,9 @@
             <a-input :value="value" @input="$emit('input', $event.target.value)" :aria-label="title"></a-input>
         </template>
         <template v-else-if="type === 'number'">
-            <a-input type="number" :value="value" @input="$emit('input', $event.target.value)" :aria-label="title"></a-input>
+            <!-- 设置里的数字都是整数：type=number 的普通输入框能填 1.5，服务端按整数解析时只回一句 ParseInt 错误。 -->
+            <a-input-number :value="value" @change="v => $emit('input', v)" :precision="0" :aria-label="title"
+                            style="width: 100%"></a-input-number>
         </template>
         <template v-else-if="type === 'switch'">
             <a-switch :checked="value === 1" @change="checked => $emit('input', checked ? 1 : 0)" :aria-label="title"></a-switch>

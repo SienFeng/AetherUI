@@ -5,6 +5,8 @@
 package accesslog
 
 import (
+	"net"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -67,23 +69,33 @@ func ParseLine(line string, loc *time.Location) (Entry, bool) {
 		return Entry{}, false
 	}
 
+	// 目标为空时 "rejected" 后面紧跟的是第二个空格（核心记 rejected 时 To 恒为空串）。
+	// 不在这里拦住的话，cutField 会跳过空字段、把原因的第一个词当成目标。
+	if strings.HasPrefix(rest, " ") {
+		return Entry{}, false
+	}
 	target, rest, ok := cutField(rest)
 	if !ok {
 		return Entry{}, false
 	}
 
-	// 方括号里是路由信息。没有它就不知道这条记录属于谁，直接丢弃。
-	open := strings.Index(rest, "[")
-	closeIdx := strings.Index(rest, "]")
-	if open < 0 || closeIdx < open {
+	// 方括号里是路由信息，必须紧跟在目标之后（common/log/access.go 的 AccessMessage.String）。
+	// 没有它就不知道这条记录属于谁，直接丢弃。不能在整行里找第一个方括号：rejected 的行没有
+	// [detour]，原因里却常带着 IPv6 地址，那对方括号曾被当成入站 tag。
+	if !strings.HasPrefix(rest, "[") {
 		return Entry{}, false
 	}
-	inbound, route, noRuleHit := splitDetour(rest[open+1 : closeIdx])
+	closeIdx := strings.Index(rest, "]")
+	if closeIdx < 0 {
+		return Entry{}, false
+	}
+	inbound, route, noRuleHit := splitDetour(rest[1:closeIdx])
 	if inbound == "" {
 		return Entry{}, false
 	}
 
 	network, targetAddr := splitNetworkPrefix(target)
+	targetAddr = normalizeURLTarget(targetAddr)
 	_, sourceAddr := splitNetworkPrefix(source)
 	sourceIP, ok := HostOf(sourceAddr)
 	if !ok {
@@ -122,6 +134,32 @@ func splitNetworkPrefix(s string) (network, addr string) {
 		}
 	}
 	return "", s
+}
+
+// normalizeURLTarget 把 http 入站记下的请求 URL 归一成与其它入站同形的 host:port。
+//
+// http 入站的访问记录写的是 request.URL（proxy/http/server.go），不是目标地址：CONNECT
+// 是 "//host:port"，普通代理请求是 "http://host[:port]/path"。不归一的话
+// domain.Registrable 会把 "http" 当成主机名，域名统计里冒出一个叫 http 的「网站」，
+// 按目标查日志、分流验证的样例也都对不上。默认端口与核心建连时一致：https 为 443，
+// 其余（含 CONNECT）为 80。顺带丢掉 URL 里可能带着的账号密码与路径，它们不该落库。
+// 认不出的串原样返回：宁可显示原文，也不编一个不存在的地址。
+func normalizeURLTarget(target string) string {
+	if !strings.HasPrefix(target, "//") && !strings.Contains(target, "://") {
+		return target
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Hostname() == "" {
+		return target
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
 }
 
 // HostOf 去掉地址末尾的端口，并剥掉 IPv6 的方括号——留着方括号会和

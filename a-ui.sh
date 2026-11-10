@@ -130,14 +130,83 @@ update() {
     fi
 }
 
+# 卸载有域名安装时 install.sh 的 install_cert_sync 装的三样东西。/root/cert/ 下的证书
+# 不动：菜单 16 的 acme.sh 申请也写那里，分不清哪些是谁的。不用 disable --now：
+# 本脚本声称支持自带 systemd 219 的 CentOS 7，它还不认识 --now。
+remove_cert_sync() {
+    local unit_dir=/etc/systemd/system found=0
+    if [[ -f "${unit_dir}/a-ui-cert-sync.timer" || -f "${unit_dir}/a-ui-cert-sync.service" ]]; then
+        systemctl stop a-ui-cert-sync.timer a-ui-cert-sync.service >/dev/null 2>&1
+        systemctl disable a-ui-cert-sync.timer >/dev/null 2>&1
+        rm -f "${unit_dir}/a-ui-cert-sync.timer" "${unit_dir}/a-ui-cert-sync.service"
+        systemctl daemon-reload
+        found=1
+    fi
+    if [[ -f /usr/local/bin/a-ui-cert-sync ]]; then
+        rm -f /usr/local/bin/a-ui-cert-sync
+        found=1
+    fi
+    [[ ${found} -eq 1 ]] && LOGI "已移除证书同步定时器 a-ui-cert-sync（/root/cert/ 下的证书文件保留）"
+    return 0
+}
+
+# 从 Caddyfile 里删掉面板自己写入的站点，Caddy 软件包与其它站点一律不碰（卸载 Caddy
+# 本身按设计只询问、不默认执行）。install.sh 的 write_caddyfile 用 BEGIN/END 两行包住
+# 它写的站点块，只删这两行之间的内容；先备份，删完用 caddy validate 校验，不通过就
+# 原样恢复，通过了才 reload。更早版本的向导没有写标记，那样的文件认不准哪部分是
+# 面板写的，只提示、不改。参数是卸载前读到的面板端口（可为空），只用于这条提示。
+remove_caddy_site() {
+    local panel_port="$1" cf=/etc/caddy/Caddyfile
+    [[ -f "${cf}" ]] || return 0
+    if ! grep -q '^# BEGIN a-ui managed site' "${cf}"; then
+        if grep -qE "reverse_proxy[[:space:]]+127\.0\.0\.1:${panel_port:-[0-9]+}([^0-9]|\$)" "${cf}"; then
+            LOGD "${cf} 里有反代到本机面板端口的站点，像是旧版安装向导写入的。它没有面板的标记，为免误删你自己的配置，未做改动"
+            LOGD "如不再需要：编辑 ${cf} 删掉该站点块，再执行 systemctl reload caddy"
+        fi
+        return 0
+    fi
+    local new backup
+    if ! new=$(awk '
+        /^# BEGIN a-ui managed site/ { if (skip) bad = 1; skip = 1; next }
+        /^# END a-ui managed site/   { if (!skip) bad = 1; skip = 0; next }
+        !skip { print }
+        END { if (skip || bad) exit 3 }' "${cf}"); then
+        LOGE "${cf} 里面板站点的 BEGIN/END 标记不成对，为免误删其它站点，未做改动，请手动处理"
+        return 1
+    fi
+    backup="${cf}.a-ui-uninstall-$(date +%Y%m%d-%H%M%S).bak"
+    if ! cp -p "${cf}" "${backup}"; then
+        LOGE "备份 ${cf} 失败，未移除其中的面板站点"
+        return 1
+    fi
+    printf '%s\n' "${new}" >"${cf}"
+    if command -v caddy >/dev/null 2>&1 && ! caddy validate --config "${cf}" >/dev/null 2>&1; then
+        cp -p "${backup}" "${cf}"
+        LOGE "移除面板站点后 ${cf} 未通过 caddy validate，已恢复原文件，请手动处理"
+        return 1
+    fi
+    if systemctl is-active --quiet caddy 2>/dev/null && ! systemctl reload caddy; then
+        LOGE "Caddy 重新加载失败，请用 systemctl status caddy 查看"
+    fi
+    LOGI "已从 ${cf} 移除面板写入的站点（原文件备份在 ${backup}）"
+    LOGI "Caddy 软件包本身未卸载；如不再需要：systemctl stop caddy && systemctl disable caddy，再用系统的包管理器卸载"
+    local old_backup
+    old_backup=$(ls -t /root/caddy-backup-*.tar.gz 2>/dev/null | head -n 1)
+    [[ -n "${old_backup}" ]] && LOGI "安装向导停用原有 Caddy 时备份过它当时的配置：${old_backup}，如需找回原来的站点可从中取回"
+    return 0
+}
+
 uninstall() {
-    confirm "确定要卸载面板吗,xray 也会卸载?" "n"
+    confirm "确定要卸载面板吗,xray 也会卸载?（面板写入的 Caddy 站点、证书同步定时器与定时任务也会一并移除，Caddy 本身保留）" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
             show_menu
         fi
         return 0
     fi
+    # 面板端口要在删库之前读，只用于识别旧版向导写的 Caddyfile、给出提示
+    local panel_port_for_caddy
+    panel_port_for_caddy=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null | awk '/^Port:/ {print $2; exit}')
     systemctl stop a-ui
     systemctl disable a-ui
     rm /etc/systemd/system/a-ui.service -f
@@ -148,8 +217,14 @@ uninstall() {
     # install.sh 的 xray 备份目录是 /usr/local/a-ui/ 的兄弟目录，上面那行删不到它。
     # 安装正常走完时 restore_or_install_xray 会自己清掉，但中途被 Ctrl-C 或信号
     # 打断就会留下约 66MB 残留——它当初特意从 /tmp 挪到 /usr/local 来躲开 tmpfs，
-    # 代价正是不再重启即清，所以卸载时要顺手扫掉。
+    # 代价正是不再重启即清，所以卸载时要顺手扫掉。下载暂存目录（fetch_release）同理。
     rm -rf /usr/local/a-ui-xray-backup-*
+    rm -rf /usr/local/a-ui-update-*
+    # 菜单 17 加的定时任务（命令指向已不存在的面板）
+    cron_drop_lines "a-ui geo" || LOGE "移除定时更新 geo 任务失败，请用 crontab -e 手动删除含 a-ui geo 的行"
+    cron_drop_lines "a-ui clear" || LOGE "移除定时清除日志任务失败，请用 crontab -e 手动删除含 a-ui clear 的行"
+    remove_cert_sync
+    remove_caddy_site "${panel_port_for_caddy}"
 
     echo ""
     echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/a-ui -f${plain} 进行删除"
@@ -178,7 +253,57 @@ reset_user() {
     confirm_restart
 }
 
+# 执行 /usr/local/a-ui/a-ui setting 并如实判断成败（判据与 install.sh 的 a_ui_setting
+# 相同）：退出码之外再看输出——本脚本永远来自 main 分支，二进制可能是回退后的旧版本，
+# 旧版本写库失败也退出 0、只打印一行 "... failed: ..."。失败时打印输出、返回 1。
+a_ui_setting() {
+    local out rc
+    out=$(/usr/local/a-ui/a-ui setting "$@" 2>&1)
+    rc=$?
+    if [[ ${rc} -ne 0 || "${out}" == *failed* ]]; then
+        echo -e "${red}${out}${plain}"
+        return 1
+    fi
+    return 0
+}
+
+# 端口上是否已有 TCP 监听，与 install.sh 的 port_in_use 相同：ss 优先（不用 -H，CentOS 7
+# 不认识），没有就退回 netstat，两者都没有时无从判断、按空闲处理。
+port_in_use() {
+    local port="$1" listeners
+    if command -v ss >/dev/null 2>&1; then
+        listeners=$(ss -ltn 2>/dev/null)
+    elif command -v netstat >/dev/null 2>&1; then
+        listeners=$(netstat -ltn 2>/dev/null)
+    else
+        return 1
+    fi
+    echo "${listeners}" | awk -v p="${port}" '{ n = split($4, a, ":"); if (a[n] == p) found = 1 } END { exit !found }'
+}
+
+# 面板此刻是否经 Caddy 反代对外（有域名安装）：Caddyfile 把请求反代到面板当前端口，
+# 并且面板只监听回环（只能经 Caddy 访问）或 Caddy 正在运行。只监听回环、但没有 Caddy
+# 反代（只走 SSH 隧道）不算——那种情况下改端口不会把人锁在外面；菜单 19 恢复直连之后
+# 也不算（监听所有 IP、Caddy 已停用）。参数是 a-ui setting -show 的输出。
+panel_behind_caddy() {
+    local listen port
+    listen=$(echo "$1" | awk '/^Listen:/ {print $2; exit}')
+    port=$(echo "$1" | awk '/^Port:/ {print $2; exit}')
+    [[ "${port}" =~ ^[0-9]+$ && -f /etc/caddy/Caddyfile ]] || return 1
+    grep -qE "reverse_proxy[[:space:]]+(127\.0\.0\.1|localhost):${port}([^0-9]|\$)" /etc/caddy/Caddyfile || return 1
+    case "${listen}" in
+    127.* | ::1 | localhost) return 0 ;;
+    esac
+    systemctl is-active --quiet caddy 2>/dev/null
+}
+
 reset_config() {
+    # 有域名安装时，重置会把监听地址、端口、根路径一并恢复成默认值：面板改为在所有 IP 的
+    # 54321 端口、根路径 / 上直接对外，Caddy 的反代随之失效。确认之前先说清楚。
+    local show_out
+    if show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null) && panel_behind_caddy "${show_out}"; then
+        LOGD "注意：面板当前经 Caddy 反代访问（有域名安装）。重置后面板会改为在所有 IP 的 54321 端口、根路径 / 上直接对外，域名访问随之失效；如需重新隐藏面板，重置后请运行菜单 18「配置域名与伪装站」"
+    fi
     confirm "确定要重置所有面板设置吗，账号数据不会丢失，用户名和密码不会改变，两步验证会被关闭" "n"
     if [[ $? != 0 ]]; then
         if [[ $# == 0 ]]; then
@@ -205,11 +330,53 @@ set_port() {
     if [[ -z "${port}" ]]; then
         LOGD "已取消"
         before_show_menu
-    else
-        /usr/local/a-ui/a-ui setting -port ${port}
-        echo -e "设置端口完毕，现在请重启面板，并使用新设置的端口 ${green}${port}${plain} 访问面板"
-        confirm_restart
+        return 0
     fi
+    # 先校验再交给 a-ui setting：0、超过 65535 的数都能原样落库，面板重启后绑不上端口；
+    # 带前导 0 的数会被 Go 的 flag 按八进制解析（010 变成 8，08 直接报错）。
+    if [[ ! "${port}" =~ ^[0-9]{1,5}$ ]] || ((10#${port} < 1 || 10#${port} > 65535)); then
+        LOGE "端口无效：请输入 1-65535 之间的整数"
+        before_show_menu
+        return 1
+    fi
+    port=$((10#${port}))
+
+    local show_out cur_port
+    if ! show_out=$(/usr/local/a-ui/a-ui setting -show 2>/dev/null); then
+        LOGE "读取面板当前设置失败，未做任何改动"
+        before_show_menu
+        return 1
+    fi
+    cur_port=$(echo "${show_out}" | awk '/^Port:/ {print $2; exit}')
+    # 有域名安装时面板只经 Caddy 反代访问，install.sh 写进 Caddyfile 的是固定的
+    # reverse_proxy 127.0.0.1:<端口>。这里单独改面板端口，Caddy 仍转发到旧端口，管理员
+    # 就被锁在面板外。刻意不在这里同步改 Caddyfile：那是两套配置的联动修改，两头各有
+    # 失败与回滚，只成功一半就是锁死；菜单 18 的配置向导本来就是同时写 Caddy 与面板
+    # 设置、并带完整失败处理的唯一入口。所以拒绝并指路。
+    if panel_behind_caddy "${show_out}"; then
+        LOGE "面板当前经 Caddy 反代访问（有域名安装），不能在这里单独改端口：Caddy 会继续把请求转发到旧端口 ${cur_port}，面板将无法从域名打开"
+        LOGI "要重新配置域名与面板，请用菜单 18「配置域名与伪装站」（会同时更新 Caddy 与面板设置）"
+        LOGI "要改为直连访问面板，请先用菜单 19「卸载 Caddy 并恢复面板直连」，再来改端口"
+        before_show_menu
+        return 1
+    fi
+    if [[ "${port}" == "${cur_port}" ]]; then
+        LOGI "面板已经在使用端口 ${port}，无需修改"
+        before_show_menu
+        return 0
+    fi
+    if port_in_use "${port}"; then
+        LOGE "端口 ${port} 已被其它程序占用，请换一个"
+        before_show_menu
+        return 1
+    fi
+    if ! a_ui_setting -port "${port}"; then
+        LOGE "设置端口失败，面板端口保持不变"
+        before_show_menu
+        return 1
+    fi
+    echo -e "设置端口完毕，现在请重启面板，并使用新设置的端口 ${green}${port}${plain} 访问面板"
+    confirm_restart
 }
 
 start() {
@@ -321,16 +488,39 @@ install_bbr() {
     before_show_menu
 }
 
+# 新脚本先下到 /usr/bin 下的临时文件、核验后再 mv 过去，不直接对着 /usr/bin/a-ui 写：
+#   - 证书必须校验：这是以 root 执行的脚本，不能经一条可被中间人替换的连接下载。
+#   - wget -O 会先清空目标再写，下载失败或拿到的是错误页，管理脚本本身就毁了。
+#   - 被替换的正是此刻 bash 正在逐行读取的这个文件。原地改写会让它接着读到新
+#     文件里错位的内容；mv 换上的是一个新 inode，正在跑的进程继续读旧的那份。
+#     临时文件与目标同目录，mv 才是同一文件系统内的原子 rename。
 update_shell() {
-    wget -O /usr/bin/a-ui -N --no-check-certificate https://github.com/SienFeng/AetherUI/raw/main/a-ui.sh
-    if [[ $? != 0 ]]; then
+    local tmp
+    tmp=$(mktemp /usr/bin/.a-ui-update.XXXXXX) || {
+        LOGE "创建临时文件失败，未做任何改动"
+        before_show_menu
+        return 1
+    }
+    if ! wget -O "${tmp}" https://github.com/SienFeng/AetherUI/raw/main/a-ui.sh; then
+        rm -f "${tmp}"
         echo ""
         LOGE "下载脚本失败，请检查本机能否连接 Github"
         before_show_menu
-    else
-        chmod +x /usr/bin/a-ui
-        LOGI "升级脚本成功，请重新运行脚本" && exit 0
+        return 1
     fi
+    if [[ ! -s "${tmp}" ]] || ! head -n 1 "${tmp}" | grep -qE '^#!.*bash' || ! bash -n "${tmp}" 2>/dev/null; then
+        rm -f "${tmp}"
+        LOGE "下载到的不是完整的 bash 脚本（空文件、错误页或下载被截断），未做替换"
+        before_show_menu
+        return 1
+    fi
+    if ! chmod 755 "${tmp}" || ! mv -f "${tmp}" /usr/bin/a-ui; then
+        rm -f "${tmp}"
+        LOGE "替换 /usr/bin/a-ui 失败，原脚本保持不变"
+        before_show_menu
+        return 1
+    fi
+    LOGI "升级脚本成功，请重新运行脚本" && exit 0
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -587,9 +777,12 @@ ssl_cert_issue_by_cloudflare() {
         else
             LOGI "域名合法性校验通过..."
         fi
-        LOGD "请设置API密钥:"
-        read -p "Input your key here:" CF_GlobalKey
-        LOGD "你的API密钥为:${CF_GlobalKey}"
+        # Global API Key 能操作整个 Cloudflare 账户：输入不回显，读完也不打印——终端
+        # 回滚、录屏、会话日志都会把它留下来。
+        LOGD "请设置API密钥（输入时不显示）:"
+        read -rs -p "Input your key here:" CF_GlobalKey
+        echo ""
+        LOGD "已读取API密钥"
         LOGD "请设置注册邮箱:"
         read -p "Input your email here:" CF_AccountEmail
         LOGD "你的注册邮箱为:${CF_AccountEmail}"
@@ -674,8 +867,18 @@ cron_jobs() {
 #
 # 原先的写法是 curl -s -L 直接覆盖：不带 -f 时 GitHub 回错误页（限流、5xx）
 # curl 照样退出 0，错误页被当成 dat 写进 bin/，紧接着的重启让 xray 加载不了
-# geo 数据而起不来——整机节点断网，a-ui.service 也没有 Restart= 能自愈。
-# 定时任务每两天在凌晨跑一次，正是没人看着的时候。
+# geo 数据而起不来——整机节点断网；面板进程本身没有退出，a-ui.service 的
+# Restart=on-failure 也救不了。定时任务每两天在凌晨跑一次，正是没人看着的时候。
+#
+# 替换前的校验拿的是 bin/config.json，而它可能是旧的：配置热更新（tryHotApply）
+# 只经 gRPC 把改动下发进正在跑的核心，不重写这个文件，它只在核心整进程启动时才
+# 重新生成。热更新加进去的分流规则若引用了新数据里没有的分类，这份旧文件校验
+# 不出来，重启后 xray 照样起不来。所以替换、重启之后，等面板重新生成
+# bin/config.json，再用它和新数据校验一次；只有在旧数据能通过、新数据通不过时
+# 才认定是新数据的问题，换回旧数据再重启一次。没有 bin/config.json 时（面板还
+# 没起过核心）没有什么能是旧的，跳过这一步。
+#
+# 本函数必须保持自包含：update_geo_script_test.go 把它原样抽出来单独运行。
 update_geo() {
     local bin_dir install_dir xray_bin tmp_dir f
     bin_dir=$(dirname "${PATH_FOR_GEO_SITE}")
@@ -727,33 +930,128 @@ EOF
         return 1
     fi
 
+    # 现有数据先留一份到 old/ 供回退（硬链接，同一文件系统内不复制数据；不行再复制），
+    # 其它 .dat 照样链接进去，old/ 本身就能当一个完整的资源目录拿来校验。
+    local old_dir="${tmp_dir}/old" have_old=1
+    mkdir -p "${old_dir}"
+    for f in "${bin_dir}"/*.dat; do
+        case "$(basename "${f}")" in
+        geoip.dat | geosite.dat) ;;
+        *) ln -s "${f}" "${old_dir}/" 2>/dev/null ;;
+        esac
+    done
+    for f in "${PATH_FOR_GEO_IP}" "${PATH_FOR_GEO_SITE}"; do
+        if ! ln -f "${f}" "${old_dir}/$(basename "${f}")" 2>/dev/null &&
+            ! cp -p "${f}" "${old_dir}/$(basename "${f}")" 2>/dev/null; then
+            have_old=0
+        fi
+    done
+
+    local had_cfg=0
+    [[ -f "${PATH_FOR_CONFIG}" ]] && had_cfg=1
     mv -f "${tmp_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
         mv -f "${tmp_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
     local mv_rc=$?
-    rm -rf "${tmp_dir}"
     if [[ ${mv_rc} -ne 0 ]]; then
+        [[ ${have_old} -eq 1 ]] && mv -f "${old_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" &&
+            mv -f "${old_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"
+        rm -rf "${tmp_dir}"
         LOGE "替换 geo 数据失败，请检查 ${bin_dir} 下的 geoip.dat 与 geosite.dat"
         return 1
     fi
+    # 记下重启前的时刻，用来判断 bin/config.json 是不是重启后新写的。多睡一秒是因为
+    # bash 4 的 -nt 只比较到整秒。
+    if [[ ${had_cfg} -eq 1 ]]; then
+        touch "${tmp_dir}/restart-stamp"
+        sleep 1
+    fi
     LOGI "geo 数据已更新并通过校验，正在重启面板"
     systemctl restart a-ui
+    local restart_rc=$?
+    if [[ ${had_cfg} -eq 1 ]]; then
+        local i regenerated=0
+        for ((i = 0; i < 30; i++)); do
+            if [[ "${PATH_FOR_CONFIG}" -nt "${tmp_dir}/restart-stamp" ]]; then
+                regenerated=1
+                break
+            fi
+            sleep 1
+        done
+        if [[ ${regenerated} -eq 0 ]]; then
+            rm -rf "${tmp_dir}"
+            LOGE "geo 数据已替换并重启面板，但 30 秒内面板没有重新生成 ${PATH_FOR_CONFIG}，无法确认 xray 已用新数据正常启动，请用 a-ui status 与 a-ui log 检查"
+            return 1
+        fi
+        if ! (cd "${install_dir}" && XRAY_LOCATION_ASSET="${bin_dir}" "${xray_bin}" run -test -c "${PATH_FOR_CONFIG}") >/dev/null 2>&1; then
+            if [[ ${have_old} -eq 1 ]] &&
+                (cd "${install_dir}" && XRAY_LOCATION_ASSET="${old_dir}" "${xray_bin}" run -test -c "${PATH_FOR_CONFIG}") >/dev/null 2>&1; then
+                if mv -f "${old_dir}/geoip.dat" "${PATH_FOR_GEO_IP}" && mv -f "${old_dir}/geosite.dat" "${PATH_FOR_GEO_SITE}"; then
+                    LOGE "面板重新生成的核心配置引用了新 geo 数据里没有的分类（多半是热更新加进去的分流规则），已换回旧数据并再次重启面板"
+                    systemctl restart a-ui
+                else
+                    LOGE "面板重新生成的核心配置与新 geo 数据不兼容，换回旧数据也失败了，xray 可能起不来，请尽快检查 ${bin_dir}"
+                fi
+                rm -rf "${tmp_dir}"
+                return 1
+            fi
+            # 旧数据同样通不过：是配置本身另有问题（比如证书文件不在了），与这次更新无关，
+            # 新数据保留；但 xray 多半没在跑，如实返回失败
+            rm -rf "${tmp_dir}"
+            LOGE "面板重新生成的核心配置未通过 xray 校验，旧的 geo 数据同样通不过，问题不在这次更新的数据上（新数据已保留），请用 a-ui log 排查"
+            return 1
+        fi
+    fi
+    rm -rf "${tmp_dir}"
+    return ${restart_rc}
+}
+
+# root 的 crontab 只经下面两个函数改动：现有内容经管道过滤后直接喂给 crontab -，
+# 不落任何临时文件。原先的写法先把 crontab 写进固定的 /tmp/crontabTask.tmp 再
+# crontab 它：/tmp 人人可写，本机任何用户都能抢先建好这个文件（受 protected_regular
+# 保护时 root 的写入会失败，但随后的 crontab 照样把这个文件装上），他写进去的内容
+# 就成了 root 的定时任务；每次「开启」还会再追加一行重复的任务。
+#
+# 标记用的是任务命令本身（a-ui geo / a-ui clear），旧版本脚本重复写进去的行也一并
+# 收拢。crontab -l 失败而且不是"还没有 crontab"时不动它：否则会拿一份空内容把
+# root 现有的定时任务整个覆盖掉。
+
+# cron_replace_lines <标记> [行...]：删掉所有含标记的行，再追加给定的行。
+cron_replace_lines() {
+    local marker="$1" current
+    shift
+    if ! current=$(crontab -l 2>/dev/null); then
+        if ! crontab -l 2>&1 | grep -qi 'no crontab'; then
+            LOGE "读取 root 的 crontab 失败，未做任何改动"
+            return 1
+        fi
+        current=""
+    fi
+    {
+        [[ -n "${current}" ]] && printf '%s\n' "${current}" | grep -vF -- "${marker}"
+        [[ $# -gt 0 ]] && printf '%s\n' "$@"
+    } | crontab -
+}
+
+# cron_drop_lines <标记>：删掉所有含标记的行；本来就没有时不碰 crontab。
+cron_drop_lines() {
+    crontab -l 2>/dev/null | grep -qF -- "$1" || return 0
+    cron_replace_lines "$1"
 }
 
 enable_auto_update_geo() {
     LOGI "正在开启自动更新geo数据..."
-    crontab -l >/tmp/crontabTask.tmp
-    echo "00 4 */2 * * a-ui geo > /dev/null" >>/tmp/crontabTask.tmp
-    crontab /tmp/crontabTask.tmp
-    rm /tmp/crontabTask.tmp
-    LOGI "开启自动更新geo数据成功"
+    if cron_replace_lines "a-ui geo" "00 4 */2 * * a-ui geo > /dev/null"; then
+        LOGI "开启自动更新geo数据成功"
+    else
+        LOGE "开启自动更新geo数据失败"
+    fi
 }
 
 disable_auto_update_geo() {
-    crontab -l | grep -v "a-ui geo" | crontab -
-    if [[ $? -ne 0 ]]; then
-        LOGI "取消a-ui 自动更新geo数据失败"
-    else
+    if cron_drop_lines "a-ui geo"; then
         LOGI "取消a-ui 自动更新geo数据成功"
+    else
+        LOGE "取消a-ui 自动更新geo数据失败"
     fi
 }
 
@@ -798,34 +1096,33 @@ enable_auto_clear_log() {
         LOGI "配置文件中的日志文件路径无效,脚本退出"
         exit 1
     fi
-    if [[ -f ${accessfilePath} ]]; then
-        crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * a-ui clear ${accessfilePath} > /dev/null" >>/tmp/crontabTask.tmp
-        crontab /tmp/crontabTask.tmp
-        rm /tmp/crontabTask.tmp
-        LOGI "设置定时清除xray日志:${accessfilePath}成功"
-    else
-        LOGE "accesslog不存在,将不会为其设置定时清除"
-    fi
-
-    if [[ -f ${errorfilePath} ]]; then
-        crontab -l >/tmp/crontabTask.tmp
-        echo "30 4 */2 * * a-ui clear ${errorfilePath} > /dev/null" >>/tmp/crontabTask.tmp
-        crontab /tmp/crontabTask.tmp
-        rm /tmp/crontabTask.tmp
-        LOGI "设置定时清除xray日志:${errorfilePath}成功"
-    else
-        LOGE "errorlog不存在,将不会为其设置定时清除"
-    fi
+    # 标记带上完整路径和其后的空格（"a-ui clear <路径> "）：只替换同一个日志的旧任务，
+    # 另一个日志的任务不受影响——两个路径若共用 "a-ui clear" 标记，加第二条时会把刚加
+    # 的第一条删掉；末尾的空格让 access.log 不会误中 access.log.1。路径会原样进 root 的
+    # crontab、由 cron 交给 sh 执行，只放行普通字符组成的绝对路径——带空格、引号、$、%
+    # 的路径要么让任务坏掉，要么成了以 root 执行的注入点。
+    local p kind
+    for kind in access error; do
+        p="${accessfilePath}"
+        [[ "${kind}" == error ]] && p="${errorfilePath}"
+        if [[ ! -f ${p} ]]; then
+            LOGE "${kind}log不存在,将不会为其设置定时清除"
+        elif [[ ! "${p}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+            LOGE "日志路径 ${p} 含有不能安全写进 crontab 的字符（只支持字母、数字与 . _ - /），将不会为其设置定时清除"
+        elif cron_replace_lines "a-ui clear ${p} " "30 4 */2 * * a-ui clear ${p} > /dev/null"; then
+            LOGI "设置定时清除xray日志:${p}成功"
+        else
+            LOGE "设置定时清除xray日志:${p}失败"
+        fi
+    done
 }
 
 #disable auto dlete log
 disable_auto_clear_log() {
-    crontab -l | grep -v "a-ui clear" | crontab -
-    if [[ $? -ne 0 ]]; then
-        LOGI "取消 定时清除xray日志失败"
-    else
+    if cron_drop_lines "a-ui clear"; then
         LOGI "取消 定时清除xray日志成功"
+    else
+        LOGE "取消 定时清除xray日志失败"
     fi
 }
 
@@ -880,7 +1177,15 @@ restore_direct_panel() {
         return 0
     fi
 
-    /usr/local/a-ui/a-ui setting -listen ""
+    # 写入失败（库被锁、磁盘满）时不能往下走：下面的探活连 127.0.0.1，面板仍监听回环也照样通过，
+    # 会在面板只能经 Caddy 访问的时候把 Caddy 停掉。
+    if ! a_ui_setting -listen ""; then
+        LOGE "恢复面板监听所有 IP 失败，本次不会停用 Caddy"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
     systemctl restart a-ui
 
     # 面板端口和根路径都可能是随机改过的，不能假设 54321 或 "/"：直接
@@ -899,6 +1204,14 @@ restore_direct_panel() {
     fi
     port=$(echo "${show_out}" | grep '^Port:' | awk '{print $2}')
     basepath=$(echo "${show_out}" | grep '^BasePath:' | awk '{print $2}')
+    # 再确认一次真的写进去了（旧二进制写失败也退出 0）：监听地址必须是空的。
+    if [[ -n "$(echo "${show_out}" | grep '^Listen:' | awk '{print $2}')" ]]; then
+        LOGE "面板仍未监听所有 IP，本次不会停用 Caddy"
+        if [[ $# == 0 ]]; then
+            before_show_menu
+        fi
+        return 1
+    fi
 
     local alive=1 i
     if [[ -n "${port}" ]]; then

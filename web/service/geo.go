@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,13 +94,49 @@ func normalizeRegions(list []string) []string {
 	return out
 }
 
-// regionTag 由省份集合算出 dat 里的 tag。
+// regionTag 由省份集合算出允许集的 tag：last-known-good 按它记，dat 里的代码以它开头。
 //
 // 用哈希而不是拼省份名：dat 的 tag 查找大小写不敏感，而且中文名进配置
 // 字符串会引入编码上的不确定性。纯大写 ASCII 最稳。
 func regionTag(provinces []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(normalizeRegions(provinces), "\x00")))
 	return "ALLOW" + strings.ToUpper(hex.EncodeToString(sum[:4]))
+}
+
+// geoDatCode 是允许集在 dat 里的代码：tag 加上内容哈希。
+//
+// xray 的 IP 集合按「文件:代码」缓存（common/geodata/ip_matcher.go 的 IPSetFactory），热应用时新规则
+// 在旧规则还被引用的那一刻建出来，命中缓存、拿到的是旧集合。IP 库更新后允许集的段变了而代码不变，核心
+// 就一直按旧段放行——重启标志、热应用都白做。按内容寻址，内容一变代码就变，缓存天然失效；内容不变则
+// 代码不变、配置字节不变，不会白白下发一次。
+func geoDatCode(tag string, cidrs []string) string {
+	return geoDatCodeOf(tag, cidrs, true)
+}
+
+// geoDatCodeOf 同 geoDatCode；complete 为假（缺省份算出来的残缺允许集）时用 "P" 代替 "C"：面板重启后
+// last-known-good 从 dat 做种子，残缺的条目不能被当成完整的旧允许集。
+func geoDatCodeOf(tag string, cidrs []string, complete bool) string {
+	sum := sha256.Sum256([]byte(strings.Join(cidrs, "\n")))
+	mark := "C"
+	if !complete {
+		mark = "P"
+	}
+	return tag + mark + strings.ToUpper(hex.EncodeToString(sum[:4]))
+}
+
+const geoTagLen = len("ALLOW") + 8
+
+// geoTagOfCode 从 dat 代码取回允许集的 tag；升级前的 dat 只有 tag，原样返回。
+func geoTagOfCode(code string) string {
+	if len(code) == geoTagLen+1+8 && strings.HasPrefix(code, "ALLOW") && (code[geoTagLen] == 'C' || code[geoTagLen] == 'P') {
+		return code[:geoTagLen]
+	}
+	return code
+}
+
+// geoCodeIsPartial 报告 dat 代码是不是残缺允许集的（见 geoDatCodeOf）。
+func geoCodeIsPartial(code string) bool {
+	return len(code) == geoTagLen+1+8 && strings.HasPrefix(code, "ALLOW") && code[geoTagLen] == 'P'
 }
 
 // 地区限制的两种合并口径。
@@ -128,6 +165,8 @@ type provinceCIDRSource interface {
 // 都要跟着改，而它们关心的只是「给我这些省份的 IP 段」，口径由上层选定。
 type majorityCIDRSource struct{ m *ipdb.Multi }
 
+func (s majorityCIDRSource) Provinces() []string { return s.m.Provinces() }
+
 func (s majorityCIDRSource) CIDRsOfProvinces(provinces []string) []string {
 	return s.m.MajorityCIDRsOfProvinces(provinces)
 }
@@ -151,8 +190,13 @@ func regionCIDRSource(db *ipdb.Multi, settingService *SettingService) provinceCI
 
 // geoPlan 是一轮生成的结果：dat 里要写哪几组数据，以及每个入站用哪个 tag。
 type geoPlan struct {
+	// Entries 的 Tag 是 dat 代码（geoDatCode），TagByInbound 的值也是代码；TagOfCode 把代码映射回允许集的 tag。
 	Entries      []geodatEntry
 	TagByInbound map[int]string
+	TagOfCode    map[string]string
+	// Complete 是本轮按 IP 库完整算出来的允许集 tag：只有它们能记成 last-known-good。缺省份（partial）
+	// 或沿用旧集合（stale）的不算——记下来的话，下一轮会把一份残缺的集合当成「上一次的允许集」。
+	Complete map[string]bool
 	// FailClosed 是本轮只能锁死的入站（id → 原因），它们不引用 dat。
 	FailClosed map[int]string
 	// Degraded 是本轮降级的入站，含沿用旧允许集（stale）与锁死（closed）两种。
@@ -178,6 +222,7 @@ func buildGeoPlan(inbounds []*model.Inbound, db provinceCIDRSource) (*geoPlan, e
 // passes 是活动出差通行证（入站 id → 通行证），按 effectiveRegions 并入。
 func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes map[int]*model.InboundRegionPass, lastGood map[string][]string) *geoPlan {
 	plan := &geoPlan{
+		Complete:     map[string]bool{},
 		TagByInbound: map[int]string{},
 		FailClosed:   map[int]string{},
 		Degraded:     map[int]GeoDegradation{},
@@ -185,6 +230,30 @@ func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes m
 	byTag := map[string][]string{}
 	// failedTag 记住本轮已判定为「算不出」的 tag，同 tag 的入站沿用同一结论。
 	failedTag := map[string]string{}
+	// degradedTag 记住本轮算出来但缺了省份（partial / 沿用旧集合）的 tag，同 tag 的入站同样标出。
+	degradedTag := map[string]GeoDegradation{}
+	// known 是 IP 库里的省份（db 实现了 provinceLister 时），第一次遇到多省的允许集时才取。多省的允许集
+	// 靠它察觉「少了一个省」——对整组省份 CIDRsOfProvinces 仍会返回其余省份的段，只看是否为空看不出来。
+	var known map[string]bool
+	missingOf := func(provinces []string) []string {
+		lister, ok := db.(provinceLister)
+		if !ok || len(provinces) < 2 {
+			return nil // 单省的允许集「找不到」就是空，下面已经判断
+		}
+		if known == nil {
+			known = map[string]bool{}
+			for _, p := range lister.Provinces() {
+				known[p] = true
+			}
+		}
+		var missing []string
+		for _, p := range provinces {
+			if !known[p] {
+				missing = append(missing, p)
+			}
+		}
+		return missing
+	}
 
 	closeInbound := func(id int, reason string) {
 		plan.FailClosed[id] = reason
@@ -215,6 +284,9 @@ func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes m
 		}
 		if _, ok := byTag[tag]; ok {
 			plan.TagByInbound[in.Id] = tag
+			if d, ok := degradedTag[tag]; ok {
+				plan.Degraded[in.Id] = d
+			}
 			continue
 		}
 		var cidrs []string
@@ -226,8 +298,20 @@ func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes m
 				"（IP 归属地库可能未加载或地区名已变更）"
 		}
 		if reason == "" {
-			byTag[tag] = cidrs
 			plan.TagByInbound[in.Id] = tag
+			if missing := missingOf(provinces); len(missing) > 0 {
+				why := "找不到这些地区的 IP 段: " + strings.Join(missing, "、") + "（IP 归属地库可能已变更）"
+				d := GeoDegradation{Mode: geoDegradePartial, Reason: why + "，只放行其余省份"}
+				if old, ok := lastGood[tag]; ok && len(old) > 0 {
+					cidrs = old
+					d = GeoDegradation{Mode: geoDegradeStale, Reason: why + "，沿用上一次的允许集"}
+				}
+				degradedTag[tag] = d
+				plan.Degraded[in.Id] = d
+			} else {
+				plan.Complete[tag] = true
+			}
+			byTag[tag] = cidrs
 			continue
 		}
 		failedTag[tag] = reason
@@ -247,8 +331,19 @@ func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes m
 	// 按 tag 升序：dat 内容必须逐字节确定，否则内容哈希每轮都变，
 	// 那个 10 秒的重启 cron 会不停重启 xray。禁止遍历 map 产生顺序。
 	sort.Strings(tags)
+	codeOf := make(map[string]string, len(tags))
+	plan.TagOfCode = make(map[string]string, len(tags))
 	for _, tag := range tags {
-		plan.Entries = append(plan.Entries, geodatEntry{Tag: tag, CIDRs: byTag[tag]})
+		// 完整算出的与沿用旧集合的都是完整允许集；只有缺省份时剩下的那部分是残缺的。
+		_, partial := degradedTag[tag]
+		partial = partial && degradedTag[tag].Mode == geoDegradePartial
+		code := geoDatCodeOf(tag, byTag[tag], !partial)
+		codeOf[tag] = code
+		plan.TagOfCode[code] = tag
+		plan.Entries = append(plan.Entries, geodatEntry{Tag: code, CIDRs: byTag[tag]})
+	}
+	for id, tag := range plan.TagByInbound {
+		plan.TagByInbound[id] = codeOf[tag]
 	}
 	return plan
 }
@@ -259,12 +354,12 @@ func buildGeoPlanWith(inbounds []*model.Inbound, db provinceCIDRSource, passes m
 // 遇到 IPv6 来源会 **fail open**（放行），匹配器不会拿 v6 地址去比对一个
 // 没有 v6 条目的集合。只靠把 listen 限定成 IPv4 也不够——管理员随时可能
 // 把它改回留空，那时地区限制会静默失效。
-func buildGeoRules(inbounds []*model.Inbound, db provinceCIDRSource, datHash string) ([]any, error) {
+func buildGeoRules(inbounds []*model.Inbound, db provinceCIDRSource) ([]any, error) {
 	plan, err := buildGeoPlan(inbounds, db)
 	if err != nil {
 		return nil, err
 	}
-	return rulesFromGeoPlan(inbounds, plan, datHash), nil
+	return rulesFromGeoPlan(inbounds, plan), nil
 }
 
 // geoRuleSources 是一个允许集 tag 对应的两条拒绝规则的 source 条件，顺序同规则顺序：
@@ -276,7 +371,7 @@ func geoRuleSources(tag string) (v6, outside []string) {
 	return []string{"::/0"}, []string{"ext:" + geoDatRef + ":!" + tag}
 }
 
-func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) []any {
+func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan) []any {
 	rules := make([]any, 0, len(plan.TagByInbound)*2+len(plan.FailClosed))
 	// 按入站 id 升序遍历，不遍历 map。
 	for _, in := range inbounds {
@@ -305,10 +400,9 @@ func rulesFromGeoPlan(inbounds []*model.Inbound, plan *geoPlan, datHash string) 
 		})
 		rules = append(rules, map[string]any{
 			"type": "field",
-			// dat 的内容变化不体现在配置字节里，Config.Equals 察觉不到，
-			// xray 也就不会重新加载。把内容哈希嵌进 ruleTag，哈希变则配置
-			// 字节变则重启，不必为 dat 单独造一套变更检测。
-			"ruleTag":     "a-ui-geo-" + itoa(in.Id) + "-" + datHash,
+			// 不再把 dat 的哈希嵌进 ruleTag：代码本身按内容寻址（geoDatCode），允许集一变 source 字符串就变，
+			// 配置字节随之变化；dat 里其他条目（保留给运行中配置的旧代码）的增减不该让这条规则跟着变。
+			"ruleTag":     "a-ui-geo-" + itoa(in.Id),
 			"inboundTag":  []string{in.Tag},
 			"source":      outside,
 			"outboundTag": model.BlockOutboundTag,
@@ -365,7 +459,11 @@ var geoDatLock sync.Mutex
 func writeGeoDat(path string, entries []geodatEntry) (string, error) {
 	geoDatLock.Lock()
 	defer geoDatLock.Unlock()
+	return writeGeoDatLocked(path, entries)
+}
 
+// writeGeoDatLocked 是 writeGeoDat 的本体，调用方持有 geoDatLock。
+func writeGeoDatLocked(path string, entries []geodatEntry) (string, error) {
 	data, err := geodat.Encode(entries)
 	if err != nil {
 		return "", err
@@ -382,8 +480,33 @@ func writeGeoDat(path string, entries []geodatEntry) (string, error) {
 		return "", err
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
 		return "", err
 	}
 	return hash, nil
+}
+
+// writeFileAtomic 先写同目录下的临时文件再改名：要么完整换上新内容，要么原文件原样不动。
+// os.WriteFile 会先截断原文件——写到一半失败（最常见的是磁盘满）时留下一个半截的 dat，
+// fallbackToExistingDat 解不开它，所有地区入站都会被锁死，包括那些本来在完好文件里的。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpPath) // 改名成功之后这一步是空操作
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }

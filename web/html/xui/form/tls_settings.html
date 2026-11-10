@@ -95,7 +95,7 @@
                 <a-col :span="6">
                     <a-form-item label="ocspStapling">
                         <a-input-number v-model="inbound.stream.tls.certs[0].ocspStapling"
-                                        :min="0" style="width: 90px;"></a-input-number>
+                                        :min="0" :precision="0" style="width: 90px;"></a-input-number>
                     </a-form-item>
                 </a-col>
                 <a-col :span="6">

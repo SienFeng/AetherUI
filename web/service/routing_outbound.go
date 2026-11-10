@@ -165,14 +165,21 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 		if p, ok := ob["protocol"].(string); ok && p != "" {
 			old.Protocol = p
 		}
-		// 配置换了，上一次的探测结果就不再是对当前配置的判断了。留着它，
-		// 一个刚被改错的节点会继续顶着上一次的绿灯。只改备注时不必丢弃。
-		(&ProbeService{}).Forget(old.Id)
 		// 出口国家同理：换了落地服务器，旧国旗就是错的，等下一次探测重新测。
 		old.ExitCountry = ""
 		old.Remark = node.Remark
 		old.Enable = node.Enable
-		return database.GetDB().Save(old).Error
+		if err := database.GetDB().Save(old).Error; err != nil {
+			return err
+		}
+		// 配置换了，上一次的探测结果就不再是对当前配置的判断了。留着它，
+		// 一个刚被改错的节点会继续顶着上一次的绿灯。只改备注时不必丢弃。
+		//
+		// 必须在落库【之后】：一次进行中的探测收尾时会重读节点、只在配置没变时
+		// 写缓存（见 Probe）。先 Forget 后落库的话，它恰好在两步之间重读到旧配置，
+		// 迟到的旧结果就会在 Forget 之后写进去。
+		(&ProbeService{}).Forget(old.Id)
+		return nil
 	}
 	old.Remark = node.Remark
 	old.Enable = node.Enable
@@ -184,9 +191,12 @@ func (s *OutboundNodeService) Update(node *model.OutboundNode) error {
 // SetExitCountry 记录一次成功探测测到的出口国家。带 tag 条件：探测期间
 // 节点可能被删掉、id 又被新节点复用（SQLite 会复用自增 id），不能把旧节点
 // 的结果写到新节点头上。
-func (s *OutboundNodeService) SetExitCountry(id int, tag string, country string) error {
+//
+// 同样带 config 条件（被测的那份配置）：探测期间节点可能被编辑，Update 已经把
+// 出口国家清空，换了落地服务器的节点不能被写回旧配置测出的国旗。
+func (s *OutboundNodeService) SetExitCountry(id int, tag string, config string, country string) error {
 	return database.GetDB().Model(&model.OutboundNode{}).
-		Where("id = ? AND tag = ?", id, tag).
+		Where("id = ? AND tag = ? AND config = ?", id, tag, config).
 		Update("exit_country", country).Error
 }
 

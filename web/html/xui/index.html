@@ -441,6 +441,11 @@
             // 最近一次 /server/status 成功的时刻与当前时刻，用来判断「实时」是否属实
             lastStatusAt: 0,
             nowTick: Date.now(),
+            // 状态轮询正处在一次中断里（面板重启、网络抖动）：只在中断开始时提示一次，
+            // 成功一次即复位。中断期间「N 秒前更新」本身就在说明情况。
+            statusOutage: false,
+            // 会话已失效：停止轮询，整页重新加载回到登录页
+            sessionExpired: false,
             // 这三份数据来自入站页已有的接口，本页只读不写，也不新增任何
             // 后端接口。刷新频率远低于 /server/status 的 2 秒——它们一小时
             // 量级才有意义的变化，跟着 CPU 一起每 2 秒拉一次纯属浪费。
@@ -501,12 +506,40 @@
                     console.error(e);
                 }
             },
+            // 不走 HttpUtil：它每次失败都弹一条全局提示，面板重启的几十秒里就是每 2 秒一条；
+            // 会话过期时它只会反复弹「登录时效已过」，页面永远停在这里不跳登录页。
             async getStatus() {
-                const msg = await HttpUtil.post('/server/status');
-                if (msg.success) {
-                    this.setStatus(msg.obj);
-                    this.lastStatusAt = Date.now();
+                let body;
+                try {
+                    const resp = await axios.post('/server/status');
+                    body = resp.data;
+                } catch (e) {
+                    this.noteStatusOutage(e.message || String(e));
+                    return;
                 }
+                if (body && body.success === true) {
+                    this.statusOutage = false;
+                    this.setStatus(body.obj);
+                    this.lastStatusAt = Date.now();
+                    return;
+                }
+                if (body && body.success === false) {
+                    // /server/status 自己从不返回 success:false，只有 checkLogin 会（对 ajax 请求
+                    // 回 200 + success:false）：会话已失效。整页重新加载，服务端会把未登录的页面
+                    // 请求重定向到登录页，与面板升级后「重新登录」是同一个做法。
+                    this.sessionExpired = true;
+                    this.$message.warning(body.msg || '登录已失效，请重新登录');
+                    setTimeout(() => location.reload(), 1500);
+                    return;
+                }
+                this.noteStatusOutage('返回内容无法识别');
+            },
+            noteStatusOutage(reason) {
+                if (this.statusOutage) {
+                    return;
+                }
+                this.statusOutage = true;
+                this.$message.warning('系统状态刷新失败，正在自动重试：' + reason);
             },
             setStatus(data) {
                 this.status = new Status(data);
@@ -946,11 +979,14 @@
             this.businessTimer = setInterval(() => this.loadBusiness(), 30000);
             // 独立的 1 秒时钟：状态请求挂住时它照样前进，「N 秒前更新」才会如实变大
             this.clockTimer = setInterval(() => { this.nowTick = Date.now(); }, 1000);
-            while (true) {
-                try {
-                    await this.getStatus();
-                } catch (e) {
-                    console.error(e);
+            while (!this.sessionExpired) {
+                // 标签页在后台时不发请求，切回来下一轮自动继续（最多晚 2 秒）。
+                if (!document.hidden) {
+                    try {
+                        await this.getStatus();
+                    } catch (e) {
+                        console.error(e);
+                    }
                 }
                 await PromiseUtil.sleep(2000);
             }

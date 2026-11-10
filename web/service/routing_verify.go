@@ -148,14 +148,22 @@ type sampleTarget struct {
 // 永远只测到域名那一半，buildRule 为它生成的那条 IP 规则从来没被验证过。
 // 只有 full:/domain: 能还原出确定的域名；keyword/regexp/dotless/geosite/ext 推不出
 // 可靠样例，geoip:/ext:/带 ! 取反的 IP 条目同理，一律跳过而不是猜一个。
-func sampleTargets(domains, cidrs []string, perGroup int) []sampleTarget {
+//
+// IP 样例绕开 geoip:private（见 publicSampleIP）。第二个返回值报告是否有 IP 条目
+// 因为整段都在私网里而一个样例都没取：上层据此把「无法验证」的原因说清楚。
+func sampleTargets(domains, cidrs []string, perGroup int) ([]sampleTarget, bool) {
 	ips := []sampleTarget{}
+	privateOnly := false
+	isPrivate := geodata.GetPrivateIPMatcher().Match
 	for _, c := range cidrs {
 		if len(ips) >= perGroup {
 			break
 		}
-		if ip := firstUsableIP(strings.TrimSpace(c)); ip != nil {
+		ip, allPrivate := publicSampleIP(strings.TrimSpace(c), isPrivate)
+		if ip != nil {
 			ips = append(ips, sampleTarget{IP: ip, Display: ip.String()})
+		} else if allPrivate {
+			privateOnly = true
 		}
 	}
 	domainLimit := perGroup
@@ -174,8 +182,11 @@ func sampleTargets(domains, cidrs []string, perGroup int) []sampleTarget {
 		case strings.HasPrefix(d, "domain:"):
 			host = strings.TrimPrefix(d, "domain:")
 		}
-		if host = strings.TrimSpace(host); host != "" {
-			out = append(out, sampleTarget{Domain: host, Display: host})
+		// 样例要长得像真实流量：嗅探出的域名是 punycode。新录入的条目已经存成 xn--
+		// 形态；升级前存进库的中文域名在这里转一下，核心里那条未转换的规则命中不了，
+		// 结论如实是「不符」，而不是拿同一个中文字符串自问自答亮绿灯。
+		if ascii, err := domainToASCII(strings.TrimSpace(host)); err == nil && ascii != "" {
+			out = append(out, sampleTarget{Domain: ascii, Display: ascii})
 		}
 	}
 	for _, t := range ips {
@@ -184,7 +195,73 @@ func sampleTargets(domains, cidrs []string, perGroup int) []sampleTarget {
 		}
 		out = append(out, t)
 	}
-	return out
+	return out, privateOnly
+}
+
+// publicSampleIP 在一个 IP 条目里挑一个不落在 geoip:private 的地址作样例。返回
+// （样例, 整段都在私网里）：解析不了的条目（取反、geoip:、ext:）返回 (nil, false)。
+//
+// 模板里的 geoip:private → blocked 排在所有注入规则之前（注入不变量 1：模板的安全
+// 规则保持更高优先级），落在私网里的样例必然先被它截走，好好的规则于是被判「不符」。
+// 0.0.0.0/0、::/0 的「网络地址 +1」恰好是 0.0.0.1、::1，正中这一条。整段都是私网时
+// 本规则对这些地址本来就轮不到，拿任何样例去测都不说明它配得对不对。
+//
+// 先试网络地址 +1（原来的取法，大多数段它就不是私网）；是私网时再依次试「它所在的
+// /bits-1、/bits-2……/(段前缀+1) 块的下一块起点」。私网表由按 CIDR 对齐的块组成，
+// first 所在那块私网的下一块起点必在这串候选里，由细到粗第一个不是私网的，就是段内
+// 紧跟在那块私网之后的地址——不必另抄一份私网段列表来算边界。
+//
+// 私网判定用 xray 自己的 geodata.GetPrivateIPMatcher（common/geodata/consts.go）：
+// 与仓库种子 geoip.dat 的 PRIVATE 类别逐段一致（含 RFC 5737 的三个文档段），而它不必
+// 读文件。不手写判定，理由同 newGroupMatcher。
+func publicSampleIP(entry string, isPrivate func(net.IP) bool) (net.IP, bool) {
+	first := firstUsableIP(entry)
+	if first == nil {
+		return nil, false
+	}
+	if !isPrivate(first) {
+		return first, false
+	}
+	_, ipNet, err := net.ParseCIDR(entry)
+	if err != nil {
+		return nil, true // 单个地址，且是私网
+	}
+	ones, bits := ipNet.Mask.Size()
+	for prefix := bits; prefix > ones; prefix-- {
+		next := nextBlockStart(first, bits-prefix)
+		if next == nil || !ipNet.Contains(next) {
+			continue
+		}
+		if !isPrivate(next) {
+			return next, false
+		}
+	}
+	return nil, true
+}
+
+// nextBlockStart 返回 ip 所在的、低 hostBits 位为主机位的那一块的下一块起点；
+// 已到地址空间末尾时返回 nil。
+func nextBlockStart(ip net.IP, hostBits int) net.IP {
+	out := make(net.IP, len(ip))
+	copy(out, ip)
+	n := len(out)
+	full, rem := hostBits/8, hostBits%8
+	for i := 0; i < full && i < n; i++ {
+		out[n-1-i] = 0
+	}
+	if full < n && rem > 0 {
+		out[n-1-full] &^= byte(1<<rem - 1)
+	}
+	inc := uint16(1) << rem
+	for idx := n - 1 - full; idx >= 0; idx-- {
+		sum := uint16(out[idx]) + inc
+		out[idx] = byte(sum)
+		if sum < 256 {
+			return out
+		}
+		inc = 1
+	}
+	return nil
 }
 
 // firstUsableIP 返回 IP 段内第一个可用地址：网络地址 +1，/32、/128 与单个 IP 取自身。
@@ -244,11 +321,17 @@ func routeHead(route string) string {
 // 指定的入站报「永远不会命中」）；两边必须一起改，否则页面说「会命中」而这里不给绿，
 // 或反过来。TestRoute 把 TargetDomain 直接交给 PickRoute、不经过嗅探，所以这一层
 // 只能由面板自己补上——否则全局规则会对这类入站亮出没有依据的绿灯。
-func sniffingBlind(in *model.Inbound) bool {
+//
+// forceSniffing 是「补全流量识别」开关：开着时按生成配置同一个函数（forcedSniffing）先补全再判断，
+// 否则关了嗅探的入站在核心里明明拿得到域名，这里却剔掉域名样例、页面还标「永远不会命中」。
+func sniffingBlind(in *model.Inbound, forceSniffing bool) bool {
 	if in.Protocol == "socks" || in.Protocol == model.Http {
 		return false
 	}
 	raw := in.Sniffing
+	if forceSniffing {
+		raw = forcedSniffing(string(in.Protocol), raw)
+	}
 	if raw == "" {
 		raw = "{}"
 	}
@@ -468,6 +551,7 @@ const (
 	labelUnknownOutbound = "未知出站"
 	reasonSniffingOff    = "该入站未开启 sniffing（http/tls），核心在路由阶段拿不到域名，域名规则对其不会命中"
 	reasonSniffingIPOnly = "仅验证了 IP 条件：该入站未开启 sniffing（http/tls），域名条件对其不会命中"
+	reasonPrivateOnly    = "IP 段都落在 geoip:private：默认模板里屏蔽私网的规则排在所有分流规则之前，这些地址的样例会先被它截走，无法据此验证本规则"
 	sampleErrTimeout     = "超时"
 )
 
@@ -524,6 +608,9 @@ type verifyPlan struct {
 	// large：合并后条目数超过 auditLargeThreshold（与异常扫描的大小规则同一口径）。
 	// 大规则的组条目与匹配器不在一轮内常驻，用完即释放（见 verifyOne）。
 	large bool
+	// privateOnly：有组的 IP 条目整段落在 geoip:private 里没取到样例，用来解释
+	// 「一个样例都没有」的无法验证（见 reasonPrivateOnly）。
+	privateOnly bool
 }
 
 // Verify 验证一条规则。规则不存在返回 error；其余情况（含规则停用、不会写进配置、
@@ -715,7 +802,9 @@ type verifyShared struct {
 
 	logEnabled bool
 	logErr     string
-	groupLogs  func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
+	// forceSniffing：「补全流量识别」开关，见 sniffingBlind。
+	forceSniffing bool
+	groupLogs     func(inboundId int, sinceMs int64, limit int) ([]TargetRouteCount, bool, error)
 	// geoBlock 判断封禁连接是否来自入站地区限制之外；惰性构建，一轮内只建一次。
 	geoBlock      *geoBlockMatcher
 	geoBlockReady bool
@@ -749,7 +838,9 @@ type logRowsKey struct {
 type groupConditions struct {
 	domains, cidrs []string
 	targets        []sampleTarget
-	skip           bool
+	// privateOnly：有 IP 条目整段都在 geoip:private 里、没取到样例（见 sampleTargets）。
+	privateOnly bool
+	skip        bool
 }
 
 type matcherEntry struct {
@@ -803,6 +894,7 @@ func (s *RoutingVerifyService) prepareShared(rt XrayRuntime) (*verifyShared, err
 		shadowSmall: map[string]*matcherEntry{},
 		rpcTimeout:  s.rpcTimeout,
 	}
+	sh.forceSniffing = (&SettingService{}).GetForceSniffing()
 	for _, n := range nodeList {
 		sh.nodes[n.Id] = n
 		sh.remarkByTag[n.Tag] = nodeLabel(n)
@@ -882,10 +974,12 @@ func (sh *verifyShared) group(gid int) *groupConditions {
 	}
 	g := &groupConditions{skip: true}
 	if domains, cidrs, ok := groupConditionsOf(gid); ok {
+		targets, privateOnly := sampleTargets(domains, cidrs, verifyPerGroupSamples)
 		g = &groupConditions{
-			domains: domains,
-			cidrs:   cidrs,
-			targets: sampleTargets(domains, cidrs, verifyPerGroupSamples),
+			domains:     domains,
+			cidrs:       cidrs,
+			targets:     targets,
+			privateOnly: privateOnly,
 		}
 	}
 	sh.groups[gid] = g
@@ -976,7 +1070,7 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 		// 核心拿不到这个入站的域名时，域名样例在 TestRoute 里命中也不代表真实流量会命中，
 		// 不能算作证据；IP 样例照测。
 		targets := plan.targets
-		blind := len(plan.domains) > 0 && sniffingBlind(vu.inbound)
+		blind := len(plan.domains) > 0 && sniffingBlind(vu.inbound, sh.forceSniffing)
 		if blind {
 			targets = ipOnlyTargets(plan.targets)
 		}
@@ -1009,6 +1103,10 @@ func (s *RoutingVerifyService) verifyOne(budgetCtx context.Context, sh *verifySh
 			case u.Verdict == verdictVerified:
 				u.Reason = reasonSniffingIPOnly
 			}
+		} else if plan.privateOnly && res.Core.State == coreStateOK &&
+			u.Verdict == verdictUnverifiable && len(u.Samples) == 0 {
+			// combineVerdict 的笼统原因只说域名推不出样例；这里是 IP 段整段落在私网里。
+			u.Reason = reasonPrivateOnly
 		}
 		res.Users = append(res.Users, u)
 	}
@@ -1305,6 +1403,7 @@ func (s *RoutingVerifyService) planRule(sh *verifyShared, rule *model.RoutingRul
 		domainLists = append(domainLists, g.domains)
 		cidrLists = append(cidrLists, g.cidrs)
 		plan.targets = append(plan.targets, g.targets...)
+		plan.privateOnly = plan.privateOnly || g.privateOnly
 		used = append(used, strconv.Itoa(gid))
 		plan.groupIds = append(plan.groupIds, gid)
 	}

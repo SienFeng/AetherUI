@@ -1,7 +1,10 @@
 package service
 
 import (
+	"net"
 	"testing"
+
+	"github.com/xtls/xray-core/common/geodata"
 
 	"a-ui/database/model"
 )
@@ -39,7 +42,8 @@ func TestSampleTargets(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := disp(sampleTargets(c.domains, c.cidrs, c.perGroup))
+			ts, _ := sampleTargets(c.domains, c.cidrs, c.perGroup)
+			got := disp(ts)
 			if len(got) != len(c.want) {
 				t.Fatalf("got %v want %v", got, c.want)
 			}
@@ -50,7 +54,7 @@ func TestSampleTargets(t *testing.T) {
 			}
 		})
 	}
-	ts := sampleTargets([]string{"full:a.com"}, []string{"1.2.3.0/24"}, 2)
+	ts, _ := sampleTargets([]string{"full:a.com"}, []string{"1.2.3.0/24"}, 2)
 	if ts[0].Domain != "a.com" || ts[0].IP != nil || ts[1].IP.String() != "1.2.3.1" || ts[1].Domain != "" {
 		t.Fatalf("字段不对: %+v", ts)
 	}
@@ -163,5 +167,55 @@ func TestCombineVerdict(t *testing.T) {
 				t.Fatalf("非 verified 必须带 reason")
 			}
 		})
+	}
+}
+
+// 模板里那条 geoip:private → blocked 排在所有注入规则之前：样例落在私网里，核心
+// 必然先把它送进 blocked，好好的规则于是被判「不符」。0.0.0.0/0、::/0 这类大段的
+// 网络地址 +1 恰好就是私网（0.0.0.1、::1）。段里有非私网地址时就从那里取样；整段
+// 都是私网则一个也不取（交给上层给「无法验证」），绝不拿私网地址去测。
+//
+// 断言不写死挑出来的是哪个地址：只要求它在段内、且不被 xray 自己的私网匹配器命中。
+func TestSampleTargetsAvoidTemplatePrivateRanges(t *testing.T) {
+	private := geodata.GetPrivateIPMatcher()
+	for _, cidr := range []string{"0.0.0.0/0", "::/0", "10.0.0.0/7", "192.0.0.0/16", "100.64.0.0/9", "fc00::/6"} {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatalf("ParseCIDR(%s): %v", cidr, err)
+		}
+		ts, privateOnly := sampleTargets(nil, []string{cidr}, 2)
+		if len(ts) != 1 || ts[0].IP == nil {
+			t.Fatalf("%s 里有非私网地址，应取到一个 IP 样例，实际 %+v", cidr, ts)
+		}
+		if ip := ts[0].IP; !ipNet.Contains(ip) || private.Match(ip) {
+			t.Errorf("%s 的样例 %s 不在段内或落在 geoip:private 里", cidr, ip)
+		}
+		if privateOnly {
+			t.Errorf("%s 取到了样例，不该报告「整段都是私网」", cidr)
+		}
+	}
+	for _, cidr := range []string{"10.0.0.0/8", "192.0.2.0/24", "198.51.100.7", "fc00::/7", "127.0.0.1/32"} {
+		ts, privateOnly := sampleTargets(nil, []string{cidr}, 2)
+		if len(ts) != 0 {
+			t.Errorf("%s 整段都在 geoip:private 里，不该拿它取样，实际 %+v", cidr, ts)
+		}
+		if !privateOnly {
+			t.Errorf("%s 整段都是私网，应如实报告，上层据此说明为什么无法验证", cidr)
+		}
+	}
+	// 私网段排在前面不影响后面的公网段取样。
+	ts, _ := sampleTargets(nil, []string{"10.0.0.0/8", "0.0.0.0/0"}, 2)
+	if len(ts) != 1 || private.Match(ts[0].IP) {
+		t.Errorf("跳过私网段后应从下一个段取样，实际 %+v", ts)
+	}
+}
+
+// 升级前存进库的中文域名（手工录入的那份要等下一次编辑保存才会转换）：样例按真实
+// 流量里的 punycode 形态去问核心，核心里那条未转换的规则命中不了，结论如实是不符，
+// 而不是拿同一个中文字符串自问自答亮绿灯。
+func TestSampleTargetsUsePunycodeForLegacyIDNEntries(t *testing.T) {
+	ts, _ := sampleTargets([]string{"domain:例子.example.com", "full:example.com"}, nil, 2)
+	if len(ts) != 2 || ts[0].Domain != "xn--fsqu00a.example.com" || ts[1].Domain != "example.com" {
+		t.Fatalf("样例 = %+v，期望先是 xn--fsqu00a.example.com", ts)
 	}
 }
