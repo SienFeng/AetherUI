@@ -519,3 +519,51 @@ func TestRunDefaultsModeSkipsConfiguredPanel(t *testing.T) {
 		t.Error("已配置的面板不该被改动")
 	}
 }
+
+// 每台全新安装实际走的顺序：config_after_install 先跑 defaults，随后向导再跑 caddy / reality。defaults
+// 不能让向导被当成「已配置」而跳过，也不能让向导之后的整份设置通不过保存校验；reality 建入站时生成配置
+// 已经带着 DoH、IPIfNonMatch 与访问日志，入站照样要建得起来。
+func TestRunDefaultsThenWizard(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"caddy", Options{Mode: "caddy", Domain: "example.com", BasePath: "/Ab3xK9pQ/",
+			Listen: "127.0.0.1", Port: 54321}},
+		{"reality", Options{Mode: "reality", RealityDest: "www.tesla.com:443", BasePath: "/Zz9Yy8/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDB(t)
+			if _, err := Run(Options{Mode: "defaults"}); err != nil {
+				t.Fatalf("defaults: %v", err)
+			}
+			res, err := Run(tc.opts)
+			if err != nil {
+				t.Fatalf("向导: %v", err)
+			}
+			if res.Skipped {
+				t.Fatal("defaults 之后的向导被跳过了")
+			}
+			s := service.SettingService{}
+			if bp, _ := s.GetBasePath(); bp != tc.opts.BasePath {
+				t.Errorf("根路径 = %q，期望 %q", bp, tc.opts.BasePath)
+			}
+			if on, _ := s.GetAutoRegionParams(); !on {
+				t.Error("自动管理地区限制应保持打开")
+			}
+			if tc.opts.Mode == "reality" {
+				inbounds, err := (&service.InboundService{}).GetAllInbounds()
+				if err != nil || len(inbounds) != 1 || inbounds[0].Port != 443 {
+					t.Errorf("REALITY 入站没建起来: %v %v", inbounds, err)
+				}
+			}
+			all, err := s.GetAllSetting()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := all.CheckValid(); err != nil {
+				t.Errorf("整份设置通不过保存校验: %v", err)
+			}
+		})
+	}
+}
