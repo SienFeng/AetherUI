@@ -135,44 +135,31 @@ func TestHomeNetworksOnlyForInboundsWithPass(t *testing.T) {
 
 var errTestHomeSet = errors.New("IP 归属地库未加载")
 
-// 默认同时在用网络数：入站自己没设（0）就按默认；自己设了按自己的；默认为 0 时只管设了额度或有封禁的。
-func TestLimitedInboundsAppliesDefaultLimit(t *testing.T) {
+// 并发限制只看入站自己设的额度：没设（0）就不限制。面板曾有过全局的「默认同时在用的网络数」，2026-11-10
+// 管理员要求去掉（每个人的并发数手动设）；升级前库里留下的那个设置键不能再让没设额度的入站被限制。
+func TestLimitedInboundsIgnoresLegacyDefaultLimit(t *testing.T) {
 	setupDB(t)
 	plain := makeInboundFor(t, 10071, func(in *model.Inbound) {})
 	own := makeInboundFor(t, 10072, func(in *model.Inbound) { in.ConcurrencyLimit = 3 })
-	disabled := makeInboundFor(t, 10073, func(in *model.Inbound) { in.Enable = false })
-	_ = disabled
-	s := SettingService{}
-	if err := s.saveSetting("defaultConcurrencyLimit", "1"); err != nil {
+	disabled := makeInboundFor(t, 10073, func(in *model.Inbound) { in.Enable = false; in.ConcurrencyLimit = 2 })
+	if err := database.GetDB().Create(&model.Setting{Key: "defaultConcurrencyLimit", Value: "1"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	limits := effectiveLimitsOf(t)
-	if limits[plain.Id] != 1 || limits[own.Id] != 3 {
-		t.Errorf("额度 = %v，期望没设的按默认 1、设了 3 的按 3", limits)
-	}
-	if _, ok := limits[disabled.Id]; ok {
-		t.Error("停用的入站不在 xray 配置里，不该进判定")
-	}
-	if err := s.saveSetting("defaultConcurrencyLimit", "0"); err != nil {
-		t.Fatal(err)
-	}
-	limits = effectiveLimitsOf(t)
-	if _, ok := limits[plain.Id]; ok || limits[own.Id] != 3 {
-		t.Errorf("默认为 0（不限）时只管自己设了额度的: %v", limits)
-	}
-	_ = database.GetDB()
-}
-
-func effectiveLimitsOf(t *testing.T) map[int]int {
-	t.Helper()
-	cs := ConcurrencyService{}
-	inbounds, def, err := cs.limitedInboundsWithDefault(time.Now())
+	got, err := (&ConcurrencyService{}).limitedInbounds(time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := map[int]int{}
-	for _, in := range inbounds {
-		out[in.Id] = effectiveConcurrencyLimit(in, def)
+	ids := map[int]int{}
+	for _, in := range got {
+		ids[in.Id] = in.ConcurrencyLimit
 	}
-	return out
+	if _, ok := ids[plain.Id]; ok {
+		t.Errorf("没设并发额度的入站不该进判定（遗留的默认值不再生效）: %v", ids)
+	}
+	if ids[own.Id] != 3 {
+		t.Errorf("自己设了 3 的入站应按 3 判定: %v", ids)
+	}
+	if _, ok := ids[disabled.Id]; ok {
+		t.Error("停用的入站不在 xray 配置里，不该进判定")
+	}
 }

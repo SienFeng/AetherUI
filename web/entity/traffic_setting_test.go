@@ -59,7 +59,6 @@ func validBaseSettingForEntityTest() *AllSetting {
 		AutoRegionEnable:            0,
 		AutoRegionObserveDays:       1,
 		AutoRegionMaxBlockedPercent: 5,
-		DefaultConcurrencyLimit:     1,
 		BlockIdcSources:             1,
 		BlockSmtp:                   1,
 		ForceSniffing:               1,
@@ -151,9 +150,6 @@ func TestCheckValidAntiAbuseRanges(t *testing.T) {
 		valid bool
 	}{
 		{"默认值", func(*AllSetting) {}, true},
-		{"同时在用网络数 0（不限）", func(s *AllSetting) { s.DefaultConcurrencyLimit = 0 }, true},
-		{"同时在用网络数 -1", func(s *AllSetting) { s.DefaultConcurrencyLimit = -1 }, false},
-		{"同时在用网络数 101", func(s *AllSetting) { s.DefaultConcurrencyLimit = 101 }, false},
 		{"机房拦截开关 2", func(s *AllSetting) { s.BlockIdcSources = 2 }, false},
 		{"25 端口开关 2", func(s *AllSetting) { s.BlockSmtp = 2 }, false},
 		{"流量识别补全开关 2", func(s *AllSetting) { s.ForceSniffing = 2 }, false},

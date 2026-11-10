@@ -23,8 +23,6 @@ func (s *AllSetting) checkAntiAbuse() error {
 		v        int
 		min, max int
 	}{
-		// 0 表示不限；上限只防手滑。
-		{"默认同时在用网络数", s.DefaultConcurrencyLimit, 0, 100},
 		// 倍数 1 等于「和平时一样多就限速」。
 		{"流量暴涨：倍数", s.SpikeThrottleMultiplier, 2, 100},
 		{"流量暴涨：每天至少多少 GB 才算", s.SpikeThrottleFloorGB, 1, 10000},

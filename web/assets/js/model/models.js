@@ -224,7 +224,6 @@ class AllSetting {
         this.autoRegionObserveDays = 1;
         this.autoRegionMaxBlockedPercent = 5;
         this.ipRuleResolveDomain = 0;
-        this.defaultConcurrencyLimit = 1;
         this.blockIdcSources = 1;
         this.blockSmtp = 1;
         this.forceSniffing = 1;

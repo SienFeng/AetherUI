@@ -60,37 +60,23 @@ type ConcurrencyService struct {
 	banService     IPBanService
 }
 
-// limitedInbounds 返回真正需要做并发判定的入站，见 limitedInboundsWithDefault。
+// limitedInbounds 返回真正需要做并发判定的入站：启用的入站里，自己设了额度的、以及有封禁的。并发数只由
+// 管理员按入站手动设，0 表示不限制——面板曾有过全局的「默认同时在用的网络数」，2026-11-10 按管理员要求
+// 去掉，升级前库里留下的那个设置键不再读取。停用的入站根本不在 xray 配置里，没有连接可管。
 func (s *ConcurrencyService) limitedInbounds(now time.Time) ([]*model.Inbound, error) {
-	inbounds, _, err := s.limitedInboundsWithDefault(now)
-	return inbounds, err
-}
-
-// limitedInboundsWithDefault 返回需要做并发判定的入站与默认的同时在用网络数：启用的入站里，自己设了额度的、
-// 有封禁的，以及默认额度不为 0 时的全部。停用的入站根本不在 xray 配置里，没有连接可管。
-func (s *ConcurrencyService) limitedInboundsWithDefault(now time.Time) ([]*model.Inbound, int, error) {
-	def := s.settingService.GetDefaultConcurrencyLimit()
 	var inbounds []*model.Inbound
 	// 有封禁的入站也要进判定，否则没设并发额度的入站上封禁永远不会被执行。
 	banned := database.GetDB().Model(&model.IPBan{}).
 		Select("inbound_id").
 		Where("expires_at = 0 or expires_at > ?", now.UnixMilli())
-	q := database.GetDB().Model(model.Inbound{}).Where("enable = ?", true)
-	if def <= 0 {
-		q = q.Where("concurrency_limit > 0 or id in (?)", banned)
+	err := database.GetDB().Model(model.Inbound{}).
+		Where("enable = ?", true).
+		Where("concurrency_limit > 0 or id in (?)", banned).
+		Order("id asc").Find(&inbounds).Error
+	if err != nil {
+		return nil, err
 	}
-	if err := q.Order("id asc").Find(&inbounds).Error; err != nil {
-		return nil, 0, err
-	}
-	return inbounds, def, nil
-}
-
-// effectiveConcurrencyLimit：入站自己设了额度用自己的，没设（0）用默认的同时在用网络数。
-func effectiveConcurrencyLimit(in *model.Inbound, def int) int {
-	if in.ConcurrencyLimit > 0 {
-		return in.ConcurrencyLimit
-	}
-	return max(def, 0)
+	return inbounds, nil
 }
 
 // networkKey 是「一个网络」的身份：IPv4 一个地址（同一个 Wi-Fi 的设备共用一个出口地址），IPv6 按 /64
@@ -280,7 +266,7 @@ func markBanned(list []OnlineIP, banned map[string]*model.IPBan) []OnlineIP {
 // 跳变事件。因此漏掉一轮、面板重启、客户端重连都不会让状态跑偏。
 func (s *ConcurrencyService) Enforce() error {
 	now := time.Now()
-	inbounds, def, err := s.limitedInboundsWithDefault(now)
+	inbounds, err := s.limitedInbounds(now)
 	if err != nil {
 		return err
 	}
@@ -318,7 +304,7 @@ func (s *ConcurrencyService) Enforce() error {
 			s.disconnectBanned(inbound, list)
 		}
 
-		over := planNetworkRejections(list, effectiveConcurrencyLimit(inbound, def), blockerFor(inbound), s.homeFor(inbound))
+		over := planNetworkRejections(list, inbound.ConcurrencyLimit, blockerFor(inbound), s.homeFor(inbound))
 		onlineTrackerInstance.setRejected(inbound.Port, over, now)
 		s.disconnect(inbound, over)
 	}
