@@ -2,7 +2,9 @@ package ipdb
 
 import (
 	"bytes"
+	"cmp"
 	"net"
+	"slices"
 	"sort"
 )
 
@@ -159,7 +161,10 @@ func (m *Multi) majorityCIDRs(classify func(Location) int) []string {
 	if len(events) == 0 {
 		return nil
 	}
-	sort.Slice(events, func(i, j int) bool { return events[i].at < events[j].at })
+	// 有类型的排序：sort.Slice 经反射交换元素，几百万个事件时它是这里最大的开销；换掉后
+	// 四源实测每个省快约四分之一。
+	// 同一地址上的事件下面一次全部应用，相等键之间的先后不影响结果，输出逐字节不变。
+	slices.SortFunc(events, func(a, b event) int { return cmp.Compare(a.at, b.at) })
 
 	out := make([]string, 0, 64)
 	var (
