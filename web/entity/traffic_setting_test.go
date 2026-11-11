@@ -96,6 +96,22 @@ func TestCheckValidAutoTravelRanges(t *testing.T) {
 		// 总开关没开也一律拒绝的话，连改个端口都保存不了。
 		{"总开关关着时不管长住天数与每月天数（升级陷阱）", func(s *AllSetting) { s.AutoTravelRelocateDays, s.AutoTravelMonthlyDays = 5, 3 }, true},
 		{"关闭长住改地区时不管每月天数", func(s *AllSetting) { s.AutoTravelRelocateDays, s.AutoTravelMonthlyDays = 0, 1 }, true},
+		// 离家后大约 8 − 稳定天数 天之内还能重新发通行证（近 7 天窗口里家里的天数），长住要到第 N 天才改：两者
+		// 之和超过 8，中间就有几天通行证一断（续期失败、额度用完）既不能重发、也还没到改地区，人被一直拦着。
+		{"总开关开着时稳定天数 + 长住天数超过 8", func(s *AllSetting) {
+			s.AutoTravelStableDays, s.AutoTravelRelocateDays = 4, 5
+			s.AutoRegionEnable, s.AccessLogEnable = 1, 1
+		}, false},
+		{"总开关开着时默认 3 + 5 = 8", func(s *AllSetting) { s.AutoRegionEnable, s.AccessLogEnable = 1, 1 }, true},
+		{"总开关开着时稳定 1 + 长住 7", func(s *AllSetting) {
+			s.AutoTravelStableDays, s.AutoTravelRelocateDays = 1, 7
+			s.AutoRegionEnable, s.AccessLogEnable = 1, 1
+		}, true},
+		{"总开关关着时不管稳定天数 + 长住天数（升级陷阱）", func(s *AllSetting) { s.AutoTravelStableDays, s.AutoTravelRelocateDays = 5, 5 }, true},
+		{"关闭长住改地区时不管稳定天数", func(s *AllSetting) {
+			s.AutoTravelStableDays, s.AutoTravelRelocateDays = 7, 0
+			s.AutoRegionEnable, s.AccessLogEnable = 1, 1
+		}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

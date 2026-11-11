@@ -395,11 +395,11 @@
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="switch" title="自动管理地区限制"
                                                desc="自动把用户限定在常用省份，出差、搬家也自动处理"
-                                               hint="打开后全程自动，不需要你确认：没有地区限制的用户观察期满后自动设为最常用的一个省；已有地区限制、需要认证的用户自动打开出差放行（免认证的入站不会）；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、撤销过、或打开了「不自动设置地区限制」的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
+                                               hint="打开后全程自动，不需要你确认：没有地区限制的用户观察期满、最常用的那个省用满「稳定使用天数」后，自动设为这一个省；已有地区限制、需要认证的用户自动打开出差放行（免认证的入站不会）；长住外地满下面的「长住改地区天数」后自动改过去。需要访问日志（打开这里时会一并打开）。你在编辑里改过地区、撤销过、或打开了「不自动设置地区限制」的用户不再被自动设置（从这个版本开始记录，更早以前清空过地区的用户也会被纳入）"
                                                :changed="isChanged('autoRegionEnable')" :value="allSetting.autoRegionEnable" @input="setAutoRegionEnable"></setting-list-item>
                             <setting-list-item type="number" title="观察天数"
                                                desc="用满几天后再判断常用省份。可填 1 ~ 30，默认 1"
-                                               hint="用户第一次使用满这么多天、并且最近还在用，才判定。调小 = 更快设置，依据的数据也更少。可填 1 ~ 30，默认 1"
+                                               hint="用户第一次使用满这么多天、并且最近还在用，才判定；要设的那个省自己还要在近 7 天里用满「稳定使用天数」才设置，这样一设上出差放行就能用。调小 = 更快设置，依据的数据也更少。可填 1 ~ 30，默认 1"
                                                :changed="isChanged('autoRegionObserveDays')" v-model.number="allSetting.autoRegionObserveDays"></setting-list-item>
                             <setting-list-item type="number" title="误拦流量上限（%）"
                                                desc="会被误拦的流量超过这个比例就先不设地区。可填 0 ~ 50，默认 5"
@@ -412,31 +412,31 @@
                         <a-list item-layout="horizontal" class="setting-list">
                             <setting-list-item type="number" title="家里静默多久才放行（小时）"
                                                desc="家里多久没用，外地才自动放行。可填 1 ~ 24，默认 2"
-                                               hint="允许的地区里连续这么久没有实质流量，外地来源被拦时才自动放行。调小 = 更快放行，也更容易放过错峰共享。可填 1 ~ 24，默认 2"
+                                               hint="允许的地区里连续这么久没有实质流量，外地来源被拦时才自动放行。通行证所在的省连续这么久没用、别的省又在被拦，而且那个省此刻发得出通行证时，就当换了地方，换成那个省（换回一周内刚换走的省，要连续 12 小时没用）。调小 = 更快放行，也更容易放过错峰共享。可填 1 ~ 24，默认 2"
                                                :changed="isChanged('autoTravelHomeSilenceHours')" v-model.number="allSetting.autoTravelHomeSilenceHours"></setting-list-item>
                             <setting-list-item type="number" title="稳定使用天数"
                                                desc="近 7 天至少用几天才算有固定住处。可填 1 ~ 7，默认 3"
-                                               hint="近 7 天里至少这么多天在允许的地区有流量，才算「有固定的家」，新客户不会被自动放行。可填 1 ~ 7，默认 3"
+                                               hint="近 7 天里至少这么多天在允许的地区有流量，才算「有固定的家」，新客户不会被自动放行。自动设置地区也用它：要设的那个省自己用满这么多天才设置，否则锁上之后出差放行还用不了。「自动管理地区限制」打开时，它加「长住改地区天数」不能超过 8。可填 1 ~ 7，默认 3"
                                                :changed="isChanged('autoTravelStableDays')" v-model.number="allSetting.autoTravelStableDays"></setting-list-item>
                             <setting-list-item type="number" title="每张通行证时长（小时）"
                                                desc="每次放行多久，外地仍在用会自动续期。可填 1 ~ 720，默认 72"
-                                               hint="自动发放的通行证有效多久；家里一直没用、外地仍在用时会按这个时长续期。可填 1 ~ 720，默认 72"
+                                               hint="自动发放的通行证有效多久；家里一直没用、外地仍在用时会按这个时长续期。不超过本月剩下的自动放行额度；搬家时额度不够撑到「长住改地区」那天，会预支到那天。可填 1 ~ 720，默认 72"
                                                :changed="isChanged('autoTravelPassHours')" v-model.number="allSetting.autoTravelPassHours"></setting-list-item>
                             <setting-list-item type="number" title="每月最多自动放行天数"
-                                               desc="调大对常出差的人友好，也更容易被转卖。可填 1 ~ 31，默认 10"
-                                               hint="按面板时区的自然月累计。调大 = 常出差的客户更少被挡，转卖者可用的时间也更多。可填 1 ~ 31，默认 10"
+                                               desc="调大对常出差的人友好，错开时间共用也更容易。可填 1 ~ 31，默认 10"
+                                               hint="按面板时区的自然月累计。调大 = 常出差的客户更少被挡，错开时间共用账号的人可用的时间也更多。「自动管理地区限制」打开时：长住外地改了地区，那几天不再占额度；搬家时额度不够撑到改地区那天会预支到那天，当月最多超出「长住改地区天数」。所以整个账号转给外省的人，这个上限挡不住（靠「30 天内只自动改去一个新省」）。可填 1 ~ 31，默认 10"
                                                :changed="isChanged('autoTravelMonthlyDays')" v-model.number="allSetting.autoTravelMonthlyDays"></setting-list-item>
                             <setting-list-item type="number" title="每周最多自动放行次数"
                                                desc="来回切换太频繁更像共享。可填 1 ~ 20，默认 3"
                                                hint="近 7 天内自动发放的次数上限。家里和外地频繁交替不像出差，更像错峰共享。可填 1 ~ 20，默认 3"
                                                :changed="isChanged('autoTravelWeeklyGrants')" v-model.number="allSetting.autoTravelWeeklyGrants"></setting-list-item>
                             <setting-list-item type="number" title="暂停自动放行天数"
-                                               desc="发现疑似共享后暂停自动放行几天。0 不暂停，可填 0 ~ 30，默认 7"
-                                               hint="发现家里与外地同时在用，或你手动收回了自动通行证之后，这个入站暂停自动放行多少天；同样用这个天数判断「本人在用时外地也来连过」「通行证刚发就因家里回来而收回」这两种共享痕迹。30 天内第二次同时在用则暂停 30 天。0 表示不暂停（这些判断一起关闭）。可填 0 ~ 30，默认 7"
+                                               desc="发现疑似共享后暂停自动放行几天。0 不暂停（手动收回仍会暂停），可填 0 ~ 30，默认 7"
+                                               hint="发现家里与外地同时在用之后，这个入站暂停自动放行多少天；同样用这个天数判断「本人在用时外地也来连过」（最多往回看 7 天）「通行证刚发不久就因家里回来或换了地方而结束」这两种共享痕迹。30 天内第二次同时在用则暂停 30 天。0 表示发现这些痕迹时不暂停（这些判断一起关闭）。你手动收回通行证之后，暂停这个天数与「每张通行证时长」中较长的那个，填 0 也照样暂停。可填 0 ~ 30，默认 7"
                                                :changed="isChanged('autoTravelCooldownDays')" v-model.number="allSetting.autoTravelCooldownDays"></setting-list-item>
                             <setting-list-item type="number" title="长住改地区天数"
-                                               desc="在外地连续用满几天，就把地区改过去。0 不改，可填 0 ~ 7，默认 5"
-                                               hint="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地一直在用（至少 3 天有实质流量，这里设得更小时按这里的天数），就把地区直接改成外地，不再按出差处理。不能超过每月放行天数。0 表示不自动改。可填 0 ~ 7，默认 5"
+                                               desc="家里连续几天没用、人一直在外地，就把地区改过去。0 不改，可填 0 ~ 7，默认 5"
+                                               hint="「自动管理地区限制」打开时：家里连续这么多天没有使用、外地至少 3 天有实质流量（这里设得更小时按这里的天数），而且最近 24 小时的动静仍在那个省（去了别的省、出了境、或一直没上线时先不改）、共享风险评分已就绪且低于「中」，就把地区直接改成外地，不再按出差处理。不能超过每月放行天数，加「稳定使用天数」不能超过 8。0 表示不自动改。可填 0 ~ 7，默认 5"
                                                :changed="isChanged('autoTravelRelocateDays')" v-model.number="allSetting.autoTravelRelocateDays"></setting-list-item>
                         </a-list>
                         <h3 class="setting-group-title">端口限速</h3>

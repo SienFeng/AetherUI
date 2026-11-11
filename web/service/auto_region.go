@@ -64,6 +64,8 @@ type autoRegionInput struct {
 	// UnplaceablePercent 按给定省份预演，返回近 7 天会被拦、而且自动出差放行也救不了的流量占比（0~100）：
 	// 来源在允许集之外、又查不到中国的省份（境外、IPv6、归属地不明）。外省来源被拦了还有自动出差放行。
 	UnplaceablePercent func(regions []string) (float64, error)
+	// AllowedSet 建给定省份的允许集，与执行、与自动出差放行同口径（allowedSetFor）。
+	AllowedSet func(regions []string) (*cidrSet, error)
 }
 
 type autoRegionDecision struct {
@@ -92,11 +94,6 @@ func decideAutoRegion(in autoRegionInput) autoRegionDecision {
 	if in.Now.Unix()-last > int64(autoRegionRecent(p)/time.Second) {
 		return wait("最近没有在用，等用户再用的时候判断")
 	}
-	// 稳定天数不超过观察天数：观察期设为 1 天，就不该还要等满 3 天的数据。
-	stable := min(p.StableDays, p.ObserveDays)
-	if stableHomeDays(in.Rows, in.Loc) < stable {
-		return wait(fmt.Sprintf("近 7 天有实质流量的天数不足 %d 天", stable))
-	}
 	sug := suggestRegions(in.Rows)
 	if len(sug.Suggested) == 0 {
 		return wait("近 7 天没有可用的归属地数据")
@@ -117,6 +114,27 @@ func decideAutoRegion(in autoRegionInput) autoRegionDecision {
 		}
 		target = []string{dominantProvince(in.Rows, sug.Suggested, in.Loc)}
 		reason = "用到了 " + strings.Join(sug.Suggested, "、") + "，按最常用的" + target[0] + "设置，其余省份靠自动出差放行"
+	}
+	// 设置的那个省自己要先用满「稳定使用天数」，按执行同口径的允许集数——设置之后自动出差放行的 stableHomeDays
+	// 看到的就是这个数。锁得比出差放行可用得早，中间离开的人只能被一直拦着；开通第一天恰好在外地的人还会被锁在
+	// 外地省：那个省永远凑不够天数，又没发过通行证，长住改地区也没有依据，回家以后一直进不来。
+	// 这条取代了改动前的「稳定天数不超过观察天数、所有省份合计」（观察期 1 天时只要 1 天数据就锁）。
+	if in.AllowedSet == nil {
+		return autoRegionDecision{Action: autoRegionUnsure, Reason: "无法核对稳定使用天数"}
+	}
+	set, err := in.AllowedSet(target)
+	if err != nil {
+		return autoRegionDecision{Action: autoRegionUnsure, Reason: "无法核对稳定使用天数: " + err.Error()}
+	}
+	var targetRows []model.InboundIPHour
+	for _, r := range in.Rows {
+		if set.Contains(r.IP) {
+			targetRows = append(targetRows, r)
+		}
+	}
+	if days := stableHomeDays(targetRows, in.Loc); days < p.StableDays {
+		return wait(fmt.Sprintf("%s近 7 天有实质使用的天数不足 %d 天（现在 %d 天）：自动出差放行要用满这么多天才能用，满了再设置",
+			target[0], p.StableDays, days))
 	}
 	pct, err := in.UnplaceablePercent(target)
 	if err != nil {
@@ -619,6 +637,7 @@ func (s *AutoRegionService) Run(now time.Time) (bool, error) {
 					}
 					return unplaceableShare(rows, set), nil
 				},
+				AllowedSet: allowed,
 			})
 		}
 		applied, err := s.applyDecision(in, st, d, now)

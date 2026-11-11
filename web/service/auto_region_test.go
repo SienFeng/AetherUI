@@ -35,7 +35,22 @@ func arInput() autoRegionInput {
 		Now: arNow, Loc: atLoc, Rows: homeRowsFor(5),
 		Params:             defaultAutoRegionParams(),
 		UnplaceablePercent: func([]string) (float64, error) { return 0, nil },
+		AllowedSet:         arSetFor,
 	}
+}
+
+// arSetFor 是测试里的允许集：江苏省 = 192.0.2.0/24，河南省 = 198.51.100.0/24，其余省份没有网段。
+func arSetFor(regions []string) (*cidrSet, error) {
+	var cidrs []string
+	for _, r := range regions {
+		switch r {
+		case "江苏省":
+			cidrs = append(cidrs, "192.0.2.0/24")
+		case "河南省":
+			cidrs = append(cidrs, "198.51.100.0/24")
+		}
+	}
+	return newCIDRSet(cidrs), nil
 }
 
 func TestAutoRegionWaitsDuringObservation(t *testing.T) {
@@ -63,6 +78,72 @@ func TestAutoRegionAppliesWhenClean(t *testing.T) {
 	d := decideAutoRegion(arInput())
 	if d.Action != autoRegionApply || !reflect.DeepEqual(d.Regions, []string{"江苏省"}) {
 		t.Fatalf("条件全部满足应当自动设置江苏省: %+v", d)
+	}
+}
+
+// 设置的那个省自己要用满「稳定使用天数」才设置：自动出差放行要求家里近 7 天有这么多天才发通行证，
+// 锁得比它早的话，新用户头几天出门就被拦着、没有任何自动途径放行；开通第一天恰好在外地的人还会被
+// 锁在外地省，回家以后一直进不来（那个省永远凑不够天数，又没发过通行证，长住改地区也没有依据）。
+func TestAutoRegionWaitsUntilTargetProvinceIsStable(t *testing.T) {
+	away := func(daysAgo int) model.InboundIPHour {
+		return model.InboundIPHour{IP: "198.51.100.7", HourStart: arHour(daysAgo), Province: "河南省",
+			ActiveSeconds: 1800, ActiveBytes: 50 << 20}
+	}
+	// 开通后头两天都在外地河南：观察期（1 天）已满、最近也在用，但河南只有 2 天。
+	firstDaysAway := arInput()
+	firstDaysAway.Rows = []model.InboundIPHour{away(1), away(0)}
+	if d := decideAutoRegion(firstDaysAway); d.Action != autoRegionWait ||
+		!strings.Contains(d.Reason, "河南省") || !strings.Contains(d.Reason, "天数不足") {
+		t.Fatalf("河南只用了 2 天，不到稳定使用天数 3：应继续观察: %+v", d)
+	}
+	// 新用户在家江苏用了 2 天：先不锁；用满 3 天再设置。
+	newUser := arInput()
+	newUser.Rows = homeRowsFor(2)
+	if d := decideAutoRegion(newUser); d.Action != autoRegionWait {
+		t.Fatalf("江苏只用了 2 天：应继续观察: %+v", d)
+	}
+	newUser.Rows = homeRowsFor(3)
+	if d := decideAutoRegion(newUser); d.Action != autoRegionApply || !reflect.DeepEqual(d.Regions, []string{"江苏省"}) {
+		t.Fatalf("江苏用满 3 天：应设置为江苏省: %+v", d)
+	}
+	// 稳定使用天数调成 1：2 天就够（出差放行同样只要 1 天）。
+	newUser.Rows = homeRowsFor(2)
+	newUser.Params.StableDays = 1
+	if d := decideAutoRegion(newUser); d.Action != autoRegionApply {
+		t.Fatalf("稳定使用天数设为 1 时 2 天就够: %+v", d)
+	}
+}
+
+// 用到两个省、主省份自己不满稳定使用天数：同样先不设——选错了家又没发过通行证，就再也改不回来。
+func TestAutoRegionDominantProvinceMustAlsoBeStable(t *testing.T) {
+	in := arInput()
+	in.Rows = nil
+	for _, d := range []int{3, 4} { // 江苏 2 天，时长短
+		in.Rows = append(in.Rows, model.InboundIPHour{IP: "192.0.2.9", HourStart: arHour(d), Province: "江苏省",
+			ActiveSeconds: 600, ActiveBytes: 20 << 20})
+	}
+	for _, d := range []int{0, 1} { // 河南 2 天，时长长：天数打平按时长选中河南
+		in.Rows = append(in.Rows, model.InboundIPHour{IP: "198.51.100.7", HourStart: arHour(d), Province: "河南省",
+			ActiveSeconds: 3000, ActiveBytes: 80 << 20})
+	}
+	if d := decideAutoRegion(in); d.Action != autoRegionWait || !strings.Contains(d.Reason, "河南省") {
+		t.Fatalf("主省份河南只有 2 天：应继续观察: %+v", d)
+	}
+	// 天数按执行同口径的允许集数：快照省份写的是河南、IP 却不在河南网段里的行不算河南的天数。
+	in = arInput()
+	in.Rows = []model.InboundIPHour{
+		{IP: "203.0.113.5", HourStart: arHour(2), Province: "河南省", ActiveSeconds: 1800, ActiveBytes: 50 << 20},
+		{IP: "198.51.100.7", HourStart: arHour(1), Province: "河南省", ActiveSeconds: 1800, ActiveBytes: 50 << 20},
+		{IP: "198.51.100.7", HourStart: arHour(0), Province: "河南省", ActiveSeconds: 1800, ActiveBytes: 50 << 20},
+	}
+	if d := decideAutoRegion(in); d.Action != autoRegionWait {
+		t.Fatalf("按河南网段只有 2 天：应继续观察: %+v", d)
+	}
+	// 允许集建不出来：这一轮判定不了。
+	in = arInput()
+	in.AllowedSet = func([]string) (*cidrSet, error) { return nil, errors.New("库坏了") }
+	if d := decideAutoRegion(in); d.Action != autoRegionUnsure {
+		t.Fatalf("允许集建不出来时这一轮不判: %+v", d)
 	}
 }
 
@@ -271,9 +352,14 @@ func TestAutoRegionDefaultObservesOneDay(t *testing.T) {
 		t.Fatalf("默认观察天数 = %d，期望 1", defaultAutoRegionParams().ObserveDays)
 	}
 	in := arInput()
-	in.Rows = homeRowsFor(2) // 昨天第一次用，今天也在用
+	in.Rows = homeRowsFor(2) // 昨天第一次用，今天也在用：观察期已满
+	// 2026-11-10 管理员选定：观察期满还要等这个省用满稳定使用天数（默认 3），否则锁上之后出差放行用不了。
+	if d := decideAutoRegion(in); d.Action != autoRegionWait || !strings.Contains(d.Reason, "天数不足") {
+		t.Fatalf("观察 1 天已满、江苏只用了 2 天：应等用满 3 天: %+v", d)
+	}
+	in.Rows = homeRowsFor(3)
 	if d := decideAutoRegion(in); d.Action != autoRegionApply {
-		t.Fatalf("观察 1 天、昨天起一直在用的干净数据应当自动设置: %+v", d)
+		t.Fatalf("观察期满、江苏用满 3 天的干净数据应当自动设置: %+v", d)
 	}
 }
 
@@ -895,7 +981,7 @@ func TestAutoRegionRowsReadsObservationWindow(t *testing.T) {
 		t.Fatalf("观察期窗口应当比近 7 天读得多: span=%d rows=%d", len(span), len(rows))
 	}
 	if d := decideAutoRegion(autoRegionInput{Now: now, Loc: time.Local, Rows: rows, SpanRows: span, Params: p,
-		UnplaceablePercent: func([]string) (float64, error) { return 0, nil }}); d.Action != autoRegionApply {
+		UnplaceablePercent: func([]string) (float64, error) { return 0, nil }, AllowedSet: arSetFor}); d.Action != autoRegionApply {
 		t.Fatalf("用了 12 天、观察期 10 天，应当自动设置: %+v", d)
 	}
 }

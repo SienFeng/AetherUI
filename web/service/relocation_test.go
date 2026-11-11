@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"net"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,23 @@ import (
 	"a-ui/database"
 	"a-ui/database/model"
 )
+
+// readyLowRisk 给入站写一份已就绪、低风险的共享风险快照（长住改地区与预支额度都要求评分已就绪）。
+func readyLowRisk(t *testing.T, inboundId int) {
+	t.Helper()
+	if err := database.GetTrafficDB().Create(&model.InboundRiskSnapshot{InboundId: inboundId,
+		EngineVersion: sharingRiskEngineVersion, Level: RiskLevelLow, State: RiskStateReady, Confidence: 80}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// masterSwitchOn 打开「自动管理地区限制」总开关（长住改地区只在它开着时运行）。
+func masterSwitchOn(t *testing.T) {
+	t.Helper()
+	if err := database.GetDB().Create(&model.Setting{Key: "autoRegionEnable", Value: "1"}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
 
 // baseRelocate：家里（江苏 192.0.2.0/24）最后一次实质使用在 6 天前，上海市这 5 天里天天在用（在自动通行证里被放行）。
 func baseRelocate() relocateInput {
@@ -24,7 +42,13 @@ func baseRelocate() relocateInput {
 		HomeRows:   []model.InboundIPHour{{IP: "192.0.2.9", HourStart: atHour(-6 * 24 * time.Hour), ActiveBytes: 20 * atMB}},
 		ServedAway: away,
 		History:    []model.InboundRegionPass{p},
+		RiskLevel:  RiskLevelLow,
 	}
+}
+
+// recentOf 把一组动静包成 relocateInput.Recent。
+func recentOf(sources ...recentSource) func() ([]recentSource, error) {
+	return func() ([]recentSource, error) { return sources, nil }
 }
 
 func TestDecideRelocation(t *testing.T) {
@@ -44,7 +68,13 @@ func TestDecideRelocation(t *testing.T) {
 		{"外地只有 2 天在用", func(in *relocateInput) { in.ServedAway = in.ServedAway[:2] }},
 		{"观测中断", func(in *relocateInput) { in.ObservationStale = true }},
 		{"共享风险读不出", func(in *relocateInput) { in.RiskUnknown = true }},
+		// 等级为空串：评分还没就绪（学习中、降级、引擎版本刚变、还没有快照）——改地区会把这个省永久合法化，
+		// 「测不了」不能当成「低风险」。
+		{"共享风险评分还没就绪", func(in *relocateInput) { in.RiskLevel = "" }},
 		{"共享风险中", func(in *relocateInput) { in.RiskLevel = RiskLevelMedium }},
+		{"取近期动静失败", func(in *relocateInput) {
+			in.Recent = func() ([]recentSource, error) { return nil, errors.New("访问日志库坏了") }
+		}},
 		{"无认证的入站", func(in *relocateInput) { in.AuthLess = true }},
 		{"手动通行证", func(in *relocateInput) { p := *in.Active; p.Auto = false; in.Active = &p }},
 		{"暂停地区规则的通行证", func(in *relocateInput) { p := *in.Active; p.Regions = `["*"]`; in.Active = &p }},
@@ -95,6 +125,53 @@ func TestDecideRelocationWithoutLivePass(t *testing.T) {
 	in.History = []model.InboundRegionPass{expired}
 	if d := decideRelocation(in); d.Province != "上海市" {
 		t.Fatalf("通行证到期后家里 6 天没用、上海 5 天在用，应改成上海市: %+v", d)
+	}
+}
+
+// 改地区之前要确认人此刻还在那：近 24 小时这个省没有任何动静（没在用、也没来连），或者最近的动静在别处
+// （去了下一站、出了境），都先不改。改动前只看「近 N 天里有 3 天在用」：A→B（3 天）→C 的人在 C 时地区就被改成
+// 了 B，回家以后反被锁在门外，不会自愈。被拦的来连在这里只用来确认 / 否决人在哪，不算住在那里的天数。
+func TestDecideRelocationRequiresStillThere(t *testing.T) {
+	// 上海最后一次被放行的实质使用在 30 小时前（之后通行证到期，人在不在上海还不知道）。
+	lapsed := func() relocateInput {
+		in := baseRelocate()
+		in.Active = nil
+		in.ServedAway = nil
+		for d := 0; d < 4; d++ {
+			in.ServedAway = append(in.ServedAway, servedAwayRow{Province: "上海市",
+				HourStart: atHour(-30*time.Hour - time.Duration(d)*24*time.Hour), ActiveBytes: 20 * atMB})
+		}
+		return in
+	}
+	if d := decideRelocation(lapsed()); d.Province != "" {
+		t.Fatalf("近 24 小时上海没有任何动静（可能已经离开、或一直没上线）：先不改: %+v", d)
+	}
+	in := lapsed()
+	in.Recent = recentOf(recentSource{Province: "上海市", Hour: atHour(-time.Hour)})
+	if d := decideRelocation(in); d.Province != "上海市" {
+		t.Fatalf("上海的来源 1 小时前还在来连：人还在上海，应改成上海市: %+v", d)
+	}
+	in.Recent = recentOf(recentSource{Province: "上海市", Hour: atHour(-2 * time.Hour)},
+		recentSource{Province: "浙江省", Hour: atHour(-time.Hour)})
+	if d := decideRelocation(in); d.Province != "" {
+		t.Fatalf("最近的动静在浙江（去了下一站）：不该改成上海: %+v", d)
+	}
+	in.Recent = recentOf(recentSource{Province: "上海市", Hour: atHour(-2 * time.Hour)},
+		recentSource{Hour: atHour(-time.Hour)})
+	if d := decideRelocation(in); d.Province != "" {
+		t.Fatalf("最近的动静在境外或查不到省份的地方：不该改成上海: %+v", d)
+	}
+	// 同一小时两边都有（手机与笔记本分属两个省）：不算离开。
+	in.Recent = recentOf(recentSource{Province: "上海市", Hour: atHour(-time.Hour)},
+		recentSource{Province: "浙江省", Hour: atHour(-time.Hour)})
+	if d := decideRelocation(in); d.Province != "上海市" {
+		t.Fatalf("同一小时两边都有动静，不算离开: %+v", d)
+	}
+	// 通行证还在、上海 1 小时前还在用：近期放行的使用本身就说明人在（baseRelocate）；浙江更晚的来连照样否决。
+	in = baseRelocate()
+	in.Recent = recentOf(recentSource{Province: "浙江省", Hour: atHour(0)})
+	if d := decideRelocation(in); d.Province != "" {
+		t.Fatalf("浙江的来连比上海的使用更晚：不该改成上海: %+v", d)
 	}
 }
 
@@ -265,6 +342,7 @@ func TestRunRelocatesWhenMasterSwitchOn(t *testing.T) {
 		if err := tdb.Create(&rows).Error; err != nil {
 			t.Fatal(err)
 		}
+		readyLowRisk(t, in.Id)
 		markObserved(now)
 		changed, err := (&AutoTravelService{}).Run(now)
 		if err != nil {
@@ -281,6 +359,108 @@ func TestRunRelocatesWhenMasterSwitchOn(t *testing.T) {
 		}
 	}
 	resetObserved()
+}
+
+// 整轮任务的接线：近期动静来自访问日志里被地区规则拦下的来连。
+//   - 上海天天在用（最后一次 2 小时前）、通行证还在，但浙江的来源 1 分钟前被拦（人去了下一站）：不改地区；
+//   - 上海的通行证 30 小时前到期（之后被拦着），上海的来源 5 分钟前还在来连：人还在上海，照常改。
+//
+// 「最后一次放行」与「来连」故意隔开两个小时以上：比较按整点小时，挨得近的话测试在整点后几分钟跑会落进同一小时。
+func TestRunRelocationChecksWhereTheUserIs(t *testing.T) {
+	in, pass := relocateFixture(t, 60531)
+	ipOf := travelE2E(t)
+	masterSwitchOn(t)
+	readyLowRisk(t, in.Id)
+	now := time.Now()
+	hour := func(ago time.Duration) int64 { u := now.Add(-ago).Unix(); return u - u%3600 }
+	rows := []model.InboundIPHour{{InboundId: in.Id, IP: ipOf("江苏省"), HourStart: hour(6 * 24 * time.Hour), ActiveSeconds: 1800, ActiveBytes: 50 << 20}}
+	for d := 0; d < 5; d++ {
+		rows = append(rows, model.InboundIPHour{InboundId: in.Id, IP: ipOf("上海市"), HourStart: hour(time.Duration(d)*24*time.Hour + 2*time.Hour),
+			ActiveSeconds: 1800, ActiveBytes: 50 << 20})
+	}
+	if err := database.GetTrafficDB().Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetAccessLogDB().Create(&model.AccessLog{Time: now.Add(-time.Minute).UnixMilli(), InboundId: in.Id,
+		SourceIP: ipOf("浙江省"), Route: model.BlockOutboundTag, Accepted: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	markObserved(now)
+	if _, err := (&AutoTravelService{}).Run(now); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := (&InboundService{}).GetInbound(in.Id)
+	var p model.InboundRegionPass
+	database.GetDB().First(&p, pass.Id)
+	if got.Regions != `["江苏省"]` || p.EndedAt != 0 {
+		t.Fatalf("浙江的来连比上海的使用更晚，不该改成上海，上海还在用也不该结束通行证: regions=%s pass=%+v status=%+v",
+			got.Regions, p, AutoTravelStatuses()[in.Id])
+	}
+
+	in2 := setupPassInbound(t, 60532, []string{"江苏省"})
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", in2.Id).Update("auto_travel", true).Error; err != nil {
+		t.Fatal(err)
+	}
+	ipOf = travelE2E(t)
+	writeRegionGeoDat(t, []string{"江苏省"}) // 没有通行证：靠 dat 认出上海的来连是被地区规则拦下的
+	masterSwitchOn(t)
+	readyLowRisk(t, in2.Id)
+	expired := &model.InboundRegionPass{InboundId: in2.Id, Auto: true, Regions: `["上海市"]`,
+		GrantedAt: now.Add(-5 * 24 * time.Hour).UnixMilli(), Until: now.Add(-30 * time.Hour).UnixMilli(),
+		EndedAt: now.Add(-30 * time.Hour).UnixMilli(), EndReason: model.RegionPassExpired}
+	if err := database.GetDB().Create(expired).Error; err != nil {
+		t.Fatal(err)
+	}
+	rows = []model.InboundIPHour{{InboundId: in2.Id, IP: ipOf("江苏省"), HourStart: hour(6 * 24 * time.Hour), ActiveSeconds: 1800, ActiveBytes: 50 << 20}}
+	for d := 0; d < 4; d++ {
+		rows = append(rows, model.InboundIPHour{InboundId: in2.Id, IP: ipOf("上海市"), HourStart: hour(31*time.Hour + time.Duration(d)*24*time.Hour),
+			ActiveSeconds: 1800, ActiveBytes: 50 << 20})
+	}
+	if err := database.GetTrafficDB().Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetAccessLogDB().Create(&model.AccessLog{Time: now.Add(-5 * time.Minute).UnixMilli(), InboundId: in2.Id,
+		SourceIP: ipOf("上海市"), Route: model.BlockOutboundTag, Accepted: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	markObserved(now)
+	if _, err := (&AutoTravelService{}).Run(now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := (&InboundService{}).GetInbound(in2.Id); got.Regions != `["上海市"]` {
+		t.Fatalf("上海的来源还在来连，人还在上海：应改成上海市: regions=%s status=%+v", got.Regions, AutoTravelStatuses()[in2.Id])
+	}
+}
+
+// 双栈设备的 IPv6 来连在地区限制下一律被拦，查不到省份：它不说明人去了别处，不能否决长住改地区（代码审查指出：
+// 不过滤的话，人在上海只要某一小时上海的放行不满 1 MB、IPv6 又在来连，就一直改不过去）。与 recentGeoBlocked 一样只看 IPv4。
+func TestRunRelocationIgnoresIPv6Noise(t *testing.T) {
+	in, _ := relocateFixture(t, 60533)
+	ipOf := travelE2E(t)
+	masterSwitchOn(t)
+	readyLowRisk(t, in.Id)
+	now := time.Now()
+	hour := func(ago time.Duration) int64 { u := now.Add(-ago).Unix(); return u - u%3600 }
+	rows := []model.InboundIPHour{{InboundId: in.Id, IP: ipOf("江苏省"), HourStart: hour(6 * 24 * time.Hour), ActiveSeconds: 1800, ActiveBytes: 50 << 20}}
+	for d := 0; d < 5; d++ {
+		// 上海最后一次放行在 2 小时前，IPv6 来连在 1 分钟前：一定落在更晚的小时。
+		rows = append(rows, model.InboundIPHour{InboundId: in.Id, IP: ipOf("上海市"), HourStart: hour(time.Duration(d)*24*time.Hour + 2*time.Hour),
+			ActiveSeconds: 1800, ActiveBytes: 50 << 20})
+	}
+	if err := database.GetTrafficDB().Create(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.GetAccessLogDB().Create(&model.AccessLog{Time: now.Add(-time.Minute).UnixMilli(), InboundId: in.Id,
+		SourceIP: "2001:db8::77", Route: model.BlockOutboundTag, Accepted: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	markObserved(now)
+	if _, err := (&AutoTravelService{}).Run(now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := (&InboundService{}).GetInbound(in.Id); got.Regions != `["上海市"]` {
+		t.Fatalf("IPv6 来连不该否决长住改地区: regions=%s status=%+v", got.Regions, AutoTravelStatuses()[in.Id])
+	}
 }
 
 // 通行证已经到期（额度用完）时改地区：没有生效中的通行证可结束；判定窗口里这个省到期的自动通行证改记成
@@ -319,6 +499,27 @@ func TestRelocateWithoutLivePassRelabelsExpiredPasses(t *testing.T) {
 	st, _ := (&AutoRegionService{}).stateOf(in.Id)
 	if st == nil || st.RelocatedAt != now.UnixMilli() || st.PrevRegions != `["江苏省"]` {
 		t.Errorf("状态行 = %+v，期望记下改去新省的时刻与原地区", st)
+	}
+}
+
+// 因「换了地方」结束的这个省的自动通行证（出差先到这里、去过别处又回来），改地区后同样算「住在那里」，
+// 不再占本月的自动放行额度。
+func TestRelocateRelabelsMovedPassesOfThatProvince(t *testing.T) {
+	in := setupPassInbound(t, 60513, []string{"江苏省"})
+	now := time.Now()
+	moved := &model.InboundRegionPass{InboundId: in.Id, Auto: true, Regions: `["上海市"]`,
+		GrantedAt: now.Add(-4 * 24 * time.Hour).UnixMilli(), Until: now.Add(-24 * time.Hour).UnixMilli(),
+		EndedAt: now.Add(-2 * 24 * time.Hour).UnixMilli(), EndReason: model.RegionPassMoved}
+	if err := database.GetDB().Create(moved).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := relocate(in, nil, "上海市", "长住上海", now); err != nil || !ok {
+		t.Fatalf("relocate(nil pass) = %v, %v", ok, err)
+	}
+	var got model.InboundRegionPass
+	database.GetDB().First(&got, moved.Id)
+	if got.EndReason != model.RegionPassRelocated {
+		t.Errorf("上海市那张换了地方结束的自动通行证应改记成 relocated，实际 %q", got.EndReason)
 	}
 }
 

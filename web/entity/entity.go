@@ -384,6 +384,14 @@ func (s *AllSetting) CheckValid() error {
 		return common.NewError(fmt.Sprintf("自动出差：长住改地区天数（%d）不能超过每月放行天数（%d）：通行证撑不到那一天",
 			s.AutoTravelRelocateDays, s.AutoTravelMonthlyDays))
 	}
+	// 离家后大约 8 − 稳定天数 天之内还能重新发通行证（近 7 天窗口里家里还有这么多天），长住要到第 N 天才改。两者
+	// 之和超过 8，中间就有几天：通行证一断（续期失败、额度用完）既不能重发，也还没到改地区，人被一直拦着。
+	// 同样只在总开关开着时检查（理由同上）。
+	if s.AutoRegionEnable == 1 && s.AutoTravelRelocateDays > 0 && s.AutoTravelStableDays+s.AutoTravelRelocateDays > 8 {
+		return common.NewError(fmt.Sprintf("自动出差：稳定使用天数（%d）加长住改地区天数（%d）不能超过 8：离家约 %d 天后就不能重新发通行证，"+
+			"要到第 %d 天才改地区，中间通行证一断人就被一直拦着",
+			s.AutoTravelStableDays, s.AutoTravelRelocateDays, 8-s.AutoTravelStableDays, s.AutoTravelRelocateDays))
+	}
 	// 自动管理地区靠访问日志发现被拦的人：没有它，自动设置之后用户一出省就被一直拦着，没人知道。
 	if s.AutoRegionEnable == 1 && s.AccessLogEnable != 1 {
 		return common.NewError("开启「自动管理地区限制」需要同时开启访问日志：没有访问日志，被拦的用户发现不了，也没法自动放行")

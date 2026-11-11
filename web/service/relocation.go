@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"gorm.io/gorm"
@@ -43,6 +44,14 @@ type relocateInput struct {
 	RiskUnknown      bool
 	ObservationStale bool
 	AuthLess         bool
+	// Recent 惰性取近 24 小时家里之外的来源动静（被地区规则拦下的来连）；nil 表示没有这类记录。
+	Recent func() ([]recentSource, error)
+}
+
+// recentSource 是家里之外某个来源在某个整点小时的一次动静。
+type recentSource struct {
+	Province string // 可放行的省份；查不到（境外、IPv6、归属地不明）为空串
+	Hour     int64  // 整点小时（Unix 秒）
 }
 
 type servedAwayRow struct {
@@ -59,13 +68,12 @@ type relocateDecision struct {
 // relocateNewProvinceWindow：同一个入站 30 天内只自动改去一个新省（搬回原来的地区不算）。
 const relocateNewProvinceWindow = 30 * 24 * time.Hour
 
-// decideRelocation 是长住改地区的全部判定，纯函数。
+// relocatePresenceWindow：改地区前这么久之内，这个省要有动静（被放行的实质使用，或被地区规则拦下的来连）。
+const relocatePresenceWindow = 24 * time.Hour
+
+// decideRelocation 是长住改地区的全部判定，纯函数（Recent 是惰性取数的回调，只在其余条件都满足时调用）。
 func decideRelocation(in relocateInput) relocateDecision {
-	if !in.Enabled || in.Days <= 0 || in.AuthLess || in.ObservationStale || in.RiskUnknown {
-		return relocateDecision{}
-	}
-	switch in.RiskLevel {
-	case RiskLevelMedium, RiskLevelHigh, RiskLevelSevere:
+	if !in.Enabled || in.Days <= 0 || in.AuthLess || in.ObservationStale || in.RiskUnknown || !relocationRiskOK(in.RiskLevel) {
 		return relocateDecision{}
 	}
 	if in.Active != nil && !in.Active.Auto {
@@ -106,8 +114,104 @@ func decideRelocation(in relocateInput) relocateDecision {
 	if recentlyRelocatedElsewhere(in.State, province, in.Now) {
 		return relocateDecision{}
 	}
+	// 放在最后：要查访问日志。
+	if !stillThere(in, province) {
+		return relocateDecision{}
+	}
 	return relocateDecision{Province: province,
 		Reason: fmt.Sprintf("家里 %d 天没有使用，%s有 %d 天在用，按长住处理，地区改为%s", in.Days, province, len(days[province]), province)}
+}
+
+// stillThere：人此刻还在这个省。近 relocatePresenceWindow 内这个省要有动静（通行证期间被放行的实质使用，或被地区
+// 规则拦下的来连），别处（别的省、境外、查不到省份的来源）最近的动静也不能比它晚——按整点小时比，同一小时不算离开
+// （手机与笔记本可能分属两个省）。
+//
+// 改动前只看「近 N 天里有 3 天在用」：A→B（3 天）→C 的人在 C 时地区就被改成了 B，回家以后反被锁在门外，不会自愈；
+// 去了境外或一直没上线的人也一样。被拦的来连在这里只用来确认或否决人在哪，不算住在那里的天数（那只认被放行的行）。
+func stillThere(in relocateInput, province string) bool {
+	var last, elsewhere int64
+	note := func(p string, hour int64) {
+		if p == province {
+			last = max(last, hour)
+		} else {
+			elsewhere = max(elsewhere, hour)
+		}
+	}
+	for _, r := range in.ServedAway {
+		if r.ActiveBytes >= coexistMinActiveBytes {
+			note(r.Province, r.HourStart)
+		}
+	}
+	if in.Recent != nil {
+		recent, err := in.Recent()
+		if err != nil {
+			return false
+		}
+		for _, s := range recent {
+			note(s.Province, s.Hour)
+		}
+	}
+	return last >= hourStartOf(in.Now.Add(-relocatePresenceWindow)) && elsewhere <= last
+}
+
+// recentBlockedSources 取近 relocatePresenceWindow 内被地区规则拦下的 IPv4 来源（访问日志里带路由结果、已过协议鉴权的
+// 行），每个来源取最后一次所在的整点小时。家里与机房的来源不算：前者不是「家里之外」，后者不说明人在哪。IPv6 也不算
+// （与 recentGeoBlocked 一样）：地区限制下 IPv6 一律被拦、查不到省份，双栈设备人在哪都会留下这种来连，算进「别处」
+// 的话会一再否决真搬过去的人（代码审查指出）。省份按执行同口径核对，查不到（境外、归属地不明）为空串。
+func recentBlockedSources(inboundId int, matcher *geoBlockMatcher, home, idc *cidrSet, now time.Time) ([]recentSource, error) {
+	db := database.GetAccessLogDB()
+	if db == nil {
+		return nil, nil
+	}
+	rows, err := db.Model(&model.AccessLog{}).Select("source_ip, max(time)").
+		Where("inbound_id = ? AND time >= ? AND route = ? AND accepted = ?",
+			inboundId, now.Add(-relocatePresenceWindow).UnixMilli(), model.BlockOutboundTag, true).
+		Group("source_ip").Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sets := map[string]*cidrSet{}
+	var out []recentSource
+	for rows.Next() {
+		var ip string
+		var lastMs int64
+		if err := rows.Scan(&ip, &lastMs); err != nil {
+			return nil, err
+		}
+		if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
+			continue
+		}
+		if home.Contains(ip) || idc.Contains(ip) || !matcher.Blocks(inboundId, ip) {
+			continue
+		}
+		sec := lastMs / 1000
+		out = append(out, recentSource{Province: enforceableProvince(ip, provinceOfIP(ip), allowedSetFor, sets), Hour: sec - sec%3600})
+	}
+	return out, rows.Err()
+}
+
+// relocationRiskOK：共享风险评分已就绪且低于「中」（low / watch）。空串是评分还没就绪（学习中、降级、引擎版本刚变、
+// 还没有快照）：改地区会把这个省永久合法化，「测不了」不能当成「低风险」——风险评分自己也是这么约定的
+// （sharing_risk.go 顶部第 1 条）。预支额度（relocationBorrow）用同一条口径。
+func relocationRiskOK(level string) bool {
+	switch level {
+	case "", RiskLevelMedium, RiskLevelHigh, RiskLevelSevere:
+		return false
+	}
+	return true
+}
+
+// servedDays 是 since 所在小时以来，这个省在通行证期间被放行、有实质使用的日历天数（面板时区）。
+func servedDays(rows []servedAwayRow, province string, since time.Time, loc *time.Location) int {
+	from := hourStartOf(since)
+	days := map[string]bool{}
+	for _, r := range rows {
+		if r.Province == province && r.HourStart >= from && r.ActiveBytes >= coexistMinActiveBytes {
+			days[time.Unix(r.HourStart, 0).In(loc).Format("2006-01-02")] = true
+		}
+	}
+	return len(days)
 }
 
 // lastPassRevoked：这个省最近的一张通行证（自动或手动）是被管理员收回的。
@@ -239,12 +343,12 @@ func relocate(in *model.Inbound, pass *model.InboundRegionPass, province, reason
 	return err == nil, err
 }
 
-// relabelRelocatedPasses 把近 7 天到期的、这个省的自动通行证改记成 relocated。
+// relabelRelocatedPasses 把近 7 天到期（或因换了地方结束）的、这个省的自动通行证改记成 relocated。
 func relabelRelocatedPasses(tx *gorm.DB, inboundId int, province string, now time.Time) error {
 	var passes []model.InboundRegionPass
 	since := now.Add(-time.Duration(sharingWindowDays) * 24 * time.Hour).UnixMilli()
-	if err := tx.Where("inbound_id = ? AND auto = ? AND end_reason = ? AND ended_at >= ?",
-		inboundId, true, model.RegionPassExpired, since).Find(&passes).Error; err != nil {
+	if err := tx.Where("inbound_id = ? AND auto = ? AND end_reason IN ? AND ended_at >= ?",
+		inboundId, true, []string{model.RegionPassExpired, model.RegionPassMoved}, since).Find(&passes).Error; err != nil {
 		return err
 	}
 	var ids []int
