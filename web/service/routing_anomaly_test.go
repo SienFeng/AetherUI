@@ -27,6 +27,7 @@ func resetAnomalyState(t *testing.T) {
 		anomalyPlanMu.Unlock()
 		auditLargeThreshold = auditLargeRuleEntries
 		anomalyBatchRows = 20000
+		largeMatchers.reset()
 	}
 	clear()
 	t.Cleanup(clear)
@@ -361,14 +362,14 @@ func TestAnomalyCaps(t *testing.T) {
 	}
 }
 
-// traceLargeMatchers 记录大规则匹配器的构建/释放，并统计同一时刻存活的最大个数。
+// traceLargeMatchers 记录扫描对大规则匹配器的取用/放手，并统计同一时刻占用的最大个数。
 func traceLargeMatchers(t *testing.T) (events *[]string, maxLive *int) {
 	t.Helper()
 	events, maxLive = &[]string{}, new(int)
 	live := 0
 	anomalyLargeTrace = func(event, key string) {
 		*events = append(*events, event+":"+key)
-		if event == "build" {
+		if event == "acquire" {
 			live++
 		} else {
 			live--
@@ -396,7 +397,8 @@ func addAnomalyRule(t *testing.T, f *anomalyFixture, inboundIds []int, groups ..
 	return rule
 }
 
-// 两条大规则（不同组序列）：匹配器逐个构建、用完释放，任一时刻至多一个存活。
+// 两条大规则（不同组序列）：匹配器逐个取用、用完放手，任一时刻至多一个被占用；
+// 常驻槽只留一个，第二个组序列换掉第一个（各建一次），扫完后槽里只剩一个、无人占用。
 func TestAnomalyLargeMatchersBuiltOneAtATime(t *testing.T) {
 	f := newAnomalyFixture(t, []string{"domain:openai.com", "domain:chatgpt.com", "full:x.ai"}, nil)
 	g2 := newTestGroupWithDomains(t, "Claude", []string{"domain:claude.ai", "domain:anthropic.com", "full:y.ai"})
@@ -410,12 +412,15 @@ func TestAnomalyLargeMatchersBuiltOneAtATime(t *testing.T) {
 
 	mustScan(t, f.svc, anomalyNow, true)
 	if *maxLive != 1 || len(*events) != 4 {
-		t.Fatalf("应逐个构建并释放（至多 1 个存活），events=%v maxLive=%d", *events, *maxLive)
+		t.Fatalf("应逐个取用并放手（至多 1 个占用），events=%v maxLive=%d", *events, *maxLive)
 	}
 	for i, e := range *events {
-		if want := []string{"build", "release"}[i%2]; !strings.HasPrefix(e, want+":") {
-			t.Fatalf("构建与释放应交替: %v", *events)
+		if want := []string{"acquire", "release"}[i%2]; !strings.HasPrefix(e, want+":") {
+			t.Fatalf("取用与放手应交替: %v", *events)
 		}
+	}
+	if m, builds, users := largeSlot(); m == nil || builds != 2 || users != 0 {
+		t.Fatalf("两个组序列各建一次、槽里只留最后一个且无人占用：槽 %p 构建 %d 占用 %d", m, builds, users)
 	}
 	if f.svc.Anomaly(f.rule.Id, anomalyNow).Count != 1 || f.svc.Anomaly(rule2.Id, anomalyNow).Count != 1 {
 		t.Errorf("两条大规则都应计入 1 次异常")
@@ -437,7 +442,10 @@ func TestAnomalyLargeScanSkipsBuildWithoutCandidates(t *testing.T) {
 	insertLogs(t, 1, rejected)
 	mustScan(t, f.svc, anomalyNow.Add(time.Minute), true)
 	if len(*events) != 0 {
-		t.Fatalf("没有候选行时不应构建匹配器: %v", *events)
+		t.Fatalf("没有候选行时不应取用匹配器: %v", *events)
+	}
+	if m, builds, _ := largeSlot(); m != nil || builds != 0 {
+		t.Fatalf("没有候选行时不应构建匹配器：槽 %p 构建 %d", m, builds)
 	}
 }
 

@@ -425,25 +425,73 @@ type groupMatcher struct {
 }
 
 // newGroupMatcher 构造匹配器；某一侧条目为空时不构造那一侧（其匹配恒为否）。
+// 大规则不直接调它，从全进程共用的常驻槽取（largeMatchers）。
 func newGroupMatcher(domains, cidrs []string) (*groupMatcher, error) {
+	r, err := parseGroupRules(domains, cidrs)
+	if err != nil {
+		return nil, err
+	}
+	return r.build()
+}
+
+// groupRules 是一组条目交给 xray 解析后的规则，构建匹配器之前的中间结果。
+// xray 的解析逐条一一对应（失败即报错），某一侧有条目就有同样多条规则。
+type groupRules struct {
+	domain []*geodata.DomainRule
+	ip     []*geodata.IPRule
+}
+
+func parseGroupRules(domains, cidrs []string) (*groupRules, error) {
 	xray.EnsureAssetLocation()
-	m := &groupMatcher{}
+	r := &groupRules{}
+	var err error
 	if len(domains) > 0 {
 		// 默认类型 Domain_Substr 与 infra/conf 解析 routing 规则时一致（裸串按子串）。
-		rules, err := geodata.ParseDomainRules(domains, geodata.Domain_Substr)
-		if err != nil {
+		if r.domain, err = geodata.ParseDomainRules(domains, geodata.Domain_Substr); err != nil {
 			return nil, fmt.Errorf("解析域名条件: %w", err)
-		}
-		if m.domain, err = router.NewDomainMatcher(rules); err != nil {
-			return nil, fmt.Errorf("构造域名匹配器: %w", err)
 		}
 	}
 	if len(cidrs) > 0 {
-		rules, err := geodata.ParseIPRules(cidrs)
-		if err != nil {
+		if r.ip, err = geodata.ParseIPRules(cidrs); err != nil {
 			return nil, fmt.Errorf("解析 IP 条件: %w", err)
 		}
-		if m.ip, err = router.NewIPMatcher(rules, router.MatcherAsType_Target); err != nil {
+	}
+	return r, nil
+}
+
+// datFiles 返回规则引用的 dat 文件（geosite:/geoip:/ext: 写法），去重、按首次出现的顺序。
+func (r *groupRules) datFiles() []string {
+	var files []string
+	seen := map[string]bool{}
+	add := func(f string) {
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
+	for _, d := range r.domain {
+		if g, ok := d.Value.(*geodata.DomainRule_Geosite); ok {
+			add(g.Geosite.File)
+		}
+	}
+	for _, ip := range r.ip {
+		if g := ip.GetGeoip(); g != nil {
+			add(g.File)
+		}
+	}
+	return files
+}
+
+func (r *groupRules) build() (*groupMatcher, error) {
+	m := &groupMatcher{}
+	var err error
+	if len(r.domain) > 0 {
+		if m.domain, err = router.NewDomainMatcher(r.domain); err != nil {
+			return nil, fmt.Errorf("构造域名匹配器: %w", err)
+		}
+	}
+	if len(r.ip) > 0 {
+		if m.ip, err = router.NewIPMatcher(r.ip, router.MatcherAsType_Target); err != nil {
 			return nil, fmt.Errorf("构造 IP 匹配器: %w", err)
 		}
 	}
@@ -810,15 +858,17 @@ type verifyShared struct {
 	geoBlockReady bool
 
 	groups map[int]*groupConditions
-	// 单槽匹配器缓存：只留最近一个组序列的匹配器。一个 2 万条的匹配器就要十几 MB，
-	// 按组序列各留一个的话，规则一多一轮内的常驻内存就会线性涨上去（1 核 1G 的机器扛不住）；
-	// VerifyAll 把同组序列的规则排在一起，单槽就够复用。
+	// 小规则的单槽匹配器缓存：只留最近一个组序列的匹配器。按组序列各留一个的话，规则一多
+	// 一轮内的常驻内存就会线性涨上去（1 核 1G 的机器扛不住）；VerifyAll 把同组序列的规则
+	// 排在一起，单槽就够复用。大规则的匹配器不在这里，取自全进程共用的常驻槽（largeMatchers）。
 	matcherKey string
 	matcherEnt *matcherEntry
-	logRows    map[logRowsKey]*logRowsEntry
+	// largeRelease 是本轮手里那一个大匹配器的放手函数（至多一个，见 acquireLarge）。
+	largeRelease func()
+	logRows      map[logRowsKey]*logRowsEntry
 
 	// 抢先命中归因（attributeShadows）用：核心里的规则顺序与各候选规则的匹配器。
-	// 小规则的匹配器一轮内常驻；大规则只留一个槽，归因结束即释放（与 releaseLarge 同一口径）。
+	// 小规则的匹配器一轮内常驻；大规则取自常驻槽，同一时刻只占用一个，归因结束即放手。
 	coreOrder      []*model.RoutingRule
 	coreOrderErr   error
 	coreOrderReady bool
@@ -855,8 +905,25 @@ type logRowsEntry struct {
 }
 
 func (sh *verifyShared) close() {
+	sh.releaseLargeLease()
 	if sh.closeAPI != nil {
 		sh.closeAPI()
+	}
+}
+
+// acquireLarge 从常驻槽取大匹配器，先放掉本轮手里的那一个：同一个调用方握着一个再去等
+// 另一个会把自己卡死（槽在换之前要等所有人放手）。
+func (sh *verifyShared) acquireLarge(domains, cidrs []string) *matcherEntry {
+	sh.releaseLargeLease()
+	e, release := largeMatchers.acquire(domains, cidrs)
+	sh.largeRelease = release
+	return e
+}
+
+func (sh *verifyShared) releaseLargeLease() {
+	if sh.largeRelease != nil {
+		sh.largeRelease()
+		sh.largeRelease = nil
 	}
 }
 
@@ -986,10 +1053,14 @@ func (sh *verifyShared) group(gid int) *groupConditions {
 	return g
 }
 
-// matcher 返回一条规则的访问日志匹配器，按规则实际引用的组序列放进单槽缓存。
+// matcher 返回一条规则的访问日志匹配器：大规则取自常驻槽（releaseLarge 放手），小规则
+// 按规则实际引用的组序列放进单槽缓存。
 // 刻意不按组各建一个再取「任一命中」：取反条目（!geoip:cn）在合并列表里是对并集取反，
 // 拆成逐组再 OR 就成了对各组分别取反，语义与核心里那条合并后的规则不一致。
 func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
+	if plan.large {
+		return sh.acquireLarge(plan.domains, plan.cidrs)
+	}
 	if sh.matcherEnt != nil && sh.matcherKey == plan.groupKey {
 		return sh.matcherEnt
 	}
@@ -1001,9 +1072,10 @@ func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
 	return e
 }
 
-// releaseLarge 在一条大规则判定完之后放掉它占着的大块内存：单槽里的匹配器与它引用的
-// 各组条目。之后若还有规则用到这些组，按需重读（读库的开销远小于常驻几十 MB）。
+// releaseLarge 在一条大规则判定完之后放手：放掉常驻槽的租约（匹配器留在槽里给下一次用）
+// 与它引用的各组条目。之后若还有规则用到这些组，按需重读（读库的开销远小于常驻十几万条）。
 func (sh *verifyShared) releaseLarge(plan *verifyPlan) {
+	sh.releaseLargeLease()
 	if sh.matcherKey == plan.groupKey {
 		sh.matcherKey, sh.matcherEnt = "", nil
 	}
@@ -1296,25 +1368,26 @@ func (sh *verifyShared) shadowMatcher(c *model.RoutingRule) *groupMatcher {
 		return sh.shadowLargeEnt.m
 	}
 	domains, cidrs := MergeDomains(domainLists...), MergeDomains(cidrLists...)
-	large := len(domains)+len(cidrs) > auditLargeThreshold
-	if large {
-		sh.releaseShadowLarge() // 先放旧的再建，同一时刻只留一个大匹配器
-	}
-	m, err := newGroupMatcher(domains, cidrs)
-	if err != nil {
-		logger.Warning("路由验证：构造规则匹配器失败，rule id:", c.Id, "err:", err)
-		m = nil
-	}
-	e := &matcherEntry{m: m, err: err}
-	if large {
+	var e *matcherEntry
+	if len(domains)+len(cidrs) > auditLargeThreshold {
+		sh.releaseShadowLarge() // 先放手旧的再取，同一时刻只占用一个大匹配器
+		e = sh.acquireLarge(domains, cidrs)
 		sh.shadowLargeKey, sh.shadowLargeEnt, sh.shadowLargeIds = key, e, usedIds
 	} else {
+		m, err := newGroupMatcher(domains, cidrs)
+		e = &matcherEntry{m: m, err: err}
 		sh.shadowSmall[key] = e
 	}
-	return m
+	if e.err != nil {
+		logger.Warning("路由验证：构造规则匹配器失败，rule id:", c.Id, "err:", e.err)
+		return nil
+	}
+	return e.m
 }
 
-// releaseShadowLarge 放掉归因用的大匹配器及其组条目（组条目可能是为它才读进 sh.groups 的）。
+// releaseShadowLarge 放手归因用的大匹配器，并放掉它的组条目（可能是为它才读进 sh.groups 的）。
+// 先丢掉自己对匹配器的引用再放手：放手后等着换槽的一方会立刻 GC，引用还在的话旧匹配器
+// 躲过这次回收，xray 的弱缓存就可能把它当新的交出去。
 func (sh *verifyShared) releaseShadowLarge() {
 	if sh.shadowLargeEnt == nil {
 		return
@@ -1323,6 +1396,7 @@ func (sh *verifyShared) releaseShadowLarge() {
 		delete(sh.groups, gid)
 	}
 	sh.shadowLargeKey, sh.shadowLargeEnt, sh.shadowLargeIds = "", nil, nil
+	sh.releaseLargeLease()
 }
 
 // coreStateOf 把运行时快照映射成核心级状态。pending 仍执行 TestRoute（设计 §3.5）。

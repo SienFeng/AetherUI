@@ -24,8 +24,9 @@ import (
 // 封禁（geoBlockMatcher），以及核心没命中任何规则（NoRuleHit，核心看的是嗅探出的另一个域名）。
 //
 // 小机器约束（§4.3）：规则按引用的全部域名组合并后的条目数分两档。小规则的匹配器
-// 按代次常驻缓存，每分钟扫描；大规则的匹配器每次扫描时临时构建、用完即释放，
-// 由每 10 分钟的任务扫描。两档各有独立的 (time,id) 游标。
+// 按代次常驻缓存，每分钟扫描；大规则由每 10 分钟的任务扫描，匹配器取自与路由审计共用的
+// 常驻槽（只留一个，条目或 dat 变了才重建，见 routing_large_matcher.go）。两档各有独立的
+// (time,id) 游标。
 //
 // 窗口边界：摘要按小时分桶，丢弃的是早于 now-24h 所在小时的桶，所以列表上的窗口实际是
 // 24~25 小时；流量走向图的日志证据从精确的 now-24h 起算。两边在窗口边缘最多差出一小时
@@ -531,13 +532,13 @@ func (sc *anomalyScan) accumulate(rules []*anomalyRulePlan, matcherOf func(*anom
 	}
 }
 
-// anomalyLargeTrace 只给测试观察大规则匹配器的生命周期（"build"/"release" + 组序列），
+// anomalyLargeTrace 只给测试观察扫描对大规则匹配器的取用（"acquire"/"release" + 组序列），
 // 生产环境为 nil。
 var anomalyLargeTrace func(event, groupKey string)
 
-// scanLarge 按组序列逐个处理大规则：构建一个匹配器、走完共用它的规则、释放，再建下一个，
-// 任一时刻至多一个大匹配器存活（设计 §4.3 按一次构建估算内存）。本轮没有任何候选行的
-// 组序列不构建。
+// scanLarge 按组序列逐个处理大规则：从常驻槽取一个匹配器、走完共用它的规则、放手，再取
+// 下一个，任一时刻至多占用一个（槽也只留一个，设计 §4.3 按一次构建估算内存）。本轮没有
+// 任何候选行的组序列不取，也就不会为它构建。
 func (sc *anomalyScan) scanLarge(rules []*anomalyRulePlan) {
 	var keys []string
 	byKey := map[string][]*anomalyRulePlan{}
@@ -557,15 +558,15 @@ func (sc *anomalyScan) scanLargeKey(key string, rules []*anomalyRulePlan) {
 		return
 	}
 	if anomalyLargeTrace != nil {
-		anomalyLargeTrace("build", key)
+		anomalyLargeTrace("acquire", key)
 		defer anomalyLargeTrace("release", key)
 	}
-	m := buildLargeMatcher(rules[0])
+	m, release := largeMatcherOf(rules[0])
+	defer release()
 	if m == nil {
 		return
 	}
 	sc.accumulate(rules, func(*anomalyRulePlan) *groupMatcher { return m })
-	// m 随函数返回不再被引用，下一个组序列构建前即可回收。
 }
 
 func (sc *anomalyScan) anyCandidate(rules []*anomalyRulePlan) bool {
@@ -613,10 +614,11 @@ func pruneAnomaliesLocked(plans *anomalyPlanSet, existIds map[int]bool, now time
 	}
 }
 
-// buildLargeMatcher 为大规则临时构建匹配器，取法与 planRule 一致（逐组合并）。
-// 刻意按组序列合并成一个，而不是逐组各建一个再取「任一命中」：取反条目在合并列表里
-// 是对并集取反（见 verifyShared.matcher）。失败返回 nil 并记日志，该规则本轮不计。
-func buildLargeMatcher(p *anomalyRulePlan) *groupMatcher {
+// largeMatcherOf 从常驻槽取大规则的匹配器与放手函数，条目取法与 planRule 一致（逐组读库
+// 合并）：两边得到同样的条目，审计与扫描共用同一个匹配器。刻意按组序列合并成一个，而不是
+// 逐组各建一个再取「任一命中」：取反条目在合并列表里是对并集取反（见 verifyShared.matcher）。
+// 失败返回 nil 并记日志，该规则本轮不计；放手函数照样要调用。
+func largeMatcherOf(p *anomalyRulePlan) (*groupMatcher, func()) {
 	var domainLists, cidrLists [][]string
 	for _, gid := range p.groupIds {
 		domains, cidrs, ok := groupConditionsOf(gid)
@@ -626,12 +628,12 @@ func buildLargeMatcher(p *anomalyRulePlan) *groupMatcher {
 		domainLists = append(domainLists, domains)
 		cidrLists = append(cidrLists, cidrs)
 	}
-	m, err := newGroupMatcher(MergeDomains(domainLists...), MergeDomains(cidrLists...))
-	if err != nil {
-		logger.Warning("路由异常扫描：构造大规则匹配器失败，rule id:", p.ruleId, "err:", err)
-		return nil
+	e, release := largeMatchers.acquire(MergeDomains(domainLists...), MergeDomains(cidrLists...))
+	if e.err != nil {
+		logger.Warning("路由异常扫描：构造大规则匹配器失败，rule id:", p.ruleId, "err:", e.err)
+		return nil, release
 	}
-	return m
+	return e.m, release
 }
 
 // anomalyPlanSet 返回当前的规则计划与全部规则 id（含停用）；代次或启用规则集合

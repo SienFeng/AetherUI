@@ -23,10 +23,12 @@ func resetAuditCache(t *testing.T) {
 	auditMu.Lock()
 	auditResults = map[int]*RuleVerifyResult{}
 	auditMu.Unlock()
+	largeMatchers.reset()
 	t.Cleanup(func() {
 		auditMu.Lock()
 		auditResults = map[int]*RuleVerifyResult{}
 		auditMu.Unlock()
+		largeMatchers.reset()
 	})
 }
 
