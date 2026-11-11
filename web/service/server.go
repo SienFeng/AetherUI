@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"github.com/shirou/gopsutil/cpu"
@@ -400,7 +401,11 @@ func (s *ServerService) UpdateXray(version string) error {
 		return err
 	}
 
-	s.xrayService.StopXray()
+	// 旧核心停不下来时不能往下解压：它还在跑，覆盖二进制要么失败（text file busy）要么换了文件
+	// 而进程照旧，紧接着的重启又因端口还被占着起不来。
+	if err := s.xrayService.StopXray(); err != nil && !errors.Is(err, xray.ErrNotRunning) {
+		return common.NewError("停止当前 xray 失败，没有切换版本:", err)
+	}
 	defer func() {
 		err := s.xrayService.RestartXray(true)
 		if err != nil {

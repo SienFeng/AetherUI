@@ -12,7 +12,8 @@ var urlInText = regexp.MustCompile("[A-Za-z][A-Za-z0-9+.\\-]*://[^\\s\"'<>`]+")
 // redactedQuery 替换掉被隐去的查询串，让读日志的人知道这里原本有内容。
 const redactedQuery = "?<已隐去>"
 
-// RedactURLs 去掉文本里每个 URL 的查询串、片段与 userinfo，主机与路径原样保留。
+// RedactURLs 去掉文本里每个 URL 的查询串、片段与 userinfo，以及路径里看起来像令牌的段（MaskSecretPathSegments），
+// 主机与其余路径原样保留。
 //
 // 下载地址里常带个人凭证：IP2Location 的 token 就在查询串里
 // （...?token=<TOKEN>&file=DB3LITE），也有人把账号密码写进 userinfo。
@@ -39,9 +40,31 @@ func redactURL(raw string) string {
 		authority = authority[at+1:]
 	}
 	if k := strings.IndexAny(tail, "?#"); k >= 0 && k < len(tail)-1 {
-		tail = tail[:k] + redactedQuery
+		tail = MaskSecretPathSegments(tail[:k]) + redactedQuery
+	} else {
+		tail = MaskSecretPathSegments(tail)
 	}
 	return head + authority + tail
+}
+
+// redactedSegment 替换掉路径里看起来像令牌的一段。
+const redactedSegment = "<已隐去>"
+
+// secretSegment 是「看起来像令牌」的路径段：至少 16 个字符，全是令牌常用的字符（字母数字与 - _ = + ~），
+// 而且字母、数字都有。机场订阅常把令牌放在路径里（/sub/<token>、/api/v1/client/<uuid>），只隐去查询串的话
+// 它照样进日志。普通的路径段（subscribe、v1、geoip.dat 这类短词或带扩展名的文件名）原样保留，排查要靠它们。
+var secretSegment = regexp.MustCompile(`^[A-Za-z0-9_=+~-]{16,}$`)
+
+// MaskSecretPathSegments 把路径里看起来像令牌的段换成占位符，其余原样保留。
+func MaskSecretPathSegments(path string) string {
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		if secretSegment.MatchString(seg) && strings.ContainsAny(seg, "0123456789") &&
+			strings.IndexFunc(seg, func(r rune) bool { return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' }) >= 0 {
+			segs[i] = redactedSegment
+		}
+	}
+	return strings.Join(segs, "/")
 }
 
 // RedactURLError 返回一个文本已经过 RedactURLs 处理的错误；文本里没有要隐去的

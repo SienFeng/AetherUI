@@ -672,7 +672,8 @@ ssl_cert_issue() {
     LOGI "here we provide two methods for issuing certs:"
     LOGI "method 1:acme standalone mode,need to keep port:80 open"
     LOGI "method 2:acme DNS API mode,need provide Cloudflare Global API Key"
-    LOGI "recommend method 2 first,if it fails,you can try method 1."
+    LOGI "for a free domain, method 1 is recommended"
+    LOGI "for a paid domain resolved through Cloudflare, use method 2"
     LOGI "certs will be installed in /root/cert directory"
     read -p "please choose which method do you want,type 1 or 2": method
     LOGI "you choosed method:${method}"
@@ -688,16 +689,55 @@ ssl_cert_issue() {
 }
 
 install_acme() {
-    cd ~
+    cd ~ || return 1
     LOGI "install acme..."
-    curl https://get.acme.sh | sh
-    if [ $? -ne 0 ]; then
+    # Download first, then run: the status of curl https://get.acme.sh | sh is sh's, and when the download fails
+    # sh reads empty input and still exits 0.
+    local installer
+    installer=$(mktemp) || return 1
+    if ! curl -fsSL https://get.acme.sh -o "${installer}" || ! sh "${installer}"; then
+        rm -f "${installer}"
         LOGE "install acme failed"
         return 1
-    else
-        LOGI "install acme succeed"
     fi
+    rm -f "${installer}"
+    if [ ! -x ~/.acme.sh/acme.sh ]; then
+        LOGE "install acme failed"
+        return 1
+    fi
+    LOGI "install acme succeed"
     return 0
+}
+
+# Helpers for the certificate menu.
+#
+# valid_cert_domain: the domain used to be unvalidated and unquoted. Pressing Enter gave grep no pattern, the count
+# was 0, the "already exists" check passed, and the cleanup after the failed issue became rm -rf ~/.acme.sh/ --
+# deleting acme.sh itself, the account keys, and every other domain's certificates and renewal configs, so the
+# certificates of existing TLS inbounds silently expired within 90 days.
+# acme_cert_exists: exact match on the first column of --list (Main_Domain); the old substring match refused
+# example.com whenever sub.example.com existed.
+# remove_acme_domain: cleanup after a failed issue. acme.sh >= 3.0.6 defaults to ECC, stored in <domain>_ecc; only
+# removing <domain> left it in --list, so every retry was refused as "already exists".
+# caddy_managed_domain: the domain of the Caddy certificate sync set up by the install wizard (a-ui-cert-sync writes
+# its certificate into /root/cert every hour).
+valid_cert_domain() {
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+}
+
+acme_cert_exists() {
+    ~/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qxF -- "$1"
+}
+
+remove_acme_domain() {
+    valid_cert_domain "$1" || return 0
+    ~/.acme.sh/acme.sh --remove -d "$1" >/dev/null 2>&1
+    ~/.acme.sh/acme.sh --remove -d "$1" --ecc >/dev/null 2>&1
+    rm -rf "${HOME}/.acme.sh/$1" "${HOME}/.acme.sh/$1_ecc"
+}
+
+caddy_managed_domain() {
+    sed -n 's#^ExecStart=/usr/local/bin/a-ui-cert-sync ##p' /etc/systemd/system/a-ui-cert-sync.service 2>/dev/null | head -1
 }
 
 #method for standalone mode
@@ -731,10 +771,17 @@ ssl_cert_issue_standalone() {
     #get the domain here,and we need verify it
     local domain=""
     read -p "please input your domain:" domain
+    if ! valid_cert_domain "${domain}"; then
+        LOGE "invalid domain (must not be empty; only letters, digits, - and . are allowed): ${domain}"
+        exit 1
+    fi
+    if [[ "$(caddy_managed_domain | tr '[:upper:]' '[:lower:]')" == "$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')" ]]; then
+        LOGE "the certificate for this domain is issued by Caddy and synced to /root/cert (a-ui-cert-sync); no need to issue it with acme"
+        exit 1
+    fi
     LOGD "your domain is:${domain},check it..."
     #here we need to judge whether there exists cert already
-    local currentCert=$(~/.acme.sh/acme.sh --list | grep ${domain} | wc -l)
-    if [ ${currentCert} -ne 0 ]; then
+    if acme_cert_exists "${domain}"; then
         local certInfo=$(~/.acme.sh/acme.sh --list)
         LOGE "system already have certs here,can not issue again,current certs details:"
         LOGI "$certInfo"
@@ -745,29 +792,33 @@ ssl_cert_issue_standalone() {
     #get needed port here
     local WebPort=80
     read -p "please choose which port do you use,default will be 80 port:" WebPort
-    if [[ ${WebPort} -gt 65535 || ${WebPort} -lt 1 ]]; then
-        LOGE "your input ${WebPort} is invalid,will use default port"
+    # Enter (empty) uses 80; anything that is not a number in 1-65535 is reported and really replaced with 80
+    # (it used to only print the error and still pass the value to --httpport).
+    if ! [[ "${WebPort}" =~ ^[0-9]{1,5}$ ]] || (( 10#${WebPort} < 1 || 10#${WebPort} > 65535 )); then
+        [[ -n "${WebPort}" ]] && LOGE "your input ${WebPort} is invalid,will use default port"
+        WebPort=80
     fi
+    WebPort=$((10#${WebPort}))
     LOGI "will use port:${WebPort} to issue certs,please make sure this port is open..."
     #NOTE:This should be handled by user
     #open the port and kill the occupied progress
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    ~/.acme.sh/acme.sh --issue -d ${domain} --standalone --httpport ${WebPort}
+    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport "${WebPort}"
     if [ $? -ne 0 ]; then
         LOGE "issue certs failed,please check logs"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_domain "${domain}"
         exit 1
     else
         LOGI "issue certs succeed,installing certs..."
     fi
     #install cert
-    ~/.acme.sh/acme.sh --installcert -d ${domain} --ca-file /root/cert/ca.cer \
-        --cert-file /root/cert/${domain}.cer --key-file /root/cert/${domain}.key \
-        --fullchain-file /root/cert/fullchain.cer
+    ~/.acme.sh/acme.sh --installcert -d "${domain}" --ca-file "/root/cert/${domain}.ca.cer" \
+        --cert-file "/root/cert/${domain}.cer" --key-file "/root/cert/${domain}.key" \
+        --fullchain-file "/root/cert/${domain}.fullchain.cer"
 
     if [ $? -ne 0 ]; then
         LOGE "install certs failed,exit"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_domain "${domain}"
         exit 1
     else
         LOGI "install certs succeed,enable auto renew..."
@@ -775,12 +826,13 @@ ssl_cert_issue_standalone() {
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     if [ $? -ne 0 ]; then
         LOGE "auto renew failed,certs details:"
-        ls -lah cert
+        ls -lah "$certPath"
         chmod 755 $certPath
         exit 1
     else
         LOGI "auto renew succeed,certs details:"
-        ls -lah cert
+        LOGI "certificate: /root/cert/${domain}.fullchain.cer  key: /root/cert/${domain}.key (use these paths in the inbound TLS settings)"
+        ls -lah "$certPath"
         chmod 755 $certPath
     fi
 
@@ -809,10 +861,17 @@ ssl_cert_issue_by_cloudflare() {
         fi
         LOGD "please input your domain:"
         read -p "Input your domain here:" CF_Domain
+        if ! valid_cert_domain "${CF_Domain}"; then
+            LOGE "invalid domain (must not be empty; only letters, digits, - and . are allowed): ${CF_Domain}"
+            exit 1
+        fi
+        if [[ "$(caddy_managed_domain | tr '[:upper:]' '[:lower:]')" == "$(printf '%s' "${CF_Domain}" | tr '[:upper:]' '[:lower:]')" ]]; then
+            LOGE "the certificate for this domain is issued by Caddy and synced to /root/cert (a-ui-cert-sync); no need to issue it with acme"
+            exit 1
+        fi
         LOGD "your domain is:${CF_Domain},check it..."
         #here we need to judge whether there exists cert already
-        local currentCert=$(~/.acme.sh/acme.sh --list | grep ${CF_Domain} | wc -l)
-        if [ ${currentCert} -ne 0 ]; then
+        if acme_cert_exists "${CF_Domain}"; then
             local certInfo=$(~/.acme.sh/acme.sh --list)
             LOGE "system already have certs here,can not issue again,current certs details:"
             LOGI "$certInfo"
@@ -837,20 +896,20 @@ ssl_cert_issue_by_cloudflare() {
         fi
         export CF_Key="${CF_GlobalKey}"
         export CF_Email=${CF_AccountEmail}
-        ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${CF_Domain} -d *.${CF_Domain} --log
+        ~/.acme.sh/acme.sh --issue --dns dns_cf -d "${CF_Domain}" -d "*.${CF_Domain}" --log
         if [ $? -ne 0 ]; then
             LOGE "issue cert failed,exit"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_domain "${CF_Domain}"
             exit 1
         else
             LOGI "issue cert succeed,installing..."
         fi
-        ~/.acme.sh/acme.sh --installcert -d ${CF_Domain} -d *.${CF_Domain} --ca-file /root/cert/ca.cer \
-            --cert-file /root/cert/${CF_Domain}.cer --key-file /root/cert/${CF_Domain}.key \
-            --fullchain-file /root/cert/fullchain.cer
+        ~/.acme.sh/acme.sh --installcert -d "${CF_Domain}" -d "*.${CF_Domain}" --ca-file "/root/cert/${CF_Domain}.ca.cer" \
+            --cert-file "/root/cert/${CF_Domain}.cer" --key-file "/root/cert/${CF_Domain}.key" \
+            --fullchain-file "/root/cert/${CF_Domain}.fullchain.cer"
         if [ $? -ne 0 ]; then
             LOGE "install cert failed,exit"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_domain "${CF_Domain}"
             exit 1
         else
             LOGI "install cert succeed,enable auto renew..."
@@ -858,12 +917,13 @@ ssl_cert_issue_by_cloudflare() {
         ~/.acme.sh/acme.sh --upgrade --auto-upgrade
         if [ $? -ne 0 ]; then
             LOGE "enable auto renew failed,exit"
-            ls -lah cert
+            ls -lah "$certPath"
             chmod 755 $certPath
             exit 1
         else
             LOGI "enable auto renew succeed,cert details:"
-            ls -lah cert
+            LOGI "certificate: /root/cert/${CF_Domain}.fullchain.cer  key: /root/cert/${CF_Domain}.key (use these paths in the inbound TLS settings)"
+            ls -lah "$certPath"
             chmod 755 $certPath
         fi
     else

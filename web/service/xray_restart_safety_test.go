@@ -281,3 +281,40 @@ func sendThroughSocks(t *testing.T, proxyAddr, host string, port int, payload []
 		t.Fatalf("写 payload: %v", err)
 	}
 }
+
+// 旧核心停不下来（SIGKILL 之后迟迟不退出）时，RestartXray 必须报错、不起新核心、继续持有旧进程。
+// 修复前它忽略 Stop 的错误照样换掉 p：新核心因端口还被占着起不来，卡住的旧进程也不再归面板管。
+func TestRestartXrayKeepsOldCoreWhenStopFails(t *testing.T) {
+	setupDB(t)
+	useTemplateWithAPIPort(t, freePort(t), nil)
+	useFakeXray(t, "exec sleep 30")
+	stopXrayAtCleanup(t)
+
+	xs := &XrayService{}
+	if err := xs.RestartXray(true); err != nil {
+		t.Fatalf("首次 RestartXray(true): %v", err)
+	}
+	waitRunning(t, xs)
+	before := currentProcess()
+
+	orig := stopCore
+	stopCore = func(*xray.Process) error { return fmt.Errorf("等待 xray 进程退出超时") }
+	t.Cleanup(func() { stopCore = orig })
+
+	if err := xs.RestartXray(true); err == nil {
+		t.Fatal("旧核心停不下来时 RestartXray 应当报错")
+	}
+	if currentProcess() != before {
+		t.Fatal("旧核心停不下来时进程对象被换掉了：卡住的进程不再归面板管")
+	}
+
+	// 进程在 IsRunning 与 Stop 之间自己退出（ErrNotRunning）不算停不下来，照常起新核心。
+	stopCore = func(*xray.Process) error { return xray.ErrNotRunning }
+	if err := xs.RestartXray(true); err != nil {
+		t.Fatalf("ErrNotRunning 时应照常重启: %v", err)
+	}
+	if currentProcess() == before {
+		t.Fatal("ErrNotRunning 时没有起新核心")
+	}
+	_ = orig(before)
+}

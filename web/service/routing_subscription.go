@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"a-ui/util/common"
@@ -302,7 +305,8 @@ func ValidateSubscribeURL(raw string) error {
 	return nil
 }
 
-// displaySubscribeURL 是能放进报错与日志的订阅地址：主机与路径留着（排查靠它们），查询串、片段与账号密码去掉。
+// displaySubscribeURL 是能放进报错与日志的订阅地址：主机与路径留着（排查靠它们），查询串、片段、账号密码
+// 与路径里看起来像令牌的段（common.MaskSecretPathSegments）去掉。
 // 只做字符串切分、不走 url.Parse：要处理的恰恰是写坏了、解析不了的地址。
 func displaySubscribeURL(raw string) string {
 	s, suffix := raw, ""
@@ -321,7 +325,7 @@ func displaySubscribeURL(raw string) string {
 	if at := strings.LastIndex(authority, "@"); at >= 0 {
 		s = s[:start] + "***@" + rest[at+1:]
 	}
-	return s + suffix
+	return common.MaskSecretPathSegments(s) + suffix
 }
 
 // fetchSubscription 拉取订阅内容。超时与体积上限都是硬限制。
@@ -330,8 +334,7 @@ func fetchSubscription(rawURL string) (string, error) {
 		return "", err
 	}
 
-	client := &http.Client{Timeout: subscriptionTimeout}
-	resp, err := client.Get(rawURL)
+	resp, err := subscriptionClient().Get(rawURL)
 	if err != nil {
 		return "", common.NewError("拉取订阅失败:", err)
 	}
@@ -351,6 +354,55 @@ func fetchSubscription(rawURL string) (string, error) {
 		return "", common.NewError("订阅内容超过 10MB 上限")
 	}
 	return string(body), nil
+}
+
+// errSubscriptionLocalAddr 是订阅地址（或它重定向到的地址）落在本机或内网时的错误。
+var errSubscriptionLocalAddr = errors.New("订阅地址指向本机或内网地址，出于安全考虑不允许拉取（订阅须放在公网可访问的地址上）")
+
+// subscriptionAllowLocal 只给测试用：测试里的订阅服务都在 127.0.0.1 上。
+var subscriptionAllowLocal atomic.Bool
+
+// AllowLocalSubscriptionsForTest 让拉取订阅可以访问本机地址。只供测试调用（各包的 TestMain）。
+func AllowLocalSubscriptionsForTest() { subscriptionAllowLocal.Store(true) }
+
+// subscriptionAddrBlocked 判断拉订阅时能不能连这个 IP：本机、内网（RFC 1918 / fc00::/7）、链路本地
+// （169.254.0.0/16，云厂商的元数据服务就在这里）、运营商级 NAT（100.64.0.0/10）、未指定与组播地址一律不连。
+func subscriptionAddrBlocked(ip net.IP) bool {
+	if subscriptionAllowLocal.Load() {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() || cgnatRange.Contains(ip)
+}
+
+var cgnatRange = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// subscriptionClient 是拉订阅用的 HTTP 客户端。
+//
+// 修复前用的是默认客户端：订阅地址（以及订阅服务器返回的重定向）可以指向本机的面板、云厂商的元数据
+// 服务或内网机器，面板替人去访问它们。检查放在拨号那一刻（Dialer.Control 看的是真正要连的 IP），
+// 而不是事先解析一次主机名：事先解析挡不住重定向，也挡不住两次解析结果不同（DNS 重绑定）。
+// 不走环境变量里的代理：走代理时真正连的是代理，这道检查就看不到目标地址了。
+func subscriptionClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout: subscriptionTimeout,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if ip := net.ParseIP(host); ip == nil || subscriptionAddrBlocked(ip) {
+				return errSubscriptionLocalAddr
+			}
+			return nil
+		},
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = dialer.DialContext
+	// 每次拉取都新建一个 Transport，空闲连接留着没人复用，只会在 IdleConnTimeout 里白占着 socket。
+	transport.DisableKeepAlives = true
+	return &http.Client{Timeout: subscriptionTimeout, Transport: transport}
 }
 
 // ShouldUpdateNow 判断某个域名组现在是否该更新。
@@ -413,7 +465,7 @@ func redactURL(raw string) string {
 	if at := strings.LastIndex(rest[:authEnd], "@"); at >= 0 {
 		rest = "***" + rest[at:]
 	}
-	return scheme + rest + suffix
+	return scheme + common.MaskSecretPathSegments(rest) + suffix
 }
 
 // redactURLsInText 对一段文本（多是嵌着订阅地址的错误信息）里的每个 URL 做 redactURL。

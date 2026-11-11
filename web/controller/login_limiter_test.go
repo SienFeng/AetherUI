@@ -137,3 +137,34 @@ func TestLimiterNeverEvictsActiveLocks(t *testing.T) {
 		t.Error("回收记录时把仍在锁定期内的来源解锁了")
 	}
 }
+
+// 表被锁定中的来源撑满之后，表外的新来源修复前直接放行、完全不计数（每个新来源都能无限次猜）。
+// 现在共用一个令牌桶：连续几次之后就要等，过一阵又能再试——限速而不锁死，从新地址登录的管理员不会被锁在门外。
+func TestLimiterRateLimitsSourcesWhenTableIsFull(t *testing.T) {
+	l, now := newClockedLimiter()
+	for i := 0; i < loginMaxEntries; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)
+		for j := 0; j < loginMaxFailures; j++ {
+			failOnce(l, ip)
+		}
+	}
+	if len(l.entries) != loginMaxEntries {
+		t.Fatalf("前提不成立：表应当满了，实际 %d", len(l.entries))
+	}
+	opened := 0
+	for i := 0; i < 100; i++ {
+		if _, _, gate := l.Begin(fmt.Sprintf("2001:db8:%x::1", i)); gate == loginGateOpen {
+			opened++
+		}
+	}
+	if opened != loginOverflowBurst {
+		t.Fatalf("表满时 100 个新来源放行了 %d 次，应当只放行 %d 次", opened, loginOverflowBurst)
+	}
+	*now = now.Add(loginOverflowRefill)
+	if _, _, gate := l.Begin("203.0.113.9"); gate != loginGateOpen {
+		t.Fatal("令牌补上之后新来源应当能再试一次（限速，不是锁死）")
+	}
+	if _, _, gate := l.Begin("203.0.113.10"); gate != loginGateBusy {
+		t.Fatal("刚补的一个令牌用掉之后应当再次限速")
+	}
+}

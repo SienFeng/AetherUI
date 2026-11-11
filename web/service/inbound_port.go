@@ -30,6 +30,9 @@ type inboundListenSpec struct {
 	Port   int
 	TCP    bool
 	UDP    bool
+	// Derived 表示这是从「所有地址」拆出来的单个本机地址（见 unheldPart）：探它只认 EADDRINUSE，
+	// 别的失败（IPv6 地址还在 DAD、刚被摘掉）不能让整个入站被判为端口冲突。
+	Derived bool
 }
 
 // listenSpecOf 从生成的入站配置推出它要占的监听。第二个返回值为 false 表示它不占端口
@@ -185,38 +188,108 @@ func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
 }
 
-// heldListeners 返回运行中的核心配置（running，nil 表示核心没在跑）里入站占着的 TCP / UDP 端口。
-// 这些端口正被我们自己的 xray 占着，探测必然撞上自己；热应用会先删后加，端口由核心自己释放、再占。
-func heldListeners(running *xray.Config) (tcp, udp map[int]bool) {
-	tcp, udp = map[int]bool{}, map[int]bool{}
+// heldListeners 返回运行中的核心配置（running，nil 表示核心没在跑）里入站占着的监听（地址 + 端口 + 协议）。
+// 这些监听正被我们自己的 xray 占着，探测必然撞上自己；热应用会先删后加，端口由核心自己释放、再占。
+func heldListeners(running *xray.Config) []inboundListenSpec {
 	if running == nil {
-		return tcp, udp
+		return nil
 	}
+	var held []inboundListenSpec
 	for i := range running.InboundConfigs {
-		spec, ok := listenSpecOf(&running.InboundConfigs[i])
-		if !ok {
-			continue
-		}
-		if spec.TCP {
-			tcp[spec.Port] = true
-		}
-		if spec.UDP {
-			udp[spec.Port] = true
+		if spec, ok := listenSpecOf(&running.InboundConfigs[i]); ok {
+			held = append(held, spec)
 		}
 	}
-	return tcp, udp
+	return held
 }
 
-// unheldPart 去掉 spec 里运行中的核心已经占着的那部分，什么都不剩时返回 false。按协议分开算：
-// 核心只占着某端口的 TCP 时，入站改成也要 UDP（socks 打开 udp），UDP 那部分照样要探。
-func unheldPart(spec inboundListenSpec, tcp, udp map[int]bool) (inboundListenSpec, bool) {
-	if tcp[spec.Port] {
-		spec.TCP = false
+// localAddrsFn 列出本机网卡上的地址，测试可以换掉。
+var localAddrsFn = func() ([]net.IP, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
 	}
-	if udp[spec.Port] {
-		spec.UDP = false
+	var ips []net.IP
+	for _, a := range addrs {
+		// IPv6 链路本地地址不带 zone 绑不上，跳过；IPv4 的 169.254/16 照常探。
+		if n, ok := a.(*net.IPNet); ok && !(n.IP.To4() == nil && n.IP.IsLinkLocalUnicast()) && !n.IP.IsMulticast() {
+			ips = append(ips, n.IP)
+		}
 	}
-	return spec, spec.TCP || spec.UDP
+	return ips, nil
+}
+
+// unheldPart 返回 spec 里运行中的核心没占着、需要实际 bind 探测的部分，什么都不剩时返回空。
+//
+// 按协议、按地址分开算：
+//   - 核心只占着某端口的 TCP 时，入站改成也要 UDP（socks 打开 udp），UDP 那部分照样要探。
+//   - 核心占着「所有地址」或同一个地址：探测必然撞上自己，跳过。
+//   - 核心占着别的具体地址（127.0.0.1 → 10.0.0.5）：新地址没人替我们占着，照常探。
+//   - 核心占着具体地址、新监听是所有地址（127.0.0.1 → 0.0.0.0）：直接探 0.0.0.0 必然撞上自己的核心，
+//     于是改为逐个探本机网卡上核心没占着的地址——别的程序占着公网地址的这个端口时，新核心整个起不来。
+//     本机网卡之外的回环地址（127.0.0.2 这类）列举不到，这一处仍可能漏。
+func unheldPart(spec inboundListenSpec, held []inboundListenSpec) []inboundListenSpec {
+	var probes []inboundListenSpec
+	for _, udp := range []bool{false, true} {
+		if (!udp && !spec.TCP) || (udp && !spec.UDP) {
+			continue
+		}
+		var holders []string
+		covered := false
+		for _, h := range held {
+			if h.Port != spec.Port || (udp && !h.UDP) || (!udp && !h.TCP) {
+				continue
+			}
+			if isAnyListen(h.Listen) || (!isAnyListen(spec.Listen) && listenOverlaps(h.Listen, spec.Listen)) {
+				covered = true
+				break
+			}
+			holders = append(holders, h.Listen)
+		}
+		if covered {
+			continue
+		}
+		one := func(listen string) inboundListenSpec {
+			return inboundListenSpec{Listen: listen, Port: spec.Port, TCP: !udp, UDP: udp}
+		}
+		if len(holders) == 0 || !isAnyListen(spec.Listen) {
+			probes = append(probes, one(spec.Listen))
+			continue
+		}
+		ips, err := localAddrsFn()
+		if err != nil {
+			logger.Warning("列举本机地址失败，跳过端口", spec.Port, "的探测:", err)
+			continue
+		}
+	next:
+		for _, ip := range ips {
+			for _, h := range holders {
+				if listenOverlaps(h, ip.String()) {
+					continue next
+				}
+			}
+			pr := one(ip.String())
+			pr.Derived = true
+			probes = append(probes, pr)
+		}
+	}
+	return probes
+}
+
+// probeAll 依次探测 probes，返回第一个失败。
+func probeAll(probes []inboundListenSpec) error {
+	for _, pr := range probes {
+		err := probeListenFn(pr)
+		if err == nil {
+			continue
+		}
+		if pr.Derived && !isAddrInUse(err) {
+			logger.Debug("探测本机地址", pr.Listen, "端口", pr.Port, "失败（不是端口占用，忽略）:", err)
+			continue
+		}
+		return err
+	}
+	return nil
 }
 
 // checkInboundPortUsable 在保存入站时拦住「下发时才会撞上」的端口。old 为 nil 表示新建。
@@ -248,13 +321,12 @@ func (s *InboundService) checkInboundPortUsable(inbound *model.Inbound, old *mod
 	if err := checkPanelPort(&settingService, spec); err != nil {
 		return err
 	}
-	heldTCP, heldUDP := heldListeners(runningConfigOf(currentProcess()))
-	probe, ok := unheldPart(spec, heldTCP, heldUDP)
-	if !ok {
+	probes := unheldPart(spec, heldListeners(runningConfigOf(currentProcess())))
+	if len(probes) == 0 {
 		return nil
 	}
 	lock.Lock()
-	err := probeListenFn(probe)
+	err := probeAll(probes)
 	lock.Unlock()
 	if err == nil {
 		return nil

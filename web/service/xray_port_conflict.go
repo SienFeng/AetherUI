@@ -158,7 +158,7 @@ func excludeBusyInbounds(cfg *xray.Config, running *xray.Config) {
 	if cfg == nil {
 		return
 	}
-	heldTCP, heldUDP := heldListeners(running)
+	held := heldListeners(running)
 	found := false
 	for i := range cfg.InboundConfigs {
 		ib := &cfg.InboundConfigs[i]
@@ -169,12 +169,12 @@ func excludeBusyInbounds(cfg *xray.Config, running *xray.Config) {
 		if !ok {
 			continue
 		}
-		probe, ok := unheldPart(spec, heldTCP, heldUDP)
-		if !ok {
+		probes := unheldPart(spec, held)
+		if len(probes) == 0 {
 			continue
 		}
 		// 登记用入站完整的监听规格：GetXrayConfig 按它与生成的入站比对来摘。
-		if err := probeListenFn(probe); err != nil {
+		if err := probeAll(probes); err != nil {
 			registerPortConflict(ib.Tag, spec, err)
 			found = true
 		}

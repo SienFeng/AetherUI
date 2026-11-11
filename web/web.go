@@ -28,6 +28,7 @@ import (
 	"a-ui/web/job"
 	"a-ui/web/service"
 	"a-ui/web/session"
+	"a-ui/xray"
 )
 
 //go:embed assets/*
@@ -553,7 +554,9 @@ func (s *Server) Stop() error {
 			logger.Warning("仍有定时任务在", cronDrainTimeout, "内没有跑完，不再等待")
 		}
 	}
-	s.xrayService.StopXray()
+	if xerr := s.xrayService.StopXray(); xerr != nil && !errors.Is(xerr, xray.ErrNotRunning) {
+		logger.Error("停止 xray 失败:", xerr)
+	}
 	return err
 }
 

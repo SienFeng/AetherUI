@@ -1,6 +1,8 @@
 package service
 
 import (
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -1342,5 +1344,49 @@ func TestValidateSubscribeURLDoesNotEchoTheAddress(t *testing.T) {
 	err := ValidateSubscribeURLs("https://ok.example.com/a\nsub.example.com/b?token=SECRET5")
 	if err == nil || strings.Contains(err.Error(), "SECRET") || !strings.Contains(err.Error(), "第 2 个") {
 		t.Errorf("多个地址时应当点出是第几个、且不带令牌: %v", err)
+	}
+}
+
+// 订阅令牌在路径里时，报错与日志里的地址也要把它隐去（修复前只隐去查询串与账号密码）。
+func TestSubscribeURLDisplayMasksPathToken(t *testing.T) {
+	raw := "https://sub.example.com/link/AbCdEf0123456789xyz"
+	for name, got := range map[string]string{
+		"displaySubscribeURL": displaySubscribeURL(raw + "?flag=clash"),
+		"redactURL":           redactURL(raw),
+		"redactURLsInText":    redactURLsInText(`拉取订阅失败: Get "` + raw + `": dial tcp: i/o timeout`),
+	} {
+		if strings.Contains(got, "AbCdEf0123456789xyz") {
+			t.Errorf("%s 把路径里的令牌带出来了: %s", name, got)
+		}
+		if !strings.Contains(got, "sub.example.com/link/") {
+			t.Errorf("%s 不该隐去主机与普通路径: %s", name, got)
+		}
+	}
+}
+
+// 拉订阅不许连本机与内网：修复前用默认客户端，订阅地址（或订阅服务器返回的重定向）可以指向面板自己、
+// 云厂商元数据服务（169.254.169.254）或内网机器。检查在拨号那一刻做，重定向过去的同样拦住。
+func TestSubscriptionFetchRefusesLocalAddresses(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "example.com")
+	}))
+	t.Cleanup(local.Close)
+
+	subscriptionAllowLocal.Store(false)
+	t.Cleanup(func() { subscriptionAllowLocal.Store(true) })
+
+	if _, err := fetchSubscription(local.URL + "/list.txt"); err == nil || !strings.Contains(err.Error(), "内网") {
+		t.Fatalf("订阅地址指向本机时应当拒绝，实际 %v", err)
+	}
+	for _, s := range []string{"127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1",
+		"0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"} {
+		if !subscriptionAddrBlocked(net.ParseIP(s)) {
+			t.Errorf("%s 应当被拦", s)
+		}
+	}
+	for _, s := range []string{"192.0.2.1", "198.51.100.7", "2001:db8::1", "8.8.8.8"} {
+		if subscriptionAddrBlocked(net.ParseIP(s)) {
+			t.Errorf("%s 是公网地址，不该被拦", s)
+		}
 	}
 }

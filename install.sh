@@ -17,6 +17,12 @@ panel_port=""
 # 重复打印回滚命令——用户此时多半已经翻过"确认停用"那一步打印的提示，
 # 且此时 80/443 上是真的什么都不监听了，比第一次提示时更紧急。
 stopped_web_svc=""
+# caddy_freshly_installed 为 1 表示 Caddy 是这次向导里才装上的（见 stop_fresh_caddy）。
+caddy_freshly_installed=0
+# 内置静态伪装页的专用目录。修复前用 /var/www/html：刚被停用的 apache/nginx 的站点根目录多半就是它，
+# 里面已有的 index.html 会原样保留（伪装页变成「Apache2 Debian Default Page」，配上 Caddy 的 Server 头一眼可辨），
+# 目录里的 PHP 源码（wp-config.php 带着数据库密码）、.git 也会被 file_server 原样送出去。
+mask_docroot=/var/www/a-ui-mask
 
 # 面板是否已被本次安装/更新停掉。停掉之后的任何失败退出都必须先把它拉回来：
 # a-ui.service 的 Restart=on-failure 只管进程异常退出，被 systemctl stop 停掉的
@@ -696,8 +702,24 @@ handle_existing_web_server() {
 # 此时 80/443 上完全没有服务在监听，必须重复提示回滚命令。
 print_stopped_svc_rollback_hint() {
     [[ -z "${stopped_web_svc}" ]] && return 0
+    # 证书没签下来这类失败发生时 Caddy 已经按新配置跑起来了：这时说「80/443 上没有任何服务」与事实相反，
+    # 照着执行 enable --now 也会因为端口被 Caddy 占着而失败。
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        echo -e "${yellow}${stopped_web_svc} 已经被停用，80/443 现在由 Caddy 占着${plain}"
+        echo -e "${yellow}如需先恢复旧站点：systemctl disable --now caddy && systemctl enable --now ${stopped_web_svc}${plain}"
+        return 0
+    fi
     echo -e "${yellow}${stopped_web_svc} 已经被停用，此时 80/443 上没有任何服务在监听${plain}"
     echo -e "${yellow}如需先恢复旧站点：systemctl enable --now ${stopped_web_svc}${plain}"
+}
+
+# 这次向导里才装上的 Caddy，在写好我们的 Caddyfile 之前失败（用户在选伪装站时输入 q、写配置失败）时停掉并取消
+# 自启：Debian/Ubuntu 的 caddy 包装完就带着默认的 :80 站点跑起来，留着它会让「80/443 上没有服务在监听」的提示
+# 与事实相反，按提示恢复旧站点也会因端口被占而失败，而且开机还会再起来。
+stop_fresh_caddy() {
+    [[ "${caddy_freshly_installed}" != "1" ]] && return 0
+    systemctl disable --now caddy >/dev/null 2>&1
+    caddy_freshly_installed=0
 }
 
 # handle_existing_web_server 停用的若正是我们自己的 Caddy（重新配置一台
@@ -719,6 +741,35 @@ restart_own_caddy_if_stopped() {
     return 1
 }
 
+# install_caddy_apt 按 Caddy 官方的 apt 源装 Caddy。每一步都查结果：修复前全部静默、互不检查，最小化的
+# Debian 没有 gpg 时钥匙没写成、源列表却留下了，此后整台机器的 apt update 都报错，屏幕上只有一句「安装失败」。
+# 任何一步失败都把这次写下的源列表和钥匙删掉。
+install_caddy_apt() {
+    local keyring=/usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    local list=/etc/apt/sources.list.d/caddy-stable.list
+    local tmpkey created=()
+    # 只删这次新写下的：管理员早先自己加过的源列表与钥匙不动。
+    [[ -e "${list}" ]] || created+=("${list}")
+    [[ -e "${keyring}" ]] || created+=("${keyring}")
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1
+    tmpkey=$(mktemp) || return 1
+    if ! curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" -o "${tmpkey}" ||
+        ! gpg --batch --yes --dearmor -o "${keyring}" "${tmpkey}" 2>/dev/null ||
+        ! curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" -o "${list}"; then
+        rm -f "${tmpkey}" "${created[@]}"
+        echo -e "${red}添加 Caddy 的 apt 源失败（下载签名钥匙或源列表失败，或系统缺少 gpg）${plain}"
+        return 1
+    fi
+    rm -f "${tmpkey}"
+    if ! apt-get update -qq >/dev/null 2>&1 || ! apt-get install -y -qq caddy >/dev/null 2>&1; then
+        rm -f "${created[@]}"
+        apt-get update -qq >/dev/null 2>&1
+        echo -e "${red}apt 安装 Caddy 失败，已移除这次添加的 Caddy 源${plain}"
+        return 1
+    fi
+    return 0
+}
+
 # apt 分支的命令已在 Ubuntu 20.04.6 aarch64 上实测通过（Caddy 2.11.4）。
 # 脚本以 root 运行（开头有 EUID 检查），所以不加 sudo。
 #
@@ -738,13 +789,7 @@ install_caddy() {
         dnf copr enable -y @caddy/caddy >/dev/null 2>&1 || yum copr enable -y @caddy/caddy >/dev/null 2>&1
         dnf install -y caddy >/dev/null 2>&1 || yum install -y caddy >/dev/null 2>&1
     else
-        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1
-        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
-            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
-            > /etc/apt/sources.list.d/caddy-stable.list
-        apt-get update -qq >/dev/null 2>&1
-        apt-get install -y -qq caddy >/dev/null 2>&1
+        install_caddy_apt
     fi
     if ! command -v caddy &>/dev/null; then
         echo -e "${red}Caddy 安装失败${plain}"
@@ -753,15 +798,16 @@ install_caddy() {
     fi
     echo -e "${green}Caddy 安装完成: $(caddy version | head -1)${plain}"
     systemctl enable caddy 2>/dev/null
+    caddy_freshly_installed=1
     return 0
 }
 
 ensure_static_site() {
-    mkdir -p /var/www/html
-    if [[ -f /var/www/html/index.html ]]; then
+    mkdir -p "${mask_docroot}"
+    if [[ -f "${mask_docroot}/index.html" ]]; then
         return 0
     fi
-    cat > /var/www/html/index.html <<'HTMLEOF'
+    cat > "${mask_docroot}/index.html" <<'HTMLEOF'
 <!doctype html>
 <html lang="en">
 <head>
@@ -1059,7 +1105,7 @@ write_caddyfile() {
             header_down Location \"^https?://[^/]+(/.*)?\$\" \"https://{host}\$1\"
         }"
     else
-        mask_block="        root * /var/www/html
+        mask_block="        root * ${mask_docroot}
         file_server"
     fi
 
@@ -1302,6 +1348,7 @@ domain_flow() {
     # 的机器，而用户以为自己什么都没做。
     local mask_url
     if ! mask_url=$(choose_mask_site); then
+        stop_fresh_caddy
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"
@@ -1315,6 +1362,7 @@ domain_flow() {
     if ! write_caddyfile "${domain}" "${basepath}" "${panel_port}" "${mask_url}"; then
         # 校验没过时 write_caddyfile 自己已经换回；校验过了、重启 Caddy 失败时新文件还在，这里换回上一份。
         restore_caddyfile_if_panel_unchanged "${basepath}"
+        stop_fresh_caddy
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"

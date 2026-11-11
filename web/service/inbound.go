@@ -132,7 +132,9 @@ func validateInbound(inbound *model.Inbound, replacedTag string) error {
 	return ValidateInboundReplacing(ib, replacedTag)
 }
 
-func (s *InboundService) AddInbound(inbound *model.Inbound) error {
+// checkNewInbound 是新建入站落库之前的全部校验（AddInbound 与 v2-ui 迁移的 AddInbounds 共用）。
+// 校验放在落库之前，因此不需要事务回滚。
+func (s *InboundService) checkNewInbound(inbound *model.Inbound) error {
 	if err := normalizeInboundRegions(inbound); err != nil {
 		return err
 	}
@@ -152,15 +154,18 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) error {
 	if err := s.checkInboundPortUsable(inbound, nil); err != nil {
 		return err
 	}
-	// 校验放在落库之前，因此不需要事务回滚。
-	if err := validateInbound(inbound, ""); err != nil {
+	return validateInbound(inbound, "")
+}
+
+func (s *InboundService) AddInbound(inbound *model.Inbound) error {
+	if err := s.checkNewInbound(inbound); err != nil {
 		return err
 	}
 	db := database.GetDB()
 	// 事务包住「落库 + 扩散」：扩散失败若放行，就是一个用户静默地没进规则，
 	// 正是「自动应用于新增用户」这个功能要消灭的失效。宁可整个失败让管理员
 	// 重试。inbound.Id 是自增的，必须 Save 之后才能拿来扩散。
-	err = db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(inbound).Error; err != nil {
 			return err
 		}
@@ -200,17 +205,20 @@ func clearInboundLeftovers(id int) {
 	}
 }
 
+// AddInbounds 批量新建入站（v2-ui 迁移用），落库前做与 AddInbound 相同的校验：修复前这条路径只查端口，
+// 核心不认的旧配置直接写进库，下一次整进程重启时整份配置加载失败、所有用户一起断网。
+// 任何一个不过就整批不写，错误里带上是第几个、哪个端口。
 func (s *InboundService) AddInbounds(inbounds []*model.Inbound) error {
-	for _, inbound := range inbounds {
-		exist, err := s.checkPortExist(inbound.Port, 0)
-		if err != nil {
-			return err
+	seen := map[int]int{}
+	for i, inbound := range inbounds {
+		which := fmt.Sprintf("第 %d 个入站（端口 %d）", i+1, inbound.Port)
+		// 库里只查得到已经存在的；同一批里两个同端口的入站要单独拦。
+		if j, dup := seen[inbound.Port]; dup {
+			return common.NewErrorf("%s与第 %d 个入站端口相同", which, j+1)
 		}
-		if exist {
-			return common.NewError("端口已存在:", inbound.Port)
-		}
-		if err := s.checkInboundPortUsable(inbound, nil); err != nil {
-			return err
+		seen[inbound.Port] = i
+		if err := s.checkNewInbound(inbound); err != nil {
+			return common.NewError(which+":", err)
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"a-ui/database/model"
 	"a-ui/logger"
+	"a-ui/util/common"
 	"a-ui/xray"
 )
 
@@ -224,7 +225,12 @@ func (s *XrayService) RestartXray(isForce bool) error {
 			return err
 		}
 		s.drainTraffic(p)
-		p.Stop()
+		// 旧进程停不下来（SIGKILL 之后 5 秒还没退出）就不起新的：它还占着全部入站端口，新核心必然 bind
+		// 失败；而换掉 p 之后面板再也不持有那个卡住的进程，它只能等 finalizer 碰巧去杀。留着它、返回错误，
+		// 重启标志由调用方放回，下一轮再停一次。中途自己退出了（ErrNotRunning）则照常起新的。
+		if err := stopCore(p); err != nil && !errors.Is(err, xray.ErrNotRunning) {
+			return common.NewError("停止旧的 xray 进程失败，没有启动新进程:", err)
+		}
 	}
 
 	swapProcess(xray.NewProcess(xrayConfig))
@@ -359,10 +365,13 @@ func (s *XrayService) StopXray() error {
 	logger.Debug("stop xray")
 	if s.IsXrayRunning() {
 		s.drainTraffic(p)
-		return p.Stop()
+		return stopCore(p)
 	}
-	return errors.New("xray is not running")
+	return xray.ErrNotRunning
 }
+
+// stopCore 停掉核心进程。做成变量只为测试能模拟「SIGKILL 之后进程迟迟不退出」。
+var stopCore = (*xray.Process).Stop
 
 func (s *XrayService) SetToNeedRestart() {
 	xrayChangeSeq.Inc()
