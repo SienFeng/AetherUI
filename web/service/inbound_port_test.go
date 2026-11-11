@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -220,7 +221,7 @@ func TestProbeIsSkippedForPortsOfTheRunningCore(t *testing.T) {
 		t.Fatalf("RestartXray(true): %v", err)
 	}
 	waitRunning(t, xs)
-	if heldTCP, _ := heldListeners(runningConfigOf(currentProcess())); !heldTCP[port] {
+	if probes := unheldPart(inboundListenSpec{Listen: "127.0.0.1", Port: port, TCP: true}, heldListeners(runningConfigOf(currentProcess()))); len(probes) != 0 {
 		t.Fatalf("前提不成立：运行配置里应当有端口 %d", port)
 	}
 	held, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
@@ -251,5 +252,47 @@ func TestListenSpecOfTemplateAPIInbound(t *testing.T) {
 	}
 	if _, ok := listenSpecOf(&xray.InboundConfig{Listen: rawf(`"/run/xray.sock"`), Port: 0, Protocol: "vless"}); ok {
 		t.Fatal("unix socket 监听没有端口，不该参与端口判定")
+	}
+}
+
+// v2-ui 迁移（AddInbounds）修复前只查端口：核心不认的旧配置直接写进库，下次整进程重启时整份配置
+// 加载失败；同一批里两个同端口的入站也照样写进去。现在与 AddInbound 同一套校验，不过就整批不写。
+func TestAddInboundsValidatesLikeAddInbound(t *testing.T) {
+	setupDB(t)
+	a, b := freePort(t), freePort(t)
+	// 假核心只拒绝带着入站 a 的配置：不带它的基线照常通过，否则会按「改动前就已经不合法」放行。
+	fakeXrayBinary(t, fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'Xray 26.7.28 (fake)'; exit 0; fi\n"+
+		"if grep -q '\"port\":%d' \"$4\"; then echo 'Failed to start: infra/conf: rejected by fake core'; exit 23; fi\n"+
+		"echo 'Configuration OK.'\n", a), 0o755)
+	countRows := func() int64 {
+		var n int64
+		database.GetDB().Model(&model.Inbound{}).Count(&n)
+		return n
+	}
+
+	err := (&InboundService{}).AddInbounds([]*model.Inbound{
+		socksInbound(a, "127.0.0.1", `{"auth":"noauth","udp":false}`),
+		socksInbound(b, "127.0.0.1", `{"auth":"noauth","udp":false}`),
+	})
+	if err == nil {
+		t.Fatal("核心拒绝这份入站时 AddInbounds 应当报错")
+	}
+	if !strings.Contains(err.Error(), "第 1 个入站") {
+		t.Errorf("报错应当点名是第几个入站: %v", err)
+	}
+	if n := countRows(); n != 0 {
+		t.Fatalf("校验没过却写进了 %d 个入站", n)
+	}
+
+	dup := freePort(t)
+	err = (&InboundService{}).AddInbounds([]*model.Inbound{
+		socksInbound(dup, "127.0.0.1", `{"auth":"noauth","udp":false}`),
+		socksInbound(dup, "127.0.0.1", `{"auth":"noauth","udp":false}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "端口相同") {
+		t.Fatalf("同一批里两个同端口的入站应当拒绝，实际 %v", err)
+	}
+	if n := countRows(); n != 0 {
+		t.Fatalf("同批端口重复却写进了 %d 个入站", n)
 	}
 }

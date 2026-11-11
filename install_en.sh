@@ -21,6 +21,13 @@ panel_port=""
 # likely scrolled past the confirmation prompt's hint, and 80/443 really
 # have nothing listening on them, which is more urgent than the first hint.
 stopped_web_svc=""
+# caddy_freshly_installed is 1 when Caddy was installed during this run (see stop_fresh_caddy).
+caddy_freshly_installed=0
+# Dedicated directory for the built-in static decoy page. It used to be /var/www/html, which is usually the web
+# root of the apache/nginx just stopped: its existing index.html was kept (the decoy became the "Apache2 Debian
+# Default Page" behind a Caddy Server header), and its PHP source (wp-config.php with database passwords) and
+# .git were served raw by file_server.
+mask_docroot=/var/www/a-ui-mask
 
 # Whether this install/update has already stopped the panel. Any failure
 # exit after that point must bring it back up first: a-ui.service's
@@ -776,8 +783,25 @@ handle_existing_web_server() {
 # point, so the rollback command must be reprinted.
 print_stopped_svc_rollback_hint() {
     [[ -z "${stopped_web_svc}" ]] && return 0
+    # When a failure happens after Caddy is already serving the new config (e.g. the certificate was not issued),
+    # "nothing is listening" would be false, and enable --now would fail because Caddy holds the ports.
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        echo -e "${yellow}${stopped_web_svc} has already been stopped; 80/443 are now held by Caddy${plain}"
+        echo -e "${yellow}To restore the old site first: systemctl disable --now caddy && systemctl enable --now ${stopped_web_svc}${plain}"
+        return 0
+    fi
     echo -e "${yellow}${stopped_web_svc} has already been stopped; nothing is currently listening on 80/443${plain}"
     echo -e "${yellow}To restore the old site first: systemctl enable --now ${stopped_web_svc}${plain}"
+}
+
+# A Caddy installed during this run is stopped and disabled when the wizard fails before our Caddyfile is written
+# (the user enters q while choosing the decoy site, or writing the config fails): the Debian/Ubuntu caddy package
+# starts with its default :80 site, which would make the "nothing is listening" hint false, make restoring the old
+# site fail because the port is taken, and come back on every reboot.
+stop_fresh_caddy() {
+    [[ "${caddy_freshly_installed}" != "1" ]] && return 0
+    systemctl disable --now caddy >/dev/null 2>&1
+    caddy_freshly_installed=0
 }
 
 # If the web server handle_existing_web_server stopped was our own Caddy
@@ -800,6 +824,36 @@ restart_own_caddy_if_stopped() {
     fi
     echo -e "${red}Failed to restart Caddy; please run: systemctl start caddy${plain}"
     return 1
+}
+
+# install_caddy_apt installs Caddy from Caddy's official apt repository, checking every step: previously every
+# step was silent and unchecked, so on a minimal Debian without gpg the keyring was never written but the source
+# list stayed, every later apt update on the host failed, and the screen only said "Failed to install Caddy".
+# Any failure removes the source list and keyring written in this run.
+install_caddy_apt() {
+    local keyring=/usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    local list=/etc/apt/sources.list.d/caddy-stable.list
+    local tmpkey created=()
+    # Only remove what this run created: a source list or keyring the admin added earlier is left alone.
+    [[ -e "${list}" ]] || created+=("${list}")
+    [[ -e "${keyring}" ]] || created+=("${keyring}")
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl gnupg >/dev/null 2>&1
+    tmpkey=$(mktemp) || return 1
+    if ! curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" -o "${tmpkey}" ||
+        ! gpg --batch --yes --dearmor -o "${keyring}" "${tmpkey}" 2>/dev/null ||
+        ! curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" -o "${list}"; then
+        rm -f "${tmpkey}" "${created[@]}"
+        echo -e "${red}Failed to add Caddy's apt repository (could not download the signing key or source list, or gpg is missing)${plain}"
+        return 1
+    fi
+    rm -f "${tmpkey}"
+    if ! apt-get update -qq >/dev/null 2>&1 || ! apt-get install -y -qq caddy >/dev/null 2>&1; then
+        rm -f "${created[@]}"
+        apt-get update -qq >/dev/null 2>&1
+        echo -e "${red}apt failed to install Caddy; the Caddy repository added in this run was removed${plain}"
+        return 1
+    fi
+    return 0
 }
 
 # The apt branch's commands have been verified on Ubuntu 20.04.6 aarch64
@@ -826,13 +880,7 @@ install_caddy() {
         dnf copr enable -y @caddy/caddy >/dev/null 2>&1 || yum copr enable -y @caddy/caddy >/dev/null 2>&1
         dnf install -y caddy >/dev/null 2>&1 || yum install -y caddy >/dev/null 2>&1
     else
-        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1
-        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" \
-            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" \
-            > /etc/apt/sources.list.d/caddy-stable.list
-        apt-get update -qq >/dev/null 2>&1
-        apt-get install -y -qq caddy >/dev/null 2>&1
+        install_caddy_apt
     fi
     if ! command -v caddy &>/dev/null; then
         echo -e "${red}Failed to install Caddy${plain}"
@@ -841,15 +889,16 @@ install_caddy() {
     fi
     echo -e "${green}Caddy installed: $(caddy version | head -1)${plain}"
     systemctl enable caddy 2>/dev/null
+    caddy_freshly_installed=1
     return 0
 }
 
 ensure_static_site() {
-    mkdir -p /var/www/html
-    if [[ -f /var/www/html/index.html ]]; then
+    mkdir -p "${mask_docroot}"
+    if [[ -f "${mask_docroot}/index.html" ]]; then
         return 0
     fi
-    cat > /var/www/html/index.html <<'HTMLEOF'
+    cat > "${mask_docroot}/index.html" <<'HTMLEOF'
 <!doctype html>
 <html lang="en">
 <head>
@@ -1203,7 +1252,7 @@ write_caddyfile() {
             header_down Location \"^https?://[^/]+(/.*)?\$\" \"https://{host}\$1\"
         }"
     else
-        mask_block="        root * /var/www/html
+        mask_block="        root * ${mask_docroot}
         file_server"
     fi
 
@@ -1476,6 +1525,7 @@ domain_flow() {
     # did nothing.
     local mask_url
     if ! mask_url=$(choose_mask_site); then
+        stop_fresh_caddy
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"
@@ -1490,6 +1540,7 @@ domain_flow() {
         # write_caddyfile already put the file back when validation failed; when validation passed but
         # restarting Caddy failed the new file is still there, so put the previous one back here.
         restore_caddyfile_if_panel_unchanged "${basepath}"
+        stop_fresh_caddy
         restart_own_caddy_if_stopped
         print_stopped_svc_rollback_hint
         print_rescue_hint_if_force "${force}" "${detected_port}"

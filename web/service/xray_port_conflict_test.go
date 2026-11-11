@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,14 +241,64 @@ func TestHeldPortStillProbesProtocolsTheCoreDoesNotHold(t *testing.T) {
 	running := &xray.Config{InboundConfigs: []xray.InboundConfig{
 		{Tag: "inbound-20500", Port: 20500, Protocol: "socks", Listen: rawf(`"127.0.0.1"`), Settings: rawf(`{"udp":false}`)},
 	}}
-	tcp, udp := heldListeners(running)
+	held := heldListeners(running)
 	spec := inboundListenSpec{Listen: "127.0.0.1", Port: 20500, TCP: true, UDP: true}
-	rest, ok := unheldPart(spec, tcp, udp)
-	if !ok || rest.TCP || !rest.UDP {
-		t.Fatalf("核心只占着 TCP，还要探 UDP；实际 %+v ok=%v", rest, ok)
+	rest := unheldPart(spec, held)
+	if len(rest) != 1 || rest[0].TCP || !rest[0].UDP || rest[0].Listen != "127.0.0.1" {
+		t.Fatalf("核心只占着 TCP，还要探 UDP；实际 %+v", rest)
 	}
-	if _, ok := unheldPart(inboundListenSpec{Listen: "127.0.0.1", Port: 20500, TCP: true}, tcp, udp); ok {
-		t.Fatal("要的正是核心占着的那部分，不该再探测")
+	if rest := unheldPart(inboundListenSpec{Listen: "127.0.0.1", Port: 20500, TCP: true}, held); len(rest) != 0 {
+		t.Fatalf("要的正是核心占着的那部分，不该再探测: %+v", rest)
+	}
+}
+
+// 端口相同但监听地址不同的，核心并没有替我们占着：修复前只按端口号判断，入站从 127.0.0.1 改到 0.0.0.0
+// （或另一个具体地址）时整个跳过探测，别的程序占着公网地址的这个端口，整进程重启后新核心起不来。
+func TestHeldPortProbesAddressesTheCoreDoesNotHold(t *testing.T) {
+	oldAddrs := localAddrsFn
+	localAddrsFn = func() ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::10")}, nil
+	}
+	t.Cleanup(func() { localAddrsFn = oldAddrs })
+
+	held := heldListeners(&xray.Config{InboundConfigs: []xray.InboundConfig{
+		{Tag: "inbound-20600", Port: 20600, Protocol: "socks", Listen: rawf(`"127.0.0.1"`), Settings: rawf(`{"udp":false}`)},
+	}})
+
+	// 改到另一个具体地址：照常探新地址。
+	got := unheldPart(inboundListenSpec{Listen: "192.0.2.10", Port: 20600, TCP: true}, held)
+	if len(got) != 1 || got[0].Listen != "192.0.2.10" || !got[0].TCP {
+		t.Fatalf("换到另一个具体地址应当探测新地址，实际 %+v", got)
+	}
+
+	// 改到所有地址：直接探 0.0.0.0 会撞上自己的核心，改为逐个探核心没占着的本机地址。
+	got = unheldPart(inboundListenSpec{Listen: "0.0.0.0", Port: 20600, TCP: true}, held)
+	var listens []string
+	for _, g := range got {
+		listens = append(listens, g.Listen)
+	}
+	if strings.Join(listens, ",") != "192.0.2.10,2001:db8::10" {
+		t.Fatalf("改到所有地址应当逐个探核心没占着的本机地址，实际 %v", listens)
+	}
+
+	// 拆出来的地址只认端口占用：探它遇到别的错误（地址不可用）不能把整个入站判成冲突。
+	oldProbe := probeListenFn
+	t.Cleanup(func() { probeListenFn = oldProbe })
+	probeListenFn = func(inboundListenSpec) error { return syscall.EADDRNOTAVAIL }
+	if err := probeAll(got); err != nil {
+		t.Fatalf("拆出来的地址探测失败但不是端口占用，不该算冲突: %v", err)
+	}
+	probeListenFn = func(inboundListenSpec) error { return syscall.EADDRINUSE }
+	if err := probeAll(got); err == nil {
+		t.Fatal("拆出来的地址端口被占用，应当算冲突")
+	}
+
+	// 核心占着所有地址时，任何地址都不用探。
+	anyHeld := heldListeners(&xray.Config{InboundConfigs: []xray.InboundConfig{
+		{Tag: "inbound-20600", Port: 20600, Protocol: "socks", Listen: rawf(`"0.0.0.0"`), Settings: rawf(`{"udp":false}`)},
+	}})
+	if got := unheldPart(inboundListenSpec{Listen: "192.0.2.10", Port: 20600, TCP: true}, anyHeld); len(got) != 0 {
+		t.Fatalf("核心占着所有地址时不该探测: %+v", got)
 	}
 }
 

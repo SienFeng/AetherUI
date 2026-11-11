@@ -656,16 +656,51 @@ ssl_cert_issue() {
 }
 
 install_acme() {
-    cd ~
+    cd ~ || return 1
     LOGI "开始安装acme脚本..."
-    curl https://get.acme.sh | sh
-    if [ $? -ne 0 ]; then
+    # 先下载再执行：curl https://get.acme.sh | sh 的退出码是 sh 的，下载失败时 sh 读到空输入、照样返回 0。
+    local installer
+    installer=$(mktemp) || return 1
+    if ! curl -fsSL https://get.acme.sh -o "${installer}" || ! sh "${installer}"; then
+        rm -f "${installer}"
         LOGE "acme安装失败"
         return 1
-    else
-        LOGI "acme安装成功"
     fi
+    rm -f "${installer}"
+    if [ ! -x ~/.acme.sh/acme.sh ]; then
+        LOGE "acme安装失败"
+        return 1
+    fi
+    LOGI "acme安装成功"
     return 0
+}
+
+# 证书菜单的几个小工具。
+#
+# valid_cert_domain：修复前域名完全不校验、命令里也不加引号。直接回车时 grep 没有模式、计数为 0，「已有证书」
+# 检查照样通过，签发失败后的清理就变成 rm -rf ~/.acme.sh/——acme.sh 本体、账户密钥和其它所有域名的证书与续期配置
+# 一起删光，续期任务指向一个已经不存在的脚本，现有 TLS 入站的证书 90 天内悄悄过期。
+# acme_cert_exists：按 --list 的第一列（Main_Domain）精确比对；修复前子串匹配，有 sub.example.com 时 example.com 被拒。
+# remove_acme_domain：签发失败后的清理。acme.sh 3.0.6 起默认 ECC，配置在 <域名>_ecc 目录，修复前只删 <域名>，
+# 失败一次之后 --list 里还有它，此后每次重试都被「已有证书」拒掉。
+# caddy_managed_domain：安装向导配好的 Caddy 证书同步对应的域名（a-ui-cert-sync 每小时把它的证书写进 /root/cert）。
+valid_cert_domain() {
+    [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+}
+
+acme_cert_exists() {
+    ~/.acme.sh/acme.sh --list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qxF -- "$1"
+}
+
+remove_acme_domain() {
+    valid_cert_domain "$1" || return 0
+    ~/.acme.sh/acme.sh --remove -d "$1" >/dev/null 2>&1
+    ~/.acme.sh/acme.sh --remove -d "$1" --ecc >/dev/null 2>&1
+    rm -rf "${HOME}/.acme.sh/$1" "${HOME}/.acme.sh/$1_ecc"
+}
+
+caddy_managed_domain() {
+    sed -n 's#^ExecStart=/usr/local/bin/a-ui-cert-sync ##p' /etc/systemd/system/a-ui-cert-sync.service 2>/dev/null | head -1
 }
 
 #method for standalone mode
@@ -698,10 +733,17 @@ ssl_cert_issue_standalone() {
     #get the domain here,and we need verify it
     local domain=""
     read -p "请输入你的域名:" domain
+    if ! valid_cert_domain "${domain}"; then
+        LOGE "域名格式不正确（不能为空，只能包含字母、数字、- 和 .）: ${domain}"
+        exit 1
+    fi
+    if [[ "$(caddy_managed_domain | tr '[:upper:]' '[:lower:]')" == "$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')" ]]; then
+        LOGE "这个域名的证书由 Caddy 自动申请并同步到 /root/cert（a-ui-cert-sync），无需再用 acme 申请"
+        exit 1
+    fi
     LOGD "你输入的域名为:${domain},正在进行域名合法性校验..."
     #here we need to judge whether there exists cert already
-    local currentCert=$(~/.acme.sh/acme.sh --list | grep ${domain} | wc -l)
-    if [ ${currentCert} -ne 0 ]; then
+    if acme_cert_exists "${domain}"; then
         local certInfo=$(~/.acme.sh/acme.sh --list)
         LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
         LOGI "$certInfo"
@@ -712,29 +754,32 @@ ssl_cert_issue_standalone() {
     #get needed port here
     local WebPort=80
     read -p "请输入你所希望使用的端口,如回车将使用默认80端口:" WebPort
-    if [[ ${WebPort} -gt 65535 || ${WebPort} -lt 1 ]]; then
-        LOGE "你所选择的端口${WebPort}为无效值,将使用默认80端口进行申请"
+    # 回车（空）照常用 80；不是 1-65535 的数字时报错并真的改用 80（修复前只报错，原值照样传给 --httpport）。
+    if ! [[ "${WebPort}" =~ ^[0-9]{1,5}$ ]] || (( 10#${WebPort} < 1 || 10#${WebPort} > 65535 )); then
+        [[ -n "${WebPort}" ]] && LOGE "你所选择的端口${WebPort}为无效值,将使用默认80端口进行申请"
+        WebPort=80
     fi
+    WebPort=$((10#${WebPort}))
     LOGI "将会使用${WebPort}进行证书申请,请确保端口处于开放状态..."
     #NOTE:This should be handled by user
     #open the port and kill the occupied progress
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    ~/.acme.sh/acme.sh --issue -d ${domain} --standalone --httpport ${WebPort}
+    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport "${WebPort}"
     if [ $? -ne 0 ]; then
         LOGE "证书申请失败,原因请参见报错信息"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_domain "${domain}"
         exit 1
     else
         LOGI "证书申请成功,开始安装证书..."
     fi
     #install cert
-    ~/.acme.sh/acme.sh --installcert -d ${domain} --ca-file /root/cert/ca.cer \
-        --cert-file /root/cert/${domain}.cer --key-file /root/cert/${domain}.key \
-        --fullchain-file /root/cert/fullchain.cer
+    ~/.acme.sh/acme.sh --installcert -d "${domain}" --ca-file "/root/cert/${domain}.ca.cer" \
+        --cert-file "/root/cert/${domain}.cer" --key-file "/root/cert/${domain}.key" \
+        --fullchain-file "/root/cert/${domain}.fullchain.cer"
 
     if [ $? -ne 0 ]; then
         LOGE "证书安装失败,脚本退出"
-        rm -rf ~/.acme.sh/${domain}
+        remove_acme_domain "${domain}"
         exit 1
     else
         LOGI "证书安装成功,开启自动更新..."
@@ -742,12 +787,13 @@ ssl_cert_issue_standalone() {
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     if [ $? -ne 0 ]; then
         LOGE "自动更新设置失败,脚本退出"
-        ls -lah cert
+        ls -lah "$certPath"
         chmod 755 $certPath
         exit 1
     else
         LOGI "证书已安装且已开启自动更新,具体信息如下"
-        ls -lah cert
+        LOGI "证书文件: /root/cert/${domain}.fullchain.cer  私钥: /root/cert/${domain}.key（填到入站的证书路径里）"
+        ls -lah "$certPath"
         chmod 755 $certPath
     fi
 
@@ -778,10 +824,17 @@ ssl_cert_issue_by_cloudflare() {
         fi
         LOGD "请设置域名:"
         read -p "Input your domain here:" CF_Domain
+        if ! valid_cert_domain "${CF_Domain}"; then
+            LOGE "域名格式不正确（不能为空，只能包含字母、数字、- 和 .）: ${CF_Domain}"
+            exit 1
+        fi
+        if [[ "$(caddy_managed_domain | tr '[:upper:]' '[:lower:]')" == "$(printf '%s' "${CF_Domain}" | tr '[:upper:]' '[:lower:]')" ]]; then
+            LOGE "这个域名的证书由 Caddy 自动申请并同步到 /root/cert（a-ui-cert-sync），无需再用 acme 申请"
+            exit 1
+        fi
         LOGD "你的域名设置为:${CF_Domain},正在进行域名合法性校验..."
         #here we need to judge whether there exists cert already
-        local currentCert=$(~/.acme.sh/acme.sh --list | grep ${CF_Domain} | wc -l)
-        if [ ${currentCert} -ne 0 ]; then
+        if acme_cert_exists "${CF_Domain}"; then
             local certInfo=$(~/.acme.sh/acme.sh --list)
             LOGE "域名合法性校验失败,当前环境已有对应域名证书,不可重复申请,当前证书详情:"
             LOGI "$certInfo"
@@ -805,20 +858,20 @@ ssl_cert_issue_by_cloudflare() {
         fi
         export CF_Key="${CF_GlobalKey}"
         export CF_Email=${CF_AccountEmail}
-        ~/.acme.sh/acme.sh --issue --dns dns_cf -d ${CF_Domain} -d *.${CF_Domain} --log
+        ~/.acme.sh/acme.sh --issue --dns dns_cf -d "${CF_Domain}" -d "*.${CF_Domain}" --log
         if [ $? -ne 0 ]; then
             LOGE "证书签发失败,脚本退出"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_domain "${CF_Domain}"
             exit 1
         else
             LOGI "证书签发成功,安装中..."
         fi
-        ~/.acme.sh/acme.sh --installcert -d ${CF_Domain} -d *.${CF_Domain} --ca-file /root/cert/ca.cer \
-            --cert-file /root/cert/${CF_Domain}.cer --key-file /root/cert/${CF_Domain}.key \
-            --fullchain-file /root/cert/fullchain.cer
+        ~/.acme.sh/acme.sh --installcert -d "${CF_Domain}" -d "*.${CF_Domain}" --ca-file "/root/cert/${CF_Domain}.ca.cer" \
+            --cert-file "/root/cert/${CF_Domain}.cer" --key-file "/root/cert/${CF_Domain}.key" \
+            --fullchain-file "/root/cert/${CF_Domain}.fullchain.cer"
         if [ $? -ne 0 ]; then
             LOGE "证书安装失败,脚本退出"
-            rm -rf ~/.acme.sh/${CF_Domain}
+            remove_acme_domain "${CF_Domain}"
             exit 1
         else
             LOGI "证书安装成功,开启自动更新..."
@@ -826,12 +879,13 @@ ssl_cert_issue_by_cloudflare() {
         ~/.acme.sh/acme.sh --upgrade --auto-upgrade
         if [ $? -ne 0 ]; then
             LOGE "自动更新设置失败,脚本退出"
-            ls -lah cert
+            ls -lah "$certPath"
             chmod 755 $certPath
             exit 1
         else
             LOGI "证书已安装且已开启自动更新,具体信息如下"
-            ls -lah cert
+            LOGI "证书文件: /root/cert/${CF_Domain}.fullchain.cer  私钥: /root/cert/${CF_Domain}.key（填到入站的证书路径里）"
+            ls -lah "$certPath"
             chmod 755 $certPath
         fi
     else

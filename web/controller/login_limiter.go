@@ -19,6 +19,11 @@ const (
 	// 记录数上限。不设上限的话，攻击者轮换来源地址就能把这张表撑到
 	// 吃光内存。
 	loginMaxEntries = 10000
+	// 表满时，表外的新来源共用一个令牌桶：最多连续 loginOverflowBurst 次，之后每 loginOverflowRefill
+	// 补一次。按速率限、不锁定：攻击者撑满表之后也只剩每分钟几次的总猜测量，而恰好这时从新地址登录的
+	// 管理员最坏只是要多试几次，不会被锁在门外。
+	loginOverflowBurst  = 5
+	loginOverflowRefill = 12 * time.Second
 )
 
 type loginAttempt struct {
@@ -33,6 +38,9 @@ type loginLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*loginAttempt
 	now     func() time.Time
+	// 表外来源共用的令牌桶（见 loginOverflowBurst）。overflowAt 为零表示还没用过，桶是满的。
+	overflowTokens float64
+	overflowAt     time.Time
 }
 
 func newLoginLimiter() *loginLimiter {
@@ -72,8 +80,8 @@ const (
 type loginTicket struct {
 	l   *loginLimiter
 	key string
-	// tracked 为假表示这次尝试没有计数：表满且全是锁定中的来源时，新来源暂时
-	// 不计数（宁可放过一个新来源，也不提前解除别人的锁定），沿用改动前的取舍。
+	// tracked 为假表示这次尝试没有单独计数：表满且全是锁定中的来源时，新来源不进表
+	// （不提前解除别人的锁定），改由共用的令牌桶限速（见 takeOverflowToken）。
 	tracked        bool
 	failuresBefore int
 	windowBefore   time.Time
@@ -101,8 +109,12 @@ func (l *loginLimiter) Begin(ip string) (*loginTicket, time.Duration, loginGate)
 			l.evict(now)
 		}
 		if len(l.entries) >= loginMaxEntries {
-			// 表里全是仍在锁定期或仍有尝试在校验中的来源。宁可这一个新来源暂时
-			// 不计数，也不能为了腾位置把别人的锁定提前解除。
+			// 表里全是仍在锁定期或仍有尝试在校验中的来源。不能为了腾位置把别人的锁定提前解除，
+			// 这个新来源改由共用的令牌桶限速。修复前它直接放行、完全不计数：先锁满 10000 个来源
+			// （IPv6 一个 /48 就有 65536 个 /64），之后每个新来源都能无限次猜密码。
+			if !l.takeOverflowToken(now) {
+				return nil, 0, loginGateBusy
+			}
 			return &loginTicket{l: l, key: key}, 0, loginGateOpen
 		}
 		e = &loginAttempt{windowStart: now}
@@ -120,6 +132,24 @@ func (l *loginLimiter) Begin(ip string) (*loginTicket, time.Duration, loginGate)
 	}
 	e.inFlight++
 	return &loginTicket{l: l, key: key, tracked: true, failuresBefore: e.failures, windowBefore: e.windowStart}, 0, loginGateOpen
+}
+
+// takeOverflowToken 从表外来源共用的令牌桶里取一个，桶空时返回 false。调用方持锁。
+func (l *loginLimiter) takeOverflowToken(now time.Time) bool {
+	if l.overflowAt.IsZero() {
+		l.overflowTokens = loginOverflowBurst
+	} else if elapsed := now.Sub(l.overflowAt); elapsed > 0 {
+		l.overflowTokens += float64(elapsed) / float64(loginOverflowRefill)
+		if l.overflowTokens > loginOverflowBurst {
+			l.overflowTokens = loginOverflowBurst
+		}
+	}
+	l.overflowAt = now
+	if l.overflowTokens < 1 {
+		return false
+	}
+	l.overflowTokens--
+	return true
 }
 
 // finish 结束一次尝试、归还名额，返回该来源的记录；已经结束过或没有计数时返回 nil。

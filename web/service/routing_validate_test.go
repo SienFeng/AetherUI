@@ -27,6 +27,8 @@ func TestMain(m *testing.M) {
 			panic(err)
 		}
 	}
+	// 测试里的订阅服务都在 127.0.0.1 上；拦截本身由 TestSubscriptionFetchRefusesLocalAddresses 单独测。
+	AllowLocalSubscriptionsForTest()
 	os.Exit(m.Run())
 }
 

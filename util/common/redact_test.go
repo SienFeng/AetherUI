@@ -62,3 +62,20 @@ func TestRedactURLErrorKeepsErrorChain(t *testing.T) {
 		t.Errorf("fmt 打印出了未隐去的内容: %q", got)
 	}
 }
+
+// 令牌放在路径里（/sub/<token>、/client/<uuid>）时，修复前只隐去查询串，令牌照样进日志。
+func TestRedactURLsMasksTokenLikePathSegments(t *testing.T) {
+	cases := map[string]string{
+		`Get "https://sub.example.com/sub/9f8a7c6e5d4b3a2f1e0d": EOF`:                    `Get "https://sub.example.com/sub/<已隐去>": EOF`,
+		`Get "https://a.example/api/v1/client/0b7f3c2e-4a1d-4e8b-9c6f-2d5e8a1b3c7d?x=1"`: `Get "https://a.example/api/v1/client/<已隐去>?<已隐去>"`,
+		// 普通路径段（短词、带扩展名的文件名、只有字母的长词）原样保留，排查要靠它们。
+		`https://download.example/geoip.dat`:             `https://download.example/geoip.dat`,
+		`https://a.example/api/v1/client/subscribe`:      `https://a.example/api/v1/client/subscribe`,
+		`https://a.example/IP2LOCATION-LITE-DB3.BIN.ZIP`: `https://a.example/IP2LOCATION-LITE-DB3.BIN.ZIP`,
+	}
+	for in, want := range cases {
+		if got := RedactURLs(in); got != want {
+			t.Errorf("RedactURLs(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}

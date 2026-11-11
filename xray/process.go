@@ -288,6 +288,10 @@ func (p *process) Start() (err error) {
 	return nil
 }
 
+// ErrNotRunning 是 Stop 遇到进程本来就没在跑（或在 IsRunning 与 Stop 之间自己退出了）时返回的错误。
+// 调用方据此区分「没什么可停的」与「停不下来」：前者可以接着起新进程，后者不行。
+var ErrNotRunning = errors.New("xray is not running")
+
 // stopWaitTimeout 是 Stop 等旧进程退出的上限。SIGKILL 之后内核回收通常是毫秒级，
 // 等满这个时长说明进程卡在不可中断的状态里，那时继续等也没有意义。做成变量是为了测试。
 var stopWaitTimeout = 5 * time.Second
@@ -302,7 +306,7 @@ func (p *process) Stop() error {
 	proc, running, done := p.proc, p.proc != nil && !p.exited, p.done
 	p.mu.Unlock()
 	if !running {
-		return errors.New("xray is not running")
+		return ErrNotRunning
 	}
 	// os.Process 的 Kill 与另一个 goroutine 里正在进行的 Wait 可以同时调用。
 	killErr := proc.Kill()
