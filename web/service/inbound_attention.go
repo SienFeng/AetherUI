@@ -48,7 +48,8 @@ const (
 )
 
 // classifyBlocked 按 lastAt（毫秒）所在小时与前一小时里，家里有没有实质流量判断。
-// 「实质」与并存判定同一门槛（coexistMinActiveBytes）。
+// 「实质」与并存判定同一门槛（coexistMinActiveBytes）。自动出差放行的防共享门槛另用更严的 homeInUseAround
+// （还要后一小时家里接着用）：这里是看最近一次被拦的实时提示，等不到后一小时，两者不要合并。
 func classifyBlocked(lastAt int64, rows []model.InboundIPHour, home *cidrSet) string {
 	sec := lastAt / 1000
 	hour := sec - sec%3600

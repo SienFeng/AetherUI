@@ -37,4 +37,5 @@ const (
 	RegionPassCleared   = "cleared"   // 管理员在编辑里清空了地区限制
 	RegionPassAutoOff   = "auto_off"  // 管理员关掉了入站的自动出差放行（只结束自动通行证）
 	RegionPassRelocated = "relocated" // 长住外地，地区已改成这个省，通行证不再需要
+	RegionPassMoved     = "moved"     // 自动通行证：这个省一段时间没用、别的省在被拦，人换了地方
 )
