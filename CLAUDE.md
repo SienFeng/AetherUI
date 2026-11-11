@@ -503,6 +503,8 @@ fail open 有三条边界，都不能收紧成拒绝：xray 自身故障（二�
 
 `regionCIDRSource` 读设置失败时**退回并集**：读设置失败是个与地区限制无关的故障（库锁、磁盘满），不该由它决定谁能连上。
 
+**省份 → IP 段必须走缓存**（`provinceCIDRCache`，`web/service/geo.go`；`regionCIDRSource` 与 `allowedSetFor` 都经它）。多数票算一次要扫遍四个源约 125 万段并排序，1 核机器上约 0.4 秒，而调用方全是周期性的：自动出差放行每分钟对每个入站算一到数次、并发判定每 30 秒、生成配置（后台审计、规则列表每 60 秒的待生效判断都会生成）对每个地区入站各算一次。2026-11-11 香港生产机（1 核、8 个自动出差入站）每分钟 :14 秒满核 5~6 秒，栈采样 68% 落在 `AutoTravelJob → allowedSetFor → majorityCIDRs`。失效判据与 `idcSnapshot` 相同：`SameSources`（`DB()` 每次新建 `Multi`，按包装指针做键永远不命中），口径进缓存键，省份顺序无关；返回的切片与集合是共享的，**调用方只能读**。新增任何按省份取段的路径都要经 `regionCIDRSource` / `allowedSetFor`，不要直接调 `Multi.CIDRsOfProvinces` / `MajorityCIDRsOfProvinces`。冷启动（面板启动、IP 库每日更新换掉任何一个源）后每种省份组合各算一次，仍有一次性的短暂尖峰。
+
 ### 地区限制的降级、出差通行证与自动出差放行
 
 设计见 `docs/superpowers/specs/2026-11-09-region-flexibility-auto-travel-design.md`。只记代码里看不出来的约束：

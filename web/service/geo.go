@@ -176,16 +176,114 @@ func (s majorityCIDRSource) CIDRsOfProvinces(provinces []string) []string {
 // 取不到设置、或设置是默认值时一律退回并集：这条路径生成的是**允许集**，
 // 而空的或过窄的允许集配上 ! 取反就是把人挡在门外。读设置失败是个与地区
 // 限制无关的故障（库锁、磁盘满），不该由它决定谁能连上。
+//
+// 返回的是带缓存的包装（cachedCIDRSource），见 provinceCIDRCache。
 func regionCIDRSource(db *ipdb.Multi, settingService *SettingService) provinceCIDRSource {
+	if db == nil {
+		return db // 与改动前一致：调用方自己判空
+	}
+	return cachedRegionSource(db, settingService)
+}
+
+// cachedRegionSource 是 regionCIDRSource 的具体类型版本，allowedSetFor 要用它取缓存的集合。
+// 读设置放在缓存锁之外：那是一次查库，不该和别人的缓存命中排队。
+func cachedRegionSource(db *ipdb.Multi, settingService *SettingService) cachedCIDRSource {
 	mode, err := settingService.GetRegionMatchMode()
 	if err != nil {
 		logger.Warning("读取地区匹配模式失败，本轮按并集口径生成:", err)
-		return db
+		return cachedCIDRSource{db: db, inner: db, mode: "union"}
 	}
 	if mode == RegionMatchMajority {
-		return majorityCIDRSource{db}
+		return cachedCIDRSource{db: db, inner: majorityCIDRSource{db}, mode: "majority"}
 	}
-	return db
+	return cachedCIDRSource{db: db, inner: db, mode: "union"}
+}
+
+// provinceCIDRCache 缓存「一组省份 → IP 段（及其集合）」，IP 库没换、口径没变就不重算。
+//
+// 按多数票算一次要扫遍全部源的全部网段并排序（四个源约 125 万段），1 核机器上约 0.4 秒；
+// 而它的调用方都是周期性的：自动出差放行每分钟对每个开了自动出差的入站算一到数次、并发判定
+// 每 30 秒、生成配置（审计、规则列表每 60 秒的待生效判断都会生成一份）对每个地区入站各算一次。
+// 不缓存时生产机（1 核、8 个自动出差入站）每分钟有 5~6 秒满核，2026-11-11 栈采样定位到这里。
+//
+// 失效与 idcSnapshot 同一个判据：IPDBService.DB() 每次都新建一个 Multi 包装，按包装的指针做键
+// 永远不命中，所以比较底下的各个源（SameSources）——更新、卸下、装回任何一个源都会整表作废。
+// 口径进缓存键。缓存里的切片与集合是共享的，调用方只能读，不能改。
+var (
+	provinceCIDRMu   sync.Mutex
+	provinceCIDRFor  *ipdb.Multi
+	provinceCIDRs    = map[string][]string{}
+	provinceCIDRSets = map[string]*cidrSet{}
+)
+
+// provinceCIDRCacheMax 限制缓存的省份组合数。实际只有「各入站的地区 + 被拦来源的省份 + 通行证」
+// 这几十种；按多数票一个省的段列表加集合约 64 KB（四源实测），满了也只有几 MB。到上限时整表
+// 清空，免得省份组合不断变化时在 1G 小机器上无界增长。
+const provinceCIDRCacheMax = 64
+
+// resetProvinceCIDRCache 只在测试之间清状态。
+func resetProvinceCIDRCache(t interface{ Helper() }) {
+	t.Helper()
+	provinceCIDRMu.Lock()
+	defer provinceCIDRMu.Unlock()
+	provinceCIDRFor = nil
+	provinceCIDRs = map[string][]string{}
+	provinceCIDRSets = map[string]*cidrSet{}
+}
+
+// cachedCIDRSource 给 provinceCIDRSource 套上 provinceCIDRCache。
+type cachedCIDRSource struct {
+	db    *ipdb.Multi
+	inner provinceCIDRSource
+	mode  string
+}
+
+// Provinces 让包装照样满足 provinceLister：buildGeoPlanWith 靠它察觉多省的允许集缺了省。
+func (c cachedCIDRSource) Provinces() []string { return c.db.Provinces() }
+
+func (c cachedCIDRSource) CIDRsOfProvinces(provinces []string) []string {
+	cidrs, _ := c.lookup(provinces, false)
+	return cidrs
+}
+
+// allowedSet 返回这组省份的 cidrSet（与 CIDRsOfProvinces 同一份段）。
+func (c cachedCIDRSource) allowedSet(provinces []string) *cidrSet {
+	_, set := c.lookup(provinces, true)
+	return set
+}
+
+// lookup 在锁内计算：同一时刻冷启动的几个调用方排队等第一个算完，而不是在 1 核上各算一遍。
+func (c cachedCIDRSource) lookup(provinces []string, wantSet bool) ([]string, *cidrSet) {
+	// 两种口径都按省份集合判断，与顺序、重复无关；排序用副本，不动调用方的切片。
+	sorted := append([]string(nil), provinces...)
+	sort.Strings(sorted)
+	key := c.mode + "\x00" + strings.Join(sorted, "\x00")
+
+	provinceCIDRMu.Lock()
+	defer provinceCIDRMu.Unlock()
+	if !provinceCIDRFor.SameSources(c.db) {
+		provinceCIDRFor = c.db
+		provinceCIDRs = map[string][]string{}
+		provinceCIDRSets = map[string]*cidrSet{}
+	}
+	cidrs, ok := provinceCIDRs[key]
+	if !ok {
+		if len(provinceCIDRs) >= provinceCIDRCacheMax {
+			provinceCIDRs = map[string][]string{}
+			provinceCIDRSets = map[string]*cidrSet{}
+		}
+		cidrs = c.inner.CIDRsOfProvinces(provinces)
+		provinceCIDRs[key] = cidrs
+	}
+	if !wantSet {
+		return cidrs, nil
+	}
+	set, ok := provinceCIDRSets[key]
+	if !ok {
+		set = newCIDRSet(cidrs)
+		provinceCIDRSets[key] = set
+	}
+	return cidrs, set
 }
 
 // geoPlan 是一轮生成的结果：dat 里要写哪几组数据，以及每个入站用哪个 tag。

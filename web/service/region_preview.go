@@ -81,12 +81,14 @@ func (s *cidrSet) Contains(ip string) bool {
 }
 
 // allowedSetFor 按当前 IP 库与合并口径构造 provinces 的允许集。
+//
+// 结果来自 provinceCIDRCache，是共享的只读集合，调用方不能改它。
 func allowedSetFor(provinces []string) (*cidrSet, error) {
 	db := (&IPDBService{}).DB()
 	if db == nil {
 		return nil, common.NewError("IP 归属地库未加载")
 	}
-	return newCIDRSet(regionCIDRSource(db, &SettingService{}).CIDRsOfProvinces(provinces)), nil
+	return cachedRegionSource(db, &SettingService{}).allowedSet(provinces), nil
 }
 
 // majorityProvince 取各源里票数最多的中国省份，平票按源顺序取第一个；没有任何
