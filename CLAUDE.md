@@ -51,7 +51,7 @@ go mod tidy && go vet ./...
 
 ### 发版
 
-打 tag 推送即触发 `.github/workflows/release.yml`：matrix 构建 amd64/arm64 → 打包中/英两个 tar.gz → 生成并自检 `SHA256SUMS` → `gh release create`（tar.gz 与 `SHA256SUMS` 一起上传）。安装脚本有 `SHA256SUMS` 就按文件名逐字核对，对不上或缺这一行就中止；早于它的版本只警告。重新上传某个资产必须重新生成 `SHA256SUMS`，否则那个版本装不上（有意如此）。`SHA256SUMS` 证明完整性、不证明来源（它和安装包在同一个 release 里）。CI 会在编译前把 tag 名写入 `config/version`（该文件由 `//go:embed` 读入），因此**版本号不在代码里维护**。`workflow_dispatch` 可试构建但不建 release。
+打 tag 推送即触发 `.github/workflows/release.yml`：matrix 构建 amd64/arm64（arm64 在 GitHub 原生 ARM 构建机 `ubuntu-24.04-arm` 上本机编译，不装交叉工具链、不依赖 apt——2026-11-11 构建机解析不了 Ubuntu 软件源，交叉工具链装不上，发版卡死；两路都在编译后跑一次 `./a-ui -v`，构建作业 20 分钟超时）→ 打包中/英两个 tar.gz → 生成并自检 `SHA256SUMS` → `gh release create`（tar.gz 与 `SHA256SUMS` 一起上传）。安装脚本有 `SHA256SUMS` 就按文件名逐字核对，对不上或缺这一行就中止；早于它的版本只警告。重新上传某个资产必须重新生成 `SHA256SUMS`，否则那个版本装不上（有意如此）。`SHA256SUMS` 证明完整性、不证明来源（它和安装包在同一个 release 里）。CI 会在编译前把 tag 名写入 `config/version`（该文件由 `//go:embed` 读入），因此**版本号不在代码里维护**。`workflow_dispatch` 可试构建但不建 release。
 
 ## 架构要点
 

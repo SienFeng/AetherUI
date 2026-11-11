@@ -13,11 +13,20 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # arm64 在 GitHub 的原生 ARM 构建机上编译，不再装交叉工具链：2026-11-11 发 v1.56.0 时
+    # 构建机解析不了 security.ubuntu.com，apt-get install gcc-aarch64-linux-gnu 卡了近 20 分钟后
+    # 失败，发版整个卡住。原生构建机自带 gcc 与静态链接用的 libc.a，这一路从此不依赖 apt。
+    runs-on: ${{ matrix.runner }}
+    # 正常两三分钟编完；挂住时尽早失败，而不是等到默认的 6 小时
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +55,14 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      # 项目依赖 mattn/go-sqlite3，必须开 CGO，交叉编译需要目标架构的 gcc。
-      # libc6-dev-arm64-cross 提供静态链接所需的 libc.a：它只是 gcc-aarch64-linux-gnu
-      # 的 Recommends，显式列出以免 apt 配置变化导致静态链接失败。
-      - name: 安装 arm64 交叉工具链
-        if: matrix.arch == 'arm64'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      # 项目依赖 mattn/go-sqlite3，必须开 CGO。两种架构都在本机架构上编译，用构建机自带的 gcc；
+      # 静态链接所需的 libc.a 来自预装的 libc6-dev。缺了的话下面「编译」里的静态链接断言会失败。
+      - name: 检查本机编译器
+        run: |
+          uname -m
+          gcc --version | head -1
 
-      # 必须静态链接：CI 宿主机的 glibc（ubuntu-latest 现为 2.39）远新于常见部署环境，
+      # 必须静态链接：CI 宿主机的 glibc（ubuntu-latest 现为 26.04 的 2.43）远新于常见部署环境，
       # 动态链接会把宿主 glibc 的符号版本烙进二进制，在 glibc < 2.34 的系统（Ubuntu 20.04、
       # Debian 11 等）上动态链接器解析失败，进程连 main() 都到不了。
       # netgo/osusergo 是静态链接 glibc 的必备配套——否则 DNS 解析与用户查找仍会走 cgo，
@@ -61,9 +70,6 @@ jobs:
       # sqlite_omit_load_extension 去掉 go-sqlite3 对 dlopen 的依赖，本项目不使用该功能。
       - name: 编译
         run: |
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            export CC=aarch64-linux-gnu-gcc
-          fi
           CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.arch }} \
             go build -trimpath \
               -tags "netgo,osusergo,sqlite_omit_load_extension" \
@@ -76,6 +82,8 @@ jobs:
             echo "::error::a-ui 不是静态链接，将在 glibc 较老的系统上无法启动"
             exit 1
           fi
+          # 在目标架构上编译，产物可以当场跑一次：-v 在任何初始化之前返回，不碰数据库
+          ./a-ui -v
 
       - name: 打包
         run: |
