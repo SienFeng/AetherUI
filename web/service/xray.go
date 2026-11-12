@@ -331,11 +331,9 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 			return false
 		}
 	}
-	if diff.RoutingConfig != nil {
-		if err := api.ApplyRoutingConfig(diff.RoutingConfig); err != nil {
-			logger.Debug("热应用：下发路由配置失败，退回重启:", err)
-			return false
-		}
+	if _, err := applyRoutingDiff(&api, process.GetConfig(), newCfg, diff, meterOnly); err != nil {
+		logger.Debug("热应用：下发路由配置失败，退回重启:", err)
+		return false
 	}
 	if err := killInboundConns(killPorts); err != nil {
 		logger.Warning("热应用：", err, "，退回整进程重启以保证旧连接断开")
@@ -515,4 +513,51 @@ func defaultOutboundTag(cfg *xray.Config) string {
 		return ""
 	}
 	return outbounds[0].Tag
+}
+
+// routingAPI 是热应用下发路由时用到的控制面调用；xray.XrayAPI 实现它，测试用假的。
+type routingAPI interface {
+	ApplyRoutingConfig(routing []byte) error
+	RemoveRules(ruleTags []string) error
+	AppendRoutingRules(routing []byte) error
+}
+
+// applyRoutingDiff 把 diff 里的路由改动下发给核心，返回是否走了增量。
+//
+// 只换了计量池（meterOnly）时增量下发：按 ruleTag 删掉退池的计量规则，只把新进的接到表尾，其余规则留在核心里
+// 不重建（xray.TailRuleDelta）。整表下发会让 xray 把每条规则重建一遍：内联的域名与 IP 段不进它的缓存、每建一个
+// 匹配器强制 GC 两次，计量规则带 IP 守卫，一条 4 次。计量池每小时都换，整表下发一次在 1 核的生产机上让 xray
+// 满核约 9 秒（2026-11-12 香港生产机实测）；同版本 xray 本机实测整表 200 次强制 GC，增量 18 次。
+//
+// 算不出增量（生成的配置不满足 TailRuleDelta 的前提，比如计量规则后面还有别的规则、ruleTag 重名）或者增量的任何一步
+// 失败，都退回整表下发：整表替换不依赖核心当前的状态，半途删掉的规则会被它补齐。不直接判热应用失败——那会整进程
+// 重启 xray、掐断所有人的连接，而换池每小时都有。整表下发也失败才返回 error，由调用方退回重启。
+func applyRoutingDiff(api routingAPI, oldCfg, newCfg *xray.Config, diff *xray.HotDiff, meterOnly bool) (bool, error) {
+	if diff.RoutingConfig == nil {
+		return false, nil
+	}
+	if meterOnly {
+		delta, err := xray.TailRuleDelta(oldCfg, newCfg, model.IsMeterTag)
+		if err != nil {
+			logger.Info("计量池改动无法增量下发，改为整表下发路由：", err)
+		} else if err := applyRuleDelta(api, delta); err != nil {
+			logger.Warning("计量规则增量下发失败，改为整表下发路由：", err)
+		} else {
+			logger.Infof("xray 计量池改动已增量下发：删除 %d 条、追加 %d 条计量规则，无需重启", len(delta.Remove), delta.AppendCount)
+			return true, nil
+		}
+	}
+	return false, api.ApplyRoutingConfig(diff.RoutingConfig)
+}
+
+func applyRuleDelta(api routingAPI, delta *xray.RuleDelta) error {
+	if len(delta.Remove) > 0 {
+		if err := api.RemoveRules(delta.Remove); err != nil {
+			return err
+		}
+	}
+	if delta.AppendCount > 0 {
+		return api.AppendRoutingRules(delta.AppendRouting)
+	}
+	return nil
 }

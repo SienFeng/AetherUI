@@ -259,11 +259,17 @@ type MeterEntry struct {
 	Domain    string
 }
 
-// Pool 返回当前在池的全部条目，按 (inboundId asc, domain asc) 排序。
+// Pool 返回当前在池的全部条目，按 (进池时刻 asc, inboundId asc, domain asc) 排序。
 //
 // 排序不是可省的整洁工作：生成期用它产出计量出站与计量规则，而
 // Config.Equals 对 OutboundConfigs / RouterConfig 按字节比较——顺序一抖动
-// 就恒判不等，那个 10 秒的 cron 会不停重启 xray。
+// 就恒判不等，那个 10 秒的 cron 会不停重启 xray。进池时刻只在建行时写一次，
+// 排序因此同样确定。
+//
+// 进池时刻排第一，是为了新进池的条目排在最后：换池时热应用只把新进的计量规则
+// 接到核心规则表的末尾（xray.TailRuleDelta），留在池里的不重建。按域名排的话，
+// 新域名会插在中间，它后面的每一条都得删了重建——xray 每建一条带 IP 守卫的计量
+// 规则要强制 GC 4 次，整池重建一次在 1 核的生产机上满核约 9 秒（2026-11-12 实测）。
 //
 // 「在池」的判据是**精确的 CooldownUntil == 0**，绝不是 <= now。CooldownUntil
 // 这一列同时承担「是不是在池」和「冷却到什么时候」两个语义，<= now 会把
@@ -294,18 +300,21 @@ func (s *MeterPoolService) Pool(now time.Time) ([]MeterEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 在 Go 侧排序而不是交给 SQL 的 ORDER BY：排序键是生成期的不变量，
+	// 让它和读取方式解耦，将来换查询条件也不会悄悄丢掉顺序。
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].EnteredAt != rows[j].EnteredAt {
+			return rows[i].EnteredAt < rows[j].EnteredAt
+		}
+		if rows[i].InboundId != rows[j].InboundId {
+			return rows[i].InboundId < rows[j].InboundId
+		}
+		return rows[i].Domain < rows[j].Domain
+	})
 	out := make([]MeterEntry, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, MeterEntry{InboundId: r.InboundId, Domain: r.Domain})
 	}
-	// 在 Go 侧排序而不是交给 SQL 的 ORDER BY：排序键是生成期的不变量，
-	// 让它和读取方式解耦，将来换查询条件也不会悄悄丢掉顺序。
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].InboundId != out[j].InboundId {
-			return out[i].InboundId < out[j].InboundId
-		}
-		return out[i].Domain < out[j].Domain
-	})
 	return out, nil
 }
 

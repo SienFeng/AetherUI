@@ -27,11 +27,20 @@ func setupMeterPoolTest(t *testing.T) {
 }
 
 // putPoolRow 直接写一行池记录，绕过重算逻辑，专测读取与清理。
+// poolRowEnteredAt 是 putPoolRow 写的进池时刻：整个测试进程取一次。Pool 按进池时刻排序，每行各取
+// time.Now() 的话，同一个测试里先后写的几行可能跨过秒边界，顺序随之抖动。
+var poolRowEnteredAt = time.Now().Unix()
+
 func putPoolRow(t *testing.T, inboundId int, dom string, cooldownUntil int64) {
+	t.Helper()
+	putPoolRowAt(t, inboundId, dom, cooldownUntil, poolRowEnteredAt)
+}
+
+func putPoolRowAt(t *testing.T, inboundId int, dom string, cooldownUntil, enteredAt int64) {
 	t.Helper()
 	row := &model.MeterDomain{
 		InboundId: inboundId, Domain: dom,
-		EnteredAt: time.Now().Unix(), CooldownUntil: cooldownUntil,
+		EnteredAt: enteredAt, CooldownUntil: cooldownUntil,
 	}
 	if err := database.GetTrafficDB().Create(row).Error; err != nil {
 		t.Fatalf("写入池行: %v", err)
