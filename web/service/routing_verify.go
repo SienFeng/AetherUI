@@ -213,7 +213,7 @@ func sampleTargets(domains, cidrs []string, perGroup int) ([]sampleTarget, bool)
 //
 // 私网判定用 xray 自己的 geodata.GetPrivateIPMatcher（common/geodata/consts.go）：
 // 与仓库种子 geoip.dat 的 PRIVATE 类别逐段一致（含 RFC 5737 的三个文档段），而它不必
-// 读文件。不手写判定，理由同 newGroupMatcher。
+// 读文件。不手写判定，理由同 groupMatcher。
 func publicSampleIP(entry string, isPrivate func(net.IP) bool) (net.IP, bool) {
 	first := firstUsableIP(entry)
 	if first == nil {
@@ -424,17 +424,9 @@ type groupMatcher struct {
 	ip     *router.IPMatcher
 }
 
-// newGroupMatcher 构造匹配器；某一侧条目为空时不构造那一侧（其匹配恒为否）。
-// 大规则不直接调它，从全进程共用的常驻槽取（largeMatchers）。
-func newGroupMatcher(domains, cidrs []string) (*groupMatcher, error) {
-	r, err := parseGroupRules(domains, cidrs)
-	if err != nil {
-		return nil, err
-	}
-	return r.build()
-}
-
 // groupRules 是一组条目交给 xray 解析后的规则，构建匹配器之前的中间结果。
+// 匹配器不在调用处现建：小规则取自 smallMatchers、大规则取自常驻槽（largeMatchers），
+// 两者都经 buildStampedGroupMatcher 解析、构建。
 // xray 的解析逐条一一对应（失败即报错），某一侧有条目就有同样多条规则。
 type groupRules struct {
 	domain []*geodata.DomainRule
@@ -714,8 +706,9 @@ func (s *RoutingVerifyService) Verify(ruleId int) (*RuleVerifyResult, error) {
 // 不用一份全是「超时」的结论顶掉它），已跑完的照常返回，同时返回 ErrVerifyTruncated。
 //
 // 规则的处理顺序：缓存里还没有当前代次结果的排前面（上一轮被预算截掉的规则下一轮先跑，
-// 不会每轮都卡在同一处）；其余按引用的域名组排，同组序列的规则相邻，单槽匹配器缓存
-// 因此能复用，一轮内同一时刻至多一个匹配器存活。
+// 不会每轮都卡在同一处）；其余按引用的域名组排，同组序列的规则相邻，本轮那一个小规则
+// 匹配器的索引（matcherKey）因此能复用。小规则的匹配器取自全进程共用的 smallMatchers；
+// 大规则的取自常驻槽，一轮内同一时刻至多一个存活。
 func (s *RoutingVerifyService) VerifyAll() (map[int]*RuleVerifyResult, uint64, error) {
 	if !verifyMu.TryLock() {
 		return nil, 0, ErrVerifyBusy
@@ -858,9 +851,9 @@ type verifyShared struct {
 	geoBlockReady bool
 
 	groups map[int]*groupConditions
-	// 小规则的单槽匹配器缓存：只留最近一个组序列的匹配器。按组序列各留一个的话，规则一多
-	// 一轮内的常驻内存就会线性涨上去（1 核 1G 的机器扛不住）；VerifyAll 把同组序列的规则
-	// 排在一起，单槽就够复用。大规则的匹配器不在这里，取自全进程共用的常驻槽（largeMatchers）。
+	// 本轮最近用到的小规则匹配器（取自全进程共用的 smallMatchers，与异常扫描的计划是同一个
+	// 实例）。只是省掉同组序列的规则重复给上万条条目算内容哈希：VerifyAll 把同组序列的规则
+	// 排在一起。大规则的匹配器不在这里，取自全进程共用的常驻槽（largeMatchers）。
 	matcherKey string
 	matcherEnt *matcherEntry
 	// largeRelease 是本轮手里那一个大匹配器的放手函数（至多一个，见 acquireLarge）。
@@ -868,7 +861,8 @@ type verifyShared struct {
 	logRows      map[logRowsKey]*logRowsEntry
 
 	// 抢先命中归因（attributeShadows）用：核心里的规则顺序与各候选规则的匹配器。
-	// 小规则的匹配器一轮内常驻；大规则取自常驻槽，同一时刻只占用一个，归因结束即放手。
+	// 小规则的取自 smallMatchers（这里只是本轮的索引）；大规则取自常驻槽，同一时刻只占用
+	// 一个，归因结束即放手。
 	coreOrder      []*model.RoutingRule
 	coreOrderErr   error
 	coreOrderReady bool
@@ -1054,7 +1048,7 @@ func (sh *verifyShared) group(gid int) *groupConditions {
 }
 
 // matcher 返回一条规则的访问日志匹配器：大规则取自常驻槽（releaseLarge 放手），小规则
-// 按规则实际引用的组序列放进单槽缓存。
+// 取自全进程共用的 smallMatchers（按条目内容复用，审计每轮不再重建）。
 // 刻意不按组各建一个再取「任一命中」：取反条目（!geoip:cn）在合并列表里是对并集取反，
 // 拆成逐组再 OR 就成了对各组分别取反，语义与核心里那条合并后的规则不一致。
 func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
@@ -1064,10 +1058,9 @@ func (sh *verifyShared) matcher(plan *verifyPlan) *matcherEntry {
 	if sh.matcherEnt != nil && sh.matcherKey == plan.groupKey {
 		return sh.matcherEnt
 	}
-	// 先放掉旧的再构建：构建期间旧匹配器已不可达，内存峰值只算一个。
+	// 先丢掉本轮对上一个匹配器的引用再取：少一处攥着旧对象（dat 换了的情形见 smallMatchers）。
 	sh.matcherKey, sh.matcherEnt = "", nil
-	m, err := newGroupMatcher(plan.domains, plan.cidrs)
-	e := &matcherEntry{m: m, err: err}
+	e := smallMatchers.get(plan.domains, plan.cidrs)
 	sh.matcherKey, sh.matcherEnt = plan.groupKey, e
 	return e
 }
@@ -1374,8 +1367,7 @@ func (sh *verifyShared) shadowMatcher(c *model.RoutingRule) *groupMatcher {
 		e = sh.acquireLarge(domains, cidrs)
 		sh.shadowLargeKey, sh.shadowLargeEnt, sh.shadowLargeIds = key, e, usedIds
 	} else {
-		m, err := newGroupMatcher(domains, cidrs)
-		e = &matcherEntry{m: m, err: err}
+		e = smallMatchers.get(domains, cidrs)
 		sh.shadowSmall[key] = e
 	}
 	if e.err != nil {

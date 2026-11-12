@@ -183,7 +183,7 @@ type anomalyPlanSet struct {
 	gen        uint64
 	sig        string
 	rules      []*anomalyRulePlan
-	matchers   map[string]*groupMatcher // 小规则的匹配器，按组序列共享
+	matchers   map[string]*groupMatcher // 小规则的匹配器，按组序列共享；取自 smallMatchers，与审计同一个实例
 	enabledIds map[int]bool
 	// geo 判断封禁连接是否被入站地区限制拦下。地区设置或允许集变化都会改核心配置、
 	// 推进代次，计划随之重建，所以与规则计划同一个缓存口径。
@@ -733,8 +733,9 @@ func (s *RoutingAuditService) buildAnomalyPlans(enabled []*model.RoutingRule) (*
 		if !p.large {
 			m, ok := set.matchers[p.groupKey]
 			if !ok {
-				if m, err = newGroupMatcher(plan.domains, plan.cidrs); err != nil {
-					logger.Warning("路由异常扫描：构造匹配器失败，rule id:", rule.Id, "err:", err)
+				e := smallMatchers.get(plan.domains, plan.cidrs)
+				if m = e.m; e.err != nil {
+					logger.Warning("路由异常扫描：构造匹配器失败，rule id:", rule.Id, "err:", e.err)
 					m = nil
 				}
 				set.matchers[p.groupKey] = m

@@ -62,7 +62,7 @@ var largeMatchers = newLargeMatcherCache()
 // acquire 返回 domains/cidrs（已合并去重的条目）的匹配器与放手函数。建不出来时 err 非 nil，
 // 槽保持为空，下次再试（失败一般在解析阶段，不到构建那一步）。
 func (c *largeMatcherCache) acquire(domains, cidrs []string) (*matcherEntry, func()) {
-	key := largeMatcherKey(domains, cidrs)
+	key := groupMatcherKey(domains, cidrs)
 	c.mu.Lock()
 	for {
 		if c.building {
@@ -170,8 +170,9 @@ func (c *largeMatcherCache) dropLocked() {
 	c.m, c.dats, c.key = nil, nil, [sha256.Size]byte{}
 }
 
-// largeMatcherKey 是合并后条目的内容哈希；每个条目带长度前缀，拼接不会有歧义。
-func largeMatcherKey(domains, cidrs []string) [sha256.Size]byte {
+// groupMatcherKey 是合并后条目的内容哈希；每个条目带长度前缀，拼接不会有歧义。
+// 大规则的常驻槽与小规则的缓存（smallMatchers）共用。
+func groupMatcherKey(domains, cidrs []string) [sha256.Size]byte {
 	h := sha256.New()
 	buf := make([]byte, 0, 32<<10)
 	add := func(list []string) {
@@ -227,10 +228,11 @@ func datsUnchanged(stamps []datStamp) bool {
 }
 
 // largeMatcherBuild 是 acquire 实际调用的构建函数；用 var 只为测试能注入构建中途崩溃。
-var largeMatcherBuild = buildLargeGroupMatcher
+var largeMatcherBuild = buildStampedGroupMatcher
 
-// buildLargeGroupMatcher 解析条目、记下引用的 dat 文件，再建匹配器。
-func buildLargeGroupMatcher(domains, cidrs []string) (*groupMatcher, []datStamp, error) {
+// buildStampedGroupMatcher 解析条目、记下引用的 dat 文件，再建匹配器。大规则的常驻槽与
+// 小规则的缓存共用。
+func buildStampedGroupMatcher(domains, cidrs []string) (*groupMatcher, []datStamp, error) {
 	rules, err := parseGroupRules(domains, cidrs)
 	if err != nil {
 		return nil, nil, err

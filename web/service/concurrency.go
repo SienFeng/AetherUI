@@ -211,7 +211,9 @@ func (s *ConcurrencyService) homeFor(in *model.Inbound) func(ip string) bool {
 }
 
 // sourceBlocker 返回「这个来源会被核心挡在门外」的判断：地区规则（按核心用上的那一份）与机房拦截。
-// 匹配器 30 秒重建一次——判定每秒一轮，每轮读 dat、建集合太贵；通行证的增减最多晚 30 秒反映到这里。
+// 匹配器 30 秒重建一次——判定每秒一轮，每轮读 dat 与通行证太贵；通行证的增减最多晚 30 秒反映到这里。
+// 重建只是重新认一遍各入站此刻的 dat 代码，每个代码的 xray 匹配器取自全进程共用的 geoSources，
+// 不再每次重建（v1.56.3 之前每次重建都强制 GC 十几次，生产机上每 30 秒一根约 0.8 核·秒的尖峰）。
 func (s *ConcurrencyService) sourceBlocker(inbounds []*model.Inbound, now time.Time) func(in *model.Inbound) func(ip string) bool {
 	concurrencyBlockMu.Lock()
 	if concurrencyBlockGeo == nil || now.Sub(concurrencyBlockAt) > 30*time.Second || concurrencyBlockCount != len(inbounds) {

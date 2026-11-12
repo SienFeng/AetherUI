@@ -5,11 +5,9 @@ import (
 
 	"github.com/xtls/xray-core/app/router"
 	routercmd "github.com/xtls/xray-core/app/router/command"
-	"github.com/xtls/xray-core/common/geodata"
 
 	"a-ui/database/model"
 	"a-ui/logger"
-	"a-ui/xray"
 )
 
 // geoBlockMatcher 判断访问日志里一条走了 a-ui-block 的连接，是不是被入站的地区限制拦下的。
@@ -25,6 +23,9 @@ import (
 // 按**核心正在用的**地区规则判断（appliedGeo）：dat 代码取已生效的那份（按内容寻址，xray 的「文件:代码」
 // 缓存不会给出旧集合），锁死的入站（a-ui-geo-closed-*，不引用 dat）所有来源都算被拦——修复前它们匹配器
 // 建不出、一律算「走错了出站」，覆盖这个用户的每条分流规则都变红。
+//
+// 每个 dat 代码的 xray 匹配器取自全进程共用的 geoSources（routing_geo_source_cache.go），构造本身
+// 只是认一遍各入站的代码：自动出差每分钟、并发判定每 30 秒都要构造一次，现建的话每次都强制 GC。
 type geoBlockMatcher struct {
 	// byInbound 是配了地区限制的启用入站 → 它那两条拒绝规则的 source 匹配器。
 	byInbound map[int]*geoSourceRules
@@ -112,7 +113,7 @@ func newGeoBlockMatcherWith(inbounds []*model.Inbound, passes map[int]*model.Inb
 		rules, ok := byCode[code]
 		if !ok {
 			var err error
-			rules, err = buildGeoSourceRules(code)
+			rules, err = geoSources.rulesFor(code)
 			if err != nil {
 				logger.Warning("路由验证：构造地区限制匹配器失败，inbound id:", in.Id, "err:", err)
 			}
@@ -123,27 +124,6 @@ func newGeoBlockMatcherWith(inbounds []*model.Inbound, passes map[int]*model.Inb
 		}
 	}
 	return g
-}
-
-func buildGeoSourceRules(tag string) (*geoSourceRules, error) {
-	xray.EnsureAssetLocation()
-	v6, outside := geoRuleSources(tag)
-	build := func(src []string) (*router.IPMatcher, error) {
-		rules, err := geodata.ParseIPRules(src)
-		if err != nil {
-			return nil, err
-		}
-		return router.NewIPMatcher(rules, router.MatcherAsType_Source)
-	}
-	r := &geoSourceRules{}
-	var err error
-	if r.v6, err = build(v6); err != nil {
-		return nil, err
-	}
-	if r.outside, err = build(outside); err != nil {
-		return nil, err
-	}
-	return r, nil
 }
 
 // Blocks 报告来自 sourceIP、进入 inboundId 的连接会不会被该入站的地区规则拒绝。

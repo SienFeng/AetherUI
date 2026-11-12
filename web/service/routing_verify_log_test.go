@@ -9,6 +9,16 @@ import (
 	"a-ui/database/model"
 )
 
+// newGroupMatcher 直接构造一个匹配器（不经缓存），给只关心判定本身的测试用；某一侧条目为空时
+// 不构造那一侧（其匹配恒为否）。生产代码从 smallMatchers / largeMatchers 取。
+func newGroupMatcher(domains, cidrs []string) (*groupMatcher, error) {
+	r, err := parseGroupRules(domains, cidrs)
+	if err != nil {
+		return nil, err
+	}
+	return r.build()
+}
+
 func TestGroupMatcher(t *testing.T) {
 	m, err := newGroupMatcher(
 		[]string{"domain:openai.com", "full:chatgpt.com", "keyword:gpt", "regexp:^api\\."},

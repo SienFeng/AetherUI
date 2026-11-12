@@ -20,16 +20,16 @@ import (
 // resetAuditCache 清空包级审计缓存：各测试的库都从 id=1 起，残留会串到下一个测试。
 func resetAuditCache(t *testing.T) {
 	t.Helper()
-	auditMu.Lock()
-	auditResults = map[int]*RuleVerifyResult{}
-	auditMu.Unlock()
-	largeMatchers.reset()
-	t.Cleanup(func() {
+	clear := func() {
 		auditMu.Lock()
 		auditResults = map[int]*RuleVerifyResult{}
 		auditMu.Unlock()
 		largeMatchers.reset()
-	})
+		smallMatchers.reset()
+		geoSources.reset()
+	}
+	clear()
+	t.Cleanup(clear)
 }
 
 // 后台全量与按需单条必须是同一份判定：同一条规则两边给出的用户结论与样例逐项一致，
