@@ -448,8 +448,9 @@ func (s *RoutingRuleService) CheckDomainGroupRefs(groupId int) error {
 	return nil
 }
 
-// CheckOutboundRefs 在删除出站节点前调用。出站消失后规则会静默回落到
-// 默认出站（直连），封禁与分流都会失效且无任何报错。
+// CheckOutboundRefs 在删除出站节点前调用。出站消失后引用它的规则在核心里悬空：
+// xray 不报错，运行时把命中这些规则的连接直接断开、不回落默认出站，分流到这个
+// 节点的用户访问这批域名整个连不上。
 func (s *RoutingRuleService) CheckOutboundRefs(outboundId int) error {
 	db := database.GetDB()
 	var count int64

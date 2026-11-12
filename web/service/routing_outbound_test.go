@@ -108,7 +108,7 @@ func TestUpdateKeepsTagWhenConfigEdited(t *testing.T) {
 
 	// 模拟用户在 JSON 高级模式里改了配置，并把 tag 也改成了别的值。
 	// tag 必须被强制改回本表分配的值，否则引用旧 tag 的路由规则会悬空，
-	// 而 xray 对悬空 outboundTag 不报错，流量会静默回落到直连。
+	// 而 xray 对悬空 outboundTag 不报错，运行时直接断开命中它的连接。
 	edited := `{"protocol":"socks","tag":"caller-supplied",` +
 		`"settings":{"servers":[{"address":"9.9.9.9","port":1080}]}}`
 	if err := s.Update(&model.OutboundNode{

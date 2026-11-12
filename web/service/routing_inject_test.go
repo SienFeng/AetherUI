@@ -325,7 +325,7 @@ func TestInjectSkipsRuleWhenOutboundConfigCorrupt(t *testing.T) {
 		}
 	}
 	// 引用它的规则也不应出现——否则就是一个悬空 outboundTag，
-	// xray 不会报错，流量会静默回落到默认出站（直连）。
+	// xray 不会报错，运行时直接断开命中它的连接。
 	for _, r := range decodeRules(t, cfg) {
 		if r["outboundTag"] == node.Tag {
 			t.Errorf("rule referencing %q was emitted, leaving a dangling outboundTag", node.Tag)
@@ -416,9 +416,8 @@ func TestBuildRuleReportsWhyItSkipped(t *testing.T) {
 		{"入站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), InboundIds: "[999]", Action: model.ActionBlock}, model.DefaultOutboundTag},
 		{"出站不存在", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionProxy, OutboundId: 999}, model.DefaultOutboundTag},
 		{"未知动作", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: "definitely-not-an-action"}, model.DefaultOutboundTag},
-		// 直连规则也要守这条防线：悬空 outboundTag 在这里「碰巧」也会回落到
-		// 默认出站、结果与预期一致，正因如此更要挡——破一次例，「绝不输出
-		// 悬空引用」就从不变量降级成了建议。
+		// 直连规则也要守这条防线：悬空 outboundTag 会让 xray 直接断开命中它的
+		// 连接（不回落默认出站），这条直连规则覆盖的用户就整个连不上。
 		{"直连但配置里没有默认出站", &model.RoutingRule{DomainGroupId: group.Id, DomainGroupIds: mustEncodeGroupIds(t, []int{group.Id}), Action: model.ActionDirect}, ""},
 	}
 	for _, tc := range cases {
@@ -1222,7 +1221,7 @@ func TestInjectDirectRulePointsAtDefaultOutbound(t *testing.T) {
 		t.Errorf("direct rule outboundTag = %v, want %s", last["outboundTag"], model.DefaultOutboundTag)
 	}
 	// 指向的必须是真实存在于配置里的出站，不能是悬空引用——xray 对悬空
-	// outboundTag 不报错，只会静默回落默认出站，那样这个错误永远不会暴露。
+	// outboundTag 不报错（Configuration OK），运行时直接断开命中它的连接。
 	obs := decodeOutbounds(t, cfg)
 	if obs[0]["tag"] != model.DefaultOutboundTag {
 		t.Fatalf("默认出站的 tag = %v，直连规则引用的是一个不存在的出站", obs[0]["tag"])
@@ -1231,10 +1230,8 @@ func TestInjectDirectRulePointsAtDefaultOutbound(t *testing.T) {
 
 // 管理员手写模板给首位出站起过名字时，直连规则必须引用他起的那个名字。
 //
-// 这里正是硬编码 model.DefaultOutboundTag 会出事的地方，而且是最隐蔽的一种：
-// 悬空 outboundTag 在 xray 里会静默回落默认出站——恰好就是直连，结果看起来
-// 完全正确，于是这个错误既不会被发现也不会被修，直到某天模板的默认出站不再
-// 是 freedom。
+// 这里正是硬编码 model.DefaultOutboundTag 会出事的地方：悬空 outboundTag 不会让
+// xray 报错（Configuration OK），运行时却会把命中这条直连规则的连接全部断开。
 func TestInjectDirectRuleFollowsRenamedDefaultOutbound(t *testing.T) {
 	setupDB(t)
 	g := newTestGroup(t, "国内直连")

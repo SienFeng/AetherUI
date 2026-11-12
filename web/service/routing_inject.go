@@ -134,7 +134,8 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 //
 // 第二个返回值是关键：buildRules 必须只认这些 tag。一个 Config 损坏而被跳过的节点，
 // 如果其 tag 仍被规则引用，就会形成悬空 outboundTag —— 而 xray 对此不报错，运行时
-// 会静默回落到默认出站（直连），造成「以为分流/封禁了，其实直连出去」。
+// 把命中这条规则的连接直接断开、不回落默认出站（TestCoreDropsConnectionsRoutedToAMissingOutbound），
+// 造成「以为分流了，其实这批域名整个连不上」，面板照样显示 running。
 // tagDefaultOutbound 给模板里首个出站补上 tag。
 //
 // 首个出站就是 xray 的默认出站，未命中任何路由规则的流量都走它。xray 只在
@@ -144,7 +145,7 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 //
 // 只补首个：其余没有 tag 的出站无法被路由规则引用，本来就永远不会被选中。
 // 已经有 tag 的不覆盖——用户的路由规则可能正引用着它，改掉会让规则指向不存在
-// 的出站，而 xray 对悬空 outboundTag 不报错，只会静默回落直连。
+// 的出站，而 xray 对悬空 outboundTag 不报错，运行时把命中它的连接直接断开。
 //
 // 只作用于模板里已有的出站，必须在 append 生成的出站之前调用：那些出站自带
 // tag，补上去会造成重复。
@@ -153,8 +154,8 @@ func (s *RoutingInjector) Inject(cfg *xray.Config) error {
 // 压根没有可引用的默认出站。ActionDirect 的规则要引用它，**必须用这个返回值
 // 而不是硬编码 model.DefaultOutboundTag**：管理员手写模板给首个出站起过名字
 // 时上面那条早退分支会原样保留，硬编码就会发出一个悬空 outboundTag。那种
-// 情况下 xray 不报错、运行时静默回落默认出站——结果碰巧还是直连，于是这个
-// 错误既不会被发现也不会被修，直到某天默认出站不再是 freedom。
+// 情况下 xray 不报错（Configuration OK），运行时把命中这条「直连」规则的连接
+// 全部断开，它覆盖的用户访问这批域名整个连不上。
 func tagDefaultOutbound(outbounds []any) string {
 	if len(outbounds) == 0 {
 		return ""
@@ -189,7 +190,8 @@ func enabledInboundTags(inbounds []*model.Inbound) map[int]string {
 //
 // 出站与规则必须消费**同一份**过滤后的列表：只过滤一侧会留下没有规则引用
 // 的孤儿出站（无害但无意义），或者引用不存在出站的悬空规则——后者危险得多，
-// xray 对悬空 outboundTag 不报错，运行时静默回落默认出站。
+// xray 对悬空 outboundTag 不报错，运行时把命中它的连接直接断开，该入站访问这个
+// 域名就整个连不上。
 //
 // 注册域名那一道是「写入路径拒绝 + 生成期跳过」两道防线里的第二道。今天写入
 // 侧（buildMeterCandidates）已经挡住了，但 golang.org/x/net/publicsuffix 的表
@@ -220,7 +222,7 @@ func filterMeterPool(pool []MeterEntry, inboundTagById map[int]string) []MeterEn
 //
 // 第二个返回值是关键，与 buildOutbounds 返回 usableOutboundTags 是同一个
 // 道理：调用方必须只为实际写进配置的那些条目生成规则，否则会形成悬空
-// outboundTag，而 xray 对此不报错、静默回落默认出站。
+// outboundTag，而 xray 对此不报错、运行时直接断开命中它的连接。
 //
 // 深拷贝走 JSON 往返，理由就在下面那行 clone["tag"] = ...：浅拷贝（把 base
 // 这个 map 直接 append 进去）会让全部克隆与数组首位的默认出站是同一个对象，
@@ -617,10 +619,9 @@ func (s *RoutingInjector) buildRule(
 	case model.ActionDirect:
 		// 引用默认出站实际生效的 tag，绝不硬编码 model.DefaultOutboundTag。
 		//
-		// 取不到就整条丢弃，哪怕悬空引用在这里「碰巧」也会回落到默认出站、
-		// 结果与预期一致：那是同一份不变量（绝不输出悬空 outboundTag）在
-		// 唯一一处后果不严重的地方，破一次例就等于把它降级成建议。而且
-		// 一旦模板的默认出站不再是 freedom，这个巧合会当场变成静默错误。
+		// 取不到就整条丢弃，绝不发出悬空 outboundTag：xray 会把命中它的连接
+		// 直接断开、不回落默认出站，这条「直连」规则覆盖的用户访问这批域名就
+		// 整个连不上。整条丢弃时这些流量照常落到核心的默认出站。
 		if defaultOutboundTag == "" {
 			return nil, false, common.NewError("模板里没有可引用的默认出站，直连规则无法生成, rule id:",
 				rule.Id)

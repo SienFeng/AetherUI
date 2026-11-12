@@ -358,7 +358,7 @@ func TestInjectSkipsPoolRowsThatAreNoLongerRegistrableDomains(t *testing.T) {
 		t.Errorf("计量出站 = %v，期望只有 %q（%q 必须被跳过）", meterTags, goodTag, badTag)
 	}
 	// 出站与规则必须消费同一份过滤结果，否则会留下悬空 outboundTag——
-	// xray 对此不报错，运行时静默回落默认出站。
+	// xray 对此不报错，运行时直接断开命中它的连接。
 	for _, r := range decodeRules(t, cfg) {
 		if tag, _ := r["outboundTag"].(string); tag == badTag {
 			t.Errorf("生成了引用 %q 的计量规则，而该出站并未写进配置", badTag)
