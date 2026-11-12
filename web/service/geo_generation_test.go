@@ -28,6 +28,8 @@ func resetGeoGenerations(t *testing.T) {
 		geoLastFlagged = ""
 		geoGenMu.Unlock()
 		(&XrayService{}).IsNeedRestartAndSetFalse()
+		// 地区匹配器缓存按 dat 代码认：清掉，免得上一个测试的构建计数与计时器串过来。
+		geoSources.reset()
 	}
 	clear()
 	t.Cleanup(clear)

@@ -66,6 +66,9 @@ type verifyFixture struct {
 func newVerifyFixture(t *testing.T) *verifyFixture {
 	t.Helper()
 	setupAccessLogDB(t)
+	// 匹配器缓存是全进程共用的：清掉，免得上一个测试的构建计数与计时器串过来。
+	resetSmallMatchers(t)
+	resetGeoSourceCache(t)
 	f := &verifyFixture{
 		a:     newVerifyInbound(t, 41001, "用户A", true),
 		b:     newVerifyInbound(t, 41002, "用户B", true),

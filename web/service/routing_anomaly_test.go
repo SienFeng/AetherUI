@@ -28,6 +28,8 @@ func resetAnomalyState(t *testing.T) {
 		auditLargeThreshold = auditLargeRuleEntries
 		anomalyBatchRows = 20000
 		largeMatchers.reset()
+		smallMatchers.reset()
+		geoSources.reset()
 	}
 	clear()
 	t.Cleanup(clear)
