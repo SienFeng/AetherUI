@@ -298,7 +298,7 @@ func meterRuleNeedsIPGuard(strategy any) bool {
 // 返回值里**域名规则全部排在 IP 规则之前**（设计 §4.3）：两遍匹配下，
 // 域名目标在第一遍先命中域名规则、归到域名行，只有归不到域名的才落到 IP 行。
 // 顺序反了会让 IP 行吸走本该归到域名的流量，而两边的数字看上去都还是对的，
-// 没有任何一层会报错。注意池是按 (inboundId asc, domain asc) 排的，
+// 没有任何一层会报错。注意池是按 (进池时刻, inboundId, domain) 排的，
 // "72.235.209.83" 天然排在 "zeta.com" 之前——不显式分组就会踩到这个。
 //
 // 域名规则这里刻意把 domain 与 ip 并进同一条，看上去违反了「绝不把两类条件
@@ -310,6 +310,10 @@ func meterRuleNeedsIPGuard(strategy any) bool {
 //
 // IP 规则则不带守卫：守卫的作用就是让规则在第一遍必然不命中，而 IP 规则
 // 本身就是 IP 条件、第一遍对 IP 字面量目标直接命中——那正是要的行为。
+//
+// 每条规则带与计量出站同名的 ruleTag（出站 tag 已按 (入站, 域名) 唯一）：换池时
+// 热应用按 ruleTag 删掉退池的规则、只把新进的接到表尾（xray.TailRuleDelta），
+// 不再整表下发。组内的先后沿用池的顺序（按进池时刻），新进的因此排在组尾。
 func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard bool) []any {
 	domainRules := make([]any, 0, len(pool))
 	ipRules := make([]any, 0, len(pool))
@@ -321,6 +325,7 @@ func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard boo
 		if cidr, ok := meterIPCondition(e.Domain); ok {
 			ipRules = append(ipRules, map[string]any{
 				"type":        "field",
+				"ruleTag":     outboundTag,
 				"inboundTag":  []string{tag},
 				"ip":          []string{cidr},
 				"outboundTag": outboundTag,
@@ -330,6 +335,7 @@ func buildMeterRules(pool []MeterEntry, inboundTagById map[int]string, guard boo
 
 		rule := map[string]any{
 			"type":       "field",
+			"ruleTag":    outboundTag,
 			"inboundTag": []string{tag},
 			// 一律带显式 domain: 前缀。含点的裸串在 xray 里是子串匹配
 			//（infra/conf/router.go:175 的 defaultType 是 Domain_Substr），

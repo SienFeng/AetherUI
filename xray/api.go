@@ -177,7 +177,21 @@ func (x *XrayAPI) DelOutbound(tag string) error {
 //
 // 注意这个 RPC 改不了 routing.domainStrategy / domainMatcher，那两个在
 // 进程启动时固定——hot_diff.go 因此把它们归进「必须重启」的部分。
+//
+// 代价：核心会把每条规则重建一遍，内联的域名与 IP 段不进 xray 的缓存、每建一个匹配器强制 GC 两次。
+// 只换了计量规则时用 RemoveRules + AppendRoutingRules 增量下发（xray.TailRuleDelta）。
 func (x *XrayAPI) ApplyRoutingConfig(routing []byte) error {
+	return x.addRoutingRules(routing, false)
+}
+
+// AppendRoutingRules 把一段 routing 配置里的规则编译后接到核心规则表的末尾（AddRule，shouldAppend=true），
+// 已有的规则原样留在核心里、不重建。段里不能带 balancers：追加模式下 xray 会把它们当成新的负载均衡器
+// 再加一遍，撞上已有的 tag 就报错，所以这里直接拒绝。
+func (x *XrayAPI) AppendRoutingRules(routing []byte) error {
+	return x.addRoutingRules(routing, true)
+}
+
+func (x *XrayAPI) addRoutingRules(routing []byte, shouldAppend bool) error {
 	if x.RoutingServiceClient == nil {
 		return common.NewError("xray RoutingServiceClient is not initialized")
 	}
@@ -193,14 +207,34 @@ func (x *XrayAPI) ApplyRoutingConfig(routing []byte) error {
 	if err != nil {
 		return common.NewError("路由配置无法构建:", err)
 	}
+	if shouldAppend && len(built.BalancingRule) > 0 {
+		return common.NewError("追加的路由段不能带 balancers")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), routingRPCTimeout)
 	defer cancel()
 	_, err = (*x.RoutingServiceClient).AddRule(ctx, &routerService.AddRuleRequest{
-		ShouldAppend: false,
+		ShouldAppend: shouldAppend,
 		Config:       serial.ToTypedMessage(built),
 	})
 	return err
+}
+
+// RemoveRules 按 ruleTag 逐条删掉核心里的路由规则（RoutingService.RemoveRule）。核心里没有某个 tag 时
+// xray 不报错。遇到第一个错误就停下返回，调用方据此退回整表下发。
+func (x *XrayAPI) RemoveRules(ruleTags []string) error {
+	if x.RoutingServiceClient == nil {
+		return common.NewError("xray RoutingServiceClient is not initialized")
+	}
+	for _, tag := range ruleTags {
+		ctx, cancel := context.WithTimeout(context.Background(), routingRPCTimeout)
+		_, err := (*x.RoutingServiceClient).RemoveRule(ctx, &routerService.RemoveRuleRequest{RuleTag: tag})
+		cancel()
+		if err != nil {
+			return common.NewError("删除路由规则 [", tag, "] 失败:", err)
+		}
+	}
+	return nil
 }
 
 // TestRoute 向运行中的核心询问：来自 inboundTag 的、目标为 domain 或 ip 的
