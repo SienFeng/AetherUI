@@ -695,7 +695,7 @@ func TestInjectTagsDefaultOutboundSoAccessLogCanAttributeIt(t *testing.T) {
 }
 
 // 用户自己给默认出站起了 tag 时不能覆盖：他的路由规则可能正引用着那个 tag，
-// 改掉会让规则指向不存在的出站，而 xray 对悬空 outboundTag 不报错，只会静默直连。
+// 改掉会让规则指向不存在的出站，而 xray 对悬空 outboundTag 不报错，运行时直接断开命中它的连接。
 func TestInjectKeepsExistingDefaultOutboundTag(t *testing.T) {
 	setupDB(t)
 	cfg := &xray.Config{}

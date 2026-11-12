@@ -275,7 +275,7 @@ RoutingRule   分流规则   InboundIds(JSON 数组) × DomainGroupIds(JSON 数�
 3. **绝不输出条件残缺的规则**（见上）。**一条数据库规则产出 0~2 条 xray 规则：域名一条、IP 一条，顺序固定 domain 在前、ip 在后。**绝不把两类条件并进同一条（那是 AND，见上表），也绝不发出 `ip: []`。两侧都空才整条丢弃——所以一个纯 IP 组照常生成规则，界面上任何「域名为空 = 规则不生效」的镜像都是错的（`web/html/xui/routing.html` 的 `groupEffective` / `ruleHasDomains` 守着这一点）。域名组挂上订阅后，`buildRule` 生成的 `domain` 条件是 `MergeDomains(手工, 订阅)` 的结果，「条件残缺」的空检查（`len(domains) == 0`）针对的是这个合并后的列表，不是任一单独字段——只要两者合起来非空，规则就照常生成。入站条件同理：`buildRule` 会剔除已删除/已禁用的入站，**剔完为空则整条丢弃**，绝不输出空的 `inboundTag`；只剔掉一部分时规则照常生成，被剔掉的记 `logger.Warning`。
 4. **生成逐字节确定**：规则按 `priority asc, id asc`、出站按 `id asc`，`encoding/json` 对 map key 排序。**禁止遍历 map 来产生数组顺序**。
 
-黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，而悬空 `outboundTag` 不报错，block 会静默变直连。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。
+黑洞出站 `a-ui-block` 由注入器**始终自行注入**，不复用模板里的 `blocked`——用户可能把模板里那个删掉，留下悬空 `outboundTag`。xray 对此不报错，按实测命中它的连接会被直接断开（见上表；旧版这里写的是「block 会静默变直连」，那是错的），结果碰巧像封禁，但那依赖的是核心对悬空引用的处理方式，不是配置本身表达的意图。所有生成的 tag 统一带 `a-ui-` 前缀，与手工模板隔离。
 
 `buildOutbounds` 返回它**实际写入配置的** id→tag 映射，`buildRules` 必须消费这个映射而不是自己再查一次——否则一个 `Config` 损坏而被跳过的节点，其 tag 仍会被规则引用，形成悬空引用。
 

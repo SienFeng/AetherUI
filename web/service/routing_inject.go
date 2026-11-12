@@ -416,8 +416,9 @@ func (s *RoutingInjector) buildOutbounds(existing json_util.RawMessage) ([]any, 
 		usable[node.Id] = node.Tag
 	}
 
-	// 黑洞出站始终注入，不复用模板里的 blocked——用户可能把它删掉，
-	// 而 xray 对悬空 outboundTag 不报错，block 规则会静默变成直连。
+	// 黑洞出站始终注入，不复用模板里的 blocked——用户可能把它删掉，留下悬空的
+	// outboundTag。xray 对此不报错，运行时直接断开命中它的连接：碰巧像封禁，但不该
+	// 依赖核心对悬空引用的处理方式。
 	outbounds = append(outbounds, map[string]any{
 		"tag":      model.BlockOutboundTag,
 		"protocol": "blackhole",
