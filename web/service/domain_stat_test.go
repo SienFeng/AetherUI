@@ -1097,3 +1097,110 @@ func TestDeleteByInboundAndPruneOrphans(t *testing.T) {
 		t.Errorf("仍剩 %d 行", len(rows))
 	}
 }
+
+// 生产机（v1.48.0 ~ v1.56.5）上约三分之一的聚合以 database is locked 失败。事务里第一句曾是
+// capDomainStatTargets 的读，SQLite 的延迟事务从读升级成写时，另一条连接若正持有写锁，直接返回
+// SQLITE_BUSY、不走 busy_timeout 的等待：手里攥着读锁去等写锁可能与对方互等，SQLite 让后来的这一方
+// 立刻失败。每 10 分钟一轮的聚合与同一时刻写用量库的任务（共享检测采样、用量记录）相撞，整轮作废、
+// 记一条告警，下一轮重读重算。事务以写开头时，等锁发生在这条连接还没拿任何锁的时候，busy_timeout
+// （go-sqlite3 默认 5 秒）照常生效。
+func TestAggregateWaitsForAnotherWriterInsteadOfFailing(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31090, "甲")
+	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: at, SourceIP: "1.2.3.4", Network: "tcp", Target: "example.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	// 另一条连接开着写事务不提交，与生产上同一时刻写这个库的任务同形。延迟事务的 BEGIN 本身不加锁，
+	// 要真写一句才拿到写锁。
+	other := database.GetTrafficDB().Begin()
+	if other.Error != nil {
+		t.Fatalf("Begin: %v", other.Error)
+	}
+	if err := other.Create(&model.TrafficBucket{Granularity: model.GranularityHour, InboundId: in.Id, BucketStart: 1}).Error; err != nil {
+		other.Rollback()
+		t.Fatalf("占住写锁: %v", err)
+	}
+	const hold = 300 * time.Millisecond
+	released := make(chan struct{})
+	time.AfterFunc(hold, func() {
+		other.Rollback()
+		close(released)
+	})
+	t.Cleanup(func() { <-released })
+
+	start := time.Now()
+	n, err := (&DomainStatService{}).Aggregate()
+	waited := time.Since(start)
+	if err != nil {
+		t.Fatalf("另一条连接只占了 %v 写锁，聚合应等它放手再写，而不是整轮失败: %v", hold, err)
+	}
+	if waited < hold/2 {
+		t.Fatalf("聚合 %v 就完成了、没等对方放手：这条测试没有真的造出锁竞争", waited)
+	}
+	if n != 1 {
+		t.Errorf("消费了 %d 条，期望 1", n)
+	}
+	if rows := listDomainStats(t, model.GranularityHour); len(rows) != 1 || rows[0].Domain != "example.com" || rows[0].Count != 1 {
+		t.Errorf("小时桶 = %+v，期望恰好一行 example.com/1", rows)
+	}
+	cur, err := loadDomainStatCursor(database.GetTrafficDB())
+	if err != nil {
+		t.Fatalf("读位点: %v", err)
+	}
+	if cur.LastLogTime != at.UnixMilli() {
+		t.Errorf("位点时间 = %d，期望推进到 %d", cur.LastLogTime, at.UnixMilli())
+	}
+}
+
+// 位点在事务里第一个写（理由见上一条测试），它与桶的「全有或全无」只靠事务本身：写桶中途失败时
+// 位点必须一起回滚。否则下一轮从推进过的位点读起，这一批日志永远不会被计入，而且没有任何一层报错。
+func TestAggregateRollsBackTheCursorWhenABucketWriteFails(t *testing.T) {
+	setupDomainStatTest(t)
+	in := mkTrafficInbound(t, 31091, "甲")
+	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	if _, err := (&AccessLogService{}).Store([]accesslog.Entry{
+		{Time: at, SourceIP: "1.2.3.4", Network: "tcp", Target: "a.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+		{Time: at, SourceIP: "1.2.3.4", Network: "tcp", Target: "b.com:443", Inbound: in.Tag, Route: "direct", Accepted: true},
+	}); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	tdb := database.GetTrafficDB()
+	if err := tdb.Exec(`CREATE TRIGGER domain_stats_boom BEFORE INSERT ON domain_stats
+		BEGIN SELECT RAISE(ABORT, 'boom'); END`).Error; err != nil {
+		t.Fatalf("建触发器: %v", err)
+	}
+
+	svc := &DomainStatService{}
+	if _, err := svc.Aggregate(); err == nil {
+		t.Fatal("写桶失败时 Aggregate 应返回错误")
+	}
+	cur, err := loadDomainStatCursor(tdb)
+	if err != nil {
+		t.Fatalf("读位点: %v", err)
+	}
+	if cur.LastLogId != 0 || cur.LastLogTime != 0 {
+		t.Fatalf("写桶失败了，位点却推进到了 (id=%d, time=%d)：这一批日志再也不会被计入", cur.LastLogId, cur.LastLogTime)
+	}
+	if rows := listDomainStats(t, model.GranularityHour); len(rows) != 0 {
+		t.Fatalf("写桶失败的那一轮留下了 %d 行", len(rows))
+	}
+
+	if err := tdb.Exec(`DROP TRIGGER domain_stats_boom`).Error; err != nil {
+		t.Fatalf("删触发器: %v", err)
+	}
+	n, err := svc.Aggregate()
+	if err != nil {
+		t.Fatalf("恢复后 Aggregate: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("恢复后消费了 %d 条，期望 2（失败那一轮的两条）", n)
+	}
+	rows := listDomainStats(t, model.GranularityHour)
+	if len(rows) != 2 || rows[0].Count != 1 || rows[1].Count != 1 {
+		t.Errorf("恢复后小时桶 = %+v，期望 a.com、b.com 各 1 次（不丢也不重）", rows)
+	}
+}

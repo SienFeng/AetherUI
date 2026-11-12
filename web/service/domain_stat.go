@@ -224,9 +224,22 @@ func (s *DomainStatService) Aggregate() (int, error) {
 
 		// 整轮包进一个事务：GORM 的 SkipDefaultTransaction 默认为 false，
 		// 不包的话每条 UPSERT 自带一次 BEGIN/COMMIT，几百次提交对 SQLite
-		// 是几百次 fsync。位点的推进也在同一个事务里——先写桶后推位点，
-		// 中途失败则整轮不写，下一轮从原位点重来，不会丢也不会重。
+		// 是几百次 fsync。位点的推进也在同一个事务里，中途失败则整轮不写，
+		// 下一轮从原位点重来，不会丢也不会重。
+		//
+		// **事务的第一句必须是写，所以先推位点、再读已有行、再写桶。** 事务是延迟模式
+		// （go-sqlite3 默认），以读开头时这条连接先拿到读锁，之后升级成写的那一刻，别的连接
+		// 只要正持有写锁，SQLite 就立刻返回 database is locked、不走 busy_timeout 的等待（拿着
+		// 读锁去等写锁可能与对方互等，它让后来的这一方直接失败）。这个库还有别的写入方：共享
+		// 检测采样（30 秒）与共享风险快照（10 分钟）和本任务在同一时刻触发，用量记录每 10 秒
+		// 一次。v1.48.0 把 capDomainStatTargets 的读放到事务开头之后，生产机上约三分之一的
+		// 聚合整轮作废、各记一条告警。以写开头时，等锁发生在这条连接还没拿任何锁的时候，
+		// busy_timeout（默认 5 秒）照常生效；拿到写锁之后别的连接改不了这个库，
+		// capDomainStatTargets 读到的已有行与随后的写入一定一致。
 		err = tdb.Transaction(func(tx *gorm.DB) error {
+			if err := saveDomainStatCursor(tx, last.Id, last.Time); err != nil {
+				return err
+			}
 			capped, err := capDomainStatTargets(tx, counts)
 			if err != nil {
 				return err
@@ -236,7 +249,7 @@ func (s *DomainStatService) Aggregate() (int, error) {
 					return err
 				}
 			}
-			return saveDomainStatCursor(tx, last.Id, last.Time)
+			return nil
 		})
 		if err != nil {
 			return total, err
