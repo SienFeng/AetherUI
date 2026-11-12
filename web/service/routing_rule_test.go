@@ -177,7 +177,7 @@ func TestDelOutboundNodeRejectsWhenReferenced(t *testing.T) {
 	}
 
 	// 出站一旦被删，规则的 outboundTag 会悬空，而 xray 对悬空 outboundTag
-	// 不报错，运行时静默回落到默认出站（直连）。
+	// 不报错，运行时直接断开命中它的连接。
 	if err := (&OutboundNodeService{}).Del(node.Id); err == nil {
 		t.Fatal("Del succeeded on a referenced outbound; it must be refused")
 	}

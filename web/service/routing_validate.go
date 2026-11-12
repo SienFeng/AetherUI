@@ -275,7 +275,8 @@ func ValidateOutboundReplacing(ob map[string]any, replacedTag string) error {
 // 交给真实 xray 判定。field 是 xray 路由规则里的条件键（"domain" / "ip"）。
 //
 // 出站指向注入器始终会注入的黑洞，因此这条探针不会引入悬空引用——
-// xray 对悬空 outboundTag 不报错，只会静默回落直连，所以这一点是承重的。
+// xray 对悬空 outboundTag 不报错（Configuration OK），引入了也不会有任何提示，
+// 所以这一点是承重的。
 func validateRuleCondition(field string, values []string) error {
 	probe := map[string]any{
 		"type": "field", field: values, "outboundTag": model.BlockOutboundTag,

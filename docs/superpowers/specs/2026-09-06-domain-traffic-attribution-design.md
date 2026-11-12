@@ -970,13 +970,15 @@ DNSInjector 能看到计量出站。守着这条顺序的
 
 换池的热应用里有一个已知窗口，与 CLAUDE.md 记的「编辑出站」窗口同源：`tryHotApply` 先
 `DelOutbound` 再下发路由（v1.56.4 起按 `ruleTag` 删掉退池的计量规则，之前是整段 `ApplyRoutingConfig`），两者之间旧路由仍引用着已删除的计量 tag。
-**更正（2026-11-12，按源码，未实测）**：原文写的是「xray 对悬空 `outboundTag` 不报错、静默回落默认出站，
+**更正（2026-11-12，先按源码，当天在真 xray 上实测确认）**：原文写的是「xray 对悬空 `outboundTag` 不报错、静默回落默认出站，
 对计量规则而言回落目标就是直连，是所有悬空引用场景里唯一无害的一个」。现行 xray（26.7.28 与 26.11.9 的
 `app/dispatcher/default.go:466-470`）在规则指向不存在的出站时记一条 `non existing outTag` 警告并**直接断开
 连接**，注释写明不交给默认出站。所以这个窗口里，从该入站发往刚退池域名的新连接会被断开。窗口长度：
 v1.56.4 之前是整表重建的时长（1 核生产机约 9 秒，26.11.9 在新规则表建好之前一直用旧表），之后是增量
-下发的时长（一次差异计算加几次回环 RPC），退回整表下发时仍是前者。尚未补偿；先加新出站、再下发路由、
-最后删退池出站可以消除它。
+下发的时长（一次差异计算加几次回环 RPC），退回整表下发时仍是前者。
+**v1.56.5 起已消除**：热应用改为先加新出站、再下发路由、最后删退池出站（`sendHotDiff`），任何一步之后核心里
+都没有指向不存在出站的规则。断开连接这一点已在真 xray 上实测（`TestCoreDropsConnectionsRoutedToAMissingOutbound`），
+新顺序由 `TestSendHotDiffNeverLeavesARuleOnAMissingOutboundAgainstRealXray` 逐条 RPC 读核心状态守着。
 
 ### 6.11 回退到旧版本二进制
 

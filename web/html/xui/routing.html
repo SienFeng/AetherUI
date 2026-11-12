@@ -2278,7 +2278,7 @@
     </template>
         <a-form layout="vertical">
             <!-- tag 一经分配即不可变：改 tag 会让所有引用它的规则悬空，
-                 而 xray 对悬空 outboundTag 不报错，流量会静默回落到直连。 -->
+                 而 xray 对悬空 outboundTag 不报错，运行时直接断开命中它的连接。 -->
             <a-form-item label="tag（不可修改）" v-if="nodeModal.id">
                 <a-input :value="nodeModal.tag" disabled></a-input>
             </a-form-item>

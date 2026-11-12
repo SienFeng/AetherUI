@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go.uber.org/atomic"
 	"sync"
 	"time"
@@ -285,54 +286,9 @@ func (s *XrayService) tryHotApply(process *xray.Process, newCfg *xray.Config) bo
 	}
 	defer api.Close()
 
-	// 顺序有讲究：先删后加，避免同 tag 的新旧对象在核心里撞名；
-	// 出站先于路由下发，否则新规则会引用还不存在的出站 tag。
-	for _, tag := range diff.RemovedInboundTags {
-		if err := api.DelInbound(tag); err != nil {
-			logger.Debug("热应用：删除入站 [", tag, "] 失败，退回重启:", err)
-			return false
-		}
-	}
-	// 端口被占的入站不退回重启（新核心同样 bind 不上，整机断网），登记冲突、其余改动照常下发。
-	var busy map[string]bool
-	for _, raw := range diff.AddedInbounds {
-		if err := api.AddInbound(raw); err != nil {
-			if tag, spec, ok := addedInboundSpec(raw); ok && isBindError(err) {
-				registerPortConflict(tag, spec, err)
-				if busy == nil {
-					busy = map[string]bool{}
-				}
-				busy[tag] = true
-				continue
-			}
-			logger.Debug("热应用：新增入站失败，退回重启:", err)
-			return false
-		}
-	}
-	// 出站先删后加：xray 的 AddHandler 对已存在的 tag 会报 existing tag
-	// found，先加后删无法处理「编辑一个出站」这种同 tag 换内容的场景。
-	// 代价是编辑出站会有一个窗口——DelOutbound 与 AddOutbound 之间——引用
-	// 该 tag 的规则在核心里悬空；CLAUDE.md「xray 会静默接受错误配置」一节
-	// 记载的实测结论是，xray 对悬空 outboundTag 不报错，运行时静默回落
-	// 默认出站（直连）。这里刻意不做任何补偿（比如换个临时 tag 分两步搬）：
-	// 正常情况窗口只有一次回环 RPC（毫秒级），若 AddOutbound 失败，窗口会
-	// 拉长到退回重启完成（1~2 秒），但那已经在失败路径上——任何补偿逻辑
-	// 都是在增加新的失败面，与本子系统「失败即退回重启，不做部分回滚」的
-	// 设计原则冲突。
-	for _, tag := range diff.RemovedOutboundTags {
-		if err := api.DelOutbound(tag); err != nil {
-			logger.Debug("热应用：删除出站 [", tag, "] 失败，退回重启:", err)
-			return false
-		}
-	}
-	for _, raw := range diff.AddedOutbounds {
-		if err := api.AddOutbound(raw); err != nil {
-			logger.Debug("热应用：新增出站失败，退回重启:", err)
-			return false
-		}
-	}
-	if _, err := applyRoutingDiff(&api, process.GetConfig(), newCfg, diff, meterOnly); err != nil {
-		logger.Debug("热应用：下发路由配置失败，退回重启:", err)
+	busy, err := sendHotDiff(&api, process.GetConfig(), newCfg, diff, meterOnly)
+	if err != nil {
+		logger.Debug("热应用：", err, "，退回重启")
 		return false
 	}
 	if err := killInboundConns(killPorts); err != nil {
@@ -520,6 +476,101 @@ type routingAPI interface {
 	ApplyRoutingConfig(routing []byte) error
 	RemoveRules(ruleTags []string) error
 	AppendRoutingRules(routing []byte) error
+}
+
+// hotApplyAPI 是热应用用到的全部控制面调用；xray.XrayAPI 实现它，测试用假的。
+type hotApplyAPI interface {
+	routingAPI
+	DelInbound(tag string) error
+	AddInbound(raw []byte) error
+	DelOutbound(tag string) error
+	AddOutbound(raw []byte) error
+}
+
+// sendHotDiff 把 diff 经控制面下发给核心，返回因端口被占而没加进去的入站 tag。任何一步失败都返回 error，
+// 调用方退回整进程重启（重启会把已经下发的那部分一起清掉，所以中途失败不单独回滚）。
+//
+// 顺序的原则：任何一步之后，核心里都不能有指向不存在出站的规则。xray 遇到这样的规则会把命中它的连接直接断开，
+// 不回落默认出站（app/dispatcher/default.go 的 routedDispatch，26.7.28 与 26.11.9 相同；
+// TestCoreDropsConnectionsRoutedToAMissingOutbound 在真 xray 上实测）。所以：
+//  1. 入站先删后加（同 tag 的新旧入站不能在核心里撞名）。规则引用不存在的入站只是永不命中，入站与路由的先后无关。
+//  2. 新出站在引用它的路由下发之前加好。同 tag 换内容的出站（编辑出站）只能先删后加——xray 的 AddHandler 对已存在
+//     的 tag 报 existing tag found——删完立刻加回，引用它的规则只悬空一次回环 RPC。
+//  3. 下发路由。
+//  4. 退出配置的出站最后才删，那时已经没有规则引用它。
+//
+// 改动前第 4 步排在路由之前：计量池每次换池（生产上每一两个小时就有一次），从刚退池的域名进来的新连接在这段窗口里全被断开，
+// 退回整表下发时窗口是 xray 重建整张规则表的几秒；管理员连节点带规则一起删时同理。编辑出站那一次 RPC 的窗口刻意
+// 不做补偿（比如换个临时 tag 分两步搬）：补偿逻辑是新的失败面，与「失败即退回重启，不做部分回滚」的原则冲突。
+func sendHotDiff(api hotApplyAPI, oldCfg, newCfg *xray.Config, diff *xray.HotDiff, meterOnly bool) (map[string]bool, error) {
+	for _, tag := range diff.RemovedInboundTags {
+		if err := api.DelInbound(tag); err != nil {
+			return nil, fmt.Errorf("删除入站 [%s] 失败: %w", tag, err)
+		}
+	}
+	// 端口被占的入站不退回重启（新核心同样 bind 不上，整机断网），登记冲突、其余改动照常下发。
+	var busy map[string]bool
+	for _, raw := range diff.AddedInbounds {
+		if err := api.AddInbound(raw); err != nil {
+			if tag, spec, ok := addedInboundSpec(raw); ok && isBindError(err) {
+				registerPortConflict(tag, spec, err)
+				if busy == nil {
+					busy = map[string]bool{}
+				}
+				busy[tag] = true
+				continue
+			}
+			return nil, fmt.Errorf("新增入站失败: %w", err)
+		}
+	}
+	// diff 里同 tag 换内容的出站既在 RemovedOutboundTags 里、也在 AddedOutbounds 里（xray.diffOutbounds）。
+	removed := make(map[string]bool, len(diff.RemovedOutboundTags))
+	for _, tag := range diff.RemovedOutboundTags {
+		removed[tag] = true
+	}
+	replaced := map[string]bool{}
+	for _, raw := range diff.AddedOutbounds {
+		tag, err := outboundTagOf(raw)
+		if err != nil {
+			return nil, err
+		}
+		if removed[tag] {
+			if err := api.DelOutbound(tag); err != nil {
+				return nil, fmt.Errorf("删除出站 [%s] 失败: %w", tag, err)
+			}
+			replaced[tag] = true
+		}
+		if err := api.AddOutbound(raw); err != nil {
+			return nil, fmt.Errorf("新增出站 [%s] 失败: %w", tag, err)
+		}
+	}
+	if _, err := applyRoutingDiff(api, oldCfg, newCfg, diff, meterOnly); err != nil {
+		return nil, fmt.Errorf("下发路由配置失败: %w", err)
+	}
+	for _, tag := range diff.RemovedOutboundTags {
+		if replaced[tag] {
+			continue
+		}
+		if err := api.DelOutbound(tag); err != nil {
+			return nil, fmt.Errorf("删除出站 [%s] 失败: %w", tag, err)
+		}
+	}
+	return busy, nil
+}
+
+// outboundTagOf 取出站对象的 tag。AddedOutbounds 已经过 xray.decodeOutbounds 的校验（tag 非空、不重复），
+// 这里取不到只可能是 diff 被改坏了，报错让调用方退回重启。
+func outboundTagOf(raw []byte) (string, error) {
+	var ob struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.Unmarshal(raw, &ob); err != nil {
+		return "", fmt.Errorf("解析新增出站失败: %w", err)
+	}
+	if ob.Tag == "" {
+		return "", errors.New("新增出站缺少 tag")
+	}
+	return ob.Tag, nil
 }
 
 // applyRoutingDiff 把 diff 里的路由改动下发给核心，返回是否走了增量。
